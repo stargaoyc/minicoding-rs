@@ -197,8 +197,27 @@ pub struct SubagentSpec {
     pub can_spawn_subagent: bool,
 }
 
-/// TodoWrite 工具的数据类型（见 design.md §18.2）。
-pub struct TodoWriteInput { pub todos: Vec<Todo> }
+/// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
+/// 旧版 `TodoWriteInput`（全量替换）作为废弃别名保留一个版本（见 §10.1）。
+pub struct TaskCreateInput {
+    pub subject: String,
+    pub description: Option<String>,
+    pub active_form: Option<String>,
+    pub priority: Option<Priority>,
+    pub metadata: Option<serde_json::Value>,
+}
+pub struct TaskUpdateInput {
+    pub task_id: String,
+    pub status: Option<TaskStatus>,
+    pub subject: Option<String>,
+    pub description: Option<String>,
+    pub active_form: Option<String>,
+    pub add_blocks: Option<Vec<String>>,
+    pub add_blocked_by: Option<Vec<String>>,
+    pub owner: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+pub struct TaskListInput { pub status_filter: Option<TaskStatus> }
 
 pub struct Todo {
     pub id: String,
@@ -397,10 +416,10 @@ impl ToolRegistry {
         -> Result<ToolResult, ToolError>;
 }
 
-pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Todo, Plan, Mcp }
+pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Plan, Mcp }
 ```
 
-新增 `Todo`/`Plan`/`Mcp` 三个工具组：`Todo` 含 `todo.write`；`Plan` 含 `plan.exit`；`Mcp` 是动态注册的外部 MCP 工具集合。
+新增 `Task`/`Plan`/`Mcp` 三个工具组：`Task` 含 `task.create`/`task.update`/`task.list`（旧版 `todo.write` 作为废弃别名）；`Plan` 含 `plan.exit`；`Mcp` 是动态注册的外部 MCP 工具集合。
 
 ### 3.5 `Storage`
 
@@ -729,8 +748,8 @@ pub enum Event {
     SubagentStarted { id: String, role: String },
     SubagentFinished { id: String, summary: String },
     // 新增事件（可克隆，与 broadcast 兼容）
-    /// TodoWrite 工具调用后广播，供 UI 渲染进度（见 design.md §18.4）。
-    TodoUpdated { todos: Vec<Todo> },
+    /// task.update 工具调用后广播，供 UI 渲染任务进度（见 design.md §18.4）。
+    TaskUpdated { task: Task },
     /// Hook 执行结果通知（见 hooks.md §8 / design.md §20.2）。
     HookRun { name: String, event: String, decision: HookDecision, elapsed: Duration },
     /// Plan 模式状态切换（见 design.md §16.2）。
@@ -979,25 +998,46 @@ pub enum ToolError {
 
 本节列出新增的内置工具，与 `design.md` §16-§18 对应。原有工具（`fs.*`/`shell.run`/`web.fetch`/`git.*`/`task.spawn`）见 `design.md` §4.3。
 
-### 10.1 `todo.write`（TodoWrite，见 `design.md` §18）
+### 10.1 任务管理工具 `task.create`/`task.update`/`task.list`（见 `design.md` §18）
+
+任务管理采用 Claude Code v2.1.142+ 的增量模型（`task.create`/`update`/`list` 三件套），替代旧版全量替换的 `todo.write`。三个工具均属 `Task` 工具组，`SideEffect::None`（仅更新内存状态 + 广播事件），Plan 模式下可用（只读）。
+
+#### `task.create`
 
 | 项 | 值 |
 |----|----|
-| 工具组 | `Todo` |
-| 副作用 | `None`（仅更新内存状态 + 广播事件） |
-| 只读（Plan 模式） | 是 |
-| 输入 | `TodoWriteInput { todos: Vec<Todo> }` |
-| 输出 | `ToolContent::Text` 渲染后的 todo 列表 + `(N/M completed)` |
+| 输入 | `TaskCreateInput { subject, description?, active_form?, priority?, metadata? }` |
+| 输出 | `TaskCreateOutput { task_id }`（Runtime 生成 ULID，不可伪造，见 C-31） |
 
-校验规则（违反返回 `ToolError::InvalidInput`）：
+#### `task.update`
 
-- `todos.len() <= 20`；
-- 每个 `text` 非空；
-- 同一时间 `InProgress` 项 ≤ 1；
-- `Completed` 项必须含 `summary`；
-- 状态迁移合法（`Completed` 不可回 `Pending`）。
+| 项 | 值 |
+|----|----|
+| 输入 | `TaskUpdateInput { task_id, status?, subject?, description?, active_form?, add_blocks?, add_blocked_by?, owner?, metadata? }` |
+| 输出 | 更新后的 `Task` |
 
-调用后广播 `Event::TodoUpdated`，UI 据此渲染。
+`add_blocks`/`add_blocked_by` 是增量添加依赖边（非整体替换），重复添加幂等。`status` 转换须合法（`Pending → InProgress → Completed`/`Deleted` 单向，不可回退，见 C-31）。
+
+#### `task.list`
+
+| 项 | 值 |
+|----|----|
+| 输入 | `TaskListInput { status_filter? }` |
+| 输出 | `TaskListOutput { tasks: Vec<Task> }` |
+
+校验规则（违反返回 `ToolError::InvalidInput` 或 `ToolError::InvalidStateTransition`）：
+
+- `subject` 非空；
+- 同一时间 `InProgress` 项 ≤ 1（防并行开干）；
+- `Completed`/`Deleted` 项必须含 `summary`（实际完成内容/证据）；
+- 状态迁移合法（`Completed`/`Deleted` 不可回 `Pending`/`InProgress`，见 C-31）；
+- `task_id` 必须命中已注册任务，伪造返回 `ToolError::NotFound`（见 C-31）；
+- `add_blocked_by` 引用的 task_id 须存在；依赖图不可成环（DFS 检测）；
+- 尝试将 `InProgress` 设给被未完成依赖阻塞的任务 → 拒绝并提示阻塞者。
+
+调用后广播 `Event::TaskUpdated`，UI 据此渲染任务面板。
+
+> **废弃别名 `todo.write`**：旧版全量替换工具 `todo.write`（`TodoWriteInput { todos: Vec<Todo> }`）作为兼容别名保留一个版本，内部转为"先批量 `task.create`，再差异 `task.update`"。新代码与新提示词应直接用 `task.*` 三件套（见 `design.md` §18.9）。`Event::TodoUpdated` 同步更名为 `Event::TaskUpdated`。
 
 ### 10.2 `plan.exit`（ExitPlanMode，见 `design.md` §16.4）
 

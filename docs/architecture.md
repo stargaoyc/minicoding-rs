@@ -25,7 +25,8 @@
                 │  (调用 Runtime API)
 ┌───────────────▼──────────────────────────────────────────────┐
 │                   Orchestration Layer                        │
-│   Agent Loop  │  Subagent  │  Context Manager  │  Planner    │
+│   Agent Loop  │  Subagent  │  Context Manager  │  Event Bus  │
+│   Plan 模式（权限模式+工具）  │  Task 管理（工具+Registry）     │
 │   (minicoding-core)                                          │
 └───────────────┬──────────────────────────────────────────────┘
                 │  (依赖 trait 接口)
@@ -70,7 +71,8 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 - **Agent Loop**：`prompt → LLM → (tool_call)* → tool_result → LLM → ... → final` 的循环。
 - **Subagent**：派生隔离子上下文执行子任务，结果汇总回主 Agent。
 - **Context Manager**：维护消息历史、token 预算、自动压缩与摘要。
-- **Planner**（可选）：把复杂任务拆解为多步计划，逐步执行。
+- **Plan 模式**：通过 `PermissionMode::Plan` + `plan.exit` 工具实现双重只读强制（见 `design.md` §16），**不是独立编排组件**——Plan 是权限模式与工具的组合，实现在 `minicoding-tools` 与 `minicoding-policy`，编排逻辑复用 Agent Loop。
+- **Task 管理**：`task.create`/`update`/`list` 工具 + `TaskRegistry`（core trait），增量模型与依赖图，实现在 `minicoding-tools`。
 - **Event Bus**：广播生命周期事件（`MessageAppended` / `ToolCallStart` / `ToolCallEnd` / `TokenStreamed`），供 frontend 订阅渲染。
 
 ### 3.3 Capability Layer（能力层）
@@ -95,6 +97,23 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 ### 3.4 Infrastructure Layer（基础设施层）
 
 通用底层能力，不包含业务语义：异步运行时、HTTP、日志、序列化、文件系统、密钥链。
+
+### 3.5 分层与 crate 映射（澄清架构层 ↔ api.md L1/L2/L3 ↔ modules.md 14 crate）
+
+本文档的"Frontend/Orchestration/Capability/Infrastructure"四层与 `api.md` §1 的"L1 Trait / L2 Runtime / L3 SDK"三档接口、`modules.md` §0.1 的 14 个 crate 三套视图对齐如下，避免读者在三者间漂移：
+
+| 架构层（本文） | 接口档（api.md） | crate（modules.md） | 内容 |
+|---------------|-----------------|---------------------|------|
+| Frontend Layer | L3 SDK 高层 API | `minicoding-cli` / `minicoding-tui` / `minicoding-sdk` | 表现层：参数解析、UI、嵌入入口 |
+| Orchestration Layer | L2 Runtime API | `minicoding-core`（Runtime 部分） | Agent Loop、Subagent、Event Bus、Plan/Task 编排 |
+| Capability Layer — trait 定义 | L1 Trait 抽象 | `minicoding-core`（trait 部分） | `LlmProvider`/`Tool`/`ContextManager`/`PermissionPolicy`/`SandboxDriver`/`Storage`/`Hook`/`Journal`/`McpClient`/`ProjectDocLoader`/`MemoryStore` |
+| Capability Layer — 实现 | （L1 的实现侧） | `minicoding-providers` / `minicoding-tools` / `minicoding-context` / `minicoding-policy` / `minicoding-sandbox` / `minicoding-storage` / `minicoding-hooks` / `minicoding-journal` / `minicoding-mcp` / `minicoding-memory` | 各领域单一职责实现 |
+| Infrastructure Layer | （不属于项目 crate） | 第三方依赖 | `tokio`/`reqwest`/`tracing`/`serde`/`rmcp`/`landlock` 等 |
+
+**关键澄清**：
+- `minicoding-core` **横跨** Orchestration 与 Capability 两层——它的 Runtime 部分是 Orchestration，trait 定义部分是 Capability 的抽象侧。这是"零实现 core"原则的体现：core 定义抽象 + 编排，不含任何领域算法（见 `modules.md` §0.3、`AGENTS.md` §3.4）。
+- `minicoding-tools` 是唯一**组合层**，可依赖多个领域 crate（如 policy + journal + memory）完成工具执行闭环，其他领域 crate 之间不互相依赖（见 `modules.md` §0.2 单向不循环）。
+- `api.md` 的 L1/L2/L3 是**接口稳定档位**（L1 最底层 trait，L3 最顶层 SDK），与本文的物理分层正交：L1 trait 定义在 core，L2 Runtime API 在 core，L3 SDK 在 sdk crate。读者从任一视图切入都能定位到同一 crate。
 
 ---
 

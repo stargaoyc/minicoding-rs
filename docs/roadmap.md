@@ -13,7 +13,7 @@
 | M0 | 骨架与基础设施 | 3 | workspace + CI + OTel 模板 |
 | M1 | MVP：单轮 CLI | 12 | 可提问、读文件、流式输出 |
 | M2 | 完整 Agent 循环 + 应用层权限 | 12 | 工具多轮、写文件、shell、权限双抽象 |
-| M3 | 上下文、持久化与记忆 | 10 | 压缩、会话恢复、长期记忆、AGENTS.md、TodoWrite |
+| M3 | 上下文、持久化与记忆 | 10 | 压缩、会话恢复、长期记忆、AGENTS.md、任务管理 |
 | M4 | OS 沙箱与审批模式 | 8 | seatbelt/landlock/seccomp、预设、exec、拒绝升级 |
 | M5 | 扩展机制：Hooks + MCP + Plan + 文件回滚 | 12 | 10 类 Hook、MCP client、Plan 模式、/undo |
 | M6 | 多 Provider 与健壮性 | 6 | Anthropic、Ollama、重试、错误恢复 |
@@ -38,7 +38,9 @@
 - `cargo build --workspace` 通过（含平台条件依赖在非 Linux 平台不编译）。
 - `cargo run -p minicoding-cli -- --help` 输出帮助。
 - 设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 后启动一次，能在本地 OTLP collector 看到 `minicoding` 的 resource。
-- CI 全绿。
+- CI 全绿（`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny` 五门禁）。
+
+**任务追溯**：dev-plan T-M0-1..T-M0-9（9 个 task，预估 3 人日）。可度量门槛：14 crate 骨架编译通过、CI 5 门禁全绿、OTel resource 可观测、`tests/common/` 共享测试工具就位（T-M0-9）。
 
 **风险**：无。
 
@@ -61,7 +63,9 @@
 - `minicoding "读取 src/main.rs 并解释"` 能流式输出并实际读取文件。
 - 工具调用渲染清晰（工具名 + 摘要）。
 - 越界路径（`../../etc/passwd`）被 `sandbox_path` 拒绝并返回 `PathEscaped`。
-- 单测覆盖：SSE 解析、token 计数、路径沙箱、delta 聚合。
+- 单测覆盖 ≥ 80%：SSE 解析、token 计数、路径沙箱、delta 聚合。
+
+**任务追溯**：dev-plan T-M1-1..T-M1-9（9 个 task，预估 12 人日）。可度量门槛：4 个只读工具可用、OpenAI SSE 流式首 token < 2s（网络除外）、JSONL 崩溃恢复测试通过、单测覆盖率 ≥ 80%。
 
 **风险**
 - SSE 解析边界 case 多 → 用 `wiremock` 录制真实响应做 fixture。
@@ -88,8 +92,10 @@
 - 同轮多个只读工具并发执行；写/shell 严格串行（trace 中可见时序）。
 - 非 TTY 环境下副作用工具按 `non_tty_strategy` 处理（默认 deny）。
 - `shell.run` 超时、输出截断生效；危险命令被内置黑名单拒绝。
-- `Ctrl-C` 不丢已生成消息。
-- 集成测试：3+ 轮工具调用场景。
+- `Ctrl-C` 不丢已生成消息（已落盘 JSONL 可恢复）。
+- 集成测试：3+ 轮工具调用场景全通过；权限决策 100% 落 audit.log。
+
+**任务追溯**：dev-plan T-M2-1..T-M2-9（9 个 task，预估 12 人日）。可度量门槛：max_tool_iters=50 防死循环生效、并行/串行调度 OTel span 时序可验证、audit.log 含 Allow/Deny/Ask 全类型记录、criterion 基准建立（Agent 循环开销基线）。
 
 **风险**
 - edit 唯一性冲突处理 → 提供清晰错误并建议增大上下文。
@@ -109,7 +115,7 @@
 - `memory`：长期记忆双文件格式（md + index.json）+ mtime 缓存注入（见 `design.md` §8.2/§8.3）。
 - `memory`：会话摘要生成 + 失败降级链（主模型→备用→启发式兜底，见 `design.md` §8.4）。
 - `core`：`ProjectDocLoader` + AGENTS.md 分层加载（见 `design.md` §8.6）；fallback 文件名（`CLAUDE.md`/`.cursorrules`）。
-- `tools`：`todo.write` 工具（见 `design.md` §18），`SideEffect::None`，校验 20 上限/单 in_progress/completed 必填 summary。
+- `tools`：`task.create`/`update`/`list` 任务管理工具（见 `design.md` §18，features T-14），`SideEffect::None`，校验单 in_progress/completed 必填 summary/依赖图成环检测。
 
 **验收**
 - 长会话（>上下文窗口）能自动压缩且不破坏连贯性。
@@ -117,7 +123,9 @@
 - 会话摘要 LLM 调用失败时自动降级为启发式兜底，会话仍正常结束（audit.log 有告警）。
 - `--resume <id>` 恢复后可继续提问；`--replay` 复现历史工具调用且默认禁副作用。
 - AGENTS.md 从 repo_root 到 cwd 逐级加载并注入 system；Explore/Plan 子 Agent 跳过；`fs.write` 对 AGENTS.md 默认 `Ask`。
-- `todo.write` 能创建/更新/完成 todo，单 in_progress 约束生效，`Event::TodoUpdated` 广播。
+- `task.create/update/list` 能管理任务，单 in_progress 约束生效，`Event::TaskUpdated` 广播。
+
+**任务追溯**：dev-plan T-M3-1..T-M3-10（10 个 task，预估 10 人日）。可度量门槛：压缩熔断 fail_threshold=3 生效、降级链 4 级全覆盖测试、proptest 压缩管道不变量测试通过、--resume/--replay 集成测试通过、AGENTS.md 分层加载覆盖 repo_root→cwd 全路径。
 
 **风险**
 - 压缩质量 → 摘要 prompt 调优；提供 `compress=off` 兜底。
@@ -149,6 +157,8 @@
 - 沙箱拒绝（如 Landlock EPERM）被识别并升级为权限请求，而非裸错误。
 - `--preset full-access` 启动时打 red 警告并要求显式确认。
 - `doctor --security` 输出沙箱驱动类型与硬化状态。
+
+**任务追溯**：dev-plan T-M4-1..T-M4-11（11 个 task，预估 8 人日）。可度量门槛：Landlock EPERM 拦截越界写可验证、沙箱拒绝熔断 3/5 次阈值生效、`--preset full-access` red 警告 + 二次确认生效、MCP project 作用域首次批准流测试通过、`/undo` 冲突检测（mtime/hash 比对）测试通过。**平台优先级**：M4 仅交付 Linux（Landlock+libseccomp），macOS/Windows 降级 NoopDriver（见 `tech-stack.md` §11 平台优先级策略）。
 
 **风险**
 - Landlock 旧内核不支持 → 编译期检测 + 运行时降级 `NoopDriver` + warn。
@@ -182,6 +192,8 @@
 - `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
 - MCP/Hook 子进程不继承凭证环境变量。
 
+**任务追溯**：dev-plan T-M5-1..T-M5-8（8 个 task，预估 12 人日）。可度量门槛：10 类 Hook 事件全覆盖测试、Hook L0 不覆盖（黑名单 Deny 时 allow 被忽略）测试通过、asyncRewake 3 并发上限 + 超时 kill 测试通过、Plan 模式硬门 + plan.exit 预批准缓存测试通过、独立测试策略见 `design.md` §21（stub 替身表）。
+
 **风险**
 - Hook 串行链路影响延迟 → 默认超时 30s，`on_hook_error=continue` 兜底。
 - MCP 协议演进 → M5 仅 stdio，`rmcp` 完整实现推迟到 M6+。
@@ -207,6 +219,8 @@
 - 三家 provider 行为一致（同一 prompt 产出合法消息序列）。
 - `rmcp` http MCP server 可连接（含 bearer token 鉴权）。
 
+**任务追溯**：dev-plan T-M6-1..T-M6-5（5 个 task，预估 6 人日）。可度量门槛：三家 provider（OpenAI/Anthropic/Ollama）同一会话行为一致测试通过、429 Retry-After 退避重试测试通过、rmcp http+OAuth 连接测试通过。
+
 **风险**
 - Anthropic 事件流与 OpenAI 差异大 → 抽象层充分隔离。
 - `rmcp` OAuth 流程复杂 → 保留 `stdio_only` 作为 fallback。
@@ -217,7 +231,7 @@
 
 **范围**
 - `tui`：`ratatui` + `crossterm` 基础框架。
-- 多会话侧栏、对话主视图、输入区、工具面板、权限弹窗、Todo 面板。
+- 多会话侧栏、对话主视图、输入区、工具面板、权限弹窗、任务面板。
 - 流式 Markdown 增量渲染。
 - `reedline` 输入（历史、补全）。
 - `TuiPrompter` 实现（点对点，非阻塞主循环）。
@@ -225,8 +239,10 @@
 
 **验收**
 - 全屏交互流畅（< 16ms 渲染）。
-- 工具调用实时进度可见；Todo 面板同步更新。
+- 工具调用实时进度可见；任务面板同步更新。
 - 权限弹窗非阻塞主循环（`TuiPrompter` 挂起工具调用，UI 处理后回传 `Decision`）。
+
+**任务追溯**：dev-plan T-M7-1..T-M7-4（4 个 task，预估 10 人日）。可度量门槛：渲染帧率 < 16ms（60fps）、流式 Markdown 增量解析无闪烁、TuiPrompter 非阻塞回传测试通过。
 
 **风险**
 - 流式 Markdown 重绘性能 → 增量解析 + 脏区刷新。
@@ -246,6 +262,8 @@
 - `Client::ask` 可在第三方 Rust 项目运行。
 - `serve` 模式可被 curl 调用。
 - MCP server 可被 Claude Desktop 等客户端发现并使用。
+
+**任务追溯**：dev-plan T-M8-1..T-M8-6（6 个 task，预估 8 人日）。可度量门槛：SDK `Client::ask` 在第三方 Rust 项目可运行、`serve` HTTP 端点可 curl 调用、MCP server 可被 Claude Desktop 发现、跨平台二进制（cargo dist）三平台产出。
 
 **风险**
 - 协议稳定性 → 标 `experimental` 直到反馈收敛。
@@ -295,7 +313,7 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 - M1 → M2 强依赖（循环基础）。
 - M2 → M3 强依赖（压缩基于完整循环）。
 - M3 → M4：M4 的 OS 沙箱独立于上下文管理，但需 M2 的应用层权限就位；可与 M3 部分并行。
-- M4 → M5：M5 的 Hook/MCP 依赖沙箱就位以隔离子进程；Plan/Journal 依赖 M3 的 TodoWrite 与存储。
+- M4 → M5：M5 的 Hook/MCP 依赖沙箱就位以隔离子进程；Plan/Journal 依赖 M3 的任务管理与存储。
 - M6 可与 M7 部分并行（provider 工作独立于 TUI）。
 - M8 依赖 M6/M7 完成。
 

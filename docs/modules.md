@@ -144,7 +144,7 @@ minicoding-core/src/
 ├── journal/trait.rs       # Journal trait + ChangeEntry + UndoReport（见 api.md §3.11）
 ├── mcp/trait.rs           # McpClient trait + McpServerConfig + McpTransport + McpScope（见 api.md §11）
 ├── storage/trait.rs       # Storage trait + AuditSink trait
-├── event.rs               # Event / EventBus（仅通知，含 TodoUpdated/HookRun/PermissionResolved/FileUndone）
+├── event.rs               # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
 ├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 └── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
@@ -605,7 +605,7 @@ minicoding-tui/src/
 ├── view/
 │   ├── chat.rs           # 对话主视图
 │   ├── tool_panel.rs     # 工具调用面板
-│   ├── task_panel.rs     # 任务列表面板（同步 TodoUpdated 事件）
+│   ├── task_panel.rs     # 任务列表面板（同步 TaskUpdated 事件）
 │   ├── prompt.rs         # 输入区
 │   └── permission.rs     # 权限弹窗（TuiPrompter 非阻塞）
 ├── render/

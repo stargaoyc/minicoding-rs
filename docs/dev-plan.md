@@ -22,7 +22,7 @@
 
 ### 1.2 范围
 
-覆盖 M0–M8 全部 141 项功能（见 features.md 统计）与 35 条约束（rules.md C-01..C-35）。每个 task 标注涉及的 crate、功能 ID、约束 ID，确保功能与约束**可追溯**到具体交付单元。
+覆盖 M0–M8 全部 144 项功能（见 features.md 统计）与 35 条约束（rules.md C-01..C-35）。每个 task 标注涉及的 crate、功能 ID、约束 ID，确保功能与约束**可追溯**到具体交付单元。
 
 ### 1.3 task 字段说明
 
@@ -46,7 +46,7 @@ roadmap.md ──── 里程碑（M0-M8）范围 + 验收 + 风险
     ▼
 dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本文档
     │
-    ├── features.md ──── 功能总账（141 项 ID）
+    ├── features.md ──── 功能总账（144 项 ID）
     ├── modules.md ───── crate 结构与模块树
     └── rules.md ─────── L0/L1/L2 约束（C-01..C-35）
 ```
@@ -199,6 +199,26 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
   - `cargo doc --workspace --no-deps` 无警告生成；
   - `assert_constraints()` 在 M0 返回 `Ok(())`（占位）。
 - **预估工作量**：S
+
+#### T-M0-9 测试基础设施骨架（Test Infra Setup）
+- **crate**：workspace 根 + core（`tests/common/`）
+- **输入**：T-M0-1、T-M0-2
+- **输出**：
+  - `crates/minicoding-core/tests/common/` 共享测试工具目录：`mod.rs` 导出 `stub` 模块（`NoopMcpClient`/`NoopHookRegistry`/`StubJournal`/`StubTaskRegistry`/`StubPermissionPolicy` 等替身，供各 milestone 独立测试用，见 `design.md` §21.3）；
+  - `.cargo/config.toml` 配置 `cargo-llvm-cov` 覆盖率目标 80%；
+  - `benches/` 目录骨架（`criterion` 基准占位，M2 起填充）；
+  - `tests/common/fixtures/` 目录（wiremock 录制的 SSE/Anthropic 事件流 fixture 占位）；
+  - `xtask/` crate（可选，用于跨 crate 集成测试编排与 fixture 生成）；
+  - CI workflow 增加 `cargo llvm-cov --workspace --fail-under-lines 80` 门禁。
+- **涉及功能**：Q-01、Q-02、Q-03、Q-04、Q-05、Q-06
+- **涉及约束**：无（测试基础设施不涉及运行时约束）
+- **验收标准**：
+  - `cargo test --workspace` 能发现 `tests/common/` 下的 stub 模块并被各 crate 集成测试引用；
+  - `cargo llvm-cov --workspace` 可生成覆盖率报告（M0 阶段无业务代码，覆盖率门禁不阻塞，仅验证工具链就位）；
+  - `criterion` 基准占位可 `cargo bench` 空跑通过；
+  - CI workflow 含 coverage 上传步骤（codecov/coveralls 可选）。
+- **预估工作量**：M
+- **说明**：此任务是**独立测试基础设施**，不依附于任何业务 task。后续各 milestone 的 task 验收标准中"单测/集成测试覆盖"均依赖此 task 提供的 stub 与 fixture。M3 起补充 `proptest` 策略骨架（压缩管道不变量），M4 起补充沙箱平台 CI matrix（见 `design.md` §21.4 集成测试分层递进表）。
 
 ---
 
@@ -428,7 +448,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 #### T-M2-9 core EventBus + OTel span 埋点
 - **crate**：core（`event.rs`、`otel.rs`）
 - **输入**：T-M0-4、T-M2-1
-- **输出**：`EventBus`（broadcast，仅通知无回复，含 `TodoUpdated`/`HookRun`/`PermissionResolved`/`FileUndone` 事件）；OTel span 埋点（session/turn/llm_call/tool_call/permission）
+- **输出**：`EventBus`（broadcast，仅通知无回复，含 `TaskUpdated`/`HookRun`/`PermissionResolved`/`FileUndone` 事件）；OTel span 埋点（session/turn/llm_call/tool_call/permission）
 - **涉及功能**：O-03、O-06
 - **涉及约束**：C-04（span 字段不含凭证）
 - **验收标准**：
@@ -950,15 +970,15 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
   - 不阻塞其他 UI 交互。
 - **预估工作量**：L
 
-#### T-M7-4 tui Todo 面板 + 工具面板
+#### T-M7-4 tui 任务面板 + 工具面板
 - **crate**：tui（`view/tool_panel.rs`、`view/task_panel.rs`）
 - **输入**：T-M7-1、T-M3-8
-- **输出**：工具调用实时进度面板；Todo 面板同步更新（订阅 `Event::TodoUpdated`）；主题、配色
+- **输出**：工具调用实时进度面板；任务面板同步更新（订阅 `Event::TaskUpdated`）；主题、配色
 - **涉及功能**：F-08
 - **涉及约束**：C-33（任务规划纪律——面板可视化）
 - **验收标准**：
   - 工具调用实时进度可见；
-  - Todo 面板同步更新（`task.update` 后立即刷新）；
+  - 任务面板同步更新（`task.update` 后立即刷新）；
   - 主题可切换。
 - **预估工作量**：M
 
@@ -1052,7 +1072,7 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 - **M1 → M2 强依赖**：M2 的完整循环基于 M1 的单轮循环基础。
 - **M2 → M3 强依赖**：M3 的压缩基于 M2 的完整循环与 LlmProvider。
 - **M3 → M4 部分并行**：M4 的 OS 沙箱独立于上下文管理，但需 M2 的应用层权限就位。
-- **M4 → M5 强依赖**：M5 的 Hook/MCP 子进程依赖沙箱就位以隔离；Plan/Journal 依赖 M3 的 TodoWrite 与存储。
+- **M4 → M5 强依赖**：M5 的 Hook/MCP 子进程依赖沙箱就位以隔离；Plan/Journal 依赖 M3 的任务管理（task.*）与存储。
 - **M6 可与 M7 部分并行**：provider 工作独立于 TUI。
 - **M8 依赖 M6/M7 完成**。
 
@@ -1173,7 +1193,7 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 - 会话摘要 LLM 调用失败时自动降级为启发式兜底，会话仍正常结束（audit.log 有告警）。
 - `--resume <id>` 恢复后可继续提问；`--replay` 复现历史工具调用且默认禁副作用。
 - AGENTS.md 从 repo_root 到 cwd 逐级加载并注入 system；Explore/Plan 子 Agent 跳过；`fs.write` 对 AGENTS.md 默认 `Ask`。
-- `task.create/update/list` 能创建/更新/完成 todo，单 in_progress 约束生效，`Event::TodoUpdated` 广播。
+- `task.create/update/list` 能创建/更新/完成任务，单 in_progress 约束生效，`Event::TaskUpdated` 广播。
 - `proptest` 验证压缩管道不变量。
 - 回放测试（JSONL fixture）覆盖回归。
 
@@ -1213,7 +1233,7 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 ### 12.8 M7 — TUI
 
 - 全屏交互流畅（< 16ms 渲染，`criterion` 基准）。
-- 工具调用实时进度可见；Todo 面板同步更新。
+- 工具调用实时进度可见；任务面板同步更新。
 - 权限弹窗非阻塞主循环（`TuiPrompter` 挂起工具调用，UI 处理后回传 `Decision`）。
 - 流式 Markdown 增量渲染不闪烁。
 - 非 TTY 降级为 CLI 模式。
@@ -1234,7 +1254,7 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 
 | 里程碑 | task 数 | 涉及功能数 | 涉及约束数 |
 |------|:---:|:---:|:---:|
-| M0 | 8 | 7 | 2 |
+| M0 | 9 | 7 | 2 |
 | M1 | 9 | 19 | 8 |
 | M2 | 9 | 18 | 9 |
 | M3 | 10 | 22 | 7 |
@@ -1243,6 +1263,6 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 | M6 | 5 | 8 | 3 |
 | M7 | 4 | 4 | 2 |
 | M8 | 6 | 14 | 4 |
-| **合计** | **70** | **141**（全覆盖） | **35**（全覆盖） |
+| **合计** | **71** | **144**（全覆盖） | **35**（全覆盖） |
 
 > 功能 ID 与约束 ID 引用均来自 `features.md` 与 `rules.md` 实际编号。如发现引用偏差，以原文件为准并提 issue 修正本文。

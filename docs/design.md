@@ -335,7 +335,7 @@ build_chat_request
 | 活跃的 Plan 文件路径（§16） | 存 session 元数据 | 压缩后仍能 `/plan open` 继续未完成计划 |
 | 子 Agent CWD（§7） | 存子 Agent handle 元数据 | 子 Agent 压缩后仍能正确解析相对路径 |
 | `allowed_prompts` 预批准缓存（§16.4） | 存 session 元数据 | Plan 批准后的预批准不应因压缩失效 |
-| Todo 列表（§18） | 存 session 元数据 + Event::TodoUpdated | 任务进度跨压缩保留 |
+| 任务列表（§18） | 存 session 元数据 + Event::TaskUpdated | 任务进度跨压缩保留 |
 | `FileChangeJournal`（§17） | 独立于 messages，不受压缩影响 | 文件回滚能力不因压缩丢失 |
 | Hook 上下文（`SessionStart` 注入的） | 压缩后丢失（与 CC 一致） | 动态信息过期合理；若需保留用 `inject_context` 重新注入 |
 
@@ -1579,7 +1579,7 @@ pub struct PreApprovedPrompt {
 
 - **与 §9 权限**：`Plan` 是 `PermissionMode` 的一种，硬门在 `PermissionPolicy::check` 内实现；`allowed_prompts` 是会话级 `Verdict` 缓存。
 - **与 §7 子 Agent**：`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发，用于 Phase 1 探查（参考 CC 的 Plan 子 Agent）。
-- **与 §18 TodoWrite**：Plan 批准后，执行期用 TodoWrite 把步骤分解为可跟踪的 todo 列表，二者协作（参考 CC 的 Plan → Task 协作）。
+- **与 §18 任务管理**：Plan 批准后，执行期用 `task.create`/`task.update` 把步骤分解为可跟踪的任务列表，二者协作（参考 CC 的 Plan → Task 协作）。
 - **与 §17 文件回滚**：Plan 批准后进入执行期，文件改动写入 `FileChangeJournal`，可 `/undo` 回到批准点。
 
 ---
