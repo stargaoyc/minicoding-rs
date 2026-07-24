@@ -38,9 +38,9 @@
 - `cargo build --workspace` 通过（含平台条件依赖在非 Linux 平台不编译）。
 - `cargo run -p minicoding-cli -- --help` 输出帮助。
 - 设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 后启动一次，能在本地 OTLP collector 看到 `minicoding` 的 resource。
-- CI 全绿（`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny` 五门禁）。
+- CI 全绿（`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny` + `coverage` 六门禁；coverage 在 M0 仅验证工具链就位不阻塞，M1 起阻塞合并）。
 
-**任务追溯**：dev-plan T-M0-1..T-M0-9（9 个 task，预估 3 人日）。可度量门槛：14 crate 骨架编译通过、CI 5 门禁全绿、OTel resource 可观测、`tests/common/` 共享测试工具就位（T-M0-9）。
+**任务追溯**：dev-plan T-M0-1..T-M0-9（9 个 task，预估 3 人日）。可度量门槛：14 crate 骨架编译通过、CI 6 门禁就位（Linux only matrix）、OTel resource 可观测、`tests/common/` 共享测试工具就位（T-M0-9）。
 
 **风险**：无。
 
@@ -192,7 +192,7 @@
 - `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
 - MCP/Hook 子进程不继承凭证环境变量。
 
-**任务追溯**：dev-plan T-M5-1..T-M5-8（8 个 task，预估 12 人日）。可度量门槛：10 类 Hook 事件全覆盖测试、Hook L0 不覆盖（黑名单 Deny 时 allow 被忽略）测试通过、asyncRewake 3 并发上限 + 超时 kill 测试通过、Plan 模式硬门 + plan.exit 预批准缓存测试通过、独立测试策略见 `design.md` §21（stub 替身表）。
+**任务追溯**：dev-plan T-M5-1..T-M5-8（8 个 task，预估 12 人日）。可度量门槛：10 类 Hook 事件全覆盖测试、Hook L0 不覆盖（黑名单 Deny 时 allow 被忽略）测试通过、asyncRewake 3 并发上限 + 超时 kill 测试通过、Plan 模式硬门 + plan.exit 预批准缓存测试通过、macOS CI matrix 启用（平台优先级 M5+，见 `tech-stack.md` §11）、独立测试策略见 `design.md` §21（stub 替身表）。
 
 **风险**
 - Hook 串行链路影响延迟 → 默认超时 30s，`on_hook_error=continue` 兜底。
@@ -219,7 +219,7 @@
 - 三家 provider 行为一致（同一 prompt 产出合法消息序列）。
 - `rmcp` http MCP server 可连接（含 bearer token 鉴权）。
 
-**任务追溯**：dev-plan T-M6-1..T-M6-5（5 个 task，预估 6 人日）。可度量门槛：三家 provider（OpenAI/Anthropic/Ollama）同一会话行为一致测试通过、429 Retry-After 退避重试测试通过、rmcp http+OAuth 连接测试通过。
+**任务追溯**：dev-plan T-M6-1..T-M6-5（5 个 task，预估 6 人日）。可度量门槛：三家 provider（OpenAI/Anthropic/Ollama）同一会话行为一致测试通过、429 Retry-After 退避重试测试通过、rmcp http+OAuth 连接测试通过、Windows CI matrix 启用（平台优先级 M6+，见 `tech-stack.md` §11）。
 
 **风险**
 - Anthropic 事件流与 OpenAI 差异大 → 抽象层充分隔离。

@@ -132,14 +132,16 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 #### T-M0-3 CI 流水线（fmt/clippy/test/audit/deny）
 - **crate**：`.github/workflows/`
 - **输入**：T-M0-1、T-M0-2
-- **输出**：GitHub Actions workflow：`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny`；Linux/macOS/Windows 三平台 matrix
+- **输出**：GitHub Actions workflow：`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny`；**Linux only** matrix（M0-M4 平台优先级策略，见 `tech-stack.md` §11；M5+ 补 macOS matrix，M6+ 补 Windows matrix，对应 features Q-07）
 - **涉及功能**：Q-01
 - **涉及约束**：无
 - **验收标准**：
   - PR 触发 CI 全绿才能合并；
   - `clippy -D warnings` 零告警；
-  - `cargo audit` 无已知漏洞依赖。
+  - `cargo audit` 无已知漏洞依赖；
+  - CI matrix 仅 Linux（macOS/Windows 编译可用但不在 CI matrix 内，沙箱降级为 `NoopDriver`）。
 - **预估工作量**：S
+- **说明**：coverage 门禁（`cargo llvm-cov --workspace --fail-under-lines 80`）与基准回归门禁由 T-M0-9 补充到本 workflow。M0 阶段 coverage 仅验证工具链就位不阻塞合并，M1 起阻塞。
 
 #### T-M0-4 tracing + OpenTelemetry 初始化模板
 - **crate**：core（`otel.rs`、`paths.rs`）
@@ -202,7 +204,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 
 #### T-M0-9 测试基础设施骨架（Test Infra Setup）
 - **crate**：workspace 根 + core（`tests/common/`）
-- **输入**：T-M0-1、T-M0-2
+- **输入**：T-M0-1、T-M0-2、T-M0-3（CI workflow 先建立，本 task 补充 coverage 门禁）
 - **输出**：
   - `crates/minicoding-core/tests/common/` 共享测试工具目录：`mod.rs` 导出 `stub` 模块（`NoopMcpClient`/`NoopHookRegistry`/`StubJournal`/`StubTaskRegistry`/`StubPermissionPolicy` 等替身，供各 milestone 独立测试用，见 `design.md` §21.3）；
   - `.cargo/config.toml` 配置 `cargo-llvm-cov` 覆盖率目标 80%；

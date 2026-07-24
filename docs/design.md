@@ -1416,8 +1416,10 @@ dir = "~/.minicoding/sessions"
 - **回放测试**：录制真实会话 JSONL，作为回归用例。
 - **属性测试**：`proptest` 验证压缩管道在任意消息序列下不破坏不变量。
 - **并发测试**：并行工具调用下的消息顺序一致性。
+- **共享测试工具**：`crates/minicoding-core/tests/common/` 提供 stub 替身（`NoopMcpClient`/`NoopHookRegistry`/`StubJournal`/`StubTaskRegistry`/`StubPermissionPolicy` 等），M0 起由 T-M0-9 建立骨架（见 `dev-plan.md` §3），各 milestone 的单测/集成测试均依赖此目录。
+- **独立测试策略**：§16-§20 五个子系统（Plan/Journal/Task/MCP/Hooks）在所在里程碑内可独立测试，无需等待下游子系统实现，详见 §21。
 
-详见 `roadmap.md` 的测试里程碑。
+详见 `roadmap.md` 的测试里程碑与 `dev-plan.md` T-M0-9 测试基础设施骨架。
 
 ---
 
@@ -1962,8 +1964,9 @@ PreToolUse Hook（matcher 命中时）
 
 | 子系统 | 集成点 |
 |--------|--------|
-| §2.3 工具执行 | `PreToolUse` 在 `policy.check` 后、`dispatch` 前运行，可改写 `input` |
-| §3 上下文压缩 | `PreCompact` 在 4 级管道启动前触发，可注入"必须保留"指令影响权重 |
+| §2 Agent 循环 | `UserPromptSubmit` 在用户提交后、LLM 调用前运行，可拒绝/追加上下文；`Stop` 在一轮结束时触发，可要求继续（含 asyncRewake） |
+| §2.3 工具执行 | `PreToolUse` 在 `policy.check` 后、`dispatch` 前运行，可改写 `input`；`PostToolUse` 在工具成功后、结果回灌前运行，可改写 `result`（含 asyncRewake）；`PostToolUseFailure` 在工具失败后、错误回灌前运行，可改写 `error`（含 asyncRewake） |
+| §3 上下文压缩 | `PreCompact` 在 4 级管道启动前触发，可注入"必须保留"指令影响权重；`PostCompact` 在压缩完成后触发，可验证压缩质量并补充注入丢失的关键上下文 |
 | §8 记忆 | `SessionStart` 注入长期记忆之外的动态信息（如 `git status`） |
 | §8.6 AGENTS.md | `SessionStart` Hook 注入的动态信息与静态 AGENTS.md 互补 |
 | §9 权限 | `PermissionRequest` Hook 可短路 `Prompter`；`PreToolUse` 可 `Ask→Allow` |

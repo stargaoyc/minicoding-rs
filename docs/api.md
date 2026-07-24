@@ -550,12 +550,13 @@ pub trait Hook {
 
 pub struct HookMatcher {
     pub events: Vec<HookEvent>,
-    pub tools: Option<Vec<String>>,    // None=所有工具；仅 PreToolUse/PostToolUse/PermissionRequest 有效
+    pub tools: Option<Vec<String>>,    // None=所有工具；仅 PreToolUse/PostToolUse/PostToolUseFailure/PermissionRequest 有效
 }
 
+/// 10 类事件（见 `hooks.md` §2）：7 类纯同步 + 3 类同步/异步可选（PostToolUse/PostToolUseFailure/Stop）。
 pub enum HookEvent {
-    SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
-    PreCompact, Stop, SubagentStop, PermissionRequest,
+    SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure,
+    PreCompact, PostCompact, Stop, SubagentStop, PermissionRequest,
 }
 
 pub struct HookInput {
@@ -575,6 +576,14 @@ pub struct HookOutput {
     pub modify_input: Option<serde_json::Value>,
     pub inject_context: Option<String>,
     pub exit_message: Option<String>,
+    /// 异步唤醒（仅 PostToolUse/PostToolUseFailure/Stop 有效，见 `hooks.md` §11）
+    pub async_rewake: Option<AsyncRewakeSpec>,
+}
+
+pub struct AsyncRewakeSpec {
+    pub task_id: String,
+    pub estimated_duration: Duration,
+    pub wake_prompt: String,
 }
 
 pub enum HookDecision { Allow, Deny, Ask, Continue }
@@ -587,7 +596,7 @@ impl HookRegistry {
 }
 ```
 
-`ScriptHook` 适配器把外部可执行包装为 `Hook`：序列化 `HookInput`→stdin，读 stdout JSON→`HookOutput`，按退出码映射。**关键约束**：Hook 的 `allow` 对内置黑名单 `Deny` 无效（L0 不可覆盖，见 `rules.md` C-02 与 `hooks.md` §4）。
+`ScriptHook` 适配器把外部可执行包装为 `Hook`：序列化 `HookInput`→stdin，读 stdout JSON→`HookOutput`，按退出码映射。**关键约束**：Hook 的 `allow` 对内置黑名单 `Deny` 无效（L0 不可覆盖，见 `rules.md` C-02 与 `hooks.md` §4）。`async_rewake` 仅对 `PostToolUse`/`PostToolUseFailure`/`Stop` 三类"事后"事件有效（见 `hooks.md` §11.3），同一 session 最多 3 个并发（C-26）。
 
 ### 3.9 `SandboxDriver`（OS 级沙箱，见 `security.md` §8）
 
