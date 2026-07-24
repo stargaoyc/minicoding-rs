@@ -729,7 +729,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 
 ## §8 里程碑 M5：Hooks 与子 Agent
 
-> 对应 roadmap M5 的 Hooks/子 Agent/Plan 部分（12 人日）。交付 8 类 Hook、子 Agent、Plan 模式。
+> 对应 roadmap M5 的 Hooks/子 Agent/Plan 部分（12 人日）。交付 10 类 Hook、子 Agent、Plan 模式。
 
 #### T-M5-1 hooks Hook trait + HookRegistry + 10 事件
 - **crate**：core（`hooks/trait.rs`）、hooks（`registry.rs`、`lib.rs`）

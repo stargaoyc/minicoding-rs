@@ -1,6 +1,6 @@
 # Hooks 系统设计
 
-本文设计 `minicoding-rs` 的 Hooks 机制，参考 Claude Code 的 8 类生命周期 Hook，并融合本项目已有的 `EventBus`、`PermissionPolicy/Prompter`、上下文压缩管道。Hooks 让用户在不修改工具实现的前提下，注入自定义逻辑：拦截/批准工具调用、改写参数、注入上下文、自动跑格式化、备份压缩前现场等。
+本文设计 `minicoding-rs` 的 Hooks 机制，参考 Claude Code 的生命周期 Hook（CC 共 27 类，本项目按需精简为 10 类），并融合本项目已有的 `EventBus`、`PermissionPolicy/Prompter`、上下文压缩管道。Hooks 让用户在不修改工具实现的前提下，注入自定义逻辑：拦截/批准工具调用、改写参数、注入上下文、自动跑格式化、备份压缩前现场等。
 
 ---
 
@@ -19,22 +19,30 @@
 
 ## 2. Hook 事件类型（10 类）
 
-对齐 Claude Code 的事件分类，结合本项目命名，在原 8 类基础上新增 `PostToolUseFailure` 与 `PostCompact`（参考 CC 27 类事件的子集，按需扩展）：
+对齐 Claude Code 的事件分类，结合本项目命名，共 10 类事件。**所有 10 类事件默认同步执行**（阻塞当前 Agent 循环阶段，等 Hook 返回后再继续）；其中 `PostToolUse`/`PostToolUseFailure`/`Stop` 三类"事后"事件额外支持 `async_rewake` 异步模式（§11），Hook 同步返回 `async_rewake = Some(spec)` 后主流程不阻塞，Hook 子进程在后台继续执行，完成后唤醒 Agent。
 
-| 事件 | 触发时机 | 典型用途 | 可否阻断 | 可否注入上下文 |
-|------|---------|---------|:---:|:---:|
-| `SessionStart` | 会话开始/resume | 注入 git status、TODO、环境信息 | 否 | 是 |
-| `UserPromptSubmit` | 用户提交 prompt 后、构建请求前 | 追加 sprint 上下文、校验请求 | 是（拒绝提交） | 是 |
-| `PreToolUse` | `policy.check` 后、工具执行前 | 阻断危险操作、校验路径、改写参数、自动批准 | 是 | 是（改写 input） |
-| `PostToolUse` | 工具执行成功后、结果回灌前 | 跑 formatter/linter、记录变更、改写结果 | 否 | 是（改写 result） |
-| `PostToolUseFailure` | 工具执行失败后、错误回灌前 | 诊断失败原因、降级处理、记录错误模式 | 否 | 是（改写 error） |
-| `PreCompact` | 上下文压缩前 | 备份现场、保留关键决策 | 否 | 是（追加保留指令） |
-| `PostCompact` | 上下文压缩后 | 验证压缩质量、重新注入丢失的关键上下文 | 否 | 是（补充注入） |
-| `Stop` | 主 Agent 一轮结束 | 校验任务完成、跑测试、生成摘要 | 是（要求继续） | 否 |
-| `SubagentStop` | 子 Agent 完成 | 校验子任务产出、触发后续 | 否 | 否 |
-| `PermissionRequest` | `Verdict::Ask` 即将弹窗前 | 自动批准测试命令、阻断敏感文件 | 是（直接给出 Decision） | 否 |
+| # | 事件 | 触发阶段 | 执行模式 | 可否阻断 | 可否改写 | 可否注入上下文 | 典型用途 |
+|---|------|---------|---------|:---:|:---:|:---:|---------|
+| 1 | `SessionStart` | 会话开始/resume 前 | 同步 | 否 | 否 | 是 | 注入 git status、TODO、环境信息 |
+| 2 | `UserPromptSubmit` | 用户提交后、LLM 调用前 | 同步 | 是（拒绝提交） | 否 | 是 | 追加 sprint 上下文、校验请求 |
+| 3 | `PreToolUse` | `policy.check` 后、工具执行前 | 同步 | 是 | 是（改写 input） | 是 | 阻断危险操作、校验路径、改写参数、自动批准 |
+| 4 | `PostToolUse` | 工具执行成功后、结果回灌前 | 同步 / 异步可选 | 否 | 是（改写 result） | 是 | 跑 formatter/linter、记录变更、改写结果 |
+| 5 | `PostToolUseFailure` | 工具执行失败后、错误回灌前 | 同步 / 异步可选 | 否 | 是（改写 error） | 是 | 诊断失败原因、降级处理、记录错误模式 |
+| 6 | `PreCompact` | 上下文压缩管道启动前 | 同步 | 否 | 否 | 是（追加保留指令） | 备份现场、保留关键决策 |
+| 7 | `PostCompact` | 上下文压缩完成后 | 同步 | 否 | 否 | 是（补充注入） | 验证压缩质量、重新注入丢失的关键上下文 |
+| 8 | `Stop` | 主 Agent 一轮结束 | 同步 / 异步可选 | 是（要求继续） | 否 | 否 | 校验任务完成、跑测试、生成摘要 |
+| 9 | `SubagentStop` | 子 Agent 完成 | 同步 | 否 | 否 | 否 | 校验子任务产出、触发后续 |
+| 10 | `PermissionRequest` | `Verdict::Ask` 即将弹窗前 | 同步 | 是（直接给 Decision） | 否 | 否 | 自动批准测试命令、阻断敏感文件 |
 
-新增事件说明：
+**属性说明**：
+
+- **执行模式**：`同步` = Hook 必须在 `timeout_sec`（默认 30s）内返回，主流程阻塞等待；`异步可选` = 默认仍同步，Hook 可在 `HookOutput.async_rewake` 声明后台执行（§11.3），主流程继续。`PreToolUse`/`PermissionRequest` 等"事前"事件**不支持**异步（必须同步决策，否则权限门无法闭合）。
+- **可否阻断**：`是` = Hook 可返回 `deny`（或 `Stop` 事件的"要求继续"）改变主流程走向；`否` = Hook 只能观察/改写/注入，不能阻止该阶段发生（事后事件本身已发生）。
+- **可否改写**：`是` = Hook 可改写工具 `input`（PreToolUse）或工具 `result`/`error`（PostToolUse/PostToolUseFailure）；`否` = 该事件无载荷可改写。
+- **可否注入上下文**：`是` = Hook 返回 `inject_context` 字段，Runtime 包裹 `<hook_context>` 边界后追加到 system/上下文（声明非指令，见 §7）；`否` = 该阶段不产生上下文注入。
+- **计数澄清**：10 类事件 = 7 类纯同步（SessionStart/UserPromptSubmit/PreToolUse/PreCompact/PostCompact/SubagentStop/PermissionRequest）+ 3 类同步/异步可选（PostToolUse/PostToolUseFailure/Stop）。`asyncRewake` 不是第 11 类事件，而是这 3 类事件的子模式。
+
+**新增事件说明**：
 - `PostToolUseFailure`：与 `PostToolUse` 互补——前者处理失败，后者处理成功。失败诊断 Hook 可分析错误模式（如沙箱拒绝、权限拒绝、超时），自动建议修正或降级。
 - `PostCompact`：压缩后触发，允许 Hook 验证压缩是否丢失关键信息（如对比压缩前后 todo 列表完整性），并补充注入。与 `PreCompact` 的"备份"互补，`PostCompact` 是"验证与修复"。
 

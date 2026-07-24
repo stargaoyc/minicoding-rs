@@ -15,7 +15,7 @@
 | M2 | 完整 Agent 循环 + 应用层权限 | 12 | 工具多轮、写文件、shell、权限双抽象 |
 | M3 | 上下文、持久化与记忆 | 10 | 压缩、会话恢复、长期记忆、AGENTS.md、TodoWrite |
 | M4 | OS 沙箱与审批模式 | 8 | seatbelt/landlock/seccomp、预设、exec、拒绝升级 |
-| M5 | 扩展机制：Hooks + MCP + Plan + 文件回滚 | 12 | 8 类 Hook、MCP client、Plan 模式、/undo |
+| M5 | 扩展机制：Hooks + MCP + Plan + 文件回滚 | 12 | 10 类 Hook、MCP client、Plan 模式、/undo |
 | M6 | 多 Provider 与健壮性 | 6 | Anthropic、Ollama、重试、错误恢复 |
 | M7 | TUI | 10 | 全屏交互 |
 | M8 | SDK 与 Server | 8 | 嵌入 + HTTP + MCP server |
@@ -161,7 +161,7 @@
 ## M5 — 扩展机制：Hooks + MCP + Plan + 文件回滚（12 人日）
 
 **范围**
-- `core`：`Hook` trait + `HookRegistry` + 8 类事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/PreCompact/Stop/SubagentStop/PermissionRequest，见 `hooks.md`）。
+- `core`：`Hook` trait + `HookRegistry` + 10 类事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/Stop/SubagentStop/PermissionRequest，见 `hooks.md`）。
 - `core`：`ScriptHook` 适配器（外部可执行 + JSON over stdio + 退出码语义），`on_hook_error` 策略。
 - `core`：6 个内置示例 Hook（fmt-on-write / auto-approve-tests / block-secrets / git-status-inject / backup-before-compact / test-on-stop）。
 - `mcp`：`McpClient` trait + `stdio_only` 客户端薄封装（M5 先交付，仅 stdio）。

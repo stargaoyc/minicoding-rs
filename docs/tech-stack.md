@@ -79,6 +79,10 @@
 | 正则 | `regex` | 标配；不支持回溯但够用 |
 | 目录遍历 | `ignore` | 尊重 `.gitignore`，与 `ripgrep` 行为一致 |
 | 文件监听（可选） | `notify` | 用于 watch 模式 |
+| Diff 生成 | `similar` | Myers diff 算法主流实现，`edit`/`multiedit` 工具展示变更、`/undo` 预览用 |
+| HTML→Markdown | `htmd` | `web.fetch` 工具把抓取的 HTML 转 Markdown，纯 Rust 无 C 依赖 |
+| 有序 ID | `ulid` | `task_id`/`op_id` 用 ULID（字典序可排序，比 UUID 更适合按时间顺序列出） |
+| 哈希比对 | `sha2` | `Journal` 冲突检测比对文件内容 hash（C-28） |
 
 ---
 
@@ -145,6 +149,8 @@ OpenTelemetry 是**一等公民**（非后续可选），从 M0 起接入。业�
 | 临时文件 | `tempfile` | 文件工具测试 |
 | 快照测试 | `insta` | 配置 schema、CLI 输出快照 |
 | 覆盖率 | `cargo-llvm-cov` | 基于 LLVM，准确 |
+| 属性测试 | `proptest` | 压缩管道不变量、权限优先级、Parent-UUID 链重建（features Q-05） |
+| 性能基准 | `criterion` | 关键路径回归基准（Agent 循环/压缩/token 计数，features Q-06） |
 | 模糊测试（可选） | `cargo-fuzz` | 解析器（SSE/JSON）模糊测试 |
 
 ---
@@ -168,6 +174,12 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | 文件权限收紧 | `std::fs` + `cfg!(unix)` `chmod 0600/0700` | Unix | `~/.minicoding/` 与会话文件权限收紧 |
 
 > **平台检测策略**：`minicoding-sandbox::detect_driver()` 编译期按 `cfg!(target_os)` 选实现，运行期 `sandbox_run::landlock_available()` 探测内核支持。无可用硬隔离时（如 Windows 早期版本、不支持 Landlock 的旧内核）返回 `NoopDriver`（来自 core）并打 `warn`，依赖容器自身隔离（对应 `ExternalSandbox` 策略）。`landlock` 与 `libseccomp` 通过 cargo `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 平台不编译。`sandbox-run` 本身跨 Linux+macOS，统一了 `apply_sandbox` 调用入口。
+
+> **平台优先级（Linux 先行）**：沙箱与核心 Runtime 的多平台支持分阶段交付：
+> - **M0-M4（Linux 先行）**：沙箱仅实现 Linux（`sandbox-run` + `landlock` + `libseccomp`），CI matrix 只跑 Linux。macOS/Windows 在此阶段编译可用但沙箱降级为 `NoopDriver` + 应用层权限 + 用户提示（不阻塞 MVP）。
+> - **M5+（macOS 补齐）**：补齐 macOS `sandbox-run`（Seatbelt）实现与 CI matrix。
+> - **M6+（Windows 补齐）**：补齐 Windows 受限令牌 + Job Object 实现。
+> - **理由**：Linux 是 AI Coding 的主战场（CI/容器/服务器），Landlock 最成熟；macOS/Windows 沙箱成熟度低且非核心场景，推迟到最后避免阻塞 MVP。`sandbox-run` 跨平台 API 已统一，后续补齐只是平台实现填充，不涉及架构变更。
 
 ### 11.1 Hooks 与 MCP 相关
 
@@ -209,6 +221,37 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | Windows 沙箱 | `windows` 受限令牌 + Job Object | AppContainer | Job Object + DACL 更成熟可控；AppContainer 权限模型复杂 |
 | MCP 客户端 | `rmcp` 2.2（官方，M4 一步到位） | 自实现 http/stdio | 官方 SDK 协议跟进快、对齐 2025-11-25 spec、含 `#[tool]` 宏与 schemars；自实现易落后、维护成本高 |
 | 文件锁 | `fs2` | `flock` 裸调 | 跨平台封装、API 稳定 |
+
+### 13.1 `trait-variant` 宏的风险管理
+
+`#[trait_variant::make(Trait: Send)]` 在全项目 trait（LlmProvider/Tool/PermissionPolicy/PermissionPrompter/ContextManager/Hook/HookRegistry/SandboxDriver/ProjectDocLoader/Journal/McpClient/Storage）上使用，存在以下风险，需显式管理：
+
+**为何必须用**：Rust 2024 稳定了 `async fn in trait`，但**未稳定 `dyn` 兼容的 async trait**。Runtime 需持有 `Arc<dyn Trait>` 做动态派发（运行时装配实现 crate），原生 `async fn in trait` 的 trait 不是 object-safe。`trait-variant` 生成 Send 变体使 trait 可作 `dyn` 对象，是目前唯一不引入运行时开销（对比 `async-trait` 的 box future）的方案。
+
+**风险清单**：
+
+| 风险 | 说明 | 缓解 |
+|------|------|------|
+| 第三方宏依赖 | `trait-variant` crate 版本锁定 | 锁定在 `1.x`，CI `cargo audit` 监控；宏本身轻量（纯过程宏，无运行时依赖） |
+| 双 trait 生成 | 每个 trait 编译期生成原始 + Send 变体 | 编译开销可接受；`cargo check` 时间未显著劣化 |
+| 迁移成本 | Rust 原生支持后需移除宏 | 迁移点集中：trait 定义处 + Runtime 持有 `Arc<dyn>` 处；影响面可控 |
+| 语法侵入 | `#[trait_variant::make]` 注解散布全项目 | 集中在 `minicoding-core` 的 trait 定义模块（11 个文件），不扩散到实现 crate |
+
+**迁移路径**：当 Rust 原生支持 `dyn*` 或 object-safe async trait（RFC 3668 `dyn*` 或后续）稳定后：
+1. 移除 `#[trait_variant::make]` 注解；
+2. trait 直接定义 `async fn`，保持 object-safe；
+3. Runtime 持有 `Arc<dyn Trait>` 不变；
+4. 验证：`cargo test` 全量回归 + `cargo bench` 确认无性能回退。
+
+**替代方案对比**（已否决）：
+
+| 方案 | 否决理由 |
+|------|---------|
+| `async-trait` | box future 运行时堆分配，热路径（Agent 循环每轮调用）性能差；已属废弃路径 |
+| 手写 `Pin<Box<dyn Future>>` 返回类型 | 侵入性强、噪声大、易错 |
+| 不用 `dyn` 全用泛型 | 编译时间长、二进制体积大、Runtime 无法运行时装配实现 crate（feature gate 失效） |
+
+**决策**：M0-M5 使用 `trait-variant`；在 `roadmap.md` M6 评审节点检查 Rust 官方进展，若原生方案稳定则纳入 M7 迁移 task。`AGENTS.md` §2.1 已约束不引入 `async-trait`。
 
 ---
 

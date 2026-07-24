@@ -94,16 +94,28 @@ Prompt 注入的危险性来自三要素叠加（"致命三角"）：
 | `web.fetch`（内网） | Network | Deny | RFC1918 / 169.254.169.254 |
 | `git.apply` | FileWrite | Ask | |
 
-### 2.3 决策持久化
+### 2.3 决策持久化与两层解析模型
 
-用户选择 `AllowAlways` / `DenyAlways` 写入 `~/.minicoding/policy.toml`（见 `data-model.md` §5）。规则匹配优先级：
+用户选择 `AllowAlways` / `DenyAlways` 写入 `~/.minicoding/policy.toml`（见 `data-model.md` §5），作为 L1 用户策略的 specificity=2 条目持久化（见 `design.md` §9.5）。权限解析采用**两层模型**：
 
 ```
-内置安全黑名单 (危险命令/SSRF/敏感路径)   ← 最高，不可被任何配置覆盖
-        >  deny (显式)  >  allow (显式)  >  default
+L0  内置硬黑名单 (policy::builtin)                    ← 最高，不可被任何配置覆盖
+      危险命令前缀 / SSRF 内网 / 敏感路径 / AGENTS.md 写
+        │ 未命中 L0
+        ▼
+L1  用户策略（统一规则集，按 specificity 降序匹配）
+      specificity 5  granular 精确路径
+      specificity 4  granular 通配路径
+      specificity 3  granular 工具类别 / MCP server / 命令前缀
+      specificity 2  policy.toml 显式 allow/deny（含 AllowAlways/DenyAlways 持久化）
+      specificity 1  ApprovalMode × SideEffect 全局平移
+      specificity 0  §2.2 per-tool 默认矩阵（兜底）
+        │ 最高 specificity 命中生效；同 specificity → deny 胜出
+        ▼
+    最终 Verdict
 ```
 
-同级别按声明顺序；首条匹配生效。内置黑名单由 `policy::builtin` 模块硬编码，确保即使用户误配 `--allow 'shell.run:*'` 也无法执行 `rm -rf /`。
+内置黑名单由 `policy::builtin` 模块硬编码，确保即使用户误配 `--allow 'shell.run:*'` 也无法执行 `rm -rf /`。L1 内所有用户可配置规则（默认矩阵、ApprovalMode、policy.toml、granular）在同一命名空间按 specificity 竞争，避免多级级联的歧义。
 
 ### 2.4 运行时覆盖
 
@@ -121,16 +133,16 @@ minicoding --allow 'fs.write:src/**' --deny 'shell.run:*' "重构 utils"
 
 ### 2.6 审批模式（Approval Mode）与预设（参考 Codex）
 
-per-tool 的 `Allow/Ask/Deny` 粒度细但配置繁琐。借鉴 Codex，在 per-tool 策略之上提供**面向场景的审批模式 + 预设**，二者组合后展开为 `SandboxPolicy`（§8）与默认 `Verdict`。
+per-tool 的 `Allow/Ask/Deny` 粒度细但配置繁琐。借鉴 Codex，提供**面向场景的审批模式 + 预设**作为 L1 用户策略的快捷写入方式（见 §2.3 两层模型）。审批模式与预设**不是独立层级**，而是展开为 specificity=1 的 L1 规则后与其他用户规则平等竞争。
 
-**审批模式**（决定"何时需要人工确认"）：
+**审批模式**（展开为 specificity=1 的全局平移规则）：
 
 ```rust
 pub enum ApprovalMode {
-    Untrusted,   // 仅信任只读命令；任何写/执行/网络都 Ask
-    OnFailure,   // 命令自动执行，失败时才 Ask
-    OnRequest,   // 由模型判断何时请求确认（默认）
-    Never,       // 全自动，从不请求（仅与 DangerFullAccess 组合）
+    Untrusted,   // 展开为：所有 side_effect != None → Ask
+    OnFailure,   // 展开为：命令自动 Allow，失败时注入 Ask
+    OnRequest,   // 默认，不写入额外规则，沿用 §2.2 矩阵
+    Never,       // 展开为：所有 Ask → Allow（仍受 L0 黑名单与高 specificity deny 约束）
 }
 ```
 
@@ -143,9 +155,9 @@ pub enum ApprovalMode {
 | `external-sandbox` | OnRequest | ExternalSandbox | CI/容器内批量任务（外层容器已隔离） |
 | `full-access` | Never | DangerFullAccess | 受信沙箱内全自动部署（需显式确认 + red 警告） |
 
-CLI：`minicoding --preset auto`，或 `--approval-mode on-failure --sandbox workspace-write` 细粒度覆盖。预设与 per-tool `policy.toml` 共存：预设定"基调"，`policy.toml` 的 allow/deny 在其上叠加；内置黑名单始终最高优先级。
+CLI：`minicoding --preset auto`，或 `--approval-mode on-failure --sandbox workspace-write` 细粒度覆盖。预设展开为 L1 规则后与 `policy.toml`/granular 共存于同一命名空间，按 specificity 竞争——预设定"基调"（specificity=1），`policy.toml`（specificity=2）与 granular（specificity=3~5）可覆盖；内置黑名单（L0）始终最高优先级。
 
-> 与 §2.1 双 trait 的关系：审批模式决定 `PermissionPolicy` 的默认 `Verdict`（如 `Untrusted` 模式下所有非只读默认 `Ask`），`PermissionPrompter` 仍负责交互。`Never` 模式等价于"所有 `Ask` 自动转 `Allow`"，但内置黑名单与 OS 沙箱仍生效——这是 `full-access` 预设依赖 `DangerFullAccess` 沙箱却仍建议在容器内运行的原因。
+> 与 §2.1 双 trait 的关系：审批模式展开为 L1 规则后决定 `PermissionPolicy` 的默认 `Verdict`（如 `Untrusted` 模式展开为"所有非只读 → Ask"），`PermissionPrompter` 仍负责交互。`Never` 模式展开为"所有 `Ask` → `Allow`"，但 L0 黑名单、高 specificity 的 `deny` 规则、OS 沙箱仍生效——这是 `full-access` 预设依赖 `DangerFullAccess` 沙箱却仍建议在容器内运行的原因。
 
 ---
 

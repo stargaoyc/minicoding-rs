@@ -168,7 +168,7 @@ pub enum PresetKind {
 }
 ```
 
-`PermissionPolicy::check`（§3.6）实现时按如下优先级解析最终 `Verdict`：内置黑名单 `Deny`（最高）> `ApprovalMode × SideEffect` 决定的默认 > `policy.toml` 显式 allow/deny > per-tool 默认矩阵。`PermissionMode::Plan` 在此之上叠加"非只读工具直接 `Deny`"的硬门。
+`PermissionPolicy::check`（§3.6）实现两层解析模型（详见 `design.md` §9.5）：L0 内置黑名单 `Deny`（不可覆盖）→ L1 用户策略（默认矩阵 / `ApprovalMode` / `policy.toml` / granular rules 在同一命名空间按 specificity 降序竞争，同 specificity 下 `deny` 胜出）。`PermissionMode::Plan` 作为 L0 扩展插入"非只读工具直接 `Deny`"硬门。
 
 四种 `SandboxPolicy` 的内核隔离强度递减：`ReadOnly`/`WorkspaceWrite` 由 `minicoding-sandbox` 在子进程 `exec` 前应用内核级限制；`ExternalSandbox` 假定外层容器（Docker/Firecracker/CI runner）已隔离，本进程仅应用层校验，`SandboxDriver::is_hardened()` 返回 `false` 并打 `info` 日志声明依赖外部隔离；`DangerFullAccess` 关闭所有限制。`minicoding exec --sandbox external-sandbox` 适合在已隔离的 CI 环境中跑批量任务，避免双重沙箱开销与权限冲突。
 
@@ -519,7 +519,7 @@ pub struct ContextSnapshot {
 
 ### 3.8 `Hook` 与 `HookRegistry`（见 `hooks.md` §5）
 
-Hook 是"工具调用生命周期"的拦截器，介于"LLM 决定调用工具"与"工具真正执行"之间；也是会话/轮次/压缩等关键节点的观察+注入点。完整协议（JSON stdio）、8 类事件、配置见 `hooks.md`，此处仅给出 Rust trait。
+Hook 是"工具调用生命周期"的拦截器，介于"LLM 决定调用工具"与"工具真正执行"之间；也是会话/轮次/压缩等关键节点的观察+注入点。完整协议（JSON stdio）、10 类事件、配置见 `hooks.md`，此处仅给出 Rust trait。
 
 ```rust
 #[trait_variant::make(Hook: Send)]

@@ -17,7 +17,7 @@ Runtime
  ├── LlmProvider         (流式对话)
  ├── PermissionPolicy    (副作用授权，融合 ApprovalMode × SandboxPolicy)
  ├── PermissionPrompter  (点对点交互)
- ├── HookRegistry        (8 类生命周期 Hook，见 hooks.md)
+ ├── HookRegistry        (10 类生命周期 Hook，见 hooks.md)
  ├── SandboxDriver       (OS 级隔离，见 security.md §8)
  ├── ProjectDocLoader    (AGENTS.md 分层加载，见 §8.6)
  ├── FileChangeJournal   (会话内文件改动回滚，见 §17)
@@ -1059,25 +1059,49 @@ web.fetch 内网/元数据接口                             → Deny（SSRF 防
 
 ### 9.4 决策缓存
 
-`AllowAlways` / `DenyAlways` 写入 `~/.minicoding/policy.toml`（结构见 `data-model.md` §5），下次同规则直接命中 `Allow`/`Deny`，跳过 prompter。匹配优先级 `deny > allow > default`；内置安全黑名单（危险命令、SSRF、敏感路径）优先级最高，用户配置无法覆盖。详见 `security.md` §2、§4、§5。
+`AllowAlways` / `DenyAlways` 写入 `~/.minicoding/policy.toml`（结构见 `data-model.md` §5），作为 specificity=2 的 L1 条目（见 §9.5）持久化，下次同规则直接命中 `Allow`/`Deny`，跳过 prompter。内置安全黑名单（L0）优先级最高，用户配置无法覆盖。详见 `security.md` §2、§4、§5。
 
-### 9.5 与 ApprovalMode / SandboxPolicy 的叠加（参考 Codex）
+### 9.5 权限解析：两层模型（L0 硬黑名单 + L1 用户策略）
 
-§9.3 的 per-tool 矩阵是"细粒度基线"。在此之上叠加 Codex 风格的两层宏观配置（详见 `security.md` §2.6、§8）：
-
-- `ApprovalMode`（`Untrusted`/`OnFailure`/`OnRequest`/`Never`）：决定"何时需要人工确认"，等价于在 §9.3 的默认 `Verdict` 上做模式级平移（如 `Untrusted` 把所有非只读默认升 `Ask`，`Never` 把所有 `Ask` 自动转 `Allow`）。
-- `SandboxPolicy`（`ReadOnly`/`WorkspaceWrite`/`ExternalSandbox`/`DangerFullAccess`）：OS 级第二道防线，独立于 §9.3 的应用层决策。`ExternalSandbox` 假定外层容器已隔离，本进程仅应用层校验（CI 场景）。
-
-二者组合为"预设"（`read-only`/`auto`/`external-sandbox`/`full-access`）。`PermissionPolicy::check` 实现时按如下顺序解析最终 `Verdict`：
+> **设计取舍（简化）**：早先版本采用 5 级优先级链（黑名单 → granular → ApprovalMode → policy.toml → per-tool 矩阵），每级独立匹配再叠加。参考 Codex 的两层模型（builtin + user-configurable），本项目简化为**两层 + specificity 单一竞争**：所有用户可配置规则进入同一命名空间，按 specificity 排序竞争，deny 在同 specificity 下胜出。这避免了"5 级级联 + specificity 计算 + 模式平移"叠加产生的复杂度与潜在安全 bug。
 
 ```
-内置黑名单 Deny                          → Deny（最高，不可覆盖）
-  > ApprovalMode × SideEffect 决定的默认  → Ask/Allow
-  > policy.toml 显式 allow/deny           → 覆盖默认
-  > per-tool §9.3 矩阵                    → 兜底
+┌─────────────────────────────────────────────────────────────┐
+│  L0  内置硬黑名单 (policy::builtin)                          │
+│      危险命令前缀 / SSRF 内网 / 敏感路径 / AGENTS.md 写       │
+│      → Deny，不可被任何配置覆盖（rules.md C-02）              │
+└─────────────────────────────────────────────────────────────┘
+                          │ 未命中 L0
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  L1  用户策略（统一规则集，按 specificity 降序匹配）           │
+│                                                              │
+│   specificity 5  granular rule 精确路径  fs.write:.env*      │
+│   specificity 4  granular rule 通配路径  fs.write:src/**     │
+│   specificity 3  granular rule 工具类别  shell.run:cargo *   │
+│   specificity 3  granular rule MCP server  mcp:github        │
+│   specificity 2  policy.toml 显式 allow/deny（per-tool）     │
+│   specificity 1  ApprovalMode × SideEffect 全局平移          │
+│   specificity 0  §9.3 per-tool 默认矩阵（兜底基线）          │
+│                                                              │
+│   匹配规则：最高 specificity 命中生效；                       │
+│            同 specificity 多条命中 → deny 胜出（safe default）│
+│            无任何命中 → 视作 Allow（只读工具）或 Ask（副作用）│
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+                     最终 Verdict
 ```
 
-叠加后 `Never` 模式下 `Ask` 自动转 `Allow`，但内置黑名单与 OS 沙箱仍生效——这是 `full-access` 预设依赖 `DangerFullAccess` 沙箱却仍建议在容器内运行的原因。Plan 模式（§16）作为第四种宏观模式，独立于 ApprovalMode，强制只读。
+**为何合并而非级联**：5 级级联要求每级独立计算并按固定优先级叠加，specificity 只在 granular 内部用，跨级无法比较——这导致"全局 `--allow fs.write:src/**` 与 granular `fs.write:.env*` 谁优先"的歧义。合并后所有规则在同一尺度下比较 specificity，规则间的优先关系显式且可预测。Codex 的两层模型已验证此思路在大型策略文件下仍可维护。
+
+**ApprovalMode 的语义**：不再作为独立优先级层，而是 specificity=1 的"全局平移规则"。如 `Untrusted` 模式等价于一条 specificity=1 的规则"所有 `side_effect != None` 工具 → Ask"，会被任何更高 specificity 的用户规则覆盖。`Never` 模式等价于"所有 `Ask` → Allow"的全局规则，同样可被高 specificity 规则覆盖（如 `Never` 模式下仍可 `deny shell.run:rm *`）。
+
+**预设（preset）**：`read-only`/`auto`/`external-sandbox`/`full-access` 是"一键写入一批 L1 规则"的语法糖，不是独立层级。如 `--preset read-only` 等价于写入一条 specificity=1 的规则"所有 `side_effect != None` → Deny" + 选择 `ReadOnly` SandboxPolicy。展开后与其他 L1 规则平等竞争。
+
+**OS 沙箱**：`SandboxPolicy`（`ReadOnly`/`WorkspaceWrite`/`ExternalSandbox`/`DangerFullAccess`）是**独立的第二道防线**（`security.md` §8），不参与 L1 的 Verdict 计算。即使 L1 给出 `Allow`，沙箱仍可在内核级拦截越界写（C-22/C-30）。这是 defense in depth，不是第三层权限。
+
+**Plan 模式**（§16）作为 `PermissionMode::Plan`，在 L0 与 L1 之间插入一条 specificity=∞ 的"所有 `side_effect != None` → Deny"硬规则（不可被 L1 覆盖，但受 L0 黑名单约束一致）——本质是 L0 的扩展，而非新层级。
 
 ### 9.6 命令风险解释（参考 CC `Ctrl+E`）
 
@@ -1129,13 +1153,13 @@ pub enum RiskLevel { Low, Medium, High }
 
 `[e] Explain`（对齐 CC 的 `Ctrl+E`）展开更详细的风险说明，帮助用户决策。风险评估本身不改变 `Verdict`——它只是让用户的 `Decision` 更知情。
 
-### 9.7 细粒度审批策略（Granular Approval Policies，参考 Codex v0.122+）
+### 9.7 细粒度规则（Granular Rules，参考 Codex v0.122+）
 
-§2.6 的四种 `ApprovalMode` 是粗粒度的——无法表达"信任的本地 MCP 静默通过，不信任的第三方 MCP 需审批"。参考 Codex v0.122+ 的细粒度审批策略，在 `ApprovalMode` 之上叠加按工具类别/MCP server/路径的审批规则：
+§9.5 的 L1 用户策略中，`ApprovalMode`（specificity=1）是粗粒度的——无法表达"信任的本地 MCP 静默通过，不信任的第三方 MCP 需审批"。细粒度规则（granular rules）是 L1 内 specificity=3~5 的高优先级条目，用于按工具类别/MCP server/路径细分审批策略。它**不是独立层级**，与 `policy.toml` 显式 allow/deny（specificity=2）平等参与 L1 竞争。
 
 ```toml
 [permission.granular]
-# 按 MCP server 细分
+# 按 MCP server 细分（specificity=3）
 [[permission.granular.rules]]
 scope = "mcp:github"
 mode = "on-request"          # GitHub MCP 仍逐个确认
@@ -1144,7 +1168,7 @@ mode = "on-request"          # GitHub MCP 仍逐个确认
 scope = "mcp:local-db"
 mode = "never"               # 本地数据库 MCP 静默通过
 
-# 按工具+路径细分
+# 按工具+路径细分（通配 specificity=4，精确 specificity=5）
 [[permission.granular.rules]]
 scope = "fs.write:src/**"
 mode = "on-failure"          # src/ 下写入失败才问
@@ -1153,7 +1177,7 @@ mode = "on-failure"          # src/ 下写入失败才问
 scope = "fs.write:.env*"
 mode = "untrusted"           # .env 写入永远问
 
-# 按命令前缀细分
+# 按命令前缀细分（specificity=3）
 [[permission.granular.rules]]
 scope = "shell.run:cargo *"
 mode = "never"               # cargo 命令静默通过
@@ -1163,19 +1187,20 @@ scope = "shell.run:git push*"
 mode = "untrusted"           # git push 永远问
 ```
 
-**解析优先级**（与 §9.5 叠加）：
+**specificity 计算**（与 §9.5 L1 一致）：
 
-```
-内置黑名单 Deny                                    → Deny（最高）
-  > granular rules（按 specificity 降序匹配）       → 覆盖 ApprovalMode
-  > ApprovalMode × SideEffect 决定的默认            → Ask/Allow
-  > policy.toml 显式 allow/deny                     → 覆盖默认
-  > per-tool §9.3 矩阵                              → 兜底
-```
+| specificity | 来源 | 示例 |
+|:---:|------|------|
+| 5 | granular 精确路径（无通配） | `fs.write:.env` |
+| 4 | granular 通配路径 | `fs.write:src/**` |
+| 3 | granular 工具类别 / MCP server / 命令前缀 | `shell.run:cargo *`、`mcp:github` |
+| 2 | `policy.toml` 显式 allow/deny（per-tool，无路径细分） | `tool = "fs.write"` |
+| 1 | `ApprovalMode × SideEffect` 全局平移 | `Untrusted` 模式 |
+| 0 | §9.3 per-tool 默认矩阵 | `fs.write → Ask` |
 
-granular rule 的 `specificity`：精确路径 > 通配路径 > 工具类别 > MCP server > 全局。同 specificity 按声明顺序，首条匹配生效。
+**匹配规则**：最高 specificity 命中生效；同 specificity 多条命中 → `deny` 胜出（safe default）；同 specificity 同 verdict 多条命中 → 按声明顺序首条生效。这与 §9.5 的两层模型完全一致——granular rules 只是 L1 内 specificity 较高的条目，无需额外级联。
 
-**与 auto-review（§security.md §8.9）的协作**：granular rule 的 `mode = "on-request"` 时可触发 auto-review 子代理先评估，auto-review 的 `low` 决策等价于该规则降级为 `never`，`high` 等价于升级为 `untrusted`。这实现了 Codex 的"细粒度策略 + auto-review 审查者替换"组合。
+**与 auto-review（`security.md` §8.9）的协作**：granular rule 的 `mode = "on-request"` 时可触发 auto-review 子代理先评估，auto-review 的 `low` 决策等价于该规则临时降级为 `never`，`high` 等价于升级为 `untrusted`。这实现了 Codex 的"细粒度策略 + auto-review 审查者替换"组合，且无需引入新层级——auto-review 的输出只是动态修改该 granular rule 的 `mode` 字段后重新参与 L1 匹配。
 
 ---
 
@@ -1214,12 +1239,22 @@ pub enum RuntimeError {
 
 ### 10.3 会话存储结构（Parent-UUID 链，参考 Claude Code）
 
-原先 JSONL 是纯顺序追加，无法表达"从某点分叉"或"压缩边界"。参考 CC 的 Parent-UUID 链结构，每条消息记录 `uuid` 与 `parent_uuid`，形成链表而非纯数组：
+原先 JSONL 是纯顺序追加，无法表达"从某点分叉"或"压缩边界"。参考 CC 的 Parent-UUID 链结构，每条消息记录 `uuid` 与 `parent_uuid`，形成链表而非纯数组。
+
+**关键澄清：Parent-UUID 链与 JSONL 追加写不冲突**。`parent_uuid` 只是 JSONL 行的一个可选字段，写入仍是单行 `append`（与 `data-model.md` §2.2 一致）。二者关系如下：
+
+| 维度 | JSONL 追加写（`data-model.md` §2.2） | Parent-UUID 链（本节） |
+|------|--------------------------------------|----------------------|
+| 写入 | 每行独立 `append(true).write_all`，崩溃最多丢最后一行 | 不变——`parent_uuid` 是行内字段，写入路径相同 |
+| 默认读取 | 线性逐行解析即可还原消息序列 | 不变——默认 `parent_uuid` = 上一行 `id`，线性顺序即链顺序 |
+| 特殊读取 | 不涉及 | 仅 Fork/Side-chain 检视时需建 DAG；普通 `--resume` 仍线性读 |
+| Fork | 不支持 | 复制前缀行到**新文件**（对新文件的写入仍是追加），原文件只读不动 |
+| 压缩边界 | 不支持 | 摘要行 `parent_uuid = None`；用 `index.json` 的 `last_compaction_id` 指针 O(1) 定位，无需全文件扫描 |
 
 ```rust
 pub struct StoredMessage {
-    pub uuid: String,              // 本条消息唯一 ID
-    pub parent_uuid: Option<String>, // 父消息 UUID（首条为 None）
+    pub uuid: String,              // 本条消息唯一 ID（= data-model.md §2.2 的 `id`）
+    pub parent_uuid: Option<String>, // 父消息 UUID；默认 = 上一行 `id`，首条/压缩摘要/side-chain 头为 None
     pub role: Role,
     pub content: Content,
     pub tool_calls: Vec<ToolCall>,
@@ -1232,18 +1267,21 @@ pub struct StoredMessage {
 
 链表结构支持三种原来无法表达的能力：
 
-1. **Fork（分叉）**：同一 `parent_uuid` 可有多个子消息，表示"从某点尝试不同方向"。`--fork-session` 复制链前缀，在新会话中继续，原会话不变；
-2. **Compaction Boundary（压缩边界）**：压缩产生的摘要消息 `parent_uuid = None`，表示"此前历史已折叠进摘要"，重建上下文时从最近的 `parent_uuid = None` 处开始，不回放已压缩的旧消息；
-3. **Side-chain（子 Agent 链）**：子 Agent 的 transcript 作为 side-chain 存储在主会话 JSONL 中，`parent_uuid` 指向派发它的 `task.spawn` 工具调用，便于追溯"这个子 Agent 是在哪个轮次派生的"。
+1. **Fork（分叉）**：同一 `parent_uuid` 可有多个子消息，表示"从某点尝试不同方向"。`--fork-session` 复制链前缀到**新会话文件**，原会话文件只读不写——对新会话的写入仍是纯追加，不破坏 JSONL 追加写语义；
+2. **Compaction Boundary（压缩边界）**：压缩产生的摘要消息 `parent_uuid = None`，表示"此前历史已折叠进摘要"。为避免"扫描整个文件找最近 `None`"，`sessions/index.json`（`data-model.md` §3.1）新增 `last_compaction_id` 字段指向最近的摘要消息 `id`，`--resume` 时 O(1) 跳过已压缩前缀；`index.json` 损坏时回退到尾向扫描（O(N)，仅异常路径）；
+3. **Side-chain（子 Agent 链）**：子 Agent 的 transcript 作为 side-chain 存储在主会话 JSONL 中，`parent_uuid` 指向派发它的 `task.spawn` 工具调用，便于追溯"这个子 Agent 是在哪个轮次派生的"。线性读取主链时跳过 `msg_type = SubagentTranscript` 的连续段即可（按 `parent_uuid` 不在主链上识别）。
+
+**与 `data-model.md` §2.2 的对齐**：`data-model.md` 的 JSONL 记录结构已包含 `id` 字段，本节 `uuid` 即该 `id`（同义词，统一为 `id`）；新增 `parent_uuid` 字段为可选（`#[serde(default)]`），旧文件读取时 `parent_uuid` 默认为 `None`，按"上一行 `id`"线性重建即可，前向兼容。`data-model.md` §2.2 的示例与字段说明同步更新见该文件。
 
 ### 10.4 会话恢复
 
 `minicoding --resume <session-id>` 流程：
 
-1. 从 JSONL 重建消息链（按 `parent_uuid` 链表组装，而非纯数组顺序）；
-2. 找到最近的 `parent_uuid = None`（压缩边界），从该点开始重建 `ContextManager`（避免回放已压缩的旧消息）；
-3. 从 `SessionMeta`（§3.7）恢复会话名、权限模式、Plan 文件路径、任务列表等非消息状态；
-4. 进入交互模式，可继续提问。
+1. 读 `sessions/index.json` 取 `last_compaction_id`（若无则从文件头开始）；
+2. 从该 `id` 对应的行起**线性向下**解析 JSONL（默认每行 `parent_uuid` = 上一行 `id`，无需建 DAG），重建 `ContextManager`；
+3. 若用户请求 `--fork` 或检视 side-chain，才按 `parent_uuid` 建 DAG（稀有路径）；
+4. 从 `SessionMeta`（§3.7）恢复会话名、权限模式、Plan 文件路径、任务列表等非消息状态；
+5. 进入交互模式，可继续提问。
 
 ### 10.5 Fork 会话（参考 CC `--fork-session`）
 
@@ -1261,7 +1299,7 @@ fork 后:
          (复制前缀)         (新消息)
 ```
 
-Fork 通过复制 JSONL 中 `parent_uuid` 链到 `msg_3` 的所有条目实现，新会话 `sess_B` 的后续消息以 `msg_3` 为 `parent_uuid` 继续。原会话文件只读不写，fork 操作零风险。
+Fork 通过**读原文件前缀 → 追加写到新文件**实现（原会话文件只读不写，新会话文件按 JSONL 追加写语义依次 `append` 前缀行 + 后续新消息），新会话 `sess_B` 的后续消息以 `msg_3` 为 `parent_uuid` 继续。fork 操作零风险——既不修改原文件，新文件的写入也遵循 `data-model.md` §3.2 的崩溃安全追加写约定。
 
 适用场景：用户对 Agent 的某次决策不满意，想"回到那个分叉点试试另一条路"，而不丢失原会话的进展。类似 `git branch`。
 
@@ -1942,4 +1980,103 @@ PreToolUse Hook（matcher 命中时）
 - Hook 的 `allow`/`deny`/`modify_input` 全部落 `audit.log`，标注 `source=hook:<name>`；
 - `inject_context` 内容包裹 `<hook_context>` 边界，声明非指令。
 
-详细 Hook 事件类型（8 类）、协议、Rust API、配置见 `hooks.md`。
+详细 Hook 事件类型（10 类）、协议、Rust API、配置见 `hooks.md`。
+
+---
+
+## 21. 子系统依赖方向与独立测试策略
+
+§16-§20 五个子系统（Plan/Journal/Task/MCP/Hooks）在设计层面互操作频繁，乍看存在"循环依赖链"。本节明确：**设计层互操作 ≠ 实现层循环依赖**。通过 trait 解耦与测试替身，任何子系统都能在所在里程碑内独立完成单测与集成测试，无需等待下游子系统实现。
+
+### 21.1 设计层互操作 vs 实现层依赖
+
+设计层互操作是子系统在 Runtime 编排下的运行时协作（如 Plan 批准后调用 Task 工具、Journal 记录 Plan 执行期的文件改动）——这些协作发生在 Runtime 内部，**不要求实现 crate 之间互相 import**。
+
+实现层依赖遵循 `modules.md` §0.2 的单向不循环原则：
+
+```
+                     core (trait 定义)
+                       ▲
+            ┌──────────┼──────────┬──────────┬──────────┐
+            │          │          │          │          │
+        journal    memory     policy      hooks        mcp
+            │                     │          │          │
+            └──────────┬──────────┴──────────┴──────────┘
+                       │
+                     tools (组合层，唯一可跨领域)
+                       │
+                  cli / tui / sdk
+```
+
+- `minicoding-journal` 只依赖 `minicoding-core`（实现 `Journal` trait），不依赖 plan/task/hooks crate；
+- `minicoding-hooks` 只依赖 `minicoding-core`（实现 `Hook`/`HookRegistry` trait），不依赖 plan/task/journal crate；
+- `minicoding-mcp` 只依赖 `minicoding-core` + `rmcp`，不依赖 plan/task/journal/hooks crate；
+- Plan 与 Task 是**工具**（在 `minicoding-tools`），不是独立 crate——它们的"依赖"是工具实现层调用 `Journal`/`TaskRegistry` 的 trait 对象（`Arc<dyn Journal>`/`Arc<dyn TaskRegistry>`），由 Runtime 注入；
+- Runtime 在 `minicoding-core`，持有所有 trait 对象，编排协作，本身不含领域算法。
+
+因此 §16.6/§17.6/§18.9/§19.7/§20.2 列出的"与既有抽象的关系"都是 **Runtime 编排关系**，不是 crate 间 `use` 依赖。`cargo tree` 不会出现循环。
+
+### 21.2 子系统真实依赖方向（DAG）
+
+把设计层互操作按"谁调用谁"画出，得到一个有向无环图（DAG）：
+
+```
+                ┌─────────┐
+                │  Hooks  │ ── 拦截一切（运行时插入点，不持反向引用）
+                └────┬────┘
+                     │ observe
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+   ┌─────────┐  ┌─────────┐  ┌─────────┐
+   │  Plan   │─▶│  Task   │  │   MCP   │
+   └────┬────┘  └────┬────┘  └─────────┘
+        │            │            ▲
+        │ uses       │ uses       │ tool reg
+        ▼            ▼            │
+   ┌─────────────────────┐        │
+   │      Journal        │ ◀──────┘
+   └─────────────────────┘  (fs tools record to journal)
+```
+
+- **Hooks** 是观察者，通过 `HookRegistry` 在 Runtime 钩子点被调用，不反向持有 Plan/Task/Journal；
+- **Plan** 在执行期使用 Task（分解步骤）与 Journal（记录文件改动），是单向调用方；
+- **Task** 可选用 Journal（"撤销到某 task 开始前"，§18.9 后续增强），当前实现不依赖；
+- **MCP** 与 Plan/Task/Journal 无直接关系，只通过 `ToolRegistry` 注册工具，工具执行时若产生文件改动同样进 Journal（fs 层统一接入）；
+- **Journal** 是叶子节点，不调用任何其他子系统。
+
+图中**不存在环**。设计文档早先"Plan ↔ Task""Task ↔ Journal"的"双向"措辞是语义互操作（如"Plan 用 Task，Task 也可被非 Plan 场景使用"），并非实现层循环调用。
+
+### 21.3 独立测试策略
+
+每个子系统在所在里程碑内可独立测试，方法是**用 core trait 的 stub 替身注入 Runtime**。stub 放在 `crates/minicoding-core/tests/common/` 共享。
+
+| 里程碑 | 子系统 | 待测 trait | stub 替身 | 测试场景 |
+|--------|--------|-----------|-----------|---------|
+| M4 | Journal | `Journal` | 不需要（叶子节点，纯内存数据结构） | 直接构造 `ChangeEntry` 调 `record/undo/diff`；用 `tempfile` 真实写文件验证 `before/after` 比对与 `failed_files` 检测；`/undo` CLI 用 `assert_cmd` 跑 |
+| M4 | MCP | `McpClient` | `NoopMcpClient`（core 兜底） | 用本地 mock stdio process（一个 echo server 脚本）验证工具注册与调用；权限规则用 `policy.toml` 通配匹配测；project 作用域批准用临时 `.minicoding/mcp.json` 测 |
+| M5 | Hooks | `Hook`/`HookRegistry` | `NoopHookRegistry`（core 兜底，所有事件 `Continue`） | `HookRegistryImpl` 单测：串行聚合、matcher glob、`modify_input` 链式传递；`ScriptHook` 用 echo 脚本测退出码映射；L0 不覆盖用内置黑名单 fixture 测 |
+| M5 | Plan | `PermissionPolicy`（Plan 硬门） | `StubJournal`（record/undo 计数不真写）、`StubTaskRegistry` | Plan 硬门：`PermissionMode::Plan` 下 `fs.write` 直接 `Deny`；`ExitPlanMode` 工具调用后 `allowed_prompts` 注入 `StubPermissionPolicy` 验证命中；plan.md 读写用 `tempfile` |
+| M5 | Task | `TaskRegistry`（在 core 定义） | 不需要（独立数据结构，无外部依赖） | CRUD/依赖图 DFS 成环检测/`InProgress` 唯一性/`Completed` 必填 `summary` 等校验规则单测；持久化用 `tempfile` 写 JSONL 验证 round-trip |
+
+**关键约束**：stub 替身必须实现完整 trait 契约（不偷懒返回 `unimplemented!`），否则测试无意义。stub 放 `core/tests/common/` 而非各自 crate，避免领域 crate 互相引用测试代码破坏隔离。
+
+### 21.4 集成测试的分层递进
+
+单测保证各子系统独立正确，集成测试验证它们在 Runtime 编排下的协作。集成测试按里程碑分层递进，**后置里程碑的集成测试才组合前置子系统**：
+
+| 集成测试 | 里程碑 | 组合的子系统 | 验证点 |
+|---------|--------|-------------|--------|
+| `tests/journal_undo.rs` | M4 | Journal + fs tools | `fs.write` → `Journal::record` → `/undo` 恢复 |
+| `tests/mcp_tool_dispatch.rs` | M4 | MCP + ToolRegistry + Permission | 远程工具注册、权限规则、`audit.log` 落盘 |
+| `tests/hook_pretooluse.rs` | M5 | Hooks + Permission + fs tools | `PreToolUse` 改写 input、`Ask→Allow`、L0 不覆盖 |
+| `tests/plan_lifecycle.rs` | M5 | Plan + Permission + Task(stub) + Journal(stub) | Plan 硬门、`ExitPlanMode`、`allowed_prompts` 注入 |
+| `tests/task_dependency.rs` | M5 | Task + EventBus | 依赖图、`Event::TaskUpdated` 广播、遗忘提醒 |
+| `tests/full_turn_e2e.rs` | M6 | 全部 | 一个真实 turn：LLM mock → Plan → Task → fs.write(Journal) → Hook PostToolUse → Stop |
+
+M4 测 Journal 时**不需要** Plan：直接在测试代码里手工构造 `ChangeEntry`（如 `ChangeEntry::new(prompt="test", files=vec![FileChange::Written{...}])`）调 `record/undo`，模拟"一个 turn 的文件改动"。`fs.write` 工具在 M2 已实现并接入 `Journal::record` 钩子点（T-M2-3 预留），M4 只是补齐 `Journal` 实现并启用 `file_undo` 特性门控——无需 Plan 参与。
+
+M5 测 Plan 时**不需要**真实的 Task/Journal 实现：Plan 工具的 `ExitPlanMode` 逻辑只验证"plan.md 落盘 + `allowed_prompts` 注入 PermissionPolicy + 模式切回 Default"，这三个动作的协作方都用 stub 替身。真实的 Plan→Task→Journal 协作在 M6 `full_turn_e2e.rs` 验证。
+
+### 21.5 文档措辞修正
+
+为避免"循环依赖"误解，§16.6/§17.6/§18.9/§20.2 中"与既有抽象的关系"统一表述为"**Runtime 编排关系**"（非 crate 间依赖）。本节 §21 是该措辞的权威解释，后续若新增子系统协作描述应参照本节区分"运行时编排"与"实现层依赖"。

@@ -42,15 +42,16 @@ MemoryStore
 
 ### 2.2 JSONL 记录结构
 
-会话文件 `~/.minicoding/sessions/{session_id}.jsonl`，每行一条记录：
+会话文件 `~/.minicoding/sessions/{session_id}.jsonl`，每行一条记录。`message` 行新增可选字段 `parent_uuid`（与 `design.md` §10.3 对齐），用于支持 Fork / 压缩边界 / Side-chain。**默认情况下 `parent_uuid` 等于上一行 `message` 的 `id`，线性读取不需要建 DAG**——`parent_uuid` 仅在 Fork/Side-chain 检视时被使用。
 
 ```json
 {"v":1,"type":"session_start","id":"sess_01H...","created_at":"2026-07-24T10:00:00Z","workdir":"e:/projects/foo","config_hash":1234567890,"provider":"anthropic","model":"claude-sonnet-4"}
-{"v":1,"type":"message","id":"msg_01H...","role":"system","content":[{"type":"text","text":"You are..."}],"created_at":"...","meta":{"tokens":42,"source":"system"}}
-{"v":1,"type":"message","id":"msg_01H...","role":"user","content":[{"type":"text","text":"解释入口"}],"created_at":"...","meta":{"source":"user"}}
-{"v":1,"type":"message","id":"msg_01H...","role":"assistant","content":[{"type":"text","text":"让我读取"}],"tool_calls":[{"id":"call_1","name":"fs.read","input":{"path":"src/main.rs"}}],"created_at":"...","meta":{"tokens":28,"source":"llm","usage":{"input":512,"output":28}}}
-{"v":1,"type":"message","id":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"fn main() {...}"},"is_error":false}],"created_at":"...","meta":{"source":"tool","tool_name":"fs.read","elapsed_ms":3,"bytes":1024}}
+{"v":1,"type":"message","id":"msg_01H...","parent_uuid":null,"role":"system","content":[{"type":"text","text":"You are..."}],"created_at":"...","meta":{"tokens":42,"source":"system"}}
+{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"user","content":[{"type":"text","text":"解释入口"}],"created_at":"...","meta":{"source":"user"}}
+{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"assistant","content":[{"type":"text","text":"让我读取"}],"tool_calls":[{"id":"call_1","name":"fs.read","input":{"path":"src/main.rs"}}],"created_at":"...","meta":{"tokens":28,"source":"llm","usage":{"input":512,"output":28}}}
+{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"fn main() {...}"},"is_error":false}],"created_at":"...","meta":{"source":"tool","tool_name":"fs.read","elapsed_ms":3,"bytes":1024}}
 {"v":1,"type":"compression","id":"cmp_01H...","at":"...","steps":[{"kind":"tool_result_truncate","affected":["msg_01H..."]},{"kind":"summarize","affected":["msg_01H...","msg_01H..."],"summary_id":"msg_01H..."}],"tokens_before":12000,"tokens_after":4500}
+{"v":1,"type":"message","id":"msg_01H...","parent_uuid":null,"role":"system","content":[{"type":"text","text":"[summarized] ..."}],"created_at":"...","meta":{"source":"summarize","summarized":true}}
 {"v":1,"type":"session_end","at":"...","reason":"normal"}
 ```
 
@@ -61,9 +62,10 @@ MemoryStore
 | `v` | schema 版本，当前 1 |
 | `type` | `session_start` / `message` / `compression` / `session_end` / `permission` / `error` |
 | `id` | ULID，全局唯一且时间有序 |
+| `parent_uuid` | 仅 `message` 行：父消息 `id`。默认 = 上一行 `message` 的 `id`；`null` 表示链头或压缩边界（摘要行）；side-chain 头指向派发它的 `task.spawn` 工具调用 `id`。**可选字段，旧文件读取时按 `None` 处理并线性重建**（`#[serde(default)]`） |
 | `meta.tokens` | 该消息占用 token 数（assistant 含 output） |
 | `meta.usage` | 仅 assistant：上游返回的 token 用量 |
-| `meta.source` | 消息产生方：`system`/`user`/`llm`/`tool`/`subagent` |
+| `meta.source` | 消息产生方：`system`/`user`/`llm`/`tool`/`subagent`/`summarize` |
 | `meta.pinned` | 是否用户固定（不被压缩） |
 | `meta.summarized` | 是否为摘要替换后的消息 |
 
@@ -72,6 +74,7 @@ MemoryStore
 - 读取时忽略未知字段（`#[serde(default)]` + `serde_json::Value` 兜底）。
 - `v` 字段用于 schema 迁移：`migrate(v_from, v_to, record)` 链式升级。
 - 旧字段保留至少 2 个大版本，标注 deprecated。
+- **`parent_uuid` 前向兼容**：旧文件（v=1，无 `parent_uuid` 字段）读取时 `parent_uuid` 默认 `None`，`Storage::load` 线性扫描时按"上一行 `id`"自动回填，等价于纯数组顺序模型——旧文件零迁移可用。
 
 ---
 
@@ -113,7 +116,7 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
 
 ### 3.1 会话索引 `index.json`
 
-避免遍历所有 jsonl 即可列出会话：
+避免遍历所有 jsonl 即可列出会话，并缓存压缩边界指针以 O(1) 跳过已压缩前缀（与 `design.md` §10.4 协同）：
 
 ```json
 {
@@ -128,13 +131,14 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
       "title": "解释入口逻辑",          // 首条用户消息摘要
       "provider": "anthropic",
       "model": "claude-sonnet-4",
-      "tokens_total": 12345
+      "tokens_total": 12345,
+      "last_compaction_id": "msg_01H..."  // 最近的压缩摘要消息 id；null/缺省=未压缩，从文件头读
     }
   ]
 }
 ```
 
-索引在每次 append 后异步更新（写失败不影响主流程，下次启动重建）。
+索引在每次 append 后异步更新（写失败不影响主流程，下次启动重建）。`last_compaction_id` 在压缩产生摘要行时同步更新；`--resume` 时读此字段定位起始行，避免全文件扫描找 `parent_uuid = null`。索引损坏时回退到尾向扫描（O(N)，仅异常路径）。
 
 ### 3.2 写入策略
 
@@ -144,18 +148,31 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
 
 ### 3.3 读取与回放
 
+`Storage::load` 默认**线性逐行解析**，不建 DAG。`parent_uuid` 仅作为字段透传给上层（`ContextManager` 在需要 Fork/Side-chain 检视时才用）。普通 `--resume` 路径下，线性顺序即等价于 parent 链顺序：
+
 ```rust
 impl Storage for JsonlStorage {
     async fn load(&self, session: &SessionId) -> Result<Vec<Message>> {
         let path = self.dir.join(format!("{session}.jsonl"));
-        let mut messages = Vec::new();
+        // 读 index.json 取 last_compaction_id（若无则从头），定位起始字节偏移
+        let start_offset = self.lookup_compaction_offset(session).await?;
         let mut reader = BufReader::new(File::open(&path)?);
+        reader.seek(SeekFrom::Start(start_offset))?;
+        let mut messages = Vec::new();
         let mut line = String::new();
+        let mut prev_id: Option<String> = None;   // 用于回填旧文件缺失的 parent_uuid
         while reader.read_line(&mut line)? > 0 {
             let record: SessionRecord = serde_json::from_str(&line)
                 .map_err(|e| StorageError::Corrupt { line: line.clone(), source: e })?;
             match record {
-                SessionRecord::Message(m) => messages.push(m),
+                SessionRecord::Message(mut m) => {
+                    // 前向兼容：旧文件无 parent_uuid，按线性顺序回填
+                    if m.parent_uuid.is_none() && !m.is_compaction_summary() {
+                        m.parent_uuid = prev_id.clone();
+                    }
+                    prev_id = Some(m.id.clone());
+                    messages.push(m);
+                }
                 SessionRecord::Compression(_) => { /* 重建压缩状态 */ }
                 _ => {}
             }
@@ -165,6 +182,8 @@ impl Storage for JsonlStorage {
     }
 }
 ```
+
+`lookup_compaction_offset` 先查 `index.json` 的 `last_compaction_id`，找到对应行的字节偏移（首行带偏移缓存）；索引缺失时回退到尾向扫描找最近的 `parent_uuid = null` 摘要行。Fork/Side-chain 检视等稀有路径走单独的 `load_as_dag` 方法（按 `parent_uuid` 组装），不在默认热路径上。
 
 ---
 
@@ -235,14 +254,23 @@ glob = "{.git,.env,*.secret}/**"
 | `domain` | web.* | 域名 glob，如 `*.github.com` |
 | `path_prefix` | fs.* | 路径前缀（绝对或相对 workdir） |
 
-### 5.2 优先级
+### 5.2 优先级（两层模型）
+
+`policy.toml` 的 `allow`/`deny` 条目作为 L1 用户策略的 specificity=2 条目（见 `design.md` §9.5、`security.md` §2.3），与 granular rules（specificity=3~5）、`ApprovalMode`（specificity=1）、per-tool 默认矩阵（specificity=0）在同一命名空间按 specificity 降序竞争：
 
 ```
-内置安全黑名单 (危险命令/SSRF/敏感路径)   ← 最高，不可覆盖
-        >  deny (显式)  >  allow (显式)  >  default
+L0  内置安全黑名单 (危险命令/SSRF/敏感路径)   ← 最高，不可覆盖
+L1  用户策略（按 specificity 降序匹配）
+      specificity 5  granular 精确路径
+      specificity 4  granular 通配路径
+      specificity 3  granular 工具类别 / MCP server / 命令前缀
+      specificity 2  policy.toml 显式 allow/deny（本节）
+      specificity 1  ApprovalMode × SideEffect 全局平移
+      specificity 0  per-tool 默认矩阵（兜底）
+    最高 specificity 命中生效；同 specificity → deny 胜出
 ```
 
-同级别按声明顺序；首条匹配生效。详见 `security.md` §2.3。
+同 specificity 按声明顺序，首条匹配生效。`policy.toml` 内部 `deny` 与 `allow` 同 specificity 时 `deny` 胜出（safe default）。
 
 ---
 
