@@ -31,11 +31,16 @@
                 │  (依赖 trait 接口)
 ┌───────────────▼──────────────────────────────────────────────┐
 │                    Capability Layer                          │
-│ ┌──────────────┐ ┌──────────────┐ ┌──────────┐ ┌──────────┐  │
-│ │ LLM Provider │ │  Tool Registry│ │ Storage  │ │ Permission│ │
-│ │   (trait)    │ │   (trait)     │ │ (trait)  │ │  (trait)  │ │
-│ └──────────────┘ └──────────────┘ └──────────┘ └──────────┘  │
-│   providers crate│  tools crate  │ store crate│ policy crate │
+│ ┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐ │
+│ │ LlmProv  ││ Tool/Reg ││ Context  ││ Policy   ││ Sandbox  │ │
+│ │ (trait)  ││ (trait)  ││ Mgr(tr)  ││ (trait)  ││ (trait)  │ │
+│ └──────────┘└──────────┘└──────────┘└──────────┘└──────────┘ │
+│ ┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐ │
+│ │ Storage  ││ Hook/Reg ││ Journal  ││ McpClient││ ProjDoc  │ │
+│ │ (trait)  ││ (trait)  ││ (trait)  ││ (trait)  ││ (trait)  │ │
+│ └──────────┘└──────────┘└──────────┘└──────────┘└──────────┘ │
+│ providers│tools│context│policy│sandbox│storage│hooks│journal│ │
+│   mcp    │memory        (各实现 crate，单一职责)              │
 └──────────────────────────────────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────────┐
@@ -74,12 +79,18 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 
 | Trait | 实现 crate | 说明 |
 |-------|-----------|------|
-| `LlmProvider` | `minicoding-providers` | OpenAI / Anthropic / Ollama 等 |
-| `Tool` | `minicoding-tools` | 文件、Bash、Grep、Glob、WebFetch 等 |
-| `Storage` | `minicoding-core`（默认 JSONL） | 会话持久化 |
-| `PermissionPolicy` | `minicoding-core`（默认交互式） | 授权决策 |
-| `Tokenizer` | `minicoding-providers` | 按 provider 实现 |
-| `ContextCompressor` | `minicoding-core` | 压缩策略 |
+| `LlmProvider` / `Tokenizer` | `minicoding-providers` | OpenAI / Anthropic / Ollama |
+| `Tool` / `ToolRegistry` | `minicoding-tools`（内置）/ `minicoding-mcp`（远程包装） | 文件、Shell、Web、Git、Task、Plan、MCP |
+| `ContextManager` | `minicoding-context` | token 预算、4 级压缩管道、熔断、降级链 |
+| `PermissionPolicy` / `PermissionPrompter` | `minicoding-policy` | 决策引擎、builtin 黑名单、Prompter、ApprovalMode/Preset |
+| `SandboxDriver` | `minicoding-sandbox`（core 提供 `NoopDriver` 兜底） | OS 级隔离（sandbox-run + landlock + libseccomp） |
+| `Storage` / `AuditSink` | `minicoding-storage` | JSONL 持久化、audit.log 审计 |
+| `Hook` / `HookRegistry` | `minicoding-hooks` | 10 类事件、ScriptHook、asyncRewake |
+| `Journal` | `minicoding-journal` | FileChangeJournal、/undo 回滚 |
+| `McpClient` | `minicoding-mcp` | rmcp 2.2 官方 SDK |
+| `ProjectDocLoader` / `MemoryStore` | `minicoding-memory` | AGENTS.md 分层加载、长期/Auto 记忆 |
+
+> **架构变更（v2）**：原 `minicoding-core` 承载多职责（含 Storage/PermissionPolicy/ContextCompressor 默认实现），违反单一职责。重构后 core 精简为"抽象层 + Runtime 编排"（零实现），所有实现下沉到独立领域 crate。详见 `modules.md` §0。
 
 ### 3.4 Infrastructure Layer（基础设施层）
 

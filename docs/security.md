@@ -336,8 +336,8 @@ pub enum SandboxPolicy {
 
 | 平台 | 技术 | 实现 | crate |
 |------|------|------|-------|
-| macOS 12+ | Seatbelt (`sandbox-exec -p <profile>`) | 动态生成 profile：`(allow file-read*) (deny file-write*) (subpath (allow file-write*) "<workdir>") (deny network)`；VCS 目录默认 deny-write | `minicoding-sandbox`（调用 `sandbox-exec`） |
-| Linux 5.13+ | Landlock + seccomp | Landlock 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`）；seccomp 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load` 等） | `landlock` crate + `libseccomp` |
+| macOS 12+ | `sandbox-run`（封装原生 sandbox 框架 / Seatbelt） | 由 `sandbox-run` 生成 profile 并 `apply_sandbox`：`ProtectSystem=strict` / `ReadWritePaths=<workdir>` / `PrivateNetwork=true`；VCS 目录设 `ReadOnlyPaths`；不手写 profile 字符串 | `minicoding-sandbox`（基于 `sandbox-run`） |
+| Linux 5.13+ | `sandbox-run`（Landlock）+ `libseccomp` | `sandbox-run` 底层调 `landlock` crate 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`）；`libseccomp` 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load`）；不手写 ruleset 胶水 | `sandbox-run` + `landlock` + `libseccomp` |
 | Windows | AppContainer / Job Object（评估） | 受限 token + Job 限制写路径；初期降级为应用层 + 用户提示 | `windows` crate |
 | 全平台兜底 | 容器 / VM | CI/不可信任务推荐在容器内运行 `minicoding` | 外部 |
 

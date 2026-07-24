@@ -592,12 +592,12 @@ pub trait SandboxDriver {
 
 | 实现 | 平台 | 技术 |
 |------|------|------|
-| `SeatbeltDriver` | macOS 12+ | `sandbox-exec -p <profile>`，动态生成 profile |
-| `LandlockDriver` | Linux 5.13+ | `landlock` crate + `libseccomp`（seccomp 白名单 syscall） |
+| `SeatbeltDriver` | macOS 12+ | `sandbox-run`（封装原生 sandbox 框架），`apply_sandbox` 在子进程 pre-exec 调用，不手写 profile |
+| `LandlockDriver` | Linux 5.13+ | `sandbox-run`（封装 `landlock` crate）+ `libseccomp`（seccomp 白名单 syscall），不手写 ruleset 胶水 |
 | `WindowsSandboxDriver` | Windows | 受限令牌 + Job Object + DACL（初期可能降级） |
 | `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） |
 
-`.git`/`.minicoding` 目录在所有写策略下默认强制只读（防破坏版本库与配置），需 `tools.sandbox.allow_dotgit_write = true` 显式放开。详见 `security.md` §8.2。
+`.git`/`.hg`/`.svn` VCS 目录在所有写策略下默认强制只读（防破坏版本库元数据），需 `tools.sandbox.allow_vcs_write = true`（旧名 `allow_dotgit_write`，向后兼容）显式放开。详见 `security.md` §8.2。
 
 ### 3.10 `ProjectDocLoader`（AGENTS.md 分层加载，见 `design.md` §8.6）
 
@@ -1056,7 +1056,7 @@ pub trait McpClient {
 }
 ```
 
-**默认实现 `RmcpClient`**：基于官方 Rust MCP SDK（`rmcp` crate，阶段 5+ 落地，参考 Codex `experimental_use_rmcp_client`），支持 stdio + Streamable HTTP + OAuth。早期可用薄封装的 `StdioMcpClient` 仅支持 stdio。
+**默认实现 `RmcpClient`**：基于官方 Rust MCP SDK（`rmcp` 2.2 crate，对齐 MCP 2025-11-25 spec），支持 stdio（`transport-child-process`）+ Streamable HTTP（`transport-streamable-http-client-reqwest`，rustls）+ OAuth。M4 一步到位，**不再"自实现 stdio 薄封装"过渡方案**（rmcp 2.x 已稳定）。
 
 **project 作用域批准流**（防恶意仓库植入）：
 
