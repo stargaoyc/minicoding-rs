@@ -1,0 +1,1073 @@
+# API / 接口设计
+
+本文定义 `minicoding-rs` 的核心 trait 签名、公共数据类型、配置 schema、SDK 高层 API，以及对外暴露的稳定接口面。所有签名以 Rust 2024 + `async fn in trait`（MSRV 1.85+）表达。
+
+---
+
+## 1. 接口分层
+
+```
+┌─────────────────────────────────────────┐
+│  L3  SDK 高层 API (minicoding-sdk)      │  ask / ask_stream / run_task
+├─────────────────────────────────────────┤
+│  L2  Runtime API (minicoding-core)      │  Runtime::run_turn / spawn_subagent
+├─────────────────────────────────────────┤
+│  L1  Trait 抽象 (minicoding-core)       │  LlmProvider / Tool / Storage ...
+└─────────────────────────────────────────┘
+```
+
+- **L1** 是可替换能力的契约，第三方可实现接入。
+- **L2** 是运行时入口，frontend 调用。
+- **L3** 是面向嵌入者的高层封装。
+
+---
+
+## 2. 核心数据类型（L0）
+
+### 2.1 消息模型
+
+```rust
+pub type SessionId = String;
+pub type ToolCallId = String;
+
+pub enum Role { System, User, Assistant, Tool }
+
+pub struct Message {
+    pub id: String,
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<ToolCallId>,   // role=Tool 时指向触发它的 call
+    pub created_at: time::OffsetDateTime,
+    pub metadata: MessageMeta,
+}
+
+pub enum ContentBlock {
+    Text(String),
+    Image { mime: String, data: Vec<u8> },     // base64 in transit
+    ToolUse(ToolCall),
+    ToolResult { call_id: ToolCallId, content: ToolContent, is_error: bool },
+}
+
+pub struct MessageMeta {
+    pub tokens: Option<usize>,
+    pub pinned: bool,
+    pub summarized: bool,
+    pub source: MessageSource,   // User / Llm / Tool / Subagent
+}
+```
+
+### 2.2 工具模型
+
+```rust
+pub struct ToolCall {
+    pub id: ToolCallId,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+pub struct ToolSchema {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,   // JSON Schema
+}
+
+pub enum ToolContent {
+    Text(String),
+    Json(serde_json::Value),
+    Image { mime: String, data: Vec<u8> },
+    Mixed(Vec<ToolContent>),
+}
+
+pub struct ToolResult {
+    pub content: ToolContent,
+    pub is_error: bool,
+    pub metadata: ToolResultMeta,
+}
+
+pub struct ToolResultMeta {
+    pub elapsed: Duration,
+    pub bytes: usize,
+    pub truncated: bool,
+}
+```
+
+### 2.3 会话模型
+
+```rust
+pub struct Session {
+    pub id: SessionId,
+    pub created_at: time::OffsetDateTime,
+    pub workdir: Utf8PathBuf,
+    pub config_hash: u64,
+    pub messages: Vec<Message>,           // 运行时镜像（与 storage 一致）
+}
+
+pub enum StopReason {
+    EndTurn,
+    MaxTokens,
+    ToolUse,
+    Stopped,
+    Interrupted,
+}
+
+pub enum TurnOutcome {
+    Finished(Message),
+    Interrupted(Message),
+    Failed(RuntimeError),
+}
+```
+
+### 2.4 安全与权限相关类型（参考 Codex/CC）
+
+权限模型在 §3.6 的 `PermissionPolicy`/`PermissionPrompter` 之上，叠加 Codex 风格的宏观配置。本节给出与权限/沙箱相关的核心枚举，详细语义见 `security.md` §2.6/§8 与 `design.md` §9.5/§16。
+
+```rust
+/// OS 级沙箱策略（第二道防线，见 security.md §8.1）。
+pub enum SandboxPolicy {
+    /// 只读：仅允许读文件与白名单只读命令；禁止任何写/执行/网络。
+    ReadOnly,
+    /// 工作区写：允许工作区内读写与命令执行；禁止越界写、网络（默认）。
+    WorkspaceWrite { workdir: Utf8PathBuf, writable: Vec<Utf8PathBuf> },
+    /// 外部沙箱：本进程不做内核级隔离，假定外层容器/VM 已提供隔离（CI 场景，参考 Codex `external-sandbox`）。
+    /// 仅应用层权限生效；`SandboxDriver::is_hardened()` 返回 false。
+    ExternalSandbox,
+    /// 完全访问：无限制（仅 full-access 预设，需显式确认）。
+    DangerFullAccess,
+}
+
+/// 审批模式（决定"何时需要人工确认"，见 security.md §2.6）。
+pub enum ApprovalMode {
+    Untrusted,   // 仅信任只读命令；任何写/执行/网络都 Ask
+    OnFailure,   // 命令自动执行，失败时才 Ask
+    OnRequest,   // 由模型判断何时请求确认（默认）
+    Never,       // 全自动，从不请求（仅与 DangerFullAccess 组合）
+}
+
+/// 权限模式（Plan 模式独立于 ApprovalMode，见 design.md §16.2）。
+pub enum PermissionMode {
+    Default,           // §9.3 默认矩阵（写 Ask）
+    AcceptEdits,       // 文件写入自动 Allow，shell 仍 Ask
+    Plan,              // 只读强制（硬门 + 软引导）
+    Auto,              // 分类器自动批准（阶段 6+）
+    BypassPermissions, // 全放行（仅隔离容器内）
+}
+
+/// 预设：approval_mode × sandbox_policy 的实用组合（见 security.md §2.6）。
+pub struct Preset {
+    pub name: PresetKind,
+    pub approval_mode: ApprovalMode,
+    pub sandbox_policy: SandboxPolicy,
+}
+
+pub enum PresetKind {
+    ReadOnly,         // OnRequest + ReadOnly
+    Auto,             // OnRequest + WorkspaceWrite（默认）
+    ExternalSandbox,  // OnRequest + ExternalSandbox（CI/容器内）
+    FullAccess,       // Never + DangerFullAccess
+}
+```
+
+`PermissionPolicy::check`（§3.6）实现时按如下优先级解析最终 `Verdict`：内置黑名单 `Deny`（最高）> `ApprovalMode × SideEffect` 决定的默认 > `policy.toml` 显式 allow/deny > per-tool 默认矩阵。`PermissionMode::Plan` 在此之上叠加"非只读工具直接 `Deny`"的硬门。
+
+四种 `SandboxPolicy` 的内核隔离强度递减：`ReadOnly`/`WorkspaceWrite` 由 `minicoding-sandbox` 在子进程 `exec` 前应用内核级限制；`ExternalSandbox` 假定外层容器（Docker/Firecracker/CI runner）已隔离，本进程仅应用层校验，`SandboxDriver::is_hardened()` 返回 `false` 并打 `info` 日志声明依赖外部隔离；`DangerFullAccess` 关闭所有限制。`minicoding exec --sandbox external-sandbox` 适合在已隔离的 CI 环境中跑批量任务，避免双重沙箱开销与权限冲突。
+
+### 2.5 子 Agent 与 Todo 相关类型
+
+```rust
+/// 类型化子 Agent（替代自由 role: String，见 design.md §7.2）。
+pub enum SubagentType {
+    Explore,          // 小模型，只读工具子集，跳过 AGENTS.md
+    Plan,             // 只读，仅 Plan 模式可用
+    GeneralPurpose,   // 继承父模型+全工具
+    Custom(String),   // .minicoding/agents/*.md 加载
+}
+
+pub enum Thoroughness { Quick, Medium, VeryThorough }
+
+pub struct SubagentSpec {
+    pub ty: SubagentType,
+    pub system_prompt: String,
+    pub allowed_tools: ToolGroup,
+    pub model: Option<ModelId>,
+    pub budget_tokens: usize,
+    pub max_iters: u32,
+    pub thoroughness: Thoroughness,
+    pub skip_memory: bool,
+    pub can_spawn_subagent: bool,
+}
+
+/// TodoWrite 工具的数据类型（见 design.md §18.2）。
+pub struct TodoWriteInput { pub todos: Vec<Todo> }
+
+pub struct Todo {
+    pub id: String,
+    pub text: String,
+    pub status: TodoStatus,
+    pub priority: Option<Priority>,
+    pub summary: Option<String>,
+}
+
+pub enum TodoStatus { Pending, InProgress, Completed, Deleted }
+pub enum Priority { High, Medium, Low }
+```
+
+### 2.6 文件改动事务类型（见 design.md §17）
+
+```rust
+pub struct FileChangeJournal { entries: Vec<ChangeEntry> }
+
+pub struct ChangeEntry {
+    pub op_id: OpId,
+    pub ts: time::OffsetDateTime,
+    pub prompt_snippet: String,
+    pub files: Vec<FileChange>,
+}
+
+pub enum FileChange {
+    Written { path: Utf8PathBuf, before: Option<Vec<u8>>, after: Vec<u8> },
+    Edited  { path: Utf8PathBuf, before: Vec<u8>, after: Vec<u8> },
+    Deleted { path: Utf8PathBuf, content: Vec<u8> },
+    Created { path: Utf8PathBuf, content: Vec<u8> },
+}
+
+pub struct UndoReport {
+    pub undone_entries: usize,
+    pub restored_files: Vec<Utf8PathBuf>,
+    pub failed_files: Vec<(Utf8PathBuf, JournalError)>,
+}
+```
+
+### 2.7 MCP 相关类型（见 design.md §19）
+
+```rust
+pub struct McpServerConfig {
+    pub transport: McpTransport,
+    pub startup_timeout: Duration,
+    pub tool_timeout: Duration,
+    pub enabled: bool,
+    pub required: bool,
+    pub enabled_tools: Option<Vec<String>>,
+}
+
+pub enum McpTransport {
+    Stdio { command: String, args: Vec<String>, env: HashMap<String, String>, env_vars: Vec<String>, cwd: Option<Utf8PathBuf> },
+    Http { url: String, bearer_token_env_var: Option<String>, headers: HashMap<String, String> },
+}
+
+pub enum McpScope { Local, Project, User }
+
+/// MCP 工具命名（见 design.md §19.3）。
+pub fn mcp_tool_name(server: &str, tool: &str) -> String {
+    format!("mcp__{server}__{tool}")
+}
+```
+
+---
+
+## 3. L1 Trait 抽象
+
+> **dyn-compatibility 约定**：本节所有含 `async fn` 的 trait 都需要以 `Arc<dyn Trait>` 形式被 Runtime 持有，而原生 `async fn in trait` 默认非 dyn-compatible。统一使用 `trait_variant::make(Trait: Send)` 宏为每个 trait 生成 `Send` 变体（返回 `Pin<Box<dyn Future + Send>>`），从而既保留原生 async 语法、又支持 trait object。下文签名以原生 `async fn` 表达语义，实际定义处的宏标注见各小节首行。同步 trait（如 `Tokenizer`）无需此处理。
+
+### 3.1 `LlmProvider`
+
+```rust
+#[trait_variant::make(LlmProvider: Send)]
+pub trait LlmProvider {
+    fn id(&self) -> &str;
+    fn capabilities(&self) -> Capabilities;
+    fn tokenizer(&self) -> Arc<dyn Tokenizer>;
+
+    /// 流式对话。返回的 stream 必须可被取消（drop 即取消）。
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>;
+
+    /// 非流式便捷封装（默认基于 stream 聚合）。
+    async fn chat(&self, req: ChatRequest) -> Result<Message, LlmError> { /* default */ }
+
+    async fn count_tokens(&self, messages: &[Message]) -> usize;
+}
+
+pub struct ChatRequest {
+    pub system: SystemPrompt,
+    pub messages: Vec<Message>,
+    pub tools: Vec<ToolSchema>,
+    pub params: GenerationParams,
+}
+
+pub struct GenerationParams {
+    pub model: String,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_output_tokens: Option<usize>,
+    pub stop: Vec<String>,
+    pub seed: Option<u64>,
+}
+
+pub enum Delta {
+    Text(String),
+    ToolCall(ToolCallDelta),
+    Usage(Usage),
+    Stop(StopReason),
+}
+
+pub struct ToolCallDelta {
+    pub index: u32,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub args_chunk: Option<String>,    // 增量 JSON 片段
+}
+
+pub struct Usage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub cache_read: Option<usize>,
+    pub cache_write: Option<usize>,
+}
+
+pub struct Capabilities {
+    pub supports_tool_call: bool,
+    pub supports_vision: bool,
+    pub supports_streaming: bool,
+    pub supports_json_mode: bool,
+    pub context_window: usize,
+    pub max_output: usize,
+}
+```
+
+### 3.2 `Tokenizer`
+
+```rust
+pub trait Tokenizer: Send + Sync {
+    fn count(&self, text: &str) -> usize;
+    fn count_messages(&self, msgs: &[Message]) -> usize;
+    fn id(&self) -> &str;   // "cl100k" / "claude-3" / ...
+}
+```
+
+### 3.3 `Tool`
+
+```rust
+#[trait_variant::make(Tool: Send)]
+pub trait Tool {
+    fn name(&self) -> &str;
+    fn schema(&self) -> &ToolSchema;
+    fn side_effect(&self) -> SideEffect;
+
+    /// 是否只读（用于 Plan 模式硬门，见 design.md §16.1）。
+    /// 默认实现：`self.side_effect() == SideEffect::None`。
+    /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖。
+    fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError>;
+}
+
+pub enum SideEffect { None, FileWrite, Command, Network }
+
+pub struct ToolContext {
+    pub workdir: Utf8PathBuf,
+    pub session_id: SessionId,
+    pub canceller: CancellationToken,
+    pub env: HashMap<String, String>,
+    pub timeout: Duration,
+    pub max_output_bytes: usize,
+}
+```
+
+`is_read_only()` 默认基于 `side_effect()`，但拆为独立方法是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致。Plan 模式硬门用 `is_read_only()` 而非 `side_effect()` 判断，给 MCP 工具留出"声明只读即可在 Plan 模式下用"的通道。
+
+### 3.4 `ToolRegistry`
+
+```rust
+pub struct ToolRegistry { /* opaque */ }
+
+impl ToolRegistry {
+    pub fn new() -> Self;
+    pub fn register(&mut self, tool: Arc<dyn Tool>);
+    pub fn enable_group(&mut self, group: ToolGroup);
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>>;
+    pub fn schemas(&self) -> Vec<&ToolSchema>;       // 仅 enabled
+    pub async fn dispatch(&self, call: &ToolCall, ctx: &ToolContext)
+        -> Result<ToolResult, ToolError>;
+}
+
+pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Todo, Plan, Mcp }
+```
+
+新增 `Todo`/`Plan`/`Mcp` 三个工具组：`Todo` 含 `todo.write`；`Plan` 含 `plan.exit`；`Mcp` 是动态注册的外部 MCP 工具集合。
+
+### 3.5 `Storage`
+
+```rust
+#[trait_variant::make(Storage: Send)]
+pub trait Storage {
+    async fn append(&self, session: &SessionId, msg: &Message) -> Result<(), StorageError>;
+    async fn load(&self, session: &SessionId) -> Result<Vec<Message>, StorageError>;
+    async fn list_sessions(&self) -> Result<Vec<SessionMeta>, StorageError>;
+    async fn delete(&self, session: &SessionId) -> Result<(), StorageError>;
+}
+
+pub struct SessionMeta {
+    pub id: SessionId,
+    pub created_at: time::OffsetDateTime,
+    pub message_count: usize,
+    pub last_message_at: time::OffsetDateTime,
+}
+```
+
+### 3.6 权限：`PermissionPolicy` + `PermissionPrompter`
+
+> **架构说明（修复 broadcast/oneshot 冲突）**：权限交互是"请求-响应"的点对点语义，而 `EventBus` 是"广播-订阅"语义。二者不能复用同一通道——`broadcast::Sender` 会克隆事件，而 `oneshot::Sender<Decision>` 不可克隆，强行放入 `Event` 既无法编译也语义错误。
+>
+> 因此把权限拆成两个正交抽象：
+> - **`PermissionPolicy`**：纯决策逻辑，输入 `(tool, input, ctx)`，输出 `Verdict`（`Allow` / `Deny` / `Ask(prompt)`）。无副作用、不交互、可单元测试。
+> - **`PermissionPrompter`**：点对点交互器，仅当 `Verdict::Ask` 时被 Runtime 调用，输入 `PermissionPrompt`，异步返回最终 `Decision`。由 frontend 注入（CLI / TUI / SDK 各有实现）。
+>
+> `EventBus` 只广播**通知类**事件（`PermissionRequested` / `PermissionResolved`），这些事件全部由可克隆数据组成，不携带任何 `Sender`，从而与 `broadcast` 兼容。
+
+```rust
+/// 策略返回的中间判定（未交互）。
+pub enum Verdict {
+    Allow,
+    Deny(String),
+    Ask(PermissionPrompt),
+}
+
+/// 交互后的最终决策（不再含 Ask）。
+pub enum Decision {
+    Allow,
+    Deny(String),
+}
+
+/// 纯决策 trait（无交互、无 IO）。
+#[trait_variant::make(PermissionPolicy: Send)]
+pub trait PermissionPolicy {
+    async fn check(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        ctx: &PermissionContext,
+    ) -> Result<Verdict, PolicyError>;
+}
+
+pub struct PermissionContext {
+    pub session: SessionId,
+    pub workdir: Utf8PathBuf,
+    pub side_effect: SideEffect,
+    pub turn: u32,
+    pub history: Vec<Decision>,   // 本会话已有决策，便于去重询问
+}
+
+/// 点对点交互器（非广播）。由 frontend 注入实现。
+#[trait_variant::make(PermissionPrompter: Send)]
+pub trait PermissionPrompter {
+    async fn prompt(&self, req: PermissionPrompt) -> Decision;
+}
+
+pub struct PermissionPrompt {
+    pub id: String,                    // ULID，关联 Requested/Resolved 事件
+    pub tool: String,
+    pub summary: String,               // 人类可读摘要
+    pub risk: Risk,
+    pub options: Vec<PromptOption>,    // [AllowOnce, AllowAlways, DenyOnce, DenyAlways]
+}
+
+pub enum Risk { Low, Medium, High }
+pub enum PromptOption { AllowOnce, AllowAlways, DenyOnce, DenyAlways }
+```
+
+`PermissionPrompter` 的内置实现：
+
+| 实现 | 适用场景 | 行为 |
+|------|---------|------|
+| `InteractivePrompter` | CLI TTY | 打印摘要 → 读 stdin → 解析选项；超时按 deny |
+| `NonInteractivePrompter` | 非 TTY / CI / 管道 | 按 `permission.non_tty_strategy` 配置：`deny`（默认）/ `allow` / `fail`；`deny` 时回灌"非交互环境拒绝" |
+| `TuiPrompter` | TUI | 渲染弹窗，阻塞该工具调用直至用户选择 |
+| `CallbackPrompter` | SDK | 调用用户注册的异步闭包 |
+
+Runtime 的权限解析流程见 `design.md` §9.2。
+
+### 3.7 `ContextManager`
+
+```rust
+#[trait_variant::make(ContextManager: Send)]
+pub trait ContextManager {
+    async fn append(&self, msg: Message);
+    async fn build_chat_request(
+        &self,
+        tools: &ToolRegistry,
+        config: &RuntimeConfig,
+    ) -> Result<ChatRequest, ContextError>;
+    async fn snapshot(&self) -> ContextSnapshot;
+    async fn restore(&self, snap: ContextSnapshot);
+    fn token_count(&self) -> usize;
+    fn message_count(&self) -> usize;
+}
+
+pub struct ContextSnapshot {
+    pub messages: Vec<Message>,
+    pub token_count: usize,
+    pub compression_log: Vec<CompressionStep>,
+}
+```
+
+### 3.8 `Hook` 与 `HookRegistry`（见 `hooks.md` §5）
+
+Hook 是"工具调用生命周期"的拦截器，介于"LLM 决定调用工具"与"工具真正执行"之间；也是会话/轮次/压缩等关键节点的观察+注入点。完整协议（JSON stdio）、8 类事件、配置见 `hooks.md`，此处仅给出 Rust trait。
+
+```rust
+#[trait_variant::make(Hook: Send)]
+pub trait Hook {
+    fn name(&self) -> &str;
+    fn matcher(&self) -> &HookMatcher;
+    async fn run(&self, input: HookInput) -> Result<HookOutput, HookError>;
+}
+
+pub struct HookMatcher {
+    pub events: Vec<HookEvent>,
+    pub tools: Option<Vec<String>>,    // None=所有工具；仅 PreToolUse/PostToolUse/PermissionRequest 有效
+}
+
+pub enum HookEvent {
+    SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+    PreCompact, Stop, SubagentStop, PermissionRequest,
+}
+
+pub struct HookInput {
+    pub event: HookEvent,
+    pub session_id: SessionId,
+    pub turn: u32,
+    pub tool: Option<ToolCall>,
+    pub side_effect: Option<SideEffect>,
+    pub verdict: Option<Verdict>,
+    pub cwd: Utf8PathBuf,
+    pub extras: serde_json::Value,     // 事件特有字段
+}
+
+pub struct HookOutput {
+    pub decision: HookDecision,
+    pub reason: Option<String>,
+    pub modify_input: Option<serde_json::Value>,
+    pub inject_context: Option<String>,
+    pub exit_message: Option<String>,
+}
+
+pub enum HookDecision { Allow, Deny, Ask, Continue }
+
+pub struct HookRegistry { by_event: HashMap<HookEvent, Vec<Arc<dyn Hook>>> }
+
+impl HookRegistry {
+    pub fn register(&mut self, hook: Arc<dyn Hook>);
+    pub fn for_event(&self, e: HookEvent) -> &[Arc<dyn Hook>];
+}
+```
+
+`ScriptHook` 适配器把外部可执行包装为 `Hook`：序列化 `HookInput`→stdin，读 stdout JSON→`HookOutput`，按退出码映射。**关键约束**：Hook 的 `allow` 对内置黑名单 `Deny` 无效（L0 不可覆盖，见 `rules.md` C-02 与 `hooks.md` §4）。
+
+### 3.9 `SandboxDriver`（OS 级沙箱，见 `security.md` §8）
+
+OS 级沙箱是应用层权限（§3.6）之外的第二道防线。`SandboxDriver` 抽象平台差异，Runtime 在派发 `Command`/`Network` 类工具前应用策略。
+
+```rust
+#[trait_variant::make(SandboxDriver: Send)]
+pub trait SandboxDriver {
+    /// 在子进程 exec 前应用沙箱策略（pre-main hardening，见 security.md §8.3）。
+    fn apply(&self, policy: &SandboxPolicy, cmd: &mut std::process::Command) -> Result<(), SandboxError>;
+
+    /// 当前平台是否原生支持硬隔离（用于 doctor 自检与降级提示）。
+    fn is_hardened(&self) -> bool;
+
+    /// 平台名（"seatbelt" / "landlock+seccomp" / "windows-acl" / "none"）。
+    fn id(&self) -> &'static str;
+}
+```
+
+内置实现：
+
+| 实现 | 平台 | 技术 |
+|------|------|------|
+| `SeatbeltDriver` | macOS 12+ | `sandbox-exec -p <profile>`，动态生成 profile |
+| `LandlockDriver` | Linux 5.13+ | `landlock` crate + `libseccomp`（seccomp 白名单 syscall） |
+| `WindowsSandboxDriver` | Windows | 受限令牌 + Job Object + DACL（初期可能降级） |
+| `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） |
+
+`.git`/`.minicoding` 目录在所有写策略下默认强制只读（防破坏版本库与配置），需 `tools.sandbox.allow_dotgit_write = true` 显式放开。详见 `security.md` §8.2。
+
+### 3.10 `ProjectDocLoader`（AGENTS.md 分层加载，见 `design.md` §8.6）
+
+```rust
+#[trait_variant::make(ProjectDocLoader: Send)]
+pub trait ProjectDocLoader {
+    /// 加载并拼接 AGENTS.md 指令层（全局 + repo_root→cwd 逐级 + override + fallback）。
+    /// 返回拼接后的字符串，超过 max_bytes 静默截断。
+    async fn load(&self, ctx: &LoadContext) -> Result<String, LoadError>;
+}
+
+pub struct LoadContext {
+    pub home: Utf8PathBuf,                  // $MINICODING_HOME
+    pub repo_root: Option<Utf8PathBuf>,     // None = 不在 git 仓库
+    pub cwd: Utf8PathBuf,
+    pub fallback_filenames: Vec<String>,    // ["CLAUDE.md", ".cursorrules"]
+    pub max_bytes: usize,                   // 默认 32 * 1024
+}
+```
+
+加载算法：全局层取 `AGENTS.override.md`→`AGENTS.md` 首个非空；项目层从 `repo_root` 逐级到 `cwd`，每级取 `override→md→fallback` 之首；root→leaf 拼接，截断 32KiB。AGENTS.md 不可被 Agent 自主编辑（`fs.write`/`fs.edit` 对其默认 `Ask`）。
+
+### 3.11 `Journal`（文件改动事务，见 `design.md` §17）
+
+```rust
+#[trait_variant::make(Journal: Send)]
+pub trait Journal {
+    /// 记录一次 turn 的文件改动（fs.write/edit/delete 成功后调用）。
+    async fn record(&self, entry: ChangeEntry) -> Result<(), JournalError>;
+
+    /// 撤销最近 steps 次 turn 的文件改动（/undo），含冲突检测。
+    async fn undo(&self, steps: usize) -> Result<UndoReport, JournalError>;
+
+    /// 列出会话内所有文件变更（/diff）。
+    async fn diff(&self) -> Result<Vec<DiffEntry>, JournalError>;
+
+    /// 回到会话启动时状态（/new），清空 journal + 重建初始快照。
+    async fn reset_to_initial(&self) -> Result<(), JournalError>;
+}
+
+pub struct DiffEntry {
+    pub op_id: OpId,
+    pub prompt_snippet: String,
+    pub files: Vec<FileChange>,
+}
+```
+
+`/undo` 是特性门控（`[features] file_undo = false`，默认关，参考 Codex `features.undo`），仅会话内有效，会话结束销毁（不落盘，避免敏感数据多份存储）。跨会话回滚依赖 Git。
+
+---
+
+## 4. L2 Runtime API
+
+### 4.1 `Runtime` 与 Builder
+
+```rust
+pub struct Runtime { /* opaque */ }
+
+impl Runtime {
+    pub fn builder() -> RuntimeBuilder;
+
+    /// 单轮对话；驱动 Agent 循环直到结束或中断。
+    pub async fn run_turn(&self, input: UserInput) -> Result<TurnOutcome>;
+
+    /// 派发子 Agent。
+    pub async fn spawn_subagent(
+        &self,
+        spec: SubagentSpec,
+        input: String,
+    ) -> Result<SubagentHandle>;
+
+    /// 订阅事件流。
+    pub fn subscribe(&self) -> broadcast::Receiver<Event>;
+
+    /// 当前会话快照。
+    pub async fn snapshot(&self) -> SessionSnapshot;
+
+    /// 优雅关闭。
+    pub async fn shutdown(&self) -> Result<()>;
+}
+
+pub struct RuntimeBuilder {
+    /* setters */
+}
+
+impl RuntimeBuilder {
+    pub fn config(mut self, c: RuntimeConfig) -> Self;
+    pub fn provider(mut self, p: Arc<dyn LlmProvider>) -> Self;
+    pub fn tools(mut self, t: ToolRegistry) -> Self;
+    pub fn storage(mut self, s: Arc<dyn Storage>) -> Self;
+    pub fn policy(mut self, p: Arc<dyn PermissionPolicy>) -> Self;
+    pub fn prompter(mut self, p: Arc<dyn PermissionPrompter>) -> Self;
+    pub fn context_manager(mut self, c: Arc<dyn ContextManager>) -> Self;
+    pub fn workdir(mut self, p: Utf8PathBuf) -> Self;
+    // 新增可注入能力（参考 CC/Codex 的可扩展架构）
+    pub fn sandbox_driver(mut self, d: Arc<dyn SandboxDriver>) -> Self;
+    pub fn hook_registry(mut self, h: HookRegistry) -> Self;
+    pub fn project_doc_loader(mut self, l: Arc<dyn ProjectDocLoader>) -> Self;
+    pub fn journal(mut self, j: Arc<dyn Journal>) -> Self;       // None 时 /undo 不可用
+    pub fn mcp_client(mut self, c: Arc<dyn McpClient>) -> Self;  // 见 §11
+    pub fn build(self) -> Result<Runtime>;
+}
+```
+
+### 4.2 输入与事件
+
+```rust
+pub struct UserInput {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub context_hint: Option<ContextHint>,
+}
+
+pub enum Attachment { File(Utf8PathBuf), Image(Vec<u8>, String) }
+
+pub enum Event {
+    MessageAppended(Message),
+    Token(String),
+    TurnStreamingStarted,
+    ToolCallStart(ToolCall),
+    ToolCallProgress { id: ToolCallId, bytes: usize },
+    ToolCallEnd { id: ToolCallId, ok: bool, elapsed: Duration },
+    /// 通知类：权限已询问（仅展示/审计，不含回复通道）。
+    PermissionRequested { id: String, tool: String, summary: String, risk: Risk },
+    /// 通知类：权限已 resolved（带最终决策，供 UI 关闭弹窗与审计）。
+    PermissionResolved { id: String, decision: Decision },
+    TurnEnd { stop_reason: StopReason },
+    Error(RuntimeError),
+    SubagentStarted { id: String, role: String },
+    SubagentFinished { id: String, summary: String },
+    // 新增事件（可克隆，与 broadcast 兼容）
+    /// TodoWrite 工具调用后广播，供 UI 渲染进度（见 design.md §18.4）。
+    TodoUpdated { todos: Vec<Todo> },
+    /// Hook 执行结果通知（见 hooks.md §8 / design.md §20.2）。
+    HookRun { name: String, event: String, decision: HookDecision, elapsed: Duration },
+    /// Plan 模式状态切换（见 design.md §16.2）。
+    PermissionModeChanged { from: PermissionMode, to: PermissionMode },
+    /// 文件回滚执行结果（见 design.md §17.4）。
+    FileUndone { report: UndoReport },
+}
+```
+
+---
+
+## 5. L3 SDK 高层 API
+
+```rust
+pub struct Client { runtime: Runtime }
+
+impl Client {
+    pub fn builder() -> ClientBuilder;
+
+    /// 单次提问，返回完整文本。
+    pub async fn ask(&self, prompt: impl Into<String>) -> Result<String>;
+
+    /// 流式提问。
+    pub async fn ask_stream(
+        &self, prompt: impl Into<String>,
+    ) -> Result<BoxStream<'static, Result<Delta>>>;
+
+    /// 执行任务（可能多轮、多工具），返回报告。
+    pub async fn run_task(&self, task: impl Into<String>) -> Result<TaskReport>;
+
+    /// 订阅事件。
+    pub fn subscribe(&self) -> broadcast::Receiver<Event>;
+}
+
+pub struct TaskReport {
+    pub final_text: String,
+    pub tool_calls: Vec<ToolCallRecord>,
+    pub tokens_used: Usage,
+    pub duration: Duration,
+    pub artifacts: Vec<Artifact>,
+}
+```
+
+### 5.1 SDK 使用示例
+
+```rust
+use minicoding_sdk::Client;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = Client::builder()
+        .provider_from_env()?
+        .workdir(".")?
+        .allow_read_only()      // 默认只读
+        .build()?;
+
+    // 简单提问
+    let answer = client.ask("解释这个项目的入口").await?;
+    println!("{answer}");
+
+    // 流式
+    use futures::StreamExt;
+    let mut s = client.ask_stream("重构 utils 模块").await?;
+    while let Some(delta) = s.next().await {
+        if let minicoding_core::Delta::Text(t) = delta? {
+            print!("{t}");
+        }
+    }
+    Ok(())
+}
+```
+
+---
+
+## 6. 配置 Schema
+
+完整 schema 见 `config.md`（本表节选关键）：
+
+```toml
+# ~/.minicoding/config.toml  （根目录可由 MINICODING_HOME 覆盖，见 data-model.md §3.0）
+[provider]
+default = "anthropic"
+
+[provider.anthropic]
+model = "claude-sonnet-4"
+api_key_env = "ANTHROPIC_API_KEY"
+timeout_sec = 120
+retry = { max_attempts = 4, base_delay_ms = 500 }
+
+[context]
+budget_ratio = 0.85
+compress = "summary_then_truncate"
+max_tool_iters = 50
+turn_timeout_sec = 600
+
+[tools]
+enabled_groups = ["core", "fs", "shell", "web"]
+[tools.fs]
+max_read_bytes = 1048576
+[tools.shell]
+timeout_sec = 120
+max_output_bytes = 1048576
+[tools.web]
+allowed_domains = ["*"]
+
+[permission]
+default = "ask"
+non_tty_strategy = "deny"      # deny(默认) | allow | fail
+[[permission.allow]]
+tool = "fs.write"
+glob = "src/**"
+[[permission.deny]]
+tool = "shell.run"
+command_prefix = ["rm -rf", "sudo"]
+
+# 审批模式 × 沙箱策略（预设），见 security.md §2.6/§8
+# 预设优先级低于 [[permission.allow/deny]]，但高于默认矩阵；内置黑名单始终最高
+[approval]
+mode = "on-request"            # untrusted | on-failure | on-request(默认) | never
+[sandbox]
+policy = "workspace-write"     # read-only | workspace-write(默认) | danger-full-access
+allow_dotgit_write = false     # 强烈不推荐开启
+allow_network = ["api.anthropic.com", "api.openai.com"]   # 网络白名单（覆盖默认禁）
+extra_writable = ["target/", "dist/"]
+# presets 段：保存命名预设，CLI --preset <name> 选用
+[profiles.full_auto]
+approval_mode = "on-failure"
+sandbox_policy = "workspace-write"
+[profiles.readonly_ci]
+approval_mode = "never"
+sandbox_policy = "read-only"
+
+[permission_mode]
+initial = "default"            # default | accept-edits | plan | auto | bypass-permissions
+
+[storage]
+dir = "~/.minicoding/sessions"
+
+[memory]
+dir = "~/.minicoding/memory"
+long_term_file = "long_term.md"
+session_summary_max_tokens = 200
+
+# 项目记忆分层加载（见 design.md §8.6）
+[project]
+project_doc_fallback_filenames = ["CLAUDE.md", ".cursorrules", "TEAM_GUIDE.md"]
+project_doc_max_bytes = 32768
+
+# Hooks（见 hooks.md §6）
+[hooks]
+on_hook_error = "continue"     # continue(默认) | deny | fail
+default_timeout_sec = 30
+
+# 特性门控（opt-in 功能）
+[features]
+file_undo = false              # /undo 文件回滚（参考 Codex features.undo，默认关）
+plan_mode = true               # Plan 模式（design.md §16）
+typed_subagents = true         # 类型化子 Agent（design.md §7.2）
+
+# MCP server 配置（见 design.md §19.2）
+[mcp_servers.github]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled = true
+required = false
+enabled_tools = ["list_prs", "create_pr"]
+
+[mcp_servers.internal_api]
+transport = "http"
+url = "https://internal.corp/mcp"
+bearer_token_env_var = "INTERNAL_API_TOKEN"
+```
+
+---
+
+## 7. 错误类型层次
+
+```rust
+// core/src/model/error.rs
+#[derive(thiserror::Error, Debug)]
+pub enum RuntimeError {
+    #[error("llm: {0}")] Llm(#[from] LlmError),
+    #[error("tool `{tool}`: {source}")]
+    Tool { tool: String, #[source] source: ToolError },
+    #[error("permission denied: {0}")] Permission(String),
+    #[error("context budget exceeded ({used}/{budget})")]
+    BudgetExceeded { used: usize, budget: usize },
+    #[error("storage: {0}")] Storage(#[from] StorageError),
+    #[error("config: {0}")] Config(String),
+    #[error("interrupted")] Interrupted,
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum LlmError {
+    #[error("network: {0}")] Network(#[from] reqwest::Error),
+    #[error("rate limited; retry after {retry_after_ms:?}ms")]
+    RateLimited { retry_after_ms: Option<u64> },
+    #[error("server {status}: {body}")] Server { status: u16, body: String },
+    #[error("client {status}: {body}")] Client { status: u16, body: String },
+    #[error("content filtered: {reason}")] Filtered { reason: String },
+    #[error("stream parse: {0}")] Parse(String),
+    #[error("timeout after {0:?}")] Timeout(Duration),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ToolError {
+    #[error("invalid input: {0}")] InvalidInput(String),
+    #[error("path escapes workdir: {0}")] PathEscaped(String),
+    #[error("not found: {0}")] NotFound(String),
+    #[error("timeout after {0:?}")] Timeout(Duration),
+    #[error("cancelled")] Cancelled,
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+    #[error("execution: {0}")] Exec(String),
+}
+```
+
+---
+
+## 8. 稳定性与版本化
+
+- L1 trait 以 `#[non_exhaustive]` 标注，新增字段不破坏下游。
+- L2/L3 API 遵循 SemVer；`0.x` 期间允许破坏性变更，每个 minor 版本发 CHANGELOG。
+- 配置 schema 向前兼容；新增字段必须有默认值；废弃字段保留 2 个版本并打 deprecation warning。
+- 事件枚举 `Event` 标 `#[non_exhaustive]`，订阅者必须处理通配分支。
+
+---
+
+## 9. 跨语言 / 跨进程接口（后续）
+
+阶段 3 提供：
+
+- **HTTP/JSON-RPC**（`minicoding serve`）：REST 风格 `/ask` `/stream` `/event`，便于非 Rust 集成。
+- **MCP Server**：实现 Model Context Protocol，作为工具源被其他 Agent 调用。
+- **stdin/stdout NDJSON 协议**：便于编辑器插件以子进程方式嵌入。
+
+三者共用 `core` 的数据模型，仅序列化协议不同。
+
+---
+
+## 10. 内置工具目录（参考 CC/Codex）
+
+本节列出新增的内置工具，与 `design.md` §16-§18 对应。原有工具（`fs.*`/`shell.run`/`web.fetch`/`git.*`/`task.spawn`）见 `design.md` §4.3。
+
+### 10.1 `todo.write`（TodoWrite，见 `design.md` §18）
+
+| 项 | 值 |
+|----|----|
+| 工具组 | `Todo` |
+| 副作用 | `None`（仅更新内存状态 + 广播事件） |
+| 只读（Plan 模式） | 是 |
+| 输入 | `TodoWriteInput { todos: Vec<Todo> }` |
+| 输出 | `ToolContent::Text` 渲染后的 todo 列表 + `(N/M completed)` |
+
+校验规则（违反返回 `ToolError::InvalidInput`）：
+
+- `todos.len() <= 20`；
+- 每个 `text` 非空；
+- 同一时间 `InProgress` 项 ≤ 1；
+- `Completed` 项必须含 `summary`；
+- 状态迁移合法（`Completed` 不可回 `Pending`）。
+
+调用后广播 `Event::TodoUpdated`，UI 据此渲染。
+
+### 10.2 `plan.exit`（ExitPlanMode，见 `design.md` §16.4）
+
+| 项 | 值 |
+|----|----|
+| 工具组 | `Plan` |
+| 副作用 | `None`（仅切换 `PermissionMode` + 缓存预批准） |
+| 只读（Plan 模式） | 是（仅在 Plan 模式下可调用） |
+| 输入 | `ExitPlanModeInput { plan_path, allowed_prompts, plan_was_edited }` |
+| 输出 | 提示用户决策门（approve/modify/reject） |
+
+调用后 Runtime 触发 `Event::PermissionModeChanged { from: Plan, to: Default|AcceptEdits }`，并把 `allowed_prompts` 注入会话级 `PermissionPolicy` 缓存。该工具仅在 `PermissionMode::Plan` 下可调用，其它模式下调用返回错误。
+
+### 10.3 `file.undo`（/undo，见 `design.md` §17.5）
+
+`/undo` 作为斜杠命令而非 LLM 工具暴露——文件回滚是用户控制语义，不应让 LLM 自主触发（防模型回滚自己的错误改动后继续犯错）。CLI 解析 `/undo [steps]` 后调用 `Journal::undo`。若 `[features] file_undo = false`，斜杠命令返回"未启用"。
+
+### 10.4 `task.spawn`（类型化子 Agent，见 `design.md` §7.2）
+
+`task.spawn` 的输入从自由 `role: String` 改为类型化 `SubagentSpec`：
+
+```json
+{
+  "ty": "explore",
+  "input": "查找所有调用 foo() 的位置",
+  "thoroughness": "medium",
+  "model": null,
+  "budget_tokens": 8000,
+  "max_iters": 10
+}
+```
+
+Runtime 派发前强制校验：`can_spawn_subagent == false` 时移除子 Agent 工具集中的 `task.spawn`（防嵌套）；`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发。
+
+---
+
+## 11. MCP Client API（见 `design.md` §19）
+
+`McpClient` 抽象 MCP 消费侧，由 Runtime 在启动时根据 `[mcp_servers.*]` 配置构建实例并注入 `RuntimeBuilder`。
+
+```rust
+#[trait_variant::make(McpClient: Send)]
+pub trait McpClient {
+    /// 启动所有已配置且 enabled 的 MCP server，握手 + list_tools。
+    /// required server 启动失败返回 Err，Runtime 拒绝启动。
+    async fn start(&self, configs: &[McpServerConfig]) -> Result<(), McpError>;
+
+    /// 返回所有已就绪 server 的工具，命名为 mcp__<server>__<tool>。
+    async fn list_tools(&self) -> Vec<ToolSchema>;
+
+    /// 调用某个 MCP 工具，超时由 server 配置的 tool_timeout 决定。
+    async fn call(&self, server: &str, tool: &str, input: serde_json::Value) -> Result<ToolResult, McpError>;
+
+    /// 优雅关闭所有 server（stdio: EOF；http: 连接池释放）。
+    async fn shutdown(&self) -> Result<(), McpError>;
+}
+```
+
+**默认实现 `RmcpClient`**：基于官方 Rust MCP SDK（`rmcp` crate，阶段 5+ 落地，参考 Codex `experimental_use_rmcp_client`），支持 stdio + Streamable HTTP + OAuth。早期可用薄封装的 `StdioMcpClient` 仅支持 stdio。
+
+**project 作用域批准流**（防恶意仓库植入）：
+
+```rust
+pub async fn check_project_scope_approval(
+    project_config_path: &Utf8PathBuf,
+    choices_store: &dyn McpChoicesStore,
+    prompter: &dyn PermissionPrompter,
+) -> Result<Vec<McpServerConfig>, McpError>;
+// 首次遇到 .minicoding/mcp.json 时，逐个 server 弹窗询问是否启用，
+// 结果写入 ~/.minicoding/mcp_choices.toml；后续启动直接读 choices。
+```
+
+**与权限系统的协作**：MCP 工具调用走与内置工具相同的 `PermissionPolicy::check` 流程，`tool` 名为 `mcp__<server>__<tool>`，权限规则支持 `mcp__github__*` 通配（见 `design.md` §19.3）。MCP 工具的 `side_effect` 由 server schema 的 `readOnlyHint`/`destructiveHint` 映射，`is_read_only()` 据此覆盖默认实现。
