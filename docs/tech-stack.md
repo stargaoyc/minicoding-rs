@@ -202,6 +202,16 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 - **最小 feature**：每个依赖只开启必要 feature（如 `reqwest` 只开 `json, rustls-tls, stream`）。
 - **去重**：定期 `cargo tree --duplicates`，统一版本。
 - **许可证**：`cargo deny check licenses` 限制为 MIT / Apache-2.0 / BSD / ISC 等。
+- **供应链硬化**（参考 Pi 项目）：
+  - `cargo supply-chain` 检查依赖来源可信度；
+  - 依赖更新 PR 需人工审查，CI 自动检测版本跳跃；
+  - 避免引入"同日发布"依赖（`min-release-age` 理念），降低供应链投毒风险；
+  - 重依赖（`reqwest`/`rmcp`/`landlock`）升级需附加 changelog 审查。
+- **凭证环境变量语法**（参考 AstrCode）：
+  - 统一使用 `env:VAR_NAME` 语法引用环境变量（如 `api_key = "env:OPENAI_API_KEY"`）；
+  - 支持 `env:VAR_NAME:-fallback` 回退语法；
+  - 保留 `${VAR_NAME}` 兼容（MCP env 段）；
+  - 环境变量缺失时启动解析失败并给出明确错误。
 
 ---
 

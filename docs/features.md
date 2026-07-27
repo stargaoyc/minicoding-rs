@@ -37,6 +37,7 @@
 | L-05 | 重试与限流 | 指数退避、429 Retry-After | M6 | 规划中 |
 | L-06 | 模型路由（Router） | 按任务类型选模型 | M7+ | 规划中 |
 | L-07 | 多模态（Vision） | 图片输入 | M6 | 规划中 |
+| L-08 | 独立小 LLM | 为摘要/compact/memory 提取配置独立 provider（`[provider.small]`），未设置时与主 provider 相同，可配更便宜模型降本（见 `design.md` §3.8、`modules.md` §10.3） | M3 | 规划中 |
 
 ## 3. 工具系统
 
@@ -76,6 +77,8 @@
 | C-05 | 压缩备份（可选） | 压缩前原文保留 | M3 | 规划中 |
 | C-06 | `compress=off` 兜底 | 关闭压缩直通 | M3 | 规划中 |
 | C-07 | 压缩熔断与防 Thrash | 失败计数≥3 熔断 / Thrash 检测 / 状态保留清单 / 降级链 | M3 | 规划中 |
+| C-08 | 预测性压缩 | 根据历史 turn token 增长估算，在超出窗口前提前 compact，与反应式 compact 互补（见 `design.md` §3.9）。配置 `predictive_compact_enabled = false`（默认关）/ `predictive_baseline_growth_tokens = 15000` | M3 | 规划中 |
+| C-09 | Post-compact 上下文恢复 | compact 后从历史提取最近 read 过的文件路径，按预算截断重新注入，避免模型重新 read（见 `design.md` §3.10）。配置 `post_compact_max_files = 5` / `post_compact_token_budget = 50000` / `post_compact_max_tokens_per_file = 5000` | M3 | 规划中 |
 
 ## 5. 记忆
 
@@ -152,6 +155,9 @@
 | X-09 | 工具检索（Tool Search） | BM25 按需检索（工具多时） | M7+ | 规划中 |
 | X-10 | MCP server 暴露 | `serve --as-mcp-server` 被其他 Agent 调用 | M8 | 规划中 |
 | X-11 | `mcp` 子命令 | list/approve/reset-project-choices | M5 | 规划中 |
+| X-12 | MCP 进程池 | MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5、`modules.md` §8.4） | M4 | 规划中 |
+| X-13 | MCP 后台预热 | 全局 server 启动时并发预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞 | M4 | 规划中 |
+| X-14 | MCP inflight merge | 同 server 并发请求合并，避免重复调用 | M4 | 规划中 |
 
 ## 9. 可观测性
 
@@ -177,6 +183,9 @@
 | S-05 | 备份 | tar.gz 打包 | M7+ | 规划中 |
 | S-06 | `MINICODING_HOME` | 根目录覆盖 | M0 | 规划中 |
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M5 | 规划中 |
+| S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 规划中 |
+| S-21 | env: 环境变量语法 | 统一使用 `env:VAR_NAME` 语法引用环境变量，支持 `env:VAR:-fallback` 回退（见 `tech-stack.md` §12） | M1 | 规划中 |
+| S-22 | 配置热更新 | `ConfigWatcher`（fsnotify）+ `Event::ConfigChanged`，扩展通过 `on_config_changed()` 接收变更（M6+） | M6+ | 规划中 |
 
 ## 11. 前端
 
@@ -200,6 +209,11 @@
 | E-03 | HTTP/JSON-RPC server | `minicoding serve` | M8 | 规划中 |
 | E-04 | MCP server | 被其他 Agent 调用（即 X-10） | M8 | 规划中 |
 | E-05 | stdin/stdout NDJSON | 编辑器插件协议 | M8 | 规划中 |
+| E-10 | JSON-RPC 协议 | JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`），见 `modules.md` §15 | M6 | 规划中 |
+| E-11 | HTTP/SSE server | HTTP/SSE JSON-RPC 接口，多客户端并发会话（`minicoding-server`），见 `modules.md` §16 | M8 | 规划中 |
+| E-12 | ACP 适配器 | ACP stdio 适配器，可被 Zed 等客户端嵌入 | M8 | 规划中 |
+| E-13 | SSE cursor 恢复 | 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复 | M8 | 规划中 |
+| E-14 | RehydrateRequired 信号 | broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot | M8 | 规划中 |
 
 ## 13. 工程与质量
 
@@ -215,6 +229,21 @@
 | Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M6+ | 规划中 |
 | Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M6+ | 规划中 |
 
+## 14. Extension 扩展
+
+| ID | 功能 | 描述 | 里程碑 | 状态 |
+|----|------|------|:---:|:---:|
+| X-20 | Extension SDK | 第三方扩展作者稳定 API（`Extension` trait + `Registrar` + `ExtensionManifest`），见 `design.md` §23、`modules.md` §17 | M5 | 规划中 |
+| X-21 | Prompt contributor 注入 | 扩展通过 `PromptBuild` Hook 注入 prompt section，见 `design.md` §22 | M5 | 规划中 |
+| X-22 | 扩展工具统一 dispatch | 扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过） | M5 | 规划中 |
+
+## 15. Prompt 管道
+
+| ID | 功能 | 描述 | 里程碑 | 状态 |
+|----|------|------|:---:|:---:|
+| P-30 | Prompt 管道 | 9 个 `PromptContributor` 按固定顺序拼接，稳定段在前利于 prompt cache（见 `design.md` §22） | M5 | 规划中 |
+| P-31 | IDENTITY.md 覆盖 | `~/.minicoding/IDENTITY.md` 覆盖默认身份 | M5 | 规划中 |
+
 ---
 
 ## 统计
@@ -222,19 +251,21 @@
 | 领域 | 项数 |
 |------|:---:|
 | Agent 运行时 | 15 |
-| LLM Provider | 7 |
+| LLM Provider | 8 |
 | 工具系统 | 22 |
-| 上下文管理 | 7 |
+| 上下文管理 | 9 |
 | 记忆 | 8 |
 | 权限与安全 | 24 |
 | Hooks 系统 | 13 |
-| MCP 集成 | 11 |
+| MCP 集成 | 14 |
 | 可观测性 | 8 |
-| 持久化与存储 | 7 |
+| 持久化与存储 | 10 |
 | 前端 | 8 |
-| 嵌入与跨进程 | 5 |
+| 嵌入与跨进程 | 10 |
 | 工程与质量 | 9 |
-| **合计** | **144** |
+| Extension 扩展 | 3 |
+| Prompt 管道 | 2 |
+| **合计** | **163** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 51 项（含 asyncRewake、Auto memory、压缩熔断等增强）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory 是参考 CC/Codex 后的核心增强。
 

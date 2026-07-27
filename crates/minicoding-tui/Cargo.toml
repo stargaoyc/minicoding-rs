@@ -1,0 +1,26 @@
+[package]
+name = "minicoding-tui"
+description = "TUI frontend（M7）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "minicoding-tui"
+path = "src/main.rs"
+
+[dependencies]
+minicoding-core = { workspace = true }
+minicoding-policy = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+camino = { workspace = true }
+
+# ratatui + crossterm 在 M7 引入（见 modules.md §13.3）
+# ratatui = "0.x"
+# crossterm = "0.x"

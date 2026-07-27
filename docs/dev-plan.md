@@ -6,7 +6,7 @@
 > - **涉及功能** 引用 [`features.md`](./features.md) 的 ID（A-XX/L-XX/T-XX/C-XX/M-XX/P-XX/H-XX/X-XX/O-XX/S-XX/F-XX/E-XX/Q-XX）；
 > - **涉及约束** 引用 [`rules.md`](./rules.md) 的 ID（C-01..C-35）；
 > - **crate** 引用 [`modules.md`](./modules.md) 的 14 个 crate；
-> - 里程碑范围以 roadmap 为准，dev-plan 在 M4/M5 间做了任务归组调整（M4 吸收原 M5 的 MCP/journal，M5 聚焦 Hooks/子 Agent/Plan），仅影响任务编排顺序，不改变 roadmap 交付范围。
+> - 里程碑范围以 roadmap 为准。M4/M5 已对齐：M4 = 安全沙箱 + MCP + Journal（11 task），M5 = Hooks + Plan + 子 Agent + macOS 沙箱补齐（8 task）。平台优先级：M4 仅 Linux，M5+ 补 macOS，M6+ 补 Windows（见 `tech-stack.md` §11）。
 
 ---
 
@@ -84,7 +84,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 - [ ] CI 全绿（`fmt` + `clippy -D warnings` + `test` + `audit` + `deny`）。
 - [ ] 新增/修改逻辑有对应单测，覆盖率不下降。
 - [ ] 涉及 L0 约束（C-01..C-07、C-21..C-30）的改动附带约束自检说明。
-- [ ] 涉及公共 API 变更已更新 `CHANGELOG.md` 与 `docs/`。
+- [ ] 涉及公共 API 变更已更新 `docs/api.md` 与对应 `docs/`（不维护独立 CHANGELOG.md，遵循 `AGENTS.md` §4.7）。
 - [ ] 涉及安全边界（权限/沙箱/Hook/MCP）的改动至少一名 reviewer 显式 approve。
 - [ ] 性能敏感路径（Agent 循环、压缩、token 计数）附 `criterion` 基准对比，回归 > 10% 阻塞合并。
 - [ ] 无凭证/密钥泄露（`cargo audit` + 人工检查 env/log）。
@@ -114,7 +114,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 - **验收标准**：
   - `cargo build --workspace` 通过；
   - `cargo metadata` 输出包含 14 个 crate；
-  - 每个 crate 的 `lib.rs` 含模块注释与 `#![warn(clippy::all)]`。
+  - 每个 crate 的 `lib.rs` 含模块注释与 `#![deny(clippy::all, clippy::pedantic)]`（与 `AGENTS.md` §2.9 一致）。
 - **预估工作量**：S
 
 #### T-M0-2 公共依赖与平台条件依赖管理
@@ -615,17 +615,17 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
   - `is_hardened()` 在 Landlock 可用时返回 `true`。
 - **预估工作量**：L
 
-#### T-M4-2 sandbox macOS Seatbelt + Windows + ExternalSandbox
-- **crate**：sandbox（`macos.rs`、`windows.rs`、`lib.rs`）
+#### T-M4-2 sandbox ExternalSandbox + 平台降级（macOS/Windows 推迟到 M5+/M6+）
+- **crate**：sandbox（`external.rs`、`lib.rs`）
 - **输入**：T-M4-1
-- **输出**：macOS `sandbox-run`（原生 Seatbelt 框架）；Windows 受限令牌 + Job Object（`windows` crate，可降级）；`ExternalSandbox` 策略（CI/容器场景，`NoopDriver` + info 日志声明依赖外部隔离）
+- **输出**：`ExternalSandbox` 策略（CI/容器场景，`NoopDriver` + info 日志声明依赖外部隔离）；macOS/Windows 平台在 M4 编译可用但沙箱降级为 `NoopDriver`（平台优先级 M4 仅 Linux，见 `tech-stack.md` §11）
 - **涉及功能**：P-15、P-16
 - **涉及约束**：C-22（ExternalSandbox/DangerFullAccess 需显式声明）
 - **验收标准**：
-  - macOS CI：`--sandbox read-only` 下写被 Seatbelt 拦；
-  - Windows：受限令牌生效或降级应用层并标注 "non-hardened"；
-  - `--sandbox external-sandbox` 在容器内不报沙箱初始化失败，日志声明依赖外部隔离。
-- **预估工作量**：L
+  - `--sandbox external-sandbox` 在容器内不报沙箱初始化失败，日志声明依赖外部隔离；
+  - macOS/Windows 平台编译通过，`detect_driver()` 返回 `NoopDriver` 并打 `warn` 日志；
+  - macOS Seatbelt 实现推迟到 T-M5-x（平台优先级 M5+），Windows 受限令牌推迟到 T-M6-x（M6+）。
+- **预估工作量**：M
 
 #### T-M4-3 sandbox pre-main 进程硬化 + VCS 目录保护
 - **crate**：sandbox（`hardening.rs`）
@@ -749,9 +749,9 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 
 ---
 
-## §8 里程碑 M5：Hooks 与子 Agent
+## §8 里程碑 M5：Hooks + Plan + 子 Agent
 
-> 对应 roadmap M5 的 Hooks/子 Agent/Plan 部分（12 人日）。交付 10 类 Hook、子 Agent、Plan 模式。
+> 对应 roadmap M5（12 人日）。交付 10 类 Hook、Plan 模式、类型化子 Agent，并补齐 macOS 沙箱实现（平台优先级 M5+）。MCP client 与 Journal/`/undo` 已前置到 M4。
 
 #### T-M5-1 hooks Hook trait + HookRegistry + 10 事件
 - **crate**：core（`hooks/trait.rs`）、hooks（`registry.rs`、`lib.rs`）
@@ -1201,10 +1201,10 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 
 ### 12.5 M4 — 安全沙箱与 MCP
 
-- `--sandbox read-only` 下任何写/网络在内核被拦（macOS/Linux），`audit.log` 记录拒绝。
+- `--sandbox read-only` 下任何写/网络在内核被拦（Linux），`audit.log` 记录拒绝。
 - `--sandbox workspace-write` 下越界写、网络外联被拦；工作区内自由读写执行。
 - `minicoding exec --sandbox external-sandbox` 在容器内运行不报沙箱初始化失败，日志声明依赖外部隔离。
-- `.git` 目录在 workspace-write 下默认拒绝写入（除非 `allow_dotgit_write=true`）。
+- `.git` 目录在 workspace-write 下默认拒绝写入（除非 `allow_vcs_write=true`，旧名 `allow_dotgit_write` 向后兼容）。
 - 沙箱拒绝（如 Landlock EPERM）被识别并升级为权限请求，而非裸错误。
 - `--preset full-access` 启动时打 red 警告并要求显式确认。
 - `doctor --security` 输出沙箱驱动类型与硬化状态。
@@ -1212,17 +1212,19 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 - 含 `.minicoding/mcp.json` 的仓库首次进入时逐 server 弹窗批准，结果落 `mcp_choices.toml`。
 - `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
 - MCP/Hook 子进程不继承凭证环境变量。
-- 沙箱平台 CI matrix（Linux/macOS/Windows）拒绝语义全覆盖。
+- OTel `mcp.call` span（server/tool/elapsed）可见。
+- 沙箱平台 CI matrix（Linux only，M5+ 补 macOS，M6+ 补 Windows，见 `tech-stack.md` §11 平台优先级）。
 
-### 12.6 M5 — Hooks 与子 Agent
+### 12.6 M5 — Hooks + Plan + 子 Agent
 
 - `PostToolUse(fs.write|fs.edit)` Hook 能触发 `cargo fmt`；`PreToolUse` Hook `deny` 能阻断工具调用。
 - Hook 对内置黑名单 `Deny` 的 `allow` 被忽略（L0 不破）；`modify_input` 越界被 `sandbox_path` 拦。
 - Plan 模式下非只读工具被硬门 `Deny`；`plan.exit` 后切回 Default 模式并保留预批准。
 - `task.spawn` 启动子 Agent 并隔离上下文；Explore/Plan 子 Agent 跳过 AGENTS.md。
 - asyncRewake 仅对 `PostToolUse`/`PostToolUseFailure`/`Stop` 生效；第 4 个并发被拒绝。
-- OTel `hook.run` span（hook.name/hook.event/hook.decision）、`mcp.call` span（server/tool/elapsed）可见。
+- OTel `hook.run` span（hook.name/hook.event/hook.decision）可见。
 - 子 Agent span 传播正确（父子关系）。
+- macOS CI matrix 启用，`--sandbox read-only` 在 macOS 下写被 Seatbelt 拦。
 
 ### 12.7 M6 — 多 Provider 与健壮性
 

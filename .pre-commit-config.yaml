@@ -1,0 +1,68 @@
+# pre-commit 配置（local hooks，不依赖外部 hook 仓库）
+# 安装方式（任选其一）：
+#   1. pipx install pre-commit && pre-commit install
+#   2. 直接复制 scripts/git-hooks/pre-commit → .git/hooks/pre-commit
+#
+# 钩子内容：
+#   - cargo fmt --check（格式校验）
+#   - cargo clippy --workspace --all-targets -- -D warnings（零警告）
+#   - cargo test --workspace（单元测试）
+#   - 文件尾部换行 + 大文件检查
+#
+# 与 CI 门禁（AGENTS.md §6.3）一致，本地先拦截低级错误。
+
+minimum_pre_commit_version: "3.0.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        description: 检查 Rust 代码格式（AGENTS.md §6.3 CI 门禁）
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: cargo-clippy
+        name: cargo clippy (deny warnings)
+        description: clippy 零警告门禁（AGENTS.md §2.9 / §6.3）
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: cargo-test
+        name: cargo test --workspace
+        description: 单元测试门禁（AGENTS.md §2.8 / §6.3，覆盖率目标 ≥80%）
+        entry: cargo test --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: trailing-whitespace
+        name: trailing whitespace
+        description: 清除行尾空白
+        entry: bash -c 'if git diff --cached --check | grep -q "trailing whitespace"; then git diff --cached --check; exit 1; fi'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: end-of-file-fixer
+        name: end-of-file newline
+        description: 确保文件末尾有换行符
+        entry: bash -c 'rc=0; for f in $(git diff --cached --name-only --diff-filter=AM); do if [ -f "$f" ] && [ -s "$f" ] && [ "$(tail -c1 "$f")" != "" ]; then echo "missing EOF newline: $f"; rc=1; fi; done; exit $rc'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: no-secrets-in-staged
+        name: check no secrets staged
+        description: 检查暂存区无敏感文件（AGENTS.md §6.4）
+        entry: bash -c 'if git diff --cached --name-only | grep -Eq "\.env$|\.env\.local$|credentials\.json$|\.pem$|\.key$"; then echo "ERROR: 敏感文件被暂存（见 AGENTS.md §6.4）"; git diff --cached --name-only | grep -E "\.env$|\.env\.local$|credentials\.json$|\.pem$|\.key$"; exit 1; fi'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

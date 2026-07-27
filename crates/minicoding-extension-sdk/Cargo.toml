@@ -1,0 +1,17 @@
+[package]
+name = "minicoding-extension-sdk"
+description = "扩展作者稳定 API（Extension trait + Registrar + Manifest）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minicoding-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
