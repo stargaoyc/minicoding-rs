@@ -238,7 +238,7 @@ minicoding-policy/src/
 │   ├── non_interactive.rs # NonInteractivePrompter（非 TTY 策略化）
 │   ├── tui.rs             # TuiPrompter（TUI 非阻塞）
 │   └── callback.rs        # CallbackPrompter（SDK 闭包）
-├── risk.rs                # 命令风险解释（granular approval policies，见 design.md §9.4）
+├── risk.rs                # 命令风险解释（granular approval policies，见 design.md §9.6）
 └── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
 ```
 

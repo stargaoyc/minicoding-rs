@@ -1,0 +1,50 @@
+[package]
+name = "minicoding-tools"
+description = "内置 Tool 实现（fs/shell/web/git/task/plan/mcp 包装），组合层"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minicoding-core = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
+ignore = { workspace = true }
+similar = { workspace = true }
+sha2 = { workspace = true }
+htmd = { workspace = true }
+
+# 组合层可按需依赖多个领域 crate（见 modules.md §11.3）
+# M0 阶段仅占位骨架，不引入领域 crate（T-M0-1）
+# minicoding-context = { workspace = true }
+# minicoding-policy = { workspace = true }
+# minicoding-memory = { workspace = true, optional = true }
+# minicoding-hooks = { workspace = true, optional = true }
+# minicoding-journal = { workspace = true, optional = true }
+# minicoding-sandbox = { workspace = true, optional = true }
+# minicoding-mcp = { workspace = true, optional = true }
+# minicoding-storage = { workspace = true }
+
+# reqwest 仅 web.fetch/search 工具需要（M3+）
+# reqwest = { workspace = true, optional = true }
+
+[features]
+default = []
+# 按 modules.md §0.4 特性门控
+# memory = ["dep:minicoding-memory"]
+# hooks = ["dep:minicoding-hooks"]
+# file-undo = ["dep:minicoding-journal"]
+# sandbox = ["dep:minicoding-sandbox"]
+# mcp = ["dep:minicoding-mcp"]
+# web = ["dep:reqwest"]
+# full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "web"]

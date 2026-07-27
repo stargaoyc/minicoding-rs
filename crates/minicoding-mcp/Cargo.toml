@@ -1,0 +1,27 @@
+[package]
+name = "minicoding-mcp"
+description = "MCP client/server（基于官方 rmcp 2.x）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minicoding-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+
+# rmcp 2.2 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
+# M0 阶段仅占位骨架，不引入 rmcp（T-M0-1）
+# rmcp = { version = "2.2", features = [
+#     "client", "server", "macros",
+#     "transport-child-process",
+#     "transport-streamable-http-client-reqwest",
+# ] }
+# reqwest = { workspace = true }

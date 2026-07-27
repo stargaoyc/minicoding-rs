@@ -1,0 +1,23 @@
+[package]
+name = "minicoding-core"
+description = "抽象层：数据模型 + 核心 trait + Runtime 编排 + Event + Config + OTel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# core 必须轻量，无平台/网络重依赖（见 modules.md §1.4、§15.6）
+tokio = { workspace = true }
+futures = { workspace = true }
+trait-variant = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+uuid = { workspace = true }
+ulid = { workspace = true }
+time = { workspace = true }

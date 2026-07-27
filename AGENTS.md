@@ -248,7 +248,7 @@ windows = { version = "...", features = ["..."] }
 
 ### 3.9 事件总线与权限交互
 
-- `EventBus` 仅广播通知（无回复通道）：`Event::Token`/`MessageAppended`/`TurnEnd`/`TodoUpdated`/`HookRun`/`PermissionResolved`/`FileUndone` 等
+- `EventBus` 仅广播通知（无回复通道）：`Event::Token`/`MessageAppended`/`TurnEnd`/`TaskUpdated`/`HookRun`/`PermissionResolved`/`FileUndone` 等
 - 权限交互走 `PermissionPrompter` 点对点（`InteractivePrompter`/`TuiPrompter`/`CallbackPrompter`/`NonInteractivePrompter`）
 - 决策（`PermissionPolicy`）与交互（`Prompter`）分离，解决 broadcast 无法承载点对点回复的架构缺陷（见 `docs/design.md` §9.1）
 - 详见 `docs/modules.md` §3.3

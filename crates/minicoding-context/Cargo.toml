@@ -1,0 +1,19 @@
+[package]
+name = "minicoding-context"
+description = "ContextManager 实现 + 4 级压缩管道 + 权重模型 + 熔断"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minicoding-core = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tiktoken-rs = { workspace = true }

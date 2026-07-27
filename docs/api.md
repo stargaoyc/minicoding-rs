@@ -835,7 +835,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## 6. 配置 Schema
 
-完整 schema 见 `config.md`（本表节选关键）：
+完整 schema 见 `design.md` §12（本表节选关键）：
 
 ```toml
 # ~/.minicoding/config.toml  （根目录可由 MINICODING_HOME 覆盖，见 data-model.md §3.0）

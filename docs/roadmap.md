@@ -2,7 +2,7 @@
 
 本文给出 `minicoding-rs` 的分阶段交付计划、每阶段范围、验收标准与风险。时间预算以"理想人日"计，不承诺日历日期。
 
-> **重构说明**：参考 Claude Code 与 Codex CLI 的设计，沙箱、Hooks、MCP、Plan 模式、文件回滚等"扩展与安全"能力从原 M4/M7 前置到独立里程碑，避免 MVP 形成后再大改权限/工具边界。新里程碑顺序：基础 → Agent 循环（含应用层权限）→ 上下文/记忆 → OS 沙箱/审批 → 扩展机制（Hooks/MCP/Plan/Undo）→ 多 Provider → TUI → SDK/Server。
+> **重构说明**：参考 Claude Code 与 Codex CLI 的设计，沙箱、Hooks、MCP、Plan 模式、文件回滚等"扩展与安全"能力从原 M4/M7 前置到独立里程碑，避免 MVP 形成后再大改权限/工具边界。新里程碑顺序：基础 → Agent 循环（含应用层权限）→ 上下文/记忆 → OS 沙箱/MCP/Journal（安全底线 + 扩展机制基础）→ Hooks/Plan/子 Agent → 多 Provider → TUI → SDK/Server。
 
 ---
 
@@ -14,8 +14,8 @@
 | M1 | MVP：单轮 CLI | 12 | 可提问、读文件、流式输出 |
 | M2 | 完整 Agent 循环 + 应用层权限 | 12 | 工具多轮、写文件、shell、权限双抽象 |
 | M3 | 上下文、持久化与记忆 | 10 | 压缩、会话恢复、长期记忆、AGENTS.md、任务管理 |
-| M4 | OS 沙箱与审批模式 | 8 | seatbelt/landlock/seccomp、预设、exec、拒绝升级 |
-| M5 | 扩展机制：Hooks + MCP + Plan + 文件回滚 | 12 | 10 类 Hook、MCP client、Plan 模式、/undo |
+| M4 | 安全沙箱与 MCP | 8 | seatbelt/landlock/seccomp、预设、exec、拒绝升级、MCP client、/undo |
+| M5 | 扩展机制：Hooks + Plan + 子 Agent | 12 | 10 类 Hook、Plan 模式、类型化子 Agent、macOS 沙箱 |
 | M6 | 多 Provider 与健壮性 | 6 | Anthropic、Ollama、重试、错误恢复 |
 | M7 | TUI | 10 | 全屏交互 |
 | M8 | SDK 与 Server | 8 | 嵌入 + HTTP + MCP server |
@@ -26,7 +26,7 @@
 ## M0 — 骨架与基础设施（3 人日）
 
 **范围**
-- Cargo workspace + 8 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.85。
+- Cargo workspace + 14 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.85。
 - `Cargo.toml` 公共依赖统一管理（workspace dependencies）；平台条件依赖示例（`landlock`/`libseccomp` 仅 Linux）。
 - CI：`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny`。
 - `tracing` + `tracing-subscriber` + `tracing-opentelemetry` + `opentelemetry-otlp` 初始化（`core::otel`），支持 `OTEL_EXPORTER_OTLP_ENDPOINT` 环境变量；无后端时降级为本地 fmt 日志。
@@ -55,7 +55,7 @@
 - `providers`：`tiktoken-rs` Tokenizer。
 - `tools`：`fs.read`、`fs.glob`、`fs.grep`、`fs.list`（只读组）。
 - `core`：单轮 Agent 循环（无工具多轮，仅处理一次 tool_call 便于打基础）。
-- `core`：应用层路径沙箱 `sandbox_path`（第一道防线，`security.md` §3）。
+- `policy`：应用层路径沙箱 `sandbox_path`（第一道防线，`security.md` §3）。
 - `cli`：参数解析、流式 token 渲染、单次提问模式。
 - `storage`：JSONL append。
 
@@ -135,30 +135,41 @@
 
 ---
 
-## M4 — OS 沙箱与审批模式（8 人日）
+## M4 — 安全沙箱与 MCP（8 人日）
+
+> **范围调整说明**：参考 CC/Codex 后将原 M5 的 MCP client 与 Journal/`/undo` 前置到 M4，与 OS 沙箱同步交付——MCP 远程工具与文件回滚都依赖沙箱作为安全底线，同里程碑交付避免 M5 出现"有 Hook 无沙箱兜底"的窗口期。dev-plan M4 含 11 个 task，M5 聚焦 Hooks/子 Agent/Plan。
 
 **范围**
-- `sandbox`：`SandboxDriver` trait 实现落地——macOS Seatbelt（`sandbox-exec -p` 动态生成 profile）、Linux Landlock + seccomp（`landlock` + `libseccomp`）、Windows 受限令牌（`windows` crate，可降级）。
+- `sandbox`：`SandboxDriver` trait 实现落地——Linux Landlock + seccomp（`landlock` + `libseccomp`，M4 主交付）；macOS Seatbelt 与 Windows 受限令牌在 M5+/M6+ 补齐（见平台优先级）。
 - `sandbox`：pre-main 进程硬化（`PR_SET_DUMPABLE=0`/`RLIMIT_CORE=0`/清 `LD_*`）。
 - `sandbox`：`ExternalSandbox` 策略（CI/容器场景，依赖外层隔离，`NoopDriver` + info 日志）。
 - `sandbox`：`.git`/`.hg`/`.svn` 默认只读保护（防破坏版本库）。
 - `core`：`SandboxPolicy` 四模式（ReadOnly/WorkspaceWrite/ExternalSandbox/DangerFullAccess）+ `ApprovalMode`（Untrusted/OnFailure/OnRequest/Never）+ 预设（read-only/auto/external-sandbox/full-access）。
 - `core`：沙箱拒绝检测与升级流（识别 EPERM/ENOSYS/Seatbelt denial → 请求批准 → 放宽策略重试，参考 Codex）。
 - `tools`：`shell.run` 执行前调 `SandboxDriver::apply`；`fs.write/edit/delete` 受沙箱约束。
-- `cli`：`--preset`、`--approval-mode`、`--sandbox`、`minicoding exec --sandbox read-only|external-sandbox ...` 子命令。
+- `mcp`：`McpClient` trait + `rmcp` client（stdio，M4 一步到位用官方 SDK，不自研薄封装）。
+- `mcp`：`mcp_tool_name` 命名（`mcp__<server>__<tool>`）+ project 作用域首次批准流（`mcp_choices.toml`，防恶意仓库植入）。
+- `tools`：`mcp::wrapper` 把远程 MCP 工具包装为本地 `Tool`（`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射）。
+- `journal`：`FileChangeJournal` + `/undo`（会话内 operation 级回滚，特性门控 `file_undo`，见 `design.md` §17）。
+- `tools`：`fs.write/edit/delete` 成功后调 `Journal::record`（仅 `file_undo=true` 时）。
+- `cli`：`--preset`、`--approval-mode`、`--sandbox`、`minicoding exec --sandbox read-only|external-sandbox ...` 子命令；`mcp` 子命令（list/approve/reset-project-choices）；`/undo` REPL 命令。
 - `cli`：`doctor --security` 自检（沙箱驱动是否硬化、`.git` 保护、权限配置）。
 - `core`：`CallbackPrompter`（SDK 用）、`TuiPrompter` 占位。
 
 **验收**
-- `--sandbox read-only` 下任何写/网络在内核被拦（macOS/Linux），`audit.log` 记录拒绝。
+- `--sandbox read-only` 下任何写/网络在内核被拦（Linux），`audit.log` 记录拒绝。
 - `--sandbox workspace-write` 下越界写、网络外联被拦；工作区内自由读写执行。
 - `minicoding exec --sandbox external-sandbox` 在容器内运行不报沙箱初始化失败，日志声明依赖外部隔离。
-- `.git` 目录在 workspace-write 下默认拒绝写入（除非 `allow_dotgit_write=true`）。
+- `.git` 目录在 workspace-write 下默认拒绝写入（除非 `allow_vcs_write=true`）。
 - 沙箱拒绝（如 Landlock EPERM）被识别并升级为权限请求，而非裸错误。
 - `--preset full-access` 启动时打 red 警告并要求显式确认。
 - `doctor --security` 输出沙箱驱动类型与硬化状态。
+- MCP stdio server 能连接、`list_tools`、`call`；远程工具以 `mcp__<server>__<tool>` 注册。
+- 含 `.minicoding/mcp.json` 的仓库首次进入时逐 server 弹窗批准，结果落 `mcp_choices.toml`。
+- `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
+- MCP/Hook 子进程不继承凭证环境变量。
 
-**任务追溯**：dev-plan T-M4-1..T-M4-11（11 个 task，预估 8 人日）。可度量门槛：Landlock EPERM 拦截越界写可验证、沙箱拒绝熔断 3/5 次阈值生效、`--preset full-access` red 警告 + 二次确认生效、MCP project 作用域首次批准流测试通过、`/undo` 冲突检测（mtime/hash 比对）测试通过。**平台优先级**：M4 仅交付 Linux（Landlock+libseccomp），macOS/Windows 降级 NoopDriver（见 `tech-stack.md` §11 平台优先级策略）。
+**任务追溯**：dev-plan T-M4-1..T-M4-11（11 个 task，预估 8 人日）。可度量门槛：Landlock EPERM 拦截越界写可验证、沙箱拒绝熔断 3/5 次阈值生效、`--preset full-access` red 警告 + 二次确认生效、MCP project 作用域首次批准流测试通过、`/undo` 冲突检测（mtime/hash 比对）测试通过。**平台优先级**：M4 仅交付 Linux（Landlock+libseccomp），macOS/Windows 降级 NoopDriver（见 `tech-stack.md` §11 平台优先级策略，M5+ 补 macOS，M6+ 补 Windows）。
 
 **风险**
 - Landlock 旧内核不支持 → 编译期检测 + 运行时降级 `NoopDriver` + warn。
@@ -168,37 +179,35 @@
 
 ---
 
-## M5 — 扩展机制：Hooks + MCP + Plan + 文件回滚（12 人日）
+## M5 — 扩展机制：Hooks + Plan + 子 Agent（12 人日）
+
+> **范围调整说明**：MCP client 与 Journal/`/undo` 已前置到 M4（与沙箱同里程碑交付）。M5 聚焦 Hooks、Plan 模式、类型化子 Agent，并补齐 macOS 沙箱实现（平台优先级 M5+）。
 
 **范围**
 - `core`：`Hook` trait + `HookRegistry` + 10 类事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/Stop/SubagentStop/PermissionRequest，见 `hooks.md`）。
 - `core`：`ScriptHook` 适配器（外部可执行 + JSON over stdio + 退出码语义），`on_hook_error` 策略。
 - `core`：6 个内置示例 Hook（fmt-on-write / auto-approve-tests / block-secrets / git-status-inject / backup-before-compact / test-on-stop）。
-- `mcp`：`McpClient` trait + `stdio_only` 客户端薄封装（M5 先交付，仅 stdio）。
-- `mcp`：`mcp_tool_name` 命名（`mcp__<server>__<tool>`）+ project 作用域首次批准流（`mcp_choices.toml`，防恶意仓库植入）。
-- `tools`：`mcp::wrapper` 把远程 MCP 工具包装为本地 `Tool`（`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射）。
 - `core`：Plan 模式（`PermissionMode::Plan` + `plan.exit` 工具 + 双重只读强制 + 预批准缓存，见 `design.md` §16）。
-- `core`：`FileChangeJournal` + `/undo`（会话内 operation 级回滚，特性门控 `file_undo`，见 `design.md` §17）。
-- `tools`：`fs.write/edit/delete` 成功后调 `Journal::record`（仅 `file_undo=true` 时）。
-- `cli`：`--hook`/配置加载 Hook；`/undo` REPL 命令；`/plan` 切换 Plan 模式；`mcp` 子命令（list/approve/reset-project-choices）。
-- `core`：OTel `hook.run` span、`mcp.call` span。
+- `core`：类型化子 Agent（Explore/Plan/General/Custom，`task.spawn` 工具，见 `design.md` §7）。
+- `sandbox`：补齐 macOS Seatbelt 实现（`sandbox-run` 封装原生 sandbox 框架，平台优先级 M5+）。
+- `cli`：`--hook`/配置加载 Hook；`/plan` 切换 Plan 模式。
+- `core`：OTel `hook.run` span。
 
 **验收**
 - `PostToolUse(fs.write|fs.edit)` Hook 能触发 `cargo fmt`；`PreToolUse` Hook `deny` 能阻断工具调用。
 - Hook 对内置黑名单 `Deny` 的 `allow` 被忽略（L0 不破）；`modify_input` 越界被 `sandbox_path` 拦。
-- MCP stdio server 能连接、`list_tools`、`call`；远程工具以 `mcp__<server>__<tool>` 注册。
-- 含 `.minicoding/mcp.json` 的仓库首次进入时逐 server 弹窗批准，结果落 `mcp_choices.toml`。
 - Plan 模式下非只读工具被硬门 `Deny`；`plan.exit` 后切回 Default 模式并保留预批准。
-- `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
+- `task.spawn` 能启动子 Agent 并隔离上下文；子 Agent 结束后 `Event::SubagentFinished` 广播。
 - MCP/Hook 子进程不继承凭证环境变量。
+- macOS CI matrix 启用，`--sandbox read-only` 在 macOS 下写被 Seatbelt 拦。
 
 **任务追溯**：dev-plan T-M5-1..T-M5-8（8 个 task，预估 12 人日）。可度量门槛：10 类 Hook 事件全覆盖测试、Hook L0 不覆盖（黑名单 Deny 时 allow 被忽略）测试通过、asyncRewake 3 并发上限 + 超时 kill 测试通过、Plan 模式硬门 + plan.exit 预批准缓存测试通过、macOS CI matrix 启用（平台优先级 M5+，见 `tech-stack.md` §11）、独立测试策略见 `design.md` §21（stub 替身表）。
 
 **风险**
 - Hook 串行链路影响延迟 → 默认超时 30s，`on_hook_error=continue` 兜底。
-- MCP 协议演进 → M5 仅 stdio，`rmcp` 完整实现推迟到 M6+。
 - Plan 预批准与权限矩阵交互复杂 → 充分测试 ExitPlanMode 后的 Verdict 解析。
-- Journal 回滚与外部修改冲突 → 回滚前校验文件 mtime/hash，冲突时记入 `failed_files`。
+- 子 Agent 上下文隔离不彻底 → 独立 ContextManager + 共享 trait 对象，单测验证隔离。
+- macOS Seatbelt profile 语法差异 → 按 macOS 版本测试 profile 生成。
 
 ---
 

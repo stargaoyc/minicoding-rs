@@ -1,0 +1,119 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/minicoding-core",
+    "crates/minicoding-context",
+    "crates/minicoding-policy",
+    "crates/minicoding-memory",
+    "crates/minicoding-hooks",
+    "crates/minicoding-journal",
+    "crates/minicoding-sandbox",
+    "crates/minicoding-mcp",
+    "crates/minicoding-storage",
+    "crates/minicoding-providers",
+    "crates/minicoding-tools",
+    "crates/minicoding-cli",
+    "crates/minicoding-tui",
+    "crates/minicoding-sdk",
+]
+
+# Workspace 全局元数据
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/minicoding/minicoding-rs"
+version = "0.1.0"
+authors = ["minicoding-rs contributors"]
+
+# 统一依赖版本管理（见 AGENTS.md §2.7、tech-stack.md §12）
+[workspace.dependencies]
+# 异步运行时
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+trait-variant = "0.1"
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# 日志与可观测性（OTel 一等公民，见 tech-stack.md §7、design.md §15）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+tracing-opentelemetry = "0.30"
+opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", features = ["trace", "http-proto", "reqwest-rustls"] }
+
+# 错误处理（库 crate 用 thiserror，边界用 anyhow，见 AGENTS.md §2.3）
+thiserror = "2.0"
+anyhow = "1.0"
+
+# 路径与 ID（AGENTS.md §2.5）
+camino = "1.1"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+ulid = { version = "1.1", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+
+# HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# CLI（仅 cli 引入，见 tech-stack.md §4）
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+indicatif = "0.17"
+anstream = "0.6"
+anstyle = "1.0"
+rustyline = "14.0"
+
+# 文件与代码处理（见 tech-stack.md §5）
+globset = "0.4"
+regex = "1.11"
+ignore = "0.4"
+similar = "2.6"
+sha2 = "0.10"
+htmd = "0.1"
+
+# Token 计数（见 tech-stack.md §6）
+tiktoken-rs = "0.6"
+
+# 配置（见 tech-stack.md §8）
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# 测试（dev-dependencies，见 tech-stack.md §10）
+wiremock = "0.6"
+tempfile = "3.13"
+insta = "1.41"
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+assert_cmd = "2.0"
+
+# 跨进程锁
+fs2 = "0.4"
+
+# 内部 crate 互引（path 引用，确保本地开发一致性）
+minicoding-core = { path = "crates/minicoding-core" }
+minicoding-context = { path = "crates/minicoding-context" }
+minicoding-policy = { path = "crates/minicoding-policy" }
+minicoding-memory = { path = "crates/minicoding-memory" }
+minicoding-hooks = { path = "crates/minicoding-hooks" }
+minicoding-journal = { path = "crates/minicoding-journal" }
+minicoding-sandbox = { path = "crates/minicoding-sandbox" }
+minicoding-mcp = { path = "crates/minicoding-mcp" }
+minicoding-storage = { path = "crates/minicoding-storage" }
+minicoding-providers = { path = "crates/minicoding-providers" }
+minicoding-tools = { path = "crates/minicoding-tools" }
+minicoding-cli = { path = "crates/minicoding-cli" }
+minicoding-tui = { path = "crates/minicoding-tui" }
+minicoding-sdk = { path = "crates/minicoding-sdk" }
+
+# Workspace 默认 profile
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+debug = 1

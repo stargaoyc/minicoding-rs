@@ -157,16 +157,18 @@ impl Runtime {
             Verdict::Deny(r) => Decision::Deny(r),
             Verdict::Ask(prompt) => {
                 // 广播通知（仅展示/审计，无回复通道，可克隆）
+                let prompt_id = prompt.id.clone();
                 self.emit(Event::PermissionRequested {
-                    id: prompt.id.clone(),
+                    id: prompt_id.clone(),
                     tool: prompt.tool.clone(),
                     summary: prompt.summary.clone(),
                     risk: prompt.risk.clone(),
                 }).await;
                 // 点对点解析（InteractivePrompter / NonInteractivePrompter / TuiPrompter / CallbackPrompter）
+                // prompt 在此处 move 进 prompter，故提前 clone id
                 let d = self.prompter.prompt(prompt).await;
                 self.emit(Event::PermissionResolved {
-                    id: /* prompt id */, decision: d.clone(),
+                    id: prompt_id, decision: d.clone(),
                 }).await;
                 d
             }
@@ -383,6 +385,11 @@ pub trait Tool {
     /// 是否产生副作用（影响权限路径与并行/串行调度，见 §2.3）
     fn side_effect(&self) -> SideEffect;
 
+    /// 是否只读（用于 Plan 模式硬门，见 §16.1）。
+    /// 默认实现：`self.side_effect() == SideEffect::None`。
+    /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖（见 §19.3、rules.md C-25）。
+    fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
+
     /// 执行
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext)
         -> Result<ToolResult, ToolError>;
@@ -396,7 +403,7 @@ pub enum SideEffect {
 }
 ```
 
-`side_effect()` 不仅驱动权限策略（见 §9），还是 §2.3 并行/串行分桶的依据，因此工具实现必须如实标注：把写操作误标为 `None` 会绕过串行约束并产生竞态。
+`side_effect()` 不仅驱动权限策略（见 §9），还是 §2.3 并行/串行分桶的依据，因此工具实现必须如实标注：把写操作误标为 `None` 会绕过串行约束并产生竞态。`is_read_only()` 拆为独立方法（而非直接用 `side_effect() == None`）是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致——Plan 模式硬门（§16.1）用 `is_read_only()` 判断，给声明了 `readOnlyHint` 的 MCP 工具留出"Plan 模式可用"的通道。权威定义见 `api.md` §3.3。
 
 ### 4.2 ToolRegistry
 
@@ -1354,8 +1361,21 @@ pub enum Event {
     PermissionResolved { id: String, decision: Decision },
     TurnEnd { stop_reason: StopReason },
     Error(RuntimeError),
+    /// 子 Agent 启动/结束（§7）。
+    SubagentStarted { id: String, role: String },
+    SubagentFinished { id: String, summary: String },
+    /// task.update 工具调用后广播，供 UI 渲染任务进度（§18.4）。
+    TaskUpdated { task: Task },
+    /// Hook 执行结果通知（hooks.md §8 / §20.2）。
+    HookRun { name: String, event: String, decision: HookDecision, elapsed: Duration },
+    /// Plan 模式状态切换（§16.2）。
+    PermissionModeChanged { from: PermissionMode, to: PermissionMode },
+    /// 文件回滚执行结果（§17.4）。
+    FileUndone { report: UndoReport },
 }
 ```
+
+> 权威定义见 `api.md` §4。所有事件字段必须 `Clone + Send`（broadcast 要求）。`TaskUpdated` 替代旧名 `TodoUpdated`（见 `api.md` §10.1 废弃别名说明）。
 
 ### 11.2 事件总线
 
@@ -1631,12 +1651,19 @@ pub enum FileChange {
 
 ### 17.4 接口
 
+> 权威定义见 `api.md` §3.11（含 `#[trait_variant::make(Journal: Send)]`）。本节仅展示核心签名与冲突检测语义。
+
 ```rust
+#[trait_variant::make(Journal: Send)]
 pub trait Journal {
-    fn record(&self, entry: ChangeEntry);
-    fn undo(&self, steps: usize) -> Result<UndoReport, JournalError>;
-    fn diff(&self) -> Vec<DiffEntry>;
-    fn reset_to_initial(&self) -> Result<()>;   // /new
+    /// 记录一次 turn 的文件改动（fs.write/edit/delete 成功后调用）。
+    async fn record(&self, entry: ChangeEntry) -> Result<(), JournalError>;
+    /// 撤销最近 steps 次 turn 的文件改动（/undo），含冲突检测。
+    async fn undo(&self, steps: usize) -> Result<UndoReport, JournalError>;
+    /// 列出会话内所有文件变更（/diff）。
+    async fn diff(&self) -> Result<Vec<DiffEntry>, JournalError>;
+    /// 回到会话启动时状态（/new），清空 journal + 重建初始快照。
+    async fn reset_to_initial(&self) -> Result<(), JournalError>;
 }
 
 pub struct UndoReport {
@@ -1816,7 +1843,7 @@ explicitly deferred. Prefer tool calls over prose for tracking progress.
 - **与 §17 文件回滚**：每个 `InProgress` → `Completed` 的迁移可关联一个 `ChangeEntry`，便于"撤销到某个 task 开始前"（后续增强）。
 - **与 §7 子 Agent**：`task.owner` 字段可把任务分配给子 Agent，实现"父 Agent 规划、子 Agent 执行"的分工（后续增强）。
 - **与 §15 OTel**：任务工具调用打 `tool.call` span，属性 `tool.name=task.create/update`、`task.id`、`task.status`、`task.blocks`。
-- **与事件总线**：新增 `Event::TaskUpdated { task: Task, change: TaskChange }`（可克隆，与 broadcast 兼容），供 UI 渲染。
+- **与事件总线**：广播 `Event::TaskUpdated { task: Task }`（可克隆，与 broadcast 兼容，权威定义见 `api.md` §4），供 UI 渲染。
 - **与 §3.7 压缩状态保留**：任务列表存 `SessionMeta`，压缩后不丢失。
 
 ### 18.10 向后兼容
