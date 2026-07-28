@@ -1,0 +1,16 @@
+[package]
+name = "minicoding-protocol"
+description = "JSON-RPC 2.0 wire types + Event/Command DTO（前后端协议契约）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+minicoding-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

@@ -34,7 +34,7 @@
 - MCP：`rmcp` 2.2（官方 Rust MCP SDK，**不自研** stdio/http）
 - 详见 `docs/tech-stack.md`
 
-### Workspace 结构（14 个 crate）
+### Workspace 结构（17 个 crate）
 
 ```
 minicoding-rs (workspace)
@@ -46,10 +46,13 @@ minicoding-rs (workspace)
     ├── minicoding-hooks         # HookRegistry + ScriptHook + asyncRewake
     ├── minicoding-journal       # FileChangeJournal + /undo
     ├── minicoding-sandbox       # OS 沙箱驱动（sandbox-run + landlock + libseccomp）
-    ├── minicoding-mcp           # MCP client/server（rmcp 2.2）
+    ├── minicoding-mcp           # MCP client/server（rmcp 2.2）+ 进程池 + 后台预热
     ├── minicoding-storage       # JSONL 存储 + audit.log
-    ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）
+    ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）+ 小 LLM
     ├── minicoding-tools         # 内置 Tool 实现（组合层）
+    ├── minicoding-protocol      # JSON-RPC 2.0 wire types + Event/Command DTO
+    ├── minicoding-server        # HTTP/SSE server + ACP 适配器（多前端接入层）
+    ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar）
     ├── minicoding-cli           # CLI frontend
     ├── minicoding-tui           # TUI frontend（M7）
     └── minicoding-sdk           # 嵌入 SDK（M8）

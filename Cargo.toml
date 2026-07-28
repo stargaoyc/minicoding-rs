@@ -12,6 +12,9 @@ members = [
     "crates/minicoding-storage",
     "crates/minicoding-providers",
     "crates/minicoding-tools",
+    "crates/minicoding-protocol",
+    "crates/minicoding-server",
+    "crates/minicoding-extension-sdk",
     "crates/minicoding-cli",
     "crates/minicoding-tui",
     "crates/minicoding-sdk",
@@ -105,6 +108,9 @@ minicoding-mcp = { path = "crates/minicoding-mcp" }
 minicoding-storage = { path = "crates/minicoding-storage" }
 minicoding-providers = { path = "crates/minicoding-providers" }
 minicoding-tools = { path = "crates/minicoding-tools" }
+minicoding-protocol = { path = "crates/minicoding-protocol" }
+minicoding-server = { path = "crates/minicoding-server" }
+minicoding-extension-sdk = { path = "crates/minicoding-extension-sdk" }
 minicoding-cli = { path = "crates/minicoding-cli" }
 minicoding-tui = { path = "crates/minicoding-tui" }
 minicoding-sdk = { path = "crates/minicoding-sdk" }

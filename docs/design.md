@@ -367,6 +367,105 @@ L2 摘要压缩触发
 
 降级链与 §8.4 的"会话摘要失败降级链"同构，复用同一 `SummaryFallback` 工具。`quality` 字段（`llm`/`heuristic`/`dropped`）记入压缩日志（§3.5 `ContextSnapshot`），供后续诊断压缩质量。
 
+### 3.9 预测性压缩（Predictive Compact）
+
+§3.3 的反应式 compact 在 `token_count > budget * 0.85` 时触发，存在两个不足：(1) 触发点可能在 turn 中途，此时 LLM 已开始流式输出，打断代价高；(2) 阈值靠近上限，留给本轮 tool_result 的余量不足，易在 turn 末再次触发，加剧 §3.6 的 Thrash 风险。预测性 compact 在 turn 开始前根据历史增长估算"本轮是否会超"，提前压缩，给本轮留足空间。
+
+**估算公式**：
+
+```
+predicted_tokens = current_tokens + avg_turn_growth
+avg_turn_growth  = EMA(turn_token_delta_history, alpha=0.3)
+baseline_growth  = config.context.predictive_baseline_growth_tokens  # 默认 15000
+```
+
+`avg_turn_growth` 是历史 turn token 增量的指数移动平均；冷启动期（历史样本 < 3）用 `baseline_growth` 兜底，避免空历史导致预测失真。EMA 比简单平均更能跟踪近期变化（如用户突然开始大量 read 大文件）。
+
+**触发条件**：
+
+```
+if config.context.predictive_compact_enabled
+   and predicted_tokens > budget * 0.85
+   and current_tokens <= budget * 0.85:    # 避免与反应式 compact 重复触发
+    trigger predictive_compact()
+```
+
+预测性 compact 与反应式 compact 互补而非替代：反应式是兜底防线（即使预测失误，超阈值仍触发），预测性是优化（在 turn 间隙提前压缩，避免 turn 中断）。两者复用 §3.3 的压缩管道，不引入新算法。
+
+**配置**：
+
+```toml
+[context]
+predictive_compact_enabled = false                  # 默认关，需用户显式开启
+predictive_baseline_growth_tokens = 15000           # 冷启动 baseline
+predictive_ema_alpha = 0.3                          # EMA 平滑系数
+```
+
+默认关闭是因为预测性 compact 在"短对话 + 小工具输出"场景下可能多余（提前压缩反而丢失上下文）。用户在长会话 + 大量文件读取场景下开启收益最大。
+
+**可观测性**：预测性 compact 触发时打 OTel span event（`predictive_compact`），属性 `predicted_tokens`/`current_tokens`/`avg_turn_growth`/`baseline_used`（bool），便于诊断预测准确度。若连续 N 次预测性 compact 后仍触发反应式 compact，说明 `baseline_growth` 配置过小，Runtime 在 `audit.log` 写建议调大提示。
+
+### 3.10 Post-compact 上下文恢复
+
+§3.3 L2/L3 压缩会把"刚 read 过的文件"tool_result 一起摘要或丢弃，导致 compact 后模型丢失文件内容上下文，下一轮被迫重新 `fs.read`，浪费 token 且打断思路。Post-compact 上下文恢复机制在 compact 后把"最近读过的文件"重新注入，让模型无缝继续工作。
+
+**跟踪机制**：`ContextManager` 在每个 `tool.call` span 末（`fs.read` 成功返回时）记录路径到 `recent_read_paths` 环形缓冲（容量 = `post_compact_max_files`，默认 5）。仅记录 `fs.read`，不记录 `fs.grep`/`fs.glob`（输出是搜索结果而非文件全文，重读意义不大）。
+
+```rust
+pub struct ContextManager {
+    // ... 既有字段
+    recent_read_paths: VecDeque<Utf8PathBuf>,  // 容量 post_compact_max_files
+}
+
+impl ContextManager {
+    /// 在 fs.read 工具成功后由 Runtime 调用，记录路径。
+    pub fn note_file_read(&mut self, path: Utf8PathBuf) {
+        if self.recent_read_paths.iter().any(|p| p == &path) {
+            return;  // 去重
+        }
+        if self.recent_read_paths.len() == self.config.post_compact_max_files {
+            self.recent_read_paths.pop_front();
+        }
+        self.recent_read_paths.push_back(path);
+    }
+}
+```
+
+环形缓冲在 compact 时不被清空——它跟踪的是"物理文件路径"，与 messages 是否被压缩无关。`note_file_read` 由 Runtime 在 §2.3 `run_one` 成功返回后调用，与 OTel `tool.call` span 末对齐。
+
+**重注入流程**：
+
+```
+compact 完成
+   │
+   ▼
+对 recent_read_paths 中每个路径：
+   ├─ 检查路径是否仍存在于 retained tail（§3.3 L3 保留的最近 W 条消息）
+   │    └─ 是 → 跳过（避免重复注入）
+   ├─ 检查文件是否仍存在（compact 期间用户可能删除）
+   │    └─ 否 → 跳过并 warn
+   ├─ 读取文件内容，按 post_compact_max_tokens_per_file 截断
+   └─ 累计 token 不超过 post_compact_token_budget
+   │
+   ▼
+拼装为 <post_compact_context> 块注入 system 段末尾
+```
+
+`<post_compact_context>` 边界声明这是"compact 前刚读过的文件内容，供参考"，区别于 §8.6 的 `<project_doc>`（项目约定）与 §8.7 的 `<auto_memory>`（学习记录）。包裹边界让 LLM 理解这是上下文恢复而非新指令。
+
+**配置**：
+
+```toml
+[context]
+post_compact_max_files = 5                # 跟踪最近 N 个 read 路径
+post_compact_token_budget = 50000          # 重注入总 token 上限
+post_compact_max_tokens_per_file = 5000    # 单文件截断阈值
+```
+
+token budget 与 §3.4 的预算分配独立——post-compact 重注入占用 headroom（5%）+ 必要时压缩 recent messages 窗口腾出空间。若预算不足以容纳全部 `recent_read_paths`，按 LRU（最近最少 read）顺序淘汰。
+
+**与 §3.9 预测性 compact 的协作**：预测性 compact 在 turn 间隙触发，post-compact 恢复也在间隙完成，用户无感知。反应式 compact 在 turn 中途触发时，post-compact 恢复延迟到该 turn 结束（避免在流式输出中插入 system 消息打乱对话）。
+
 ---
 
 ## 4. 工具系统详细设计
@@ -1918,7 +2017,102 @@ MCP 工具的 `side_effect` 由 server 在工具 schema 中声明（`readOnlyHin
 
 `project` 作用域的"首次批准"是关键安全机制——参考 CC 防止恶意仓库通过 `.mcp.json` 植入恶意 server：首次 clone 一个含 `.minicoding/mcp.json` 的仓库时，minicoding 提示用户逐个确认是否启用其中的 MCP server，确认后写入 `~/.minicoding/mcp_choices.toml` 记忆。`minicoding mcp reset-project-choices` 可重置。
 
-### 19.5 生命周期
+### 19.5 MCP 进程池与后台预热
+
+§19.6（生命周期）描述的"Runtime 启动时并发启动各 MCP server"是同步阻塞模型——首 turn 必须等所有 server 握手完成。当配置多个重型 MCP server（如 GitHub + Slack + 内部数据库）时，启动延迟叠加明显。本节引入进程池复用与后台预热，把启动延迟从首 turn 路径移到后台。
+
+**进程池复用**：MCP server 子进程跨 turn 复用，不每 turn 重启。`McpClient` 持有 `HashMap<ServerId, McpConnection>`，连接一旦建立长期保活，直到 Runtime 关闭或 server 崩溃。这与 §19.6（生命周期）的"Runtime 关闭时优雅关闭"一致——只是不再每 turn 启停。
+
+```rust
+pub struct McpConnectionPool {
+    connections: RwLock<HashMap<ServerId, Arc<McpConnection>>>,
+    inflight: RwLock<HashMap<RequestKey, Shared<Future<ToolResult>>>>,
+    health_check_interval: Duration,  // 默认 30s
+}
+
+pub struct McpConnection {
+    pub transport: McpTransport,        // stdio 子进程或 http 连接池
+    pub tools: Vec<ToolSchema>,          // 握手时 list_tools 缓存
+    pub last_ping: Instant,
+    pub state: ConnectionState,           // Healthy / Degraded / Disconnected
+}
+```
+
+`connections` 用 `RwLock` 是因为工具调用时只读访问连接，仅健康检查与重连时写。`inflight` 用于下文的请求合并。
+
+**后台预热**：分两类 MCP server 启动时机：
+
+| 类型 | 触发时机 | 阻塞首 turn？ |
+|------|---------|---------------|
+| 全局 server（`~/.minicoding/mcp.json`） | minicoding 进程启动 | 否（后台预热，首 turn 仅在未完成时阻塞） |
+| 项目级 server（`.minicoding/mcp.json`） | 创建/resume session 时 | 否（后台预热，首 turn 仅在未完成时阻塞） |
+
+```
+Runtime 启动 / session 创建
+   │
+   ▼
+并发派发预热任务（每个 server 一个 tokio::task）
+   │
+   ├─ 全局 server：立即开始握手 + list_tools
+   ├─ 项目级 server：首次需用户批准（§19.4），批准后开始预热
+   │
+   ▼
+首 turn 开始
+   │
+   ├─ 所需 server 已预热完成 → 直接用，零延迟
+   └─ 所需 server 仍在预热 → 等待（带 timeout），超时则该 server 工具本 turn 不可用
+```
+
+全局 server 在进程启动即预热，session 创建时通常已就绪；项目级 server 在 session 创建时启动预热，首 turn 仅在用户立即提交 prompt 且预热未完成时阻塞。这把"启动延迟"从必经路径移到"用户阅读 AGENTS.md / 输入首条消息"的并行时间段。
+
+**Inflight merge**：同 server 的并发工具调用若参数相同，合并为一次实际调用，避免重复请求外部服务（如并发的 `mcp__github__list_prs` 只发一次 HTTP）。通过 `futures::future::Shared` 把首个请求的 `Future` 共享给后续调用：
+
+```rust
+async fn call_tool(&self, server: &str, tool: &str, input: Value) -> ToolResult {
+    let key = RequestKey { server, tool, input_hash: hash(&input) };
+    if let Some(shared) = self.inflight.read().await.get(&key) {
+        return shared.clone().await;  // 复用首个请求结果
+    }
+    let fut = self.dispatch(server, tool, input).shared();
+    self.inflight.write().await.insert(key.clone(), fut.clone());
+    let result = fut.await;
+    self.inflight.write().await.remove(&key);
+    result
+}
+```
+
+`Shared` 让多个 await 同一 future，首个完成后所有等待者拿到同一结果。`input_hash` 用 `std::hash::Hasher`，避免大 input 的 clone 开销。
+
+**健康检查**：定期 `ping` 检测连接活性：
+
+```
+每 health_check_interval（默认 30s）：
+   ├─ ping 所有 Healthy 连接
+   │    ├─ 响应 → 更新 last_ping，状态保持 Healthy
+   │    └─ 超时（5s）→ 状态降级为 Degraded，记录 warn
+   │
+   └─ Degraded 连接尝试重连
+        ├─ 成功 → 恢复 Healthy
+        └─ 失败 → 状态 Disconnected，该 server 工具标记不可用，
+                   broadcast Event::McpServerDisconnected 通知前端
+```
+
+重连采用指数退避（1s → 2s → 4s → 上限 60s），避免 server 短暂故障时频繁重连打满 CPU。Disconnected 状态下用户调用该 server 工具直接返回错误"server disconnected, retrying connection"，而非 hang。
+
+**启动事件 channel**：预热完成/失败通过 `tokio::sync::mpsc` 通知 Runtime，Runtime 转发为 `Event::McpServerReady`/`Event::McpServerFailed` 广播，前端据此更新 MCP server 状态指示器（如 TUI 状态栏显示 `github: ✓` / `slack: ⏳` / `db: ✗`）。
+
+```rust
+pub enum McpPoolEvent {
+    Ready { server: ServerId, tool_count: usize },
+    Failed { server: ServerId, error: McpError },
+    Disconnected { server: ServerId },
+    Reconnected { server: ServerId },
+}
+```
+
+事件经 Runtime 转发为 `Event` 总线事件（§11），保持单一事件源。Runtime 自身也订阅这些事件以更新 `ToolRegistry`（server Ready 时注册其工具，Disconnected 时移除）。
+
+### 19.6 生命周期
 
 ```
 Runtime 启动
@@ -1941,11 +2135,11 @@ list_tools → 注册为 mcp__<server>__<tool> 进 ToolRegistry
 Runtime 关闭 → 优雅关闭各 MCP server（stdio: EOF；http: 连接池释放）
 ```
 
-### 19.6 工具检索（Tool Search，阶段 6+）
+### 19.7 工具检索（Tool Search，阶段 6+）
 
 当配置的 MCP server 提供数百个工具时，全量注入 LLM 的 `tools` 数组会吃掉大量 token 并降低模型选择准确度。参考 CC/Codex 的 Tool Search：MCP 工具延迟注册，仅当模型用 `tool.search` 工具检索到相关工具时才动态加入 `tools` 数组。索引基于 BM25 或 embedding（阶段 7+）。
 
-### 19.7 安全约束（与 `rules.md`/`security.md` 协同）
+### 19.8 安全约束（与 `rules.md`/`security.md` 协同）
 
 | 约束 | 说明 |
 |------|------|
@@ -2044,7 +2238,7 @@ PreToolUse Hook（matcher 命中时）
 - Plan 与 Task 是**工具**（在 `minicoding-tools`），不是独立 crate——它们的"依赖"是工具实现层调用 `Journal`/`TaskRegistry` 的 trait 对象（`Arc<dyn Journal>`/`Arc<dyn TaskRegistry>`），由 Runtime 注入；
 - Runtime 在 `minicoding-core`，持有所有 trait 对象，编排协作，本身不含领域算法。
 
-因此 §16.6/§17.6/§18.9/§19.7/§20.2 列出的"与既有抽象的关系"都是 **Runtime 编排关系**，不是 crate 间 `use` 依赖。`cargo tree` 不会出现循环。
+因此 §16.6/§17.6/§18.9/§19.8/§20.2 列出的"与既有抽象的关系"都是 **Runtime 编排关系**，不是 crate 间 `use` 依赖。`cargo tree` 不会出现循环。
 
 ### 21.2 子系统真实依赖方向（DAG）
 
@@ -2110,3 +2304,362 @@ M5 测 Plan 时**不需要**真实的 Task/Journal 实现：Plan 工具的 `Exit
 ### 21.5 文档措辞修正
 
 为避免"循环依赖"误解，§16.6/§17.6/§18.9/§20.2 中"与既有抽象的关系"统一表述为"**Runtime 编排关系**"（非 crate 间依赖）。本节 §21 是该措辞的权威解释，后续若新增子系统协作描述应参照本节区分"运行时编排"与"实现层依赖"。
+
+---
+
+## 22. Prompt 管道详细设计
+
+§2.2 主循环的 `build_chat_request` 把 system prompt 拼装为单个字符串传给 LLM。当 system prompt 来源增多（身份、系统规则、任务指南、环境信息、用户规则、项目规则、工具摘要、扩展注入），单字符串拼接难以维护、无法利用 prompt cache、也无法让扩展注入片段。本节定义可组合的 Prompt 管道。
+
+**设计目标**：(1) 可组合——每个来源是一个 `PromptContributor`，独立实现；(2) 可扩展——第三方扩展可注册新 contributor；(3) prompt cache 友好——稳定段排前，易变段排后，配合 LLM provider 的前缀缓存。
+
+**9 个 PromptContributor 按固定顺序拼接**：
+
+| 顺序 | Contributor | 来源 | 稳定性 | cacheable |
+|:---:|------|------|--------|:---:|
+| 1 | Identity | `~/.minicoding/IDENTITY.md`（可覆盖默认身份） | 极稳定 | ✓ |
+| 2 | System | 内置系统规则（`rules.md` §5 软规则） | 极稳定 | ✓ |
+| 3 | TaskGuidelines | 任务指南（多步任务规划、工具使用规范） | 稳定 | ✓ |
+| 4 | Communication | 通信规范（输出格式、语言偏好） | 稳定 | ✓ |
+| 5 | Environment | 工作区/平台/git 信息（cwd、OS、git branch） | 会话内稳定 | ✓ |
+| 6 | UserRules | 用户规则（来自 `long_term.md`，§8.2） | 跨会话变化 | ✗ |
+| 7 | ProjectRules | 项目规则（来自 AGENTS.md，§8.6） | 仓库内稳定 | ✗ |
+| 8 | ToolSummary | 工具 schema 摘要（含 MCP 工具） | 工具集变化时变 | ✗ |
+| 9 | Extension | 扩展注入（通过 PromptBuild Hook，§20） | 动态 | ✗ |
+
+稳定段（1-5）排前，易变段（6-9）排后。LLM provider 的 prompt cache 以前缀匹配——稳定段命中缓存，易变段仅追加增量。把 Environment 排在稳定段是因为它"会话内不变"，cache 在单会话内有效；UserRules/ProjectRules 排后是因为它们跨会话变化，cache 命中率低。
+
+**PromptContributor trait**（与 `api.md` §3.13 一致）：
+
+```rust
+#[trait_variant::make(PromptContributor: Send)]
+pub trait PromptContributor {
+    /// Contributor 唯一标识（如 "identity"、"project_rules"），用于调试与 OTel span。
+    fn name(&self) -> &str;
+
+    /// 拼装顺序（枚举固定 9 段，稳定段在前利于 prompt cache）。
+    fn order(&self) -> PromptSectionOrder;
+
+    /// 该段是否可缓存（影响 prompt cache 命中率统计）。默认 false。
+    fn cacheable(&self) -> bool { false }
+
+    /// 生成该段内容。ctx 提供会话级信息（workdir、git 状态、工具集等）。
+    async fn build(&self, ctx: &PromptContext) -> Result<PromptSection, PromptError>;
+}
+
+/// Section 排序（稳定→易变，与 9 段表格一一对应）。
+pub enum PromptSectionOrder {
+    Identity,       // 1
+    System,         // 2
+    TaskGuidelines, // 3
+    Communication,  // 4
+    Environment,    // 5
+    UserRules,      // 6
+    ProjectRules,   // 7
+    ToolSummary,    // 8
+    Extension,      // 9（仅扩展通过 PromptBuild Hook 注入）
+}
+
+pub struct PromptContext {
+    pub session_id: SessionId,
+    pub workdir: Utf8PathBuf,
+    pub platform: Platform,
+    pub git_info: Option<GitInfo>,
+    pub enabled_tools: Vec<ToolSchema>,
+    pub user_rules: MemoryBlock,       // 来自 long_term.md
+    pub project_rules: ProjectDoc,     // 来自 AGENTS.md
+}
+```
+
+`PromptContext` 把各 contributor 需要的输入聚合，避免 contributor 各自重新加载文件（如 ProjectRules 不再自己读 AGENTS.md，从 ctx 取）。`order()` 返回 `PromptSectionOrder` 枚举，使拼接顺序不依赖注册顺序，且类型安全——扩展只能通过 `Extension` 段（顺序 9）注入，无法抢占内置段位置。
+
+**PromptSection 数据结构**：
+
+```rust
+pub struct PromptSection {
+    pub contributor_name: String,
+    pub content: String,
+    pub order: PromptSectionOrder,
+    pub cacheable: bool,
+    pub boundary: Option<&'static str>,  // 如 "project_doc"、"auto_memory"，包裹边界
+}
+```
+
+`boundary` 字段让段内容包裹在 `<{boundary}>...</{boundary}>` 内（如 §8.6 的 `<project_doc>`、§8.7 的 `<auto_memory>`），声明内容性质供 LLM 区分指令与上下文。无边界的段（如 Identity/System）直接拼接。
+
+**PromptPipeline 拼装**：
+
+```rust
+pub struct PromptPipeline {
+    contributors: Vec<Arc<dyn PromptContributor>>,
+}
+
+impl PromptPipeline {
+    pub async fn build(&self, ctx: &PromptContext) -> Result<SystemPrompt> {
+        let mut sections: Vec<PromptSection> = Vec::new();
+        for c in &self.contributors {
+            sections.push(c.build(ctx).await?);
+        }
+        // 按 PromptSectionOrder 枚举定义的固定顺序排序（同 order 内按 contributor name 稳定排序）。
+        sections.sort_by_key(|s| (s.order.clone() as u32, s.contributor_name.clone()));
+
+        let mut buf = String::new();
+        for s in &sections {
+            if let Some(b) = s.boundary {
+                buf.push_str(&format!("<{b}>\n{}\n</{b}>\n\n", s.content));
+            } else {
+                buf.push_str(&s.content);
+                buf.push_str("\n\n");
+            }
+        }
+        Ok(SystemPrompt { text: buf, sections })
+    }
+}
+```
+
+`sections` 字段保留分段信息，供 OTel span 记录每段 token 数（`prompt.section.{name}.tokens`），便于诊断 prompt 膨胀来源。`sort_by_key` 保证即使 contributor 注册顺序变化，最终拼接顺序仍由 `PromptSectionOrder` 枚举决定；同段内（如多个扩展注入到 `Extension` 段）按 `contributor_name` 稳定排序，避免非确定性。
+
+**扩展通过 PromptBuild Hook 注入**：第 9 段 Extension 不是固定 contributor，而是聚合所有 `PromptBuild` Hook（§20）的 `inject_section` 输出。Hook 可注册多个，按 Hook 优先级排序后依次拼入。Hook 注入的段默认 `cacheable = false`（动态内容不应缓存）。这给扩展系统（§23）提供了注入 prompt 的统一入口，无需扩展自行实现 `PromptContributor`。
+
+---
+
+## 23. 扩展系统详细设计
+
+§22 的 Prompt 管道、§20 的 Hooks、§19 的 MCP 已分别提供 prompt 注入、生命周期钩子、外部工具接入能力。但当用户想"加一个自定义斜杠命令""加一个 TUI 状态栏项""加一个快捷键绑定"时，缺少统一载体。扩展系统把这些能力收敛为单一抽象，实现 Extension-First 架构——核心能力可插件化，未启用的扩展零开销。
+
+**设计目标**：(1) Extension-First——核心功能（如 task 管理、plan 模式）本身可作为扩展实现，验证扩展抽象的完备性；(2) 三类载体统一 API——无论进程内、IPC 子进程、MCP 远程，对 Runtime 暴露同一接口；(3) 安全收敛——扩展注册的能力仍受 L0 约束（C-01/C-02）。
+
+**三类扩展载体**：
+
+| 载体 | 部署 | 通信 | 性能 | 用途 |
+|------|------|------|------|------|
+| 进程内 first-party | 在 `minicoding-extension-sdk` 实现组合根 | 直接函数调用 | 零序列化 | 核心扩展（task/plan/journal 集成层） |
+| disk IPC 子进程 | 磁盘上的可执行文件 | JSON over stdio | 序列化开销 | 第三方本地扩展（语言无关） |
+| MCP 远程扩展 | 通过 `minicoding-mcp` 包装 | MCP 协议 | 网络开销 | 远程能力接入（与 §19 MCP 复用） |
+
+三类载体统一实现 `Extension` trait，Runtime 不感知载体差异。MCP 远程扩展复用 §19 的 MCP client，只是把其工具/Hook 包装为扩展接口。
+
+**ExtensionHost trait**（Runtime 注入，管理扩展生命周期；与 `api.md` §3.12 一致）：
+
+```rust
+#[trait_variant::make(ExtensionHost: Send)]
+pub trait ExtensionHost {
+    /// 加载扩展（读 manifest，初始化，注册能力）。
+    async fn load_extension(&self, manifest: ExtensionManifest) -> Result<ExtensionId, ExtensionError>;
+
+    /// 卸载扩展（调用 shutdown，注销所有注册项）。
+    async fn unload_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError>;
+
+    /// 列出已加载扩展。
+    async fn list_extensions(&self) -> Vec<ExtensionInfo>;
+
+    /// 配置变更通知（热重载）。
+    async fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value)
+        -> Result<(), ExtensionError>;
+}
+```
+
+`ExtensionHost` trait 由 `minicoding-core` 定义，实现在 `minicoding-extension-sdk`（进程内 first-party 组合根）或 `minicoding-cli`（disk IPC 子进程加载器）。Runtime 持有 `Arc<dyn ExtensionHost>`，在启动时批量加载 `~/.minicoding/extensions/` 下的扩展。
+
+**Extension trait**（扩展实现侧；与 `api.md` §3.12 一致）：
+
+```rust
+#[trait_variant::make(Extension: Send)]
+pub trait Extension {
+    /// 扩展元信息（供 Runtime 查询，无需扩展自行管理状态）。
+    fn manifest(&self) -> &ExtensionManifest;
+
+    /// 扩展初始化（注册能力、订阅事件、读配置）。
+    async fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value)
+        -> Result<(), ExtensionError>;
+
+    /// 扩展卸载（释放资源、取消订阅）。
+    async fn shutdown(&self) -> Result<(), ExtensionError>;
+
+    /// 配置变更通知（可选，默认空实现）。
+    async fn on_config_changed(&self, _new_config: serde_json::Value) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+```
+
+`init` 接收 `&mut dyn Registrar`，扩展通过它注册自己提供的能力。`manifest()` 让 Runtime 无需维护独立的扩展元信息表，直接从扩展实例查询。`shutdown` 由 `ExtensionHost::unload_extension` 调用，保证资源清理。
+
+**Registrar 接口**（扩展注册能力的统一入口；与 `api.md` §3.12 一致）：
+
+```rust
+pub trait Registrar {
+    fn register_tool(&mut self, tool: Arc<dyn Tool>) -> Result<(), ExtensionError>;
+    fn register_hook(&mut self, hook: Arc<dyn Hook>) -> Result<(), ExtensionError>;
+    fn register_prompt_contributor(&mut self, c: Arc<dyn PromptContributor>) -> Result<(), ExtensionError>;
+    fn register_keybinding(&mut self, kb: KeyBinding) -> Result<(), ExtensionError>;
+    fn register_status_item(&mut self, item: StatusItem) -> Result<(), ExtensionError>;
+    fn register_command(&mut self, cmd: SlashCommand) -> Result<(), ExtensionError>;
+}
+```
+
+`Registrar` 把"扩展能做什么"收敛为 6 类注册项。每类注册项最终进入 Runtime 对应的注册表（`ToolRegistry`/`HookRegistry`/`PromptPipeline`/`KeyBindingMap`/`StatusBarRegistry`/`CommandRegistry`），扩展无需直接接触 Runtime 内部结构。注册项统一用 `Arc<dyn Trait>`（而非 `Box`），便于 Runtime 在多扩展间共享实例。
+
+**ExtensionManifest**：
+
+```rust
+pub struct ExtensionManifest {
+    pub id: String,                  // 全局唯一，如 "minicoding-git-stats"
+    pub version: semver::Version,
+    pub name: String,
+    pub author: Option<String>,
+    pub carrier: ExtensionCarrier,   // Bundled / Ipc { path } / Mcp { server_id }
+    pub capabilities: Vec<Capability>,  // ["tool", "hook", "prompt", "command", ...]
+    pub permissions: Vec<Permission>,   // ["fs.read", "shell.run:git *"]
+    pub config_schema: Option<serde_json::Value>,  // JSON Schema for config
+}
+
+pub enum ExtensionCarrier {
+    Bundled,                        // 进程内，name 查找符号
+    Ipc { path: Utf8PathBuf },      // 可执行文件路径
+    Mcp { server_id: String },      // 复用 §19 MCP server
+}
+
+pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Command }
+```
+
+`permissions` 字段声明扩展需要的权限范围，加载时 `PermissionPolicy` 校验——扩展注册的工具调用时仍走 §9 权限流程，`permissions` 只用于"扩展加载时的静态检查"（如声明了 `fs.read` 但实际调用 `fs.write` 会被运行时权限拦截）。
+
+**安全约束**：
+
+- **扩展工具仍经 `PermissionPolicy::check`**（C-01）：扩展注册的 `Tool` 与内置工具走同一 `run_one` 闭环（§2.3），`side_effect != None` 仍触发权限决策。扩展无法绕过权限。
+- **不可绕过黑名单**（C-02）：即使扩展注册的工具名不在内置黑名单，若其内部触发 `shell.run` 命中黑名单前缀（如 `rm -rf /`），黑名单仍 Deny。扩展是"用户态能力"，不提升特权。
+- **IPC/MCP 扩展的输入校验**：disk IPC 与 MCP 扩展的输入/输出经 `serde_json::Value` 边界，Runtime 在 `dispatch` 前对路径类参数走 `sandbox_path`（C-03），防扩展越界读写。
+- **凭证隔离**：IPC 子进程不继承 minicoding 凭证环境变量（同 `shell.run`，C-04），扩展需显式申请 `permissions` 含凭证访问才注入。
+
+**统一 dispatch**：扩展注册的工具走 `ToolRegistry::dispatch`，与内置工具共享 §15 的 OTel `tool.call` span、§11 的 `Event::ToolCallStart/End`、§9.5 的权限规则。这保证扩展工具的可观测性、可审计性与内置工具一致，不存在"扩展工具绕过监控"的暗角。
+
+---
+
+## 24. 前后端协议与多前端接入
+
+§1 的 Runtime 是单进程内聚合根，CLI/TUI/SDK 直接持有 `Arc<Runtime>` 调用方法。但当需要"远程前端"（如浏览器、移动端、IDE 插件通过 HTTP 接入）或"嵌入式前端"（如 Zed 编辑器通过 ACP 协议嵌入）时，进程内调用不够。本节定义前后端协议，使 Runtime 可被多前端共享。
+
+**JSON-RPC 2.0 协议**：前后端通信统一用 JSON-RPC 2.0，wire types 定义在 `minicoding-protocol` crate（新增）。请求/响应/通知三类消息，与 LSP 协议风格一致，便于复用既有 LSP 客户端库。
+
+```rust
+pub enum Request {
+    CreateSession { config: SessionConfig },
+    SendUserMessage { session_id: SessionId, text: String, attachments: Vec<Attachment> },
+    Cancel { session_id: SessionId },
+    Undo { session_id: SessionId, steps: usize },
+    ListSessions { filter: Option<SessionFilter> },
+    GetSession { session_id: SessionId },
+    SetPermissionMode { session_id: SessionId, mode: PermissionMode },
+    ResolvePermission { id: String, decision: Decision },
+}
+
+pub enum Response {
+    Ok(serde_json::Value),
+    Err(RpcError),
+}
+```
+
+`Request`/`Response` 与 `api.md` 的 Runtime 方法一一对应，protocol crate 仅做序列化适配，不含业务逻辑。
+
+**Event DTO 携带 seq: u64**：§11 的 `Event` 枚举序列化为 DTO 时附加 `seq: u64`（单调递增，每会话独立计数）。前端通过 SSE 订阅事件流，记录最后接收的 `seq`，断线重连时用 `seq` 恢复：
+
+```
+SSE cursor 恢复流程：
+
+Client                          Server
+  │                               │
+  │── Subscribe(session_id,       │
+  │            last_seq=42) ────▶│
+  │                               │
+  │                       检查 last_seq：
+  │                       ├─ seq 仍在内存 ring buffer → 从 seq+1 重放
+  │                       ├─ seq 已 evict 但 ≤ durable_seq
+  │                       │    → 从 EventStore 重放 seq+1..now
+  │                       └─ seq > durable_seq 但 < now
+  │                            → 不可恢复，发 RehydrateRequired
+  │                               │
+  │◀── Event(seq=43) ────────────│
+  │◀── Event(seq=44) ────────────│
+  │      ...                      │
+  │◀── Event(seq=now) ───────────│
+```
+
+`seq` 单调递增保证事件顺序；`durable_seq` 是已持久化到 EventStore 的最大 seq（见 §25）。ring buffer 是进程内最近 N 条事件的内存缓存，命中时零 IO 重放。
+
+**RehydrateRequired 信号**：当 broadcast channel 溢出（前端消费慢于生产）且事件已从 ring buffer evict 时，Server 发 `RehydrateRequired` 通知客户端"事件流已不完整，请重拉 snapshot"。客户端收到后调用 `GetSession` 拉取当前完整状态（messages、tasks、permission mode 等），重建本地视图。这是"最终一致"而非"强一致"——短暂的事件丢失通过 snapshot 重拉补齐。
+
+**HTTP/SSE server（minicoding-server）**：`minicoding serve` 子命令启动 HTTP server，多会话并发，path 带 `session_id`：
+
+```
+POST   /sessions                          → CreateSession
+POST   /sessions/{id}/messages            → SendUserMessage
+POST   /sessions/{id}/cancel              → Cancel
+POST   /sessions/{id}/undo                → Undo
+GET    /sessions                          → ListSessions
+GET    /sessions/{id}                     → GetSession
+GET    /sessions/{id}/events              → SSE 事件流（带 Last-Event-ID header 恢复）
+POST   /sessions/{id}/permissions/{pid}   → ResolvePermission
+```
+
+SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼容（浏览器 `EventSource` 自动重连时携带）。HTTP server 实现在 `minicoding-server` crate（新增），依赖 `minicoding-tools` + `tokio` + `axum`（或 `hyper`，选型见 `tech-stack.md`）。
+
+**ACP stdio 适配器**：`minicoding serve --acp` 启动 ACP（Agent Client Protocol）stdio 模式，可被 Zed 等编辑器嵌入。ACP 是 stdio 上的 JSON-RPC，与 HTTP server 共享 protocol crate 的 wire types，仅传输层不同（stdio 替代 HTTP/SSE）。这使 minicoding 既能作为独立服务（HTTP），又能作为嵌入式 Agent（ACP）。
+
+**三层状态模型**：前后端分离后，状态分布在三层：
+
+| 层 | 存储 | 生命周期 | 用途 |
+|----|------|---------|------|
+| Durable | `EventStore`（JSONL，§10.3） | 永久 | 事件事实层，崩溃可恢复 |
+| Process | `TurnRegistry`（内存） | 进程级 | 当前活跃 turn 的中间状态（流式 delta、工具调用进度） |
+| Transport | `CommandHandler`（连接级） | 连接级 | 单个前端连接的请求/响应配对、cursor 状态 |
+
+Durable 层是事实源，Process 层是运行时中间态，Transport 层是连接级视图。三层分离使"多前端共享同一会话"成为可能——两个前端连接同一 session_id，各自维护 Transport 层 cursor，共享 Durable 与 Process 层。Process 层的 `TurnRegistry` 保证"一个 turn 同时只有一个前端驱动"，其它前端只读订阅事件。
+
+---
+
+## 25. 事件溯源方向（未来演进）
+
+§10.3 的 Parent-UUID 链与 §11 的 EventBus 已具备事件溯源雏形，但当前架构本质仍是"消息是事实"——JSONL 存储的是 `Message`（业务状态），而非 `Event`（状态变更）。本节描述未来向"事件是事实"演进的方向，使 fork、压缩边界、子 Agent side-chain 等能力获得统一的事件层基础。
+
+> **标注**：本节是未来演进方向，非当前实现。M3 之前不引入 Event 枚举与 EventStore trait，避免过早抽象。
+
+**当前架构**：`Storage::append(message)` 追加写 `Message` 到 JSONL。`Message` 是业务状态（user/assistant/tool_result），已包含压缩后的最终形态。fork（§10.5）通过复制前缀实现，压缩边界（§10.3）通过 `parent_uuid = None` 标记——这些是消息层的事后标注，非原生事件。
+
+**目标架构**：`EventLog` 是 append-only 事实层，事件不可变、`seq` 单调递增；`Session` 是投影层，从 EventLog 重放得出当前消息序列。
+
+```
+EventLog（append-only，不可变）
+   │
+   │ events: UserMessageSent / AssistantMessageStreamed / ToolCalled /
+   │         ToolResultReturned / CompactionApplied / TaskSpawned / ...
+   │
+   ▼
+Projector（重放事件，构建 Session 视图）
+   │
+   ▼
+Session { messages, tasks, permission_mode, ... }
+```
+
+Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `CompactionApplied { before: [msg_ids], after: Summary }`），Message 记录"当前是什么"。Event 不可变，Session 是 Event 的投影——同一 EventLog 可投影出不同视图（如"忽略压缩事件"得到完整历史，"应用压缩事件"得到当前窗口）。
+
+**优势**：
+
+- **fork = 从 seq 重放**：当前 fork（§10.5）需复制前缀消息到新文件；事件溯源下，fork 仅记录"从 seq=42 分叉"，新会话从 seq=42 重放 EventLog + 后续新事件，零拷贝。
+- **压缩边界 = Compacted 事件**：当前压缩边界靠 `parent_uuid = None` 标记；事件溯源下，`CompactionApplied` 事件显式记录"seq=42 之前已折叠为摘要"，投影器据此跳过旧事件。
+- **side-chain = 子 Agent 事件挂在 `TaskSpawned` 事件下**：当前 side-chain 靠 `parent_uuid` 指向 `task.spawn` 工具调用；事件溯源下，子 Agent 事件的 `parent_event_id` 指向 `TaskSpawned`，天然形成事件树。
+- **多视图**：同一 EventLog 可投影出"完整历史"（忽略 CompactionApplied）/"当前窗口"（应用 CompactionApplied）/"审计视图"（仅 ToolCalled + PermissionResolved），无需多份存储。
+
+**工具结果持久化**：当工具结果 > 阈值（如 100KB）时，持久化到 `artifacts/{event_id}.bin` 文件，EventLog 中只留引用 `{ artifact_path, size, hash }`。投影器按需读取 artifact，避免 EventLog 膨胀。这与 §4.5 的 `max_output_bytes` 截断互补——截断是"丢弃超长部分"，artifact 是"完整保留但移出主日志"。
+
+**分阶段迁移路径**：
+
+| 阶段 | 内容 | 与现有架构关系 |
+|------|------|---------------|
+| M3 | 引入 `Event` 枚举与 `EventStore` trait（定义在 core，实现在 storage） | 与现有 `Storage::append_message` 并存，不替换 |
+| M4 | `Storage::append_event` 与 `append_message` 双写——消息仍写 JSONL，同时写 EventLog | 双写保证回退能力，EventLog 仅用于新功能（如多视图） |
+| M5+ | `Session` 改为投影层，从 EventLog 重放；`Storage::append_message` 标记 deprecated | 旧 JSONL 仍可读（兼容），新会话走 EventLog |
+
+M3-M4 的双写期是"灰度过渡"——EventLog 与 JSONL 并存，验证 Event 投影的正确性后再切流。这避免大爆炸式重构，每阶段可独立回退。
+
+**与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventLog 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventLog seq，`durable_seq` 即 EventLog 的持久化进度。当前架构需额外维护 seq，事件溯源后 seq 是 EventLog 的原生属性。

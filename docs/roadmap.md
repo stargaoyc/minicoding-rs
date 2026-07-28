@@ -26,7 +26,7 @@
 ## M0 — 骨架与基础设施（3 人日）
 
 **范围**
-- Cargo workspace + 14 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.85。
+- Cargo workspace + 17 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.85。其中 M0 落地 14 个核心 crate，另 3 个（`minicoding-protocol`/`minicoding-server`/`minicoding-extension-sdk`）在 M5/M6/M8 启用时补齐 `lib.rs`。
 - `Cargo.toml` 公共依赖统一管理（workspace dependencies）；平台条件依赖示例（`landlock`/`libseccomp` 仅 Linux）。
 - CI：`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny`。
 - `tracing` + `tracing-subscriber` + `tracing-opentelemetry` + `opentelemetry-otlp` 初始化（`core::otel`），支持 `OTEL_EXPORTER_OTLP_ENDPOINT` 环境变量；无后端时降级为本地 fmt 日志。
@@ -40,7 +40,7 @@
 - 设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 后启动一次，能在本地 OTLP collector 看到 `minicoding` 的 resource。
 - CI 全绿（`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny` + `coverage` 六门禁；coverage 在 M0 仅验证工具链就位不阻塞，M1 起阻塞合并）。
 
-**任务追溯**：dev-plan T-M0-1..T-M0-9（9 个 task，预估 3 人日）。可度量门槛：14 crate 骨架编译通过、CI 6 门禁就位（Linux only matrix）、OTel resource 可观测、`tests/common/` 共享测试工具就位（T-M0-9）。
+**任务追溯**：dev-plan T-M0-1..T-M0-9（9 个 task，预估 3 人日）。可度量门槛：14 crate 骨架编译通过（另 3 个 crate 在 M5/M6/M8 启用时补齐，合计 17）、CI 6 门禁就位（Linux only matrix）、OTel resource 可观测、`tests/common/` 共享测试工具就位（T-M0-9）。
 
 **风险**：无。
 
@@ -58,6 +58,7 @@
 - `policy`：应用层路径沙箱 `sandbox_path`（第一道防线，`security.md` §3）。
 - `cli`：参数解析、流式 token 渲染、单次提问模式。
 - `storage`：JSONL append。
+- `core`：配置加载支持 last-known-good 回退（解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退，见 `design.md` §12）与 `env:VAR_NAME`/`env:VAR:-fallback` 环境变量语法（见 `tech-stack.md` §12）。
 
 **验收**
 - `minicoding "读取 src/main.rs 并解释"` 能流式输出并实际读取文件。
@@ -86,6 +87,7 @@
 - `cli`：工具调用进度渲染、权限确认交互、`Ctrl-C` graceful stop。
 - `core`：`EventBus`（broadcast，仅通知类事件，无回复通道）。
 - `core`：OTel span 埋点（session/turn/llm_call/tool_call/permission）。
+- `providers`：`[provider.small]` 独立小 LLM 配置脚手架（为 M3 的摘要/compact/memory 提取配置独立 provider，未设置时与主 provider 相同，可配更便宜模型降本，见 `design.md` §3.8、`modules.md` §10.3）。
 
 **验收**
 - `minicoding "把 utils.rs 里的 foo 改名为 bar"` 能完成读取→编辑→验证闭环。
@@ -116,6 +118,7 @@
 - `memory`：会话摘要生成 + 失败降级链（主模型→备用→启发式兜底，见 `design.md` §8.4）。
 - `core`：`ProjectDocLoader` + AGENTS.md 分层加载（见 `design.md` §8.6）；fallback 文件名（`CLAUDE.md`/`.cursorrules`）。
 - `tools`：`task.create`/`update`/`list` 任务管理工具（见 `design.md` §18，features T-14），`SideEffect::None`，校验单 in_progress/completed 必填 summary/依赖图成环检测。
+- `core`：预测性压缩（根据历史 turn token 增长估算提前 compact，与反应式 compact 互补，见 `design.md` §3.9）与 Post-compact 上下文恢复（compact 后从历史提取最近 read 过的文件路径按预算截断重新注入，避免模型重新 read，见 `design.md` §3.10）。
 
 **验收**
 - 长会话（>上下文窗口）能自动压缩且不破坏连贯性。
@@ -150,6 +153,7 @@
 - `mcp`：`McpClient` trait + `rmcp` client（stdio，M4 一步到位用官方 SDK，不自研薄封装）。
 - `mcp`：`mcp_tool_name` 命名（`mcp__<server>__<tool>`）+ project 作用域首次批准流（`mcp_choices.toml`，防恶意仓库植入）。
 - `tools`：`mcp::wrapper` 把远程 MCP 工具包装为本地 `Tool`（`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射）。
+- `mcp`：MCP 进程池（连接跨 turn 复用，不每 turn 重启，见 `design.md` §19.5、`modules.md` §8.4）+ 后台预热（全局 server 启动时并发预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞）+ inflight merge（同 server 并发请求合并，避免重复调用）。
 - `journal`：`FileChangeJournal` + `/undo`（会话内 operation 级回滚，特性门控 `file_undo`，见 `design.md` §17）。
 - `tools`：`fs.write/edit/delete` 成功后调 `Journal::record`（仅 `file_undo=true` 时）。
 - `cli`：`--preset`、`--approval-mode`、`--sandbox`、`minicoding exec --sandbox read-only|external-sandbox ...` 子命令；`mcp` 子命令（list/approve/reset-project-choices）；`/undo` REPL 命令。
@@ -192,6 +196,7 @@
 - `sandbox`：补齐 macOS Seatbelt 实现（`sandbox-run` 封装原生 sandbox 框架，平台优先级 M5+）。
 - `cli`：`--hook`/配置加载 Hook；`/plan` 切换 Plan 模式。
 - `core`：OTel `hook.run` span。
+- `sdk`/`core`：Extension SDK（`Extension` trait + `Registrar` + `ExtensionManifest`，见 `design.md` §23、`modules.md` §17）+ Prompt 管道（9 个 `PromptContributor` 按固定顺序拼接，稳定段在前利于 prompt cache，见 `design.md` §22）。扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过）。
 
 **验收**
 - `PostToolUse(fs.write|fs.edit)` Hook 能触发 `cargo fmt`；`PreToolUse` Hook `deny` 能阻断工具调用。
@@ -221,6 +226,8 @@
 - `core`：错误分类与恢复策略（见 `design.md` §10）。
 - `cli`：`--provider`、`--model` 覆盖。
 - 集成测试：mock 三家 provider 跑同一会话。
+- `protocol`：JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`，见 `modules.md` §15），为 M8 的 HTTP/SSE server 与 ACP 适配器提供协议基础；ACP stdio 适配器脚手架（可被 Zed 等客户端嵌入）。
+- `core`：配置热更新（`ConfigWatcher` 基于 fsnotify + `Event::ConfigChanged`，扩展通过 `on_config_changed()` 接收变更，M6+）。
 
 **验收**
 - Anthropic 模型可正常流式 + 工具调用。
@@ -263,6 +270,7 @@
 **范围**
 - `sdk`：`Client` + `ClientBuilder` + 高层 API。
 - `cli`：`minicoding serve` HTTP/JSON-RPC server。
+- `server`：HTTP/SSE JSON-RPC 接口（`minicoding-server`，见 `modules.md` §16），支持多客户端并发会话；事件流携带 cursor（event seq），客户端断连后从 cursor 恢复（SSE cursor 恢复）；broadcast 溢出时发 `RehydrateRequired` 信号，客户端重拉 snapshot。
 - `mcp`：`minicoding serve --as-mcp-server` 把自身工具暴露为 MCP server（被其他 Agent 调用）。
 - stdin/stdout NDJSON 协议（编辑器插件）。
 - 文档：嵌入指南、协议规范。
@@ -276,6 +284,14 @@
 
 **风险**
 - 协议稳定性 → 标 `experimental` 直到反馈收敛。
+
+---
+
+## 未来方向（Future Directions）
+
+以下为 M8 之后探索性方向，不阻塞当前里程碑：
+
+- **Event Sourcing**：将会话状态建模为不可变事件流（`Event` 持久化 + snapshot 重放），替代当前的 JSONL 消息追加 + 内存镜像模型。收益：天然支持时间旅行调试、多客户端状态同步（与 SSE cursor 恢复/E-13 协同）、审计回放（`--replay` 不再依赖消息日志而是事件重放）、跨会话 fork/merge。前置条件：M8 的 `minicoding-protocol` wire types 稳定 + `RehydrateRequired`（E-14）信号链路验证通过。引入时需评估事件 schema 版本化与旧会话兼容性。
 
 ---
 

@@ -675,6 +675,120 @@ pub struct DiffEntry {
 
 `/undo` 是特性门控（`[features] file_undo = false`，默认关，参考 Codex `features.undo`），仅会话内有效，会话结束销毁（不落盘，避免敏感数据多份存储）。跨会话回滚依赖 Git。
 
+### 3.12 Extension 系统（见 `design.md` §23、`modules.md` §17）
+
+Extension 系统为第三方扩展作者提供稳定 API。下列 trait 定义在 `minicoding-core`，SDK 实现位于 `minicoding-extension-sdk`。扩展通过 `Registrar` 注册工具/Hook/prompt contributor 等能力，扩展注册的工具仍统一走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过）。
+
+```rust
+/// 扩展宿主：管理扩展生命周期（Runtime 注入）。
+#[trait_variant::make(ExtensionHost: Send)]
+pub trait ExtensionHost {
+    /// 加载扩展（读 manifest，初始化，注册能力）。
+    async fn load_extension(&self, manifest: ExtensionManifest) -> Result<ExtensionId, ExtensionError>;
+    /// 卸载扩展（调用 shutdown，注销所有注册项）。
+    async fn unload_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError>;
+    /// 列出已加载扩展。
+    async fn list_extensions(&self) -> Vec<ExtensionInfo>;
+    /// 配置变更通知（热重载，按扩展 id 投递）。
+    async fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value) -> Result<(), ExtensionError>;
+}
+
+/// 扩展 trait（扩展作者实现）
+#[trait_variant::make(Extension: Send)]
+pub trait Extension {
+    /// 扩展元信息（供 Runtime 查询，无需扩展自行管理状态）。
+    fn manifest(&self) -> &ExtensionManifest;
+    /// 初始化：通过 Registrar 注册能力，config 为扩展配置（JSON）。
+    async fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value) -> Result<(), ExtensionError>;
+    /// 关闭：释放资源
+    async fn shutdown(&self) -> Result<(), ExtensionError>;
+    /// 配置变更通知（可选，默认空实现）
+    async fn on_config_changed(&self, _new_config: serde_json::Value) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+
+/// 注册器：扩展通过此接口注册能力（6 类注册项）。
+/// 注册项统一用 `Arc<dyn Trait>`，便于 Runtime 在多扩展间共享实例。
+pub trait Registrar {
+    fn register_tool(&mut self, tool: Arc<dyn Tool>) -> Result<(), ExtensionError>;
+    fn register_hook(&mut self, hook: Arc<dyn Hook>) -> Result<(), ExtensionError>;
+    fn register_prompt_contributor(&mut self, contributor: Arc<dyn PromptContributor>) -> Result<(), ExtensionError>;
+    fn register_keybinding(&mut self, kb: KeyBinding) -> Result<(), ExtensionError>;
+    fn register_status_item(&mut self, item: StatusItem) -> Result<(), ExtensionError>;
+    fn register_command(&mut self, cmd: SlashCommand) -> Result<(), ExtensionError>;
+}
+
+/// 扩展清单
+pub struct ExtensionManifest {
+    pub id: String,                  // 全局唯一，如 "minicoding-git-stats"
+    pub version: semver::Version,
+    pub name: String,
+    pub author: Option<String>,
+    pub carrier: ExtensionCarrier,   // Bundled / Ipc / Mcp
+    pub capabilities: Vec<Capability>,
+    pub permissions: Vec<Permission>,
+    pub config_schema: Option<serde_json::Value>,  // JSON Schema for config
+}
+
+/// 扩展载体（三类统一抽象）
+pub enum ExtensionCarrier {
+    Bundled,                        // 进程内 first-party，name 查找符号
+    Ipc { path: Utf8PathBuf },      // disk IPC 子进程（可执行文件路径）
+    Mcp { server_id: String },      // 复用 §19 MCP server
+}
+
+/// 扩展能力声明（与 Registrar 6 个方法一一对应）
+pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Command }
+```
+
+`Extension` trait 由扩展作者实现，`init` 阶段通过 `Registrar` 把自身能力注册进 Runtime，`manifest()` 让 Runtime 无需维护独立的扩展元信息表。`ExtensionHost` 由 `minicoding-extension-sdk`（进程内 first-party）或 `minicoding-cli`（disk IPC 加载器）实现，负责加载/卸载/列举扩展及配置变更广播。扩展注册的工具仍走 `ToolRegistry::dispatch`，因此权限检查（C-01）与内置黑名单（C-02）对扩展工具同样生效——扩展无法绕过权限审计（见 `design.md` §23 安全约束）。
+
+### 3.13 Prompt 管道（见 `design.md` §22）
+
+Prompt 管道把 system prompt 的组装拆为 9 个 `PromptContributor`，按固定顺序拼接。稳定段（1-5：身份/系统规则/任务指南/通信规范/环境信息）在前，易变段（6-9：用户规则/项目规则/工具摘要/扩展注入）在后，使稳定段命中 prompt cache，降低重复请求的计费。扩展通过 `PromptBuild` Hook（§3.8）注入 `Extension` section（顺序 9）。
+
+```rust
+/// Prompt contributor：为 system prompt 组装贡献一个 section。
+#[trait_variant::make(PromptContributor: Send)]
+pub trait PromptContributor {
+    /// contributor 名称（用于调试与排序）
+    fn name(&self) -> &str;
+    /// 组装 section
+    async fn build(&self, ctx: &PromptContext) -> Result<PromptSection, PromptError>;
+    /// 排序优先级（稳定段在前，利于 prompt cache）
+    fn order(&self) -> PromptSectionOrder;
+    /// 是否可缓存（内容不变的 contributor 返回 true）
+    fn cacheable(&self) -> bool { false }
+}
+
+/// Prompt section 数据结构（与 `design.md` §22 一致）
+pub struct PromptSection {
+    pub contributor_name: String,
+    pub content: String,
+    pub order: PromptSectionOrder,
+    pub cacheable: bool,
+    pub boundary: Option<&'static str>,  // 如 "project_doc"、"auto_memory"，包裹边界
+}
+
+/// Section 排序（稳定→易变）
+pub enum PromptSectionOrder {
+    Identity,       // 1. 身份
+    System,         // 2. 系统规则
+    TaskGuidelines, // 3. 任务指南
+    Communication,  // 4. 通信规范
+    Environment,    // 5. 工作区/平台/git 信息
+    UserRules,      // 6. 用户规则（long_term memory）
+    ProjectRules,   // 7. 项目规则（AGENTS.md）
+    ToolSummary,    // 8. 工具 schema 摘要
+    Extension,      // 9. 扩展注入
+}
+```
+
+9 个 contributor 按 `PromptSectionOrder` 枚举值顺序拼接，稳定段（1-5）内容相对恒定可命中 prompt cache，易变段（6-9）放后。扩展通过 `PromptBuild` Hook 注入顺序 9 的 `Extension` section，无需修改核心 contributor。
+
+`PromptContext`（`build()` 的入参）聚合各 contributor 需要的会话级输入（`session_id`/`workdir`/`platform`/`git_info`/`enabled_tools`/`user_rules`/`project_rules`），避免 contributor 各自重新加载文件。完整定义与 `PromptPipeline` 拼装算法见 `design.md` §22。
+
 ---
 
 ## 4. L2 Runtime API
@@ -1099,6 +1213,12 @@ pub trait McpClient {
 
     /// 调用某个 MCP 工具，超时由 server 配置的 tool_timeout 决定。
     async fn call(&self, server: &str, tool: &str, input: serde_json::Value) -> Result<ToolResult, McpError>;
+
+    /// 健康检查（进程池模式）。
+    async fn health_check(&self) -> Result<bool, McpError>;
+
+    /// 预热连接（后台预热）。
+    async fn warm_up(&self) -> Result<(), McpError>;
 
     /// 优雅关闭所有 server（stdio: EOF；http: 连接池释放）。
     async fn shutdown(&self) -> Result<(), McpError>;

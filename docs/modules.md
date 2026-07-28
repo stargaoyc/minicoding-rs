@@ -13,17 +13,20 @@
 ```
 minicoding-rs (workspace)
 ├── crates/
-│   ├── minicoding-core          # 抽象层：数据模型 + 核心 trait + Runtime 编排 + Event + Config + OTel
-│   ├── minicoding-context       # ContextManager 实现 + 压缩管道 + 权重 + 熔断
+│   ├── minicoding-core          # 抽象层：数据模型 + 核心 trait + Runtime 编排 + Event + Config + OTel + Prompt 管道
+│   ├── minicoding-context       # ContextManager 实现 + 4 级压缩 + 权重 + 熔断 + 预测压缩 + Post-compact 恢复
 │   ├── minicoding-policy        # 权限实现：PermissionPolicy/Prompter + builtin 黑名单 + ApprovalMode/Preset
 │   ├── minicoding-memory        # 记忆实现：长期/Auto/会话记忆 + AGENTS.md loader
 │   ├── minicoding-hooks         # Hooks 实现：Registry + ScriptHook + asyncRewake + 内置 Hook
 │   ├── minicoding-journal       # FileChangeJournal 实现 + /undo
 │   ├── minicoding-sandbox       # OS 沙箱驱动（基于 sandbox-run + landlock + libseccomp）
-│   ├── minicoding-mcp           # MCP client/server（基于 rmcp 2.x 官方 SDK）
+│   ├── minicoding-mcp           # MCP client/server（基于 rmcp 2.x）+ 进程池 + 后台预热 + inflight merge
 │   ├── minicoding-storage       # JSONL 存储 + audit.log 审计
-│   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）
+│   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）+ 小 LLM 配置
 │   ├── minicoding-tools         # 内置 Tool 实现（fs/shell/web/git/task/plan/mcp 包装）
+│   ├── minicoding-protocol      # JSON-RPC 2.0 wire types + Event/Command DTO（前后端协议契约）
+│   ├── minicoding-server        # HTTP/SSE server + ACP 适配器（多前端接入层）
+│   ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar + Manifest）
 │   ├── minicoding-cli           # CLI frontend
 │   ├── minicoding-tui           # TUI frontend（M7）
 │   └── minicoding-sdk           # 嵌入 SDK（M8）
@@ -32,8 +35,9 @@ minicoding-rs (workspace)
 ### 0.2 依赖方向
 
 ```
-                    cli / tui / sdk
-                         │
+              cli / tui / sdk      server
+                    │                │
+                    └────┬───────────┘
                          ▼
                        tools ──┬─► context   (压缩、token 预算)
                        │       ├─► policy    (权限决策)
@@ -45,7 +49,7 @@ minicoding-rs (workspace)
                        │       └─► storage   (审计落盘)
                        │
                        ▼
-              core ◄── providers   (LlmProvider 实现)
+              core ◄── providers    (LlmProvider 实现)
                 ▲    ◄── storage    (Storage/audit 实现)
                 │    ◄── context    (ContextManager 实现)
                 │    ◄── policy     (PermissionPolicy/Prompter 实现)
@@ -55,7 +59,16 @@ minicoding-rs (workspace)
                 │    ◄── sandbox    (SandboxDriver 实现)
                 │    ◄── mcp        (McpClient 实现)
                 │
+              core ◄── protocol    (wire types / DTO，依赖 core)
+                ▲    ◄── extension-sdk (Extension trait / Registrar，依赖 core)
+                │
               (trait 定义集中在此)
+
+  说明：
+  - protocol 仅依赖 core（wire types + DTO）
+  - extension-sdk 仅依赖 core（Extension trait + Registrar + Manifest）
+  - server 依赖 core + protocol + tools（HTTP/SSE 接入层）
+  - cli/tui/sdk 依赖 tools + core + protocol（前端进程）
 ```
 
 ### 0.3 分层原则
@@ -65,6 +78,7 @@ minicoding-rs (workspace)
 3. **实现单一职责**：每个领域 crate 只负责一类实现（policy 只管权限、memory 只管记忆），不交叉。
 4. **依赖单向**：core 不依赖任何领域 crate；领域 crate 依赖 core；tools 作为"组合层"可依赖多个领域 crate；cli/tui/sdk 依赖 tools + core。
 5. **平台/网络隔离**：sandbox（C 绑定）、mcp（rmcp 网络栈）、providers（HTTP）的重依赖隔离在各自 crate，不污染 core。
+6. **扩展系统一等公民**：`minicoding-extension-sdk` 提供稳定扩展 API，核心能力（Plan/Task/Memory）可插件化。扩展注册的工具仍走统一 `ToolRegistry` dispatch，确保权限审计一致。
 
 ### 0.4 特性门控
 
@@ -111,6 +125,8 @@ full    = ["memory", "hooks", "file-undo", "sandbox", "mcp"]
 - 配置（`RuntimeConfig` 分层加载 + profiles）
 - OTel 初始化与 span 辅助
 - 路径约定（`paths.rs`）
+- Prompt 管道（`PromptContributor` trait + `PromptSection` + `PromptSectionOrder`）
+- 扩展系统 trait（`ExtensionHost` + `ExtensionManifest` + `Registrar`）
 
 ### 1.2 内部模块树
 
@@ -144,6 +160,13 @@ minicoding-core/src/
 ├── journal/trait.rs       # Journal trait + ChangeEntry + UndoReport（见 api.md §3.11）
 ├── mcp/trait.rs           # McpClient trait + McpServerConfig + McpTransport + McpScope（见 api.md §11）
 ├── storage/trait.rs       # Storage trait + AuditSink trait
+├── prompt/
+│   ├── mod.rs             # Prompt 管道：PromptContributor trait + PromptSection + PromptSectionOrder
+│   ├── identity.rs        # Identity contributor（默认身份 + ~/.minicoding/IDENTITY.md 覆盖）
+│   ├── system_rules.rs    # System rules contributor
+│   ├── environment.rs     # Environment contributor（工作区/平台/git 信息）
+│   └── tool_summary.rs    # Tool summary contributor（工具 schema 摘要）
+├── extension/trait.rs     # ExtensionHost + Extension + ExtensionManifest + Registrar trait（见 api.md §3.12）
 ├── event.rs               # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
 ├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
@@ -168,6 +191,8 @@ pub mod prelude {
     pub use crate::journal::{Journal, ChangeEntry, UndoReport};
     pub use crate::mcp::{McpClient, McpServerConfig, McpTransport, McpScope};
     pub use crate::storage::{Storage, AuditSink};
+    pub use crate::prompt::{PromptContributor, PromptSection, PromptSectionOrder};
+    pub use crate::extension::{ExtensionHost, Extension, ExtensionManifest, Registrar};
     pub use crate::event::Event;
     pub use crate::config::RuntimeConfig;
 }
@@ -179,6 +204,7 @@ pub mod prelude {
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
 - **轻量依赖**：core 只依赖 `tokio`/`serde`/`serde_json`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`。无 `reqwest`/`landlock`/`rmcp`/`libseccomp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
+- **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `PromptBuild` Hook 注入 section（见 `design.md` §22）。
 
 ---
 
@@ -205,6 +231,8 @@ minicoding-context/src/
 ├── circuit_breaker.rs     # 压缩熔断状态机（见 design.md §3.6）
 ├── state_keep.rs          # 压缩后状态保留清单（SessionMeta 恢复，见 design.md §3.7）
 ├── fallback.rs            # L2 摘要失败降级链（主→备用→启发式→跳过 L3）
+├── predictive.rs          # 预测性压缩（基于 turn token 增长估算，提前 compact）
+├── post_compact_recover.rs # Post-compact 上下文恢复（重新注入最近 read 的文件内容）
 └── tokenizer.rs           # tiktoken-rs 集成 + 启发式估算
 ```
 
@@ -213,6 +241,8 @@ minicoding-context/src/
 - **依赖 core trait**：实现 `core::context::ContextManager`，调用 `core::model::Message`。
 - **压缩熔断独立模块**：`circuit_breaker.rs` 维护失败计数与 Thrash 检测状态机，与 C-29 约束对应。
 - **降级链复用**：`fallback.rs` 的 `SummaryFallback` 与 `minicoding-memory` 的会话摘要降级链同构，可通过 trait 共享。
+- **预测性压缩**：`predictive.rs` 根据历史 turn token 增长均值估算，在超出窗口前提前 compact，与反应式 compact（阈值触发）互补（见 `design.md` §3.9）；
+- **Post-compact 恢复**：`post_compact_recover.rs` compact 后从历史提取最近 read 过的文件路径，按预算截断重新注入，避免模型重新 read（见 `design.md` §3.10）。
 - **依赖**：`minicoding-core` + `tiktoken-rs`（token 计数）+ `tokio`。摘要压缩需调 LLM，通过 `LlmProvider` trait 注入（不直接依赖 providers crate）。
 
 ---
@@ -397,7 +427,10 @@ minicoding-mcp/src/
 │   ├── mod.rs
 │   ├── rmcp.rs            # 基于 rmcp 2.x 的实现（stdio + streamable HTTP + OAuth）
 │   ├── lifecycle.rs       # 启动/握手/超时/优雅关闭
-│   └── wrapper.rs         # 把 rmcp 工具包装为 minicoding Tool trait
+│   ├── wrapper.rs         # 把 rmcp 工具包装为 minicoding Tool trait
+│   ├── pool.rs            # MCP 进程池：跨 turn 复用连接（见 design.md §19.5）
+│   ├── prewarm.rs         # 后台预热：全局 server 启动时预热，项目级 session 创建时预热
+│   └── inflight.rs        # inflight merge：同 server 并发请求合并
 ├── server/
 │   └── expose.rs          # 把 minicoding 内置工具暴露为 MCP server（rmcp #[tool] 宏）
 ├── approval.rs            # project 作用域首次批准流（mcp_choices.toml）
@@ -420,6 +453,9 @@ minicoding-mcp/src/
 - **project 作用域批准**：首次遇到含 `.minicoding/mcp.json` 的仓库时逐个 server 弹窗，防恶意仓库植入（C-24）。
 - **凭证隔离**：MCP server 子进程不继承 minicoding 凭证环境变量（C-04）。
 - **`required` 语义**：`required = true` 的 server 启动失败则 minicoding 拒绝启动；`required = false`（默认）失败仅 warn 跳过。
+- **进程池复用**：MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5）；
+- **后台预热**：全局 server（`~/.minicoding/mcp.json`）启动时预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞；
+- **inflight merge**：同 server 并发请求合并，避免重复调用。
 - **依赖**：`minicoding-core` + `rmcp` 2.2（features: `client`/`server`/`macros`/`transport-child-process`/`transport-streamable-http-client-reqwest`）+ `tokio`。
 
 ---
@@ -478,7 +514,8 @@ minicoding-providers/src/
 └── common/
     ├── retry.rs           # 重试策略（指数退避、429 Retry-After）
     ├── sse.rs             # SSE 流解析
-    └── error.rs           # LlmError 分类
+    ├── error.rs           # LlmError 分类
+    └── small_llm.rs       # 小 LLM 配置（摘要/compact/memory 提取用独立 provider 降本）
 ```
 
 ### 10.3 关键设计点
@@ -486,6 +523,7 @@ minicoding-providers/src/
 - 每个 provider 内部统一返回 `BoxStream<Result<Delta>>`，转换逻辑隔离。
 - 密钥从环境变量或 OS keyring 读取，绝不接受配置文件明文。
 - 重试与超时在 `common::retry` 统一实现，装饰器包裹 stream。
+- **独立小 LLM**：`small_llm.rs` 支持为摘要 / compact / memory 提取配置独立 provider（`[provider.small]`），未设置时与主 provider 相同，可配更便宜模型降本。
 - **依赖**：`minicoding-core` + `reqwest`（rustls-tls）+ `eventsource-stream` + `tiktoken-rs` + `serde`/`serde_json`。
 
 ---
@@ -650,40 +688,121 @@ impl Client {
 
 ---
 
-## 15. 跨模块约定
+## 15. `minicoding-protocol`（前后端协议契约）
 
-### 15.1 命名
+### 15.1 职责
+
+定义 JSON-RPC 2.0 wire types + Event/Command DTO，独立于实现 crate。CLI / TUI / HTTP Server / ACP 适配器共用此 crate 的线协议类型。
+
+### 15.2 模块树
+
+minicoding-protocol/src/
+├── lib.rs                 # re-export
+├── jsonrpc.rs             # JSON-RPC 2.0 wire types（Request/Response/Notification/Error）
+├── event.rs               # Event DTO（从 core::Event 映射，携带 seq: u64）
+├── command.rs             # Command DTO（前端→后端命令：CreateSession/SendMessage/Cancel 等）
+├── cursor.rs              # SSE cursor 恢复（event seq 单调递增）
+└── rehydrate.rs           # RehydrateRequired 信号（broadcast 溢出时通知客户端重拉 snapshot）
+
+### 15.3 关键设计点
+
+- **协议与实现解耦**：wire types 集中在此 crate，server/cli/tui 共用；
+- **cursor 恢复**：SSE 流携带 cursor（event seq），客户端断连后从 cursor 恢复；
+- **Rehydrate 信号**：broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot；
+- **依赖**：`minicoding-core` + `serde`/`serde_json`。无 HTTP/server 依赖。
+
+---
+
+## 16. `minicoding-server`（HTTP/SSE server + ACP 适配器）
+
+### 16.1 职责
+
+提供 HTTP/SSE JSON-RPC 2.0 接口，支持多客户端并发会话；ACP stdio 适配器可被支持 ACP 的客户端（如 Zed）嵌入。
+
+### 16.2 模块树（规划）
+
+minicoding-server/src/
+├── main.rs                # minicoding-server 入口
+├── http.rs                # Axum HTTP/SSE handler
+├── session_mgr.rs         # 多会话管理（HTTP path 带 session_id）
+├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio）
+├── sse.rs                 # SSE 流 + cursor 恢复
+└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
+
+### 16.3 关键设计点
+
+- **SSE cursor 恢复**：事件流携带 cursor，客户端断连后从 cursor 恢复；
+- **多会话并发**：HTTP path 带 session_id，支持多 session 并发；
+- **ACP stdio**：作为 `minicoding serve --acp` 子模式，stdio 传输 JSON-RPC；
+- **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）。
+
+---
+
+## 17. `minicoding-extension-sdk`（扩展作者稳定 API）
+
+### 17.1 职责
+
+为第三方扩展作者提供稳定接口，隐藏 Runtime 内部细节。扩展可通过 Registrar 注册 6 类能力：工具 / Hook / Prompt contributor / 快捷键 / 状态栏项 / 斜杠命令。本 crate 同时提供 `ExtensionHost` 的进程内 first-party 实现（disk IPC 加载器在 `minicoding-cli`）。
+
+### 17.2 模块树（规划）
+
+minicoding-extension-sdk/src/
+├── lib.rs                 # re-export + 扩展开发入口
+├── extension.rs           # Extension trait（生命周期 init/shutdown/on_config_changed）
+├── host.rs                # BundledExtensionHost（ExtensionHost 进程内实现，M5+）
+├── registrar.rs           # Registrar 接口（6 类注册项，Arc<dyn Trait>）
+├── manifest.rs            # ExtensionManifest + ExtensionCarrier + Capability
+├── context.rs             # ExtensionContext（扩展运行时上下文：logger/config/event_bus）
+└── protocol.rs            # disk IPC 子进程扩展协议（JSON over stdio，M6+）
+
+### 17.3 关键设计点
+
+- **三类扩展载体**（`ExtensionCarrier` 枚举）：
+  1. `Bundled`：进程内 first-party（`host.rs` 实现，M5+）；
+  2. `Ipc { path }`：disk IPC 子进程（`minicoding-cli` 加载器，M6+）；
+  3. `Mcp { server_id }`：远程扩展（通过 `minicoding-mcp` 包装为 Tool，M4+）。
+- **统一 dispatch**：扩展注册的工具仍走 ToolRegistry dispatch 路径，确保权限审计与可观测性一致（C-01/C-02 不被绕过）；
+- **能力声明**：`ExtensionManifest` 声明 id/version/name/author/carrier/capabilities/permissions/config_schema，`ExtensionHost` 启动时校验权限边界；
+- **Extension-First 架构**：核心只保留 agent loop / hooks / context compaction / built-in tools；其他能力（skills / mode / goal）通过扩展接入；
+- **trait 定义位置**：`Extension`/`ExtensionHost`/`Registrar`/`ExtensionManifest` trait 定义在 `minicoding-core`（见 `api.md` §3.12），本 crate 提供进程内实现；
+- **依赖**：`minicoding-core` + `serde`/`serde_json`。无重依赖（HTTP/进程隔离在 `minicoding-cli` 与 `minicoding-mcp`）。
+
+---
+
+## 18. 跨模块约定
+
+### 18.1 命名
 
 - crate：`minicoding-<sub>`；
 - 模块：单数小写下划线（`fs`、`tool`、`provider`）；
 - trait：名词或动词（`LlmProvider`、`Tool`、`Storage`）；
 - 错误：`<Domain>Error`（`LlmError`、`ToolError`、`HookError`）。
 
-### 15.2 可见性
+### 18.2 可见性
 
 - 每个 crate 只在 `lib.rs` 暴露稳定 API，内部模块默认 `pub(crate)`。
 - `core` 的 trait 与数据模型必须 `pub`，实现细节 `pub(crate)`。
 - 实现 crate 的具体实现类型（如 `PolicyEngine`）可 `pub` 供组装，但内部方法 `pub(crate)`。
 
-### 15.3 错误传播
+### 18.3 错误传播
 
 - 各 crate 定义自己的错误类型，实现 `Into<RuntimeError>`（core 定义）。
 - 边界（CLI / SDK）统一转 `anyhow::Error` 输出。
 
-### 15.4 日志
+### 18.4 日志
 
 - 每个 crate 启用 `tracing`，不直接 `println!`。
 - span 命名：`<crate>::<module>`，关键操作打 `info!`，细节打 `debug!`/`trace!`。
 - OTel span 字段命名遵循 `design.md` §15.2。
 
-### 15.5 测试组织
+### 18.5 测试组织
 
 - 单元测试与源码同文件 `#[cfg(test)] mod tests`。
 - 集成测试放 `tests/` 目录，按场景命名（`agent_loop.rs`、`compression.rs`、`sandbox.rs`）。
 - 跨 crate 共享测试工具放 `crates/minicoding-core/tests/common/`。
 - 各实现 crate 独立测试，不依赖其他实现 crate（用 mock trait）。
 
-### 15.6 依赖治理
+### 18.6 依赖治理
 
 - core 的依赖必须是"轻量 + 无平台/网络"的（tokio/serde/tracing/thiserror/uuid/time/camino/trait-variant）。
 - 重依赖（reqwest/landlock/libseccomp/rmcp/ratatui）只能出现在对应实现 crate。
@@ -692,7 +811,7 @@ impl Client {
 
 ---
 
-## 16. 模块成熟度矩阵
+## 19. 模块成熟度矩阵
 
 | 模块 | M0-M1 MVP | M2-M3 | M4-M5 | M6-M8 |
 |------|:---:|:---:|:---:|:---:|
@@ -710,5 +829,8 @@ impl Client {
 | cli (单次+会话+exec+doctor) | ✅ | resume | mcp 子命令 | 稳定 |
 | tui | - | - | - | ✅ |
 | sdk | - | - | - | ✅ |
+| protocol (JSON-RPC DTO) | - | - | - | ✅ |
+| server (HTTP/SSE/ACP) | - | - | - | ✅ |
+| extension-sdk | - | - | 骨架 | ✅ |
 
 > ✅ = 交付；增强 = 功能扩展；- = 不交付。
