@@ -11,13 +11,19 @@ authors.workspace = true
 [dependencies]
 # core 必须轻量，无平台/网络重依赖（见 modules.md §1.4、§15.6）
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 futures = { workspace = true }
-trait-variant = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 uuid = { workspace = true }
 ulid = { workspace = true }
 time = { workspace = true }
+home = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = { workspace = true }

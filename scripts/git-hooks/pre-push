@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# minicoding-rs pre-push hook
+# 安装：cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+set -euo pipefail
+
+echo "[pre-push] cargo test --workspace ..."
+cargo test --workspace
+
+echo "[pre-push] done."

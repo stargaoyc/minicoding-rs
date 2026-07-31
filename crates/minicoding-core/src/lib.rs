@@ -12,3 +12,38 @@
 //! 详见 `docs/modules.md` §1、`docs/design.md` §1。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+pub mod config;
+pub mod context;
+pub mod model;
+pub mod paths;
+pub mod policy;
+pub mod provider;
+pub mod runtime;
+pub mod sandbox;
+pub mod storage;
+pub mod tool;
+
+/// 常用类型 re-export。
+pub mod prelude {
+    pub use crate::config::RuntimeConfig;
+    pub use crate::context::{ContextManager, ContextSnapshot};
+    pub use crate::model::{
+        Attachment, ContentBlock, ContextHint, LlmError, Message, MessageMeta, MessageSource,
+        PolicyError, PromptError, Role, RuntimeError, Session, SessionId, SessionMeta, SideEffect,
+        StopReason, StorageError, ToolCall, ToolCallId, ToolContent, ToolError, ToolResult,
+        ToolResultMeta, ToolSchema, TurnOutcome, UserInput,
+    };
+    pub use crate::policy::{
+        Decision, PermissionContext, PermissionPolicy, PermissionPrompt, PermissionPrompter,
+        PromptOption, Risk, Verdict,
+    };
+    pub use crate::provider::{
+        BoxFuture, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider, Tokenizer,
+        ToolCallDelta, Usage,
+    };
+    pub use crate::runtime::{Runtime, RuntimeBuilder};
+    pub use crate::sandbox::{NoopDriver, SandboxDriver, SandboxError, SandboxPolicy};
+    pub use crate::storage::{AuditKind, AuditRecord, AuditSink, Storage};
+    pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
+}

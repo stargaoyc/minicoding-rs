@@ -56,10 +56,11 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # 路径与 ID（AGENTS.md §2.5）
-camino = "1.1"
+camino = { version = "1.1", features = ["serde1"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 ulid = { version = "1.1", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+home = "0.5"
 
 # HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

@@ -14,3 +14,11 @@
 //! 详见 `docs/modules.md` §3、`docs/design.md` §9、`docs/security.md`。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+mod builtin;
+mod path_sandbox;
+mod prompter;
+
+pub use builtin::BuiltinPolicy;
+pub use path_sandbox::{PathSandboxError, resolve_under};
+pub use prompter::{InteractivePrompter, NonInteractivePrompter};

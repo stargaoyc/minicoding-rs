@@ -17,3 +17,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 fs2 = { workspace = true }
+time = { workspace = true }

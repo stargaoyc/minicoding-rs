@@ -17,3 +17,9 @@
 //! 详见 `docs/modules.md` §10、`docs/design.md` §4。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+mod openai;
+mod tokenizer;
+
+pub use openai::{OpenAiProvider, PROVIDER_ID};
+pub use tokenizer::{TiktokenKind, TiktokenTokenizer};
