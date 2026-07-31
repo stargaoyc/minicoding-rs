@@ -2538,7 +2538,7 @@ pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Com
 
 ## 24. 前后端协议与多前端接入
 
-§1 的 Runtime 是单进程内聚合根，CLI/TUI/SDK 直接持有 `Arc<Runtime>` 调用方法。但当需要"远程前端"（如浏览器、移动端、IDE 插件通过 HTTP 接入）或"嵌入式前端"（如 Zed 编辑器通过 ACP 协议嵌入）时，进程内调用不够。本节定义前后端协议，使 Runtime 可被多前端共享。
+§1 的 Runtime 是单进程内聚合根，CLI/TUI/SDK 直接持有 `Arc<Runtime>` 调用方法。但当需要"远程前端"（如浏览器、移动端、IDE 插件通过 HTTP 接入）或"嵌入式前端"（如 Zed 编辑器通过 ACP 协议嵌入、VS Code/Neovim 通过 LSP 协议嵌入）时，进程内调用不够。本节定义前后端协议，使 Runtime 可被多前端共享。
 
 **JSON-RPC 2.0 协议**：前后端通信统一用 JSON-RPC 2.0，wire types 定义在 `minicoding-protocol` crate（新增）。请求/响应/通知三类消息，与 LSP 协议风格一致，便于复用既有 LSP 客户端库。
 
@@ -2605,6 +2605,27 @@ POST   /sessions/{id}/permissions/{pid}   → ResolvePermission
 SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼容（浏览器 `EventSource` 自动重连时携带）。HTTP server 实现在 `minicoding-server` crate（新增），依赖 `minicoding-tools` + `tokio` + `axum`（或 `hyper`，选型见 `tech-stack.md`）。
 
 **ACP stdio 适配器**：`minicoding serve --acp` 启动 ACP（Agent Client Protocol）stdio 模式，可被 Zed 等编辑器嵌入。ACP 是 stdio 上的 JSON-RPC，与 HTTP server 共享 protocol crate 的 wire types，仅传输层不同（stdio 替代 HTTP/SSE）。这使 minicoding 既能作为独立服务（HTTP），又能作为嵌入式 Agent（ACP）。
+
+**LSP stdio 适配器**：`minicoding serve --lsp` 启动 LSP（Language Server Protocol）server 模式，可被任何支持 LSP 的编辑器（VS Code、Neovim、Emacs、Helix 等）嵌入。LSP 同样是 JSON-RPC 2.0 over stdio，与 ACP 共享 `minicoding-protocol` 的 wire types，但 LSP 拥有标准化的方法集（`textDocument/*`/`workspace/*`/`window/*`），需要把 minicoding 的对话/工具/权限能力映射到 LSP 标准方法。LSP 比 ACP 更通用（几乎所有现代编辑器原生支持），是 IDE 集成的主推路径。
+
+LSP 语义映射（minicoding 能力 → LSP 方法）：
+
+| minicoding 能力 | LSP 方法 | 方向 | 说明 |
+|-----------------|---------|------|------|
+| 会话初始化 | `initialize` | 请求-响应 | 协商能力，返回 `minicoding` 自定义 capabilities（`minicoding.ask`/`minicoding.undo` 等 command） |
+| 发送 prompt | `workspace/executeCommand` | 请求-响应 | `command="minicoding.ask"`，参数 `{text, attachments}`，响应含 turn 结果 |
+| 斜杠命令 | `workspace/executeCommand` | 请求-响应 | `command="minicoding.undo"`/`"minicoding.plan"`/`"minicoding.mcp"` 等 |
+| 流式 token | `$/progress` | 通知 | 进度 token 关联 turn，逐 token 推送增量 |
+| 工具调用进度 | `$/progress` | 通知 | kind=`tool_call`，含工具名与状态 |
+| 事件广播 | `minicoding/event`（自定义通知） | 通知 | 推送 Event DTO（携带 `seq: u64`，与 §24 SSE cursor 机制一致） |
+| 权限确认 | `window/showMessageRequest` | 请求-响应 | 点对点，对应 `PermissionPrompter`，动作 `Allow`/`Deny`/`AllowAlways` |
+| 取消 turn | `$/cancelRequest` | 通知 | 取消当前 `executeCommand` 对应的 turn |
+| AI 快速操作 | `textDocument/codeAction` | 请求-响应 | 提供解释/重构/修复等 quick action，选中代码后触发 |
+| 诊断（可选） | `textDocument/publishDiagnostics` | 通知 | AI 发现的问题作为诊断推送到编辑器 |
+
+**与 ACP 的关系**：ACP 是 Zed 专有协议，LSP 是行业标准。二者并列存在于 `minicoding-server`，共享三层状态模型（Durable/Process/Transport）与 `minicoding-protocol` wire types，仅传输层语义映射不同。用户按编辑器支持选择：Zed 用 `--acp`，其他 LSP 兼容编辑器用 `--lsp`。LSP 适配器实现 `LspPrompter`（实现 `PermissionPrompter` trait），通过 `window/showMessageRequest` 完成点对点权限交互，与 `TuiPrompter`/`InteractivePrompter` 同构。
+
+**实现选型**：用 `tower-lsp` crate（主流 Rust LSP 框架，基于 tower，MIT/Apache-2.0），不自研 JSON-RPC stdio 薄封装（§3.6 不自研原则）。`tower-lsp` 依赖隔离在 `minicoding-server` crate（feature gate `lsp`，默认关闭），不污染 core/protocol。详见 `tech-stack.md` §4、§13。
 
 **三层状态模型**：前后端分离后，状态分布在三层：
 

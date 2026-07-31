@@ -4,6 +4,7 @@
 //! 权限交互不走总线（点对点 `PermissionPrompter`，见 `policy::trait`）。
 
 use crate::model::{Message, SessionId, StopReason, ToolCallId, ToolResult};
+use crate::policy::{Decision, Risk};
 use tokio::sync::broadcast;
 
 /// 运行时事件（向前端广播，仅通知无回复通道）。
@@ -26,6 +27,15 @@ pub enum Event {
     },
     /// 会话已创建。
     SessionCreated { id: SessionId },
+    /// 权限已询问（通知类，仅展示/审计，无回复通道，见 `design.md` §9.2）。
+    PermissionRequested {
+        id: String,
+        tool: String,
+        summary: String,
+        risk: Risk,
+    },
+    /// 权限已 resolved（带最终决策，供 UI 关闭弹窗与审计，见 `design.md` §9.2）。
+    PermissionResolved { id: String, decision: Decision },
 }
 
 /// 事件总线（broadcast channel）。

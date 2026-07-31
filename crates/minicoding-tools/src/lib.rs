@@ -18,15 +18,22 @@
 //! - **`mcp::wrapper`**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect`
 //!   据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
 //!
-//! 当前 M1 阶段：已实现只读 fs 工具组（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`，
-//! 见 T-M1-6）；其余工具（shell/web/git/task/plan/mcp 包装）与领域 crate 依赖见 M2+。
+//! 当前阶段：已实现 fs 工具组——只读（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`，见
+//! T-M1-6）与写入（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`，见 T-M2-3）；以及
+//! shell 工具组（`shell.run`，见 T-M2-4）；其余工具（web/git/task/plan/mcp 包装）与
+//! 领域 crate 依赖见 M3+。
 //!
 //! 详见 `docs/modules.md` §11、`docs/design.md` §6。
 
 #![deny(clippy::all, clippy::pedantic)]
 
 mod fs;
+mod shell;
 mod util;
 
-pub use fs::{FsGlob, FsGrep, FsList, FsRead, register_readonly_tools};
+pub use fs::{
+    FsDelete, FsEdit, FsGlob, FsGrep, FsList, FsMultiEdit, FsRead, FsWrite,
+    register_readonly_tools, register_write_tools,
+};
+pub use shell::{ShellRun, register_shell_tools};
 pub use util::{ensure_dir, resolve_path, truncate_output};

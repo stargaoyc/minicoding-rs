@@ -1,18 +1,22 @@
 //! `RuntimeBuilder`：分步注入可替换能力，构造 `Runtime`。
 //!
 //! 必填：`provider` / `ctx` / `storage` / `workdir`。
-//! 可选：`tools`（默认空）、`config`（默认 `RuntimeConfig::default()`）、`events`（默认新建）。
+//! 可选：`tools`（默认空）、`config`（默认 `RuntimeConfig::default()`）、`events`（默认新建）、
+//! `policy`/`prompter`/`audit`（默认 `NoopPolicy`/`NoopPrompter`/`NoopAudit` 兜底，
+//! 真实场景由 frontend 注入 `minicoding-policy`/`minicoding-storage` 实现，见 M2）。
 
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
 use crate::model::Session;
+use crate::policy::{NoopPolicy, NoopPrompter, PermissionPolicy, PermissionPrompter};
 use crate::provider::LlmProvider;
 use crate::runtime::Runtime;
 use crate::runtime::event::EventBus;
-use crate::storage::Storage;
+use crate::storage::{AuditSink, NoopAudit, Storage};
 use crate::tool::ToolRegistry;
 use camino::Utf8PathBuf;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// `Runtime` 构造器。
 pub struct RuntimeBuilder {
@@ -24,6 +28,10 @@ pub struct RuntimeBuilder {
     events: EventBus,
     workdir: Option<Utf8PathBuf>,
     config_hash: u64,
+    policy: Option<Arc<dyn PermissionPolicy>>,
+    prompter: Option<Arc<dyn PermissionPrompter>>,
+    audit: Option<Arc<dyn AuditSink>>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl Default for RuntimeBuilder {
@@ -45,6 +53,10 @@ impl RuntimeBuilder {
             events: EventBus::new(),
             workdir: None,
             config_hash: 0,
+            policy: None,
+            prompter: None,
+            audit: None,
+            cancel_token: None,
         }
     }
 
@@ -98,6 +110,41 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置权限策略（默认 `NoopPolicy` 恒 `Allow`，真实场景应注入
+    /// `minicoding-policy::BuiltinPolicy`，见 C-01）。
+    #[must_use]
+    pub fn policy(mut self, p: Arc<dyn PermissionPolicy>) -> Self {
+        self.policy = Some(p);
+        self
+    }
+
+    /// 设置权限交互器（默认 `NoopPrompter` 恒 `Allow`，真实场景应注入
+    /// `minicoding-policy::InteractivePrompter`/`NonInteractivePrompter`）。
+    #[must_use]
+    pub fn prompter(mut self, p: Arc<dyn PermissionPrompter>) -> Self {
+        self.prompter = Some(p);
+        self
+    }
+
+    /// 设置审计 sink（默认 `NoopAudit` 空操作，真实场景应注入
+    /// `minicoding-storage::FileAuditSink`，见 AGENTS.md §5.5）。
+    #[must_use]
+    pub fn audit(mut self, a: Arc<dyn AuditSink>) -> Self {
+        self.audit = Some(a);
+        self
+    }
+
+    /// 设置取消 token（默认新建）。
+    ///
+    /// CLI 可注入共享 token，以便 Ctrl-C handler 调用 `token.cancel()` 触发
+    /// `run_turn` graceful stop（C-13）。不设置时 Runtime 内部新建一个独立 token，
+    /// 通过 `Runtime::cancel()` 仍可触发。
+    #[must_use]
+    pub fn cancel_token(mut self, t: CancellationToken) -> Self {
+        self.cancel_token = Some(t);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// # Errors
@@ -119,6 +166,10 @@ impl RuntimeBuilder {
             session,
             events: self.events,
             workdir,
+            policy: self.policy.unwrap_or_else(|| Arc::new(NoopPolicy)),
+            prompter: self.prompter.unwrap_or_else(|| Arc::new(NoopPrompter)),
+            audit: self.audit.unwrap_or_else(|| Arc::new(NoopAudit)),
+            cancel_token: self.cancel_token.unwrap_or_default(),
         })
     }
 }
@@ -130,6 +181,9 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("has_context", &self.ctx.is_some())
             .field("has_storage", &self.storage.is_some())
             .field("has_workdir", &self.workdir.is_some())
+            .field("has_policy", &self.policy.is_some())
+            .field("has_prompter", &self.prompter.is_some())
+            .field("has_audit", &self.audit.is_some())
             .field("tools_count", &self.tools.len())
             .finish_non_exhaustive()
     }

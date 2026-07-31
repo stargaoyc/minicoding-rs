@@ -2,4 +2,6 @@
 
 mod r#trait;
 
-pub use r#trait::{AuditKind, AuditRecord, AuditSink, SessionMeta, Storage, StorageError};
+pub use r#trait::{
+    AuditKind, AuditRecord, AuditSink, NoopAudit, SessionMeta, Storage, StorageError,
+};

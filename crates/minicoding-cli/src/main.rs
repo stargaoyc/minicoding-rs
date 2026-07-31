@@ -5,9 +5,10 @@
 //! 解析参数、加载配置、构建 `Runtime`、驱动会话、渲染输出。零业务逻辑——所有决策委托
 //! `Runtime`；CLI 只做 IO 与渲染。
 //!
-//! ## M1 能力
+//! ## 能力
 //!
-//! - 单次提问模式：`minicoding "你的问题"`
+//! - 单次提问模式：`minicoding "你的问题"`（M1）
+//! - 交互会话模式：`minicoding --session` 进入多轮 REPL（M2 / T-M2-8）
 //! - 流式 token 渲染（实时打印到 stdout）
 //! - 配置从环境变量或默认值加载（`OPENAI_API_KEY`/`OPENAI_API_BASE`/`OPENAI_MODEL`）
 //! - 只读工具组（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`）自动注册
@@ -21,6 +22,7 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod builder;
+mod session;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -31,8 +33,12 @@ use minicoding_core::runtime::Event;
 #[derive(Parser, Debug)]
 #[command(name = "minicoding", version, about, long_about = None)]
 struct Cli {
-    /// 单次提问内容（M1 仅支持单次模式）
+    /// 单次提问内容（无 `--session` 时为单次模式；省略则进入交互 REPL）
     prompt: Option<String>,
+
+    /// 进入交互会话模式（多轮 REPL）
+    #[arg(long)]
+    session: bool,
 
     /// 模型名称（覆盖配置/环境变量）
     #[arg(long, env = "OPENAI_MODEL")]
@@ -69,11 +75,8 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    // 检查 prompt
-    let prompt = cli
-        .prompt
-        .clone()
-        .context("M1 仅支持单次提问模式：minicoding \"你的问题\"")?;
+    // 分派：`--session` 或无 prompt → 交互 REPL；有 prompt 且无 `--session` → 单次
+    let interactive = cli.session || cli.prompt.is_none();
 
     // 构建 Runtime
     let rt = builder::build_runtime(
@@ -87,7 +90,13 @@ fn main() -> Result<()> {
 
     // 运行
     let runtime = tokio::runtime::Runtime::new()?;
-    let exit_code = runtime.block_on(run_single_turn(&rt, prompt));
+    let exit_code = if interactive {
+        runtime.block_on(session::run_interactive_session(&rt))
+    } else {
+        // 单次模式：此处 prompt 必为 Some（interactive 为 false 已保证）
+        let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
+        runtime.block_on(run_single_turn(&rt, prompt))
+    };
 
     std::process::exit(exit_code);
 }

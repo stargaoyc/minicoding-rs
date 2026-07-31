@@ -25,7 +25,7 @@ minicoding-rs (workspace)
 │   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）+ 小 LLM 配置
 │   ├── minicoding-tools         # 内置 Tool 实现（fs/shell/web/git/task/plan/mcp 包装）
 │   ├── minicoding-protocol      # JSON-RPC 2.0 wire types + Event/Command DTO（前后端协议契约）
-│   ├── minicoding-server        # HTTP/SSE server + ACP 适配器（多前端接入层）
+│   ├── minicoding-server        # HTTP/SSE server + ACP/LSP 适配器（多前端接入层）
 │   ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar + Manifest）
 │   ├── minicoding-cli           # CLI frontend
 │   ├── minicoding-tui           # TUI frontend（M7）
@@ -692,7 +692,7 @@ impl Client {
 
 ### 15.1 职责
 
-定义 JSON-RPC 2.0 wire types + Event/Command DTO，独立于实现 crate。CLI / TUI / HTTP Server / ACP 适配器共用此 crate 的线协议类型。
+定义 JSON-RPC 2.0 wire types + Event/Command DTO，独立于实现 crate。CLI / TUI / HTTP Server / ACP 适配器 / LSP 适配器共用此 crate 的线协议类型。
 
 ### 15.2 模块树
 
@@ -713,11 +713,11 @@ minicoding-protocol/src/
 
 ---
 
-## 16. `minicoding-server`（HTTP/SSE server + ACP 适配器）
+## 16. `minicoding-server`（HTTP/SSE server + ACP/LSP 适配器）
 
 ### 16.1 职责
 
-提供 HTTP/SSE JSON-RPC 2.0 接口，支持多客户端并发会话；ACP stdio 适配器可被支持 ACP 的客户端（如 Zed）嵌入。
+提供 HTTP/SSE JSON-RPC 2.0 接口，支持多客户端并发会话；ACP stdio 适配器可被支持 ACP 的客户端（如 Zed）嵌入；LSP stdio 适配器可被任何支持 LSP 的编辑器（VS Code/Neovim/Emacs/Helix 等）嵌入。
 
 ### 16.2 模块树（规划）
 
@@ -726,6 +726,8 @@ minicoding-server/src/
 ├── http.rs                # Axum HTTP/SSE handler
 ├── session_mgr.rs         # 多会话管理（HTTP path 带 session_id）
 ├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio）
+├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24）
+├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest）
 ├── sse.rs                 # SSE 流 + cursor 恢复
 └── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
 
@@ -734,7 +736,8 @@ minicoding-server/src/
 - **SSE cursor 恢复**：事件流携带 cursor，客户端断连后从 cursor 恢复；
 - **多会话并发**：HTTP path 带 session_id，支持多 session 并发；
 - **ACP stdio**：作为 `minicoding serve --acp` 子模式，stdio 传输 JSON-RPC；
-- **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）。
+- **LSP stdio**：作为 `minicoding serve --lsp` 子模式，基于 `tower-lsp` 实现，把 minicoding 能力映射到 LSP 标准方法（`workspace/executeCommand`/`$/progress`/`window/showMessageRequest` 等，见 `design.md` §24 语义映射表）；`LspPrompter` 实现点对点权限交互；
+- **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）+ `tower-lsp`（feature gate `lsp`，M8 引入）。
 
 ---
 
@@ -830,7 +833,7 @@ minicoding-extension-sdk/src/
 | tui | - | - | - | ✅ |
 | sdk | - | - | - | ✅ |
 | protocol (JSON-RPC DTO) | - | - | - | ✅ |
-| server (HTTP/SSE/ACP) | - | - | - | ✅ |
+| server (HTTP/SSE/ACP/LSP) | - | - | - | ✅ |
 | extension-sdk | - | - | 骨架 | ✅ |
 
 > ✅ = 交付；增强 = 功能扩展；- = 不交付。

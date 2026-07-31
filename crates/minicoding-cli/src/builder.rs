@@ -1,16 +1,21 @@
 //! Runtime 组装：根据 CLI 参数与环境变量构造 `Runtime`。
 //!
-//! 组装顺序：config → provider → context → storage → tools → `RuntimeBuilder`。
+//! 组装顺序：config → provider → context → storage → tools → policy/prompter/audit
+//! → `RuntimeBuilder`。
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::SimpleContextManager;
 use minicoding_core::config::{RuntimeConfig, config_hash};
+use minicoding_core::policy::{PermissionPolicy, PermissionPrompter};
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
+use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
+use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter};
 use minicoding_providers::OpenAiProvider;
-use minicoding_storage::JsonlStorage;
-use minicoding_tools::register_readonly_tools;
+use minicoding_storage::{FileAuditSink, JsonlStorage};
+use minicoding_tools::{register_readonly_tools, register_shell_tools, register_write_tools};
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 /// 从 CLI 参数构建 `Runtime`。
@@ -74,13 +79,30 @@ pub fn build_runtime(
     // 6. 构造 tool registry
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
+    register_write_tools(&mut tools);
+    register_shell_tools(&mut tools);
 
-    // 7. 解析 workdir
+    // 7. 构造权限策略 + 交互器（C-01：副作用必须经权限）
+    //    TTY → InteractivePrompter（stdin 读 y/n）；非 TTY → NonInteractivePrompter
+    //    （恒 Deny，CI 安全默认，见 design.md §9.2）
+    let policy: Arc<dyn PermissionPolicy> = Arc::new(BuiltinPolicy::new());
+    let prompter: Arc<dyn PermissionPrompter> = if std::io::stdin().is_terminal() {
+        Arc::new(InteractivePrompter::new())
+    } else {
+        tracing::warn!("stdin 非 TTY，切换为 NonInteractivePrompter（副作用工具将被拒绝）");
+        Arc::new(NonInteractivePrompter::new())
+    };
+
+    // 8. 构造审计 sink（AGENTS.md §5.5：权限决策必须落 audit.log，0600 权限）
+    let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
+    let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
+
+    // 9. 解析 workdir
     let workdir_path = Utf8PathBuf::from(workdir)
         .canonicalize_utf8()
         .unwrap_or_else(|_| Utf8PathBuf::from(workdir));
 
-    // 8. 组装 Runtime
+    // 10. 组装 Runtime
     let config_hash = config_hash(&config);
     let rt = RuntimeBuilder::new()
         .provider(Arc::new(provider))
@@ -89,6 +111,9 @@ pub fn build_runtime(
         .tools(tools)
         .config(config)
         .workdir(workdir_path)
+        .policy(policy)
+        .prompter(prompter)
+        .audit(audit)
         .build()
         .map_err(anyhow::Error::msg)?;
 
