@@ -804,6 +804,13 @@ impl Runtime {
     /// 单轮对话；驱动 Agent 循环直到结束或中断。
     pub async fn run_turn(&self, input: UserInput) -> Result<TurnOutcome>;
 
+    /// 触发 graceful 取消（CLI 的 Ctrl-C handler 调用）。
+    /// 当前 in-flight 迭代被丢弃，已落盘消息保留（C-13），run_turn 返回 Interrupted。
+    pub fn cancel(&self);
+
+    /// 返回取消 token 克隆（供 frontend 在 select! 中组合等待 Ctrl-C）。
+    pub fn cancel_token(&self) -> CancellationToken;
+
     /// 派发子 Agent。
     pub async fn spawn_subagent(
         &self,
@@ -840,6 +847,8 @@ impl RuntimeBuilder {
     pub fn project_doc_loader(mut self, l: Arc<dyn ProjectDocLoader>) -> Self;
     pub fn journal(mut self, j: Arc<dyn Journal>) -> Self;       // None 时 /undo 不可用
     pub fn mcp_client(mut self, c: Arc<dyn McpClient>) -> Self;  // 见 §11
+    /// 取消 token（默认新建；CLI 可注入共享 token 以便 Ctrl-C 触发 graceful stop，C-13）。
+    pub fn cancel_token(mut self, t: CancellationToken) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
@@ -1112,8 +1121,10 @@ pub enum ToolError {
 - **HTTP/JSON-RPC**（`minicoding serve`）：REST 风格 `/ask` `/stream` `/event`，便于非 Rust 集成。
 - **MCP Server**：实现 Model Context Protocol，作为工具源被其他 Agent 调用。
 - **stdin/stdout NDJSON 协议**：便于编辑器插件以子进程方式嵌入。
+- **ACP stdio**（`minicoding serve --acp`）：Agent Client Protocol，可被 Zed 等支持 ACP 的客户端嵌入。
+- **LSP stdio**（`minicoding serve --lsp`）：Language Server Protocol，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等支持 LSP 的编辑器嵌入。语义映射见 `design.md` §24：`workspace/executeCommand`→发送 prompt / 斜杠命令、`$/progress`→流式 token 与工具进度、`window/showMessageRequest`→权限确认（`LspPrompter` 实现 `PermissionPrompter`）、`textDocument/codeAction`→AI 快速操作。
 
-三者共用 `core` 的数据模型，仅序列化协议不同。
+五者共用 `core` 的数据模型与 `minicoding-protocol` 的 wire types，仅序列化协议与传输层不同。
 
 ---
 

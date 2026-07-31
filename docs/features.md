@@ -214,6 +214,10 @@
 | E-12 | ACP 适配器 | ACP stdio 适配器，可被 Zed 等客户端嵌入 | M8 | 规划中 |
 | E-13 | SSE cursor 恢复 | 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复 | M8 | 规划中 |
 | E-14 | RehydrateRequired 信号 | broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot | M8 | 规划中 |
+| E-15 | LSP server | `minicoding serve --lsp`，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等编辑器嵌入（见 `design.md` §24、`modules.md` §16） | M8 | 规划中 |
+| E-16 | LSP 语义映射 | `workspace/executeCommand`→prompt、`$/progress`→流式 token/工具进度、`minicoding/event`→事件广播（见 `design.md` §24 映射表） | M8 | 规划中 |
+| E-17 | LspPrompter | 实现 `PermissionPrompter`，`window/showMessageRequest` 点对点权限交互，与 `TuiPrompter` 同构 | M8 | 规划中 |
+| E-18 | LSP codeAction | `textDocument/codeAction` 提供 AI 快速操作（解释/重构/修复选中代码） | M8 | 规划中 |
 
 ## 13. 工程与质量
 
@@ -261,13 +265,13 @@
 | 可观测性 | 8 |
 | 持久化与存储 | 10 |
 | 前端 | 8 |
-| 嵌入与跨进程 | 10 |
+| 嵌入与跨进程 | 14 |
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| **合计** | **163** |
+| **合计** | **167** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 51 项（含 asyncRewake、Auto memory、压缩熔断等增强）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory 是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）是参考 CC/Codex 后的核心增强。
 
 ---
 
@@ -283,7 +287,7 @@
 |:---:|------|------|:---:|
 | **P0** | M0–M2 | MVP 必交付，缺则不可用 | ~38 |
 | **P1** | M3–M5 | 扩展与安全，缺则不具备生产可用性 | ~55 |
-| **P2** | M6–M8 / M6+ / M7+ / M8+ | 高级形态，可后续迭代 | ~51 |
+| **P2** | M6–M8 / M6+ / M7+ / M8+ | 高级形态，可后续迭代 | ~74 |
 
 - P0 功能阻塞 MVP 发布；任何 P0 延期需触发 roadmap 评审。
 - P1 功能中，P-15..P-23（沙箱/审批强化）与 H-01..H-13（Hooks）是参考 CC/Codex 后的核心差异化，建议优先于同里程碑其他 P1 项。

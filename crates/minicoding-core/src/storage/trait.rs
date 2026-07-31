@@ -57,3 +57,15 @@ pub enum AuditKind {
 pub trait AuditSink: Send + Sync {
     fn record(&self, rec: AuditRecord) -> BoxFuture<'_, Result<(), StorageError>>;
 }
+
+/// 无操作审计 sink（兜底，未注入 audit 时使用）。
+///
+/// `record` 为空操作——仅用于测试或未启用审计的场景，真实落盘应由
+/// `minicoding-storage::FileAuditSink` 提供（0600 权限，追加写）。
+pub struct NoopAudit;
+
+impl AuditSink for NoopAudit {
+    fn record(&self, _rec: AuditRecord) -> BoxFuture<'_, Result<(), StorageError>> {
+        Box::pin(async move { Ok(()) })
+    }
+}

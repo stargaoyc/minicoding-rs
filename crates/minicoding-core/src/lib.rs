@@ -35,8 +35,8 @@ pub mod prelude {
         ToolResultMeta, ToolSchema, TurnOutcome, UserInput,
     };
     pub use crate::policy::{
-        Decision, PermissionContext, PermissionPolicy, PermissionPrompt, PermissionPrompter,
-        PromptOption, Risk, Verdict,
+        Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionPolicy, PermissionPrompt,
+        PermissionPrompter, PromptOption, Risk, Verdict,
     };
     pub use crate::provider::{
         BoxFuture, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider, Tokenizer,
@@ -44,6 +44,6 @@ pub mod prelude {
     };
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::sandbox::{NoopDriver, SandboxDriver, SandboxError, SandboxPolicy};
-    pub use crate::storage::{AuditKind, AuditRecord, AuditSink, Storage};
+    pub use crate::storage::{AuditKind, AuditRecord, AuditSink, NoopAudit, Storage};
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
 }

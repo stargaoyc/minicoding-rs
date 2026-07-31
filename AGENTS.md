@@ -51,7 +51,7 @@ minicoding-rs (workspace)
     ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）+ 小 LLM
     ├── minicoding-tools         # 内置 Tool 实现（组合层）
     ├── minicoding-protocol      # JSON-RPC 2.0 wire types + Event/Command DTO
-    ├── minicoding-server        # HTTP/SSE server + ACP 适配器（多前端接入层）
+    ├── minicoding-server        # HTTP/SSE server + ACP/LSP 适配器（多前端接入层）
     ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar）
     ├── minicoding-cli           # CLI frontend
     ├── minicoding-tui           # TUI frontend（M7）

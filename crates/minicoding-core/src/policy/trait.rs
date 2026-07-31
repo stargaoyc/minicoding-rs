@@ -81,3 +81,32 @@ pub trait PermissionPolicy: Send + Sync {
 pub trait PermissionPrompter: Send + Sync {
     fn prompt(&self, req: PermissionPrompt) -> BoxFuture<'_, Decision>;
 }
+
+/// 无操作策略（兜底，未注入 policy 时使用，类似 `sandbox::NoopDriver`）。
+///
+/// `check` 恒返回 `Verdict::Allow`——仅用于测试或未启用权限 feature 的场景，
+/// 真实决策应由 `minicoding-policy::BuiltinPolicy` 提供。
+pub struct NoopPolicy;
+
+impl PermissionPolicy for NoopPolicy {
+    fn check(
+        &self,
+        _tool: &str,
+        _input: &serde_json::Value,
+        _ctx: &PermissionContext,
+    ) -> BoxFuture<'_, Result<Verdict, PolicyError>> {
+        Box::pin(async move { Ok(Verdict::Allow) })
+    }
+}
+
+/// 无操作交互器（兜底，未注入 prompter 时使用）。
+///
+/// `prompt` 恒返回 `Decision::Allow`——仅用于测试场景，真实交互应由
+/// `minicoding-policy::InteractivePrompter`/`NonInteractivePrompter` 提供。
+pub struct NoopPrompter;
+
+impl PermissionPrompter for NoopPrompter {
+    fn prompt(&self, _req: PermissionPrompt) -> BoxFuture<'_, Decision> {
+        Box::pin(async move { Decision::Allow })
+    }
+}

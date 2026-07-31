@@ -66,6 +66,7 @@
 | 彩色输出 | `anstream` + `anstyle` | `colored` | 与 `clap` 生态对齐，支持非 TTY 降级 |
 | 行编辑 | `rustyline` | `reedline` | 成熟、依赖少；后续 TUI 阶段评估 `reedline` |
 | TUI（后续） | `ratatui` + `crossterm` | - | 现代化 TUI 框架，跨平台 |
+| LSP server（M8） | `tower-lsp` | 自研 JSON-RPC stdio 薄封装 | 主流 Rust LSP 框架（基于 tower），MIT/Apache-2.0；LSP 协议方法集庞大，自研易出错且落后标准；`tower-lsp` 提供类型安全的 trait 派发与生命周期管理。依赖隔离在 `minicoding-server`（feature gate `lsp`） |
 
 ---
 
@@ -230,6 +231,7 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | macOS 沙箱 | `sandbox-run`（封装 Seatbelt） | 自实现 sandbox kit / 裸 `sandbox-exec` | `sandbox-run` 统一 API 跨平台；裸 `sandbox-exec` 需手写 profile 字符串易错 |
 | Windows 沙箱 | `windows` 受限令牌 + Job Object | AppContainer | Job Object + DACL 更成熟可控；AppContainer 权限模型复杂 |
 | MCP 客户端 | `rmcp` 2.2（官方，M4 一步到位） | 自实现 http/stdio | 官方 SDK 协议跟进快、对齐 2025-11-25 spec、含 `#[tool]` 宏与 schemars；自实现易落后、维护成本高 |
+| LSP server | `tower-lsp`（M8） | 自研 JSON-RPC stdio 薄封装 | LSP 协议方法集庞大（`textDocument/*`/`workspace/*`/`window/*`），`tower-lsp` 提供类型安全派发与生命周期管理；自研易出错且落后 LSP spec；与 ACP 共享 `minicoding-protocol` wire types，仅语义映射层不同 |
 | 文件锁 | `fs2` | `flock` 裸调 | 跨平台封装、API 稳定 |
 
 ### 13.1 `trait-variant` 宏的风险管理

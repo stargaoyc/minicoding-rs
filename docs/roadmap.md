@@ -226,7 +226,7 @@
 - `core`：错误分类与恢复策略（见 `design.md` §10）。
 - `cli`：`--provider`、`--model` 覆盖。
 - 集成测试：mock 三家 provider 跑同一会话。
-- `protocol`：JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`，见 `modules.md` §15），为 M8 的 HTTP/SSE server 与 ACP 适配器提供协议基础；ACP stdio 适配器脚手架（可被 Zed 等客户端嵌入）。
+- `protocol`：JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`，见 `modules.md` §15），为 M8 的 HTTP/SSE server、ACP 适配器与 LSP 适配器提供协议基础；ACP stdio 适配器脚手架（可被 Zed 等客户端嵌入）。
 - `core`：配置热更新（`ConfigWatcher` 基于 fsnotify + `Event::ConfigChanged`，扩展通过 `on_config_changed()` 接收变更，M6+）。
 
 **验收**
@@ -271,16 +271,19 @@
 - `sdk`：`Client` + `ClientBuilder` + 高层 API。
 - `cli`：`minicoding serve` HTTP/JSON-RPC server。
 - `server`：HTTP/SSE JSON-RPC 接口（`minicoding-server`，见 `modules.md` §16），支持多客户端并发会话；事件流携带 cursor（event seq），客户端断连后从 cursor 恢复（SSE cursor 恢复）；broadcast 溢出时发 `RehydrateRequired` 信号，客户端重拉 snapshot。
+- `server`：ACP stdio 适配器（`minicoding serve --acp`，可被 Zed 等客户端嵌入）。
+- `server`：LSP stdio 适配器（`minicoding serve --lsp`，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等编辑器嵌入，见 `design.md` §24 语义映射）；`LspPrompter` 实现 `PermissionPrompter`（`window/showMessageRequest` 点对点权限交互）。
 - `mcp`：`minicoding serve --as-mcp-server` 把自身工具暴露为 MCP server（被其他 Agent 调用）。
 - stdin/stdout NDJSON 协议（编辑器插件）。
-- 文档：嵌入指南、协议规范。
+- 文档：嵌入指南、协议规范、LSP 编辑器接入说明。
 
 **验收**
 - `Client::ask` 可在第三方 Rust 项目运行。
 - `serve` 模式可被 curl 调用。
 - MCP server 可被 Claude Desktop 等客户端发现并使用。
+- `serve --lsp` 可被支持 LSP 的编辑器（VS Code/Neovim）连接，能发送 prompt 并接收流式 token；权限确认通过 `window/showMessageRequest` 弹窗。
 
-**任务追溯**：dev-plan T-M8-1..T-M8-6（6 个 task，预估 8 人日）。可度量门槛：SDK `Client::ask` 在第三方 Rust 项目可运行、`serve` HTTP 端点可 curl 调用、MCP server 可被 Claude Desktop 发现、跨平台二进制（cargo dist）三平台产出。
+**任务追溯**：dev-plan T-M8-1..T-M8-9（9 个 task，预估 8 人日）。可度量门槛：SDK `Client::ask` 在第三方 Rust 项目可运行、`serve` HTTP 端点可 curl 调用、MCP server 可被 Claude Desktop 发现、`serve --lsp` 可被 LSP 编辑器连接、跨平台二进制（cargo dist）三平台产出。
 
 **风险**
 - 协议稳定性 → 标 `experimental` 直到反馈收敛。

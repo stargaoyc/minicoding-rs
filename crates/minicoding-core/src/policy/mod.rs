@@ -3,6 +3,6 @@
 mod r#trait;
 
 pub use r#trait::{
-    Decision, PermissionContext, PermissionPolicy, PermissionPrompt, PermissionPrompter,
-    PromptOption, Risk, Verdict,
+    Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionPolicy, PermissionPrompt,
+    PermissionPrompter, PromptOption, Risk, Verdict,
 };

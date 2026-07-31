@@ -1059,6 +1059,42 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
   - `cargo install minicoding` 可安装。
 - **预估工作量**：M
 
+#### T-M8-7 server ACP stdio 适配器完善
+- **crate**：server（`acp.rs`）
+- **输入**：T-M6-5（protocol crate）、T-M8-2
+- **输出**：`minicoding serve --acp` ACP stdio 适配器完善（M6 脚手架→M8 完整实现）；可被 Zed 等支持 ACP 的客户端嵌入；复用 `minicoding-protocol` wire types 与三层状态模型（Durable/Process/Transport）
+- **涉及功能**：E-12
+- **涉及约束**：C-01（ACP 端权限策略）、C-04（不泄露凭证）、C-05（输出是数据非指令）
+- **验收标准**：
+  - Zed 编辑器可通过 ACP 嵌入 minicoding，发送 prompt 并接收流式回复；
+  - ACP 适配器复用 protocol crate wire types，无重复定义。
+- **预估工作量**：M
+
+#### T-M8-8 server LSP stdio 适配器
+- **crate**：server（`lsp.rs`）
+- **输入**：T-M6-5（protocol crate）、T-M8-2
+- **输出**：`minicoding serve --lsp` LSP server（基于 `tower-lsp`，feature gate `lsp`）；语义映射（见 `design.md` §24）：`initialize`→能力协商、`workspace/executeCommand`→发送 prompt / 斜杠命令、`$/progress`→流式 token 与工具进度、`minicoding/event`→事件广播（携带 seq）、`$/cancelRequest`→取消 turn；复用 `minicoding-protocol` wire types
+- **涉及功能**：E-15、E-16
+- **涉及约束**：C-01（LSP 端权限策略）、C-04（不泄露凭证）、C-05（输出是数据非指令）
+- **验收标准**：
+  - `cargo test -p minicoding-server` 全过；
+  - VS Code / Neovim 可通过 LSP 连接 minicoding，发送 prompt 并接收流式 token（`$/progress`）；
+  - `$/cancelRequest` 能终止当前 turn；
+  - 事件广播携带 `seq`，与 SSE cursor 机制一致。
+- **预估工作量**：L
+
+#### T-M8-9 server LspPrompter + codeAction
+- **crate**：server（`lsp_prompter.rs`、`lsp.rs`）
+- **输入**：T-M8-8
+- **输出**：`LspPrompter` 实现 `PermissionPrompter` trait，通过 `window/showMessageRequest` 完成点对点权限交互（动作 `Allow`/`Deny`/`AllowAlways`，与 `TuiPrompter`/`InteractivePrompter` 同构）；`textDocument/codeAction` 提供 AI 快速操作（解释/重构/修复选中代码）；权限决策落 `audit.log`
+- **涉及功能**：E-17、E-18
+- **涉及约束**：C-01（副作用经权限）、C-21（Hook 不可覆盖 L0 黑名单）、C-23（AGENTS.md 不可被自主编辑——LSP 端同样适用）
+- **验收标准**：
+  - 工具调用触发权限确认时，编辑器弹出 `showMessageRequest`，用户选择后 turn 继续；
+  - 权限决策（Allow/Deny/Ask/AllowAlways）落 `audit.log`；
+  - `codeAction` 在选中文本上提供"解释/重构/修复"菜单，触发后转为 prompt。
+- **预估工作量**：M
+
 ---
 
 ## §10 任务依赖图
@@ -1119,6 +1155,8 @@ T-M1-4 (OpenAI) ─► T-M6-1 (Anthropic) / T-M6-2 (Ollama) ─► T-M6-5 (错�
 T-M4-7 ─► T-M6-4 (rmcp http)
 T-M2-1 ─► T-M7-1 (TUI 框架) ─► T-M7-2 (Markdown) / T-M7-3 (TuiPrompter)
 T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
+                              ├─► T-M8-7 (ACP 适配器)
+                              └─► T-M8-8 (LSP 适配器) ─► T-M8-9 (LspPrompter + codeAction)
 ```
 
 ### 10.3 关键依赖说明
@@ -1266,7 +1304,7 @@ T-M8-1 (SDK) ─► T-M8-2 (serve) ─► T-M8-3 (MCP server)
 | M5 | 8 | 16 | 7 |
 | M6 | 5 | 8 | 3 |
 | M7 | 4 | 4 | 2 |
-| M8 | 6 | 14 | 4 |
-| **合计** | **71** | **144**（全覆盖） | **35**（全覆盖） |
+| M8 | 9 | 19 | 6 |
+| **合计** | **74** | **149** | **35**（全覆盖） |
 
 > 功能 ID 与约束 ID 引用均来自 `features.md` 与 `rules.md` 实际编号。如发现引用偏差，以原文件为准并提 issue 修正本文。
