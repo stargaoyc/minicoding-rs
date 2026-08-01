@@ -104,6 +104,7 @@ impl LlmProvider for ScriptedProvider {
 }
 
 /// mock 工具：根据名称返回固定结果，记录被调用的入参。
+#[allow(dead_code)]
 pub struct MockTool {
     name: String,
     side_effect: SideEffect,
@@ -116,6 +117,7 @@ pub struct MockTool {
 impl MockTool {
     /// 创建只读 mock 工具。
     #[must_use]
+    #[allow(dead_code)]
     pub fn read_only(name: &str, response: impl Into<String>) -> Self {
         Self {
             name: name.to_string(),
@@ -126,6 +128,7 @@ impl MockTool {
     }
 
     /// 取出所有调用入参快照。
+    #[allow(dead_code)]
     pub fn take_calls(&self) -> Vec<serde_json::Value> {
         std::mem::take(&mut *self.calls.lock().expect("calls poisoned"))
     }
@@ -209,6 +212,14 @@ impl Storage for InMemoryStorage {
     fn delete(&self, _session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
         Box::pin(async move { Ok(()) })
     }
+    fn update_summary(
+        &self,
+        _session: &SessionId,
+        _summary: &str,
+    ) -> BoxFuture<'_, Result<(), StorageError>> {
+        // 测试 mock：摘要更新为 no-op（InMemoryStorage 不维护 index）
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 /// 简单 context manager（用于测试，持有消息列表）。
@@ -284,6 +295,7 @@ impl ContextManager for TestContext {
 
 /// 构造一个工具调用 delta 序列（含分片）。
 #[must_use]
+#[allow(dead_code)]
 pub fn tool_call_deltas(call_id: &str, name: &str, args_json: &str) -> Vec<Delta> {
     vec![
         Delta::ToolCall(ToolCallDelta {

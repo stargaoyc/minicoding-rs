@@ -239,12 +239,16 @@ chmod\s+-R\s+777\s+/
 
 ### 5.1 SSRF 防护
 
+> **T-M4-11 实现**：`minicoding-policy::ssrf` 提供 `check_url` / `check_host` / `check_ip`，由 `web.fetch` / MCP HTTP transport 在请求前调用，命中黑名单返回 `SsrfError`，由 policy builtin 转为 `Verdict::Deny`。
+
 `web.fetch` 解析目标主机后校验：
 
 - 拒绝 RFC1918 私网（`10/8`、`172.16/12`、`192.168/16`）；
-- 拒绝链路本地 `169.254/16`（云元数据接口）；
-- 拒绝回环 `127/8`（除非配置 `allow_loopback`，用于本地 Ollama）；
-- 拒绝非公网 IP（`0.0.0.0`、`100.64/10` 等）。
+- 拒绝链路本地 `169.254/16`（云元数据接口 AWS/GCP/Azure metadata）；
+- 拒绝回环 `127/8` / `::1`（除非 `SsrfOptions::local_dev()` 或配置 `allow_loopback`，用于本地 Ollama）；
+- 拒绝非公网 IP：`0.0.0.0/8`（当前网络）、`100.64/10`（CGNAT）、`fc00::/7`（IPv6 ULA）、`fe80::/10`（IPv6 链路本地）；
+- **解析策略**：用 `Url::host()` 而非 `host_str()` 取主机枚举，IPv6 字面量直接拿到 `Ipv6Addr`（避免 `[::1]` 带方括号导致 `IpAddr::from_str` 失败误走 DNS 路径）；域名经 `to_socket_addrs` 解析为 IP 后逐个校验；
+- **未覆盖**：DNS 重绑定（TOCTOU，解析后到连接前 IP 可能变化）M5+ 接入二次校验。
 
 ### 5.2 域名策略
 
@@ -272,17 +276,24 @@ deny_domains = ["*.internal.corp"]
 |------|------|---------|
 | 环境变量 | CI / 容器 | 中（依赖运行环境隔离） |
 | OS keyring | 交互场景 | 高（推荐） |
+| 文件 fallback `~/.minicoding/credentials`（0600） | keyring 不可用降级 | 中（原子 rename + 0600） |
 | 配置文件明文 | 仅本地调试 | 低（启动告警） |
+
+> **T-M4-11 实现**：`minicoding-cli::cred` 实现 keyring 优先 + 文件 fallback：
+> - 读取优先级：CLI `--api-key` > `OPENAI_API_KEY` 环境变量 > OS keyring > 文件 fallback；
+> - 文件 fallback 写入用 `tmp` + `fs::set_permissions(0o600)` + `fs::rename` 原子替换；
+> - keyring 不可用时降级到文件 fallback 并打 warn 日志，不阻塞启动；
+> - `minicoding cred store/load/delete` 子命令：`store` 从 stdin 读取（不回显），`load` 仅验证存在性不打印 key 本身，`delete` 同时清理 keyring 与文件 fallback。
 
 ### 6.2 隔离
 
 - 凭证仅存在于 `Runtime` 内存，不传给 `ToolContext.env`。
-- `fs.read` 读取 `~/.minicoding/config.toml` / `policy.toml` 时自动脱敏（替换为 `***`）。
+- `fs.read` 读取 `.env` / `credentials` / `*.pem` / `*.key` / 文件名含 `secret`/`password`/`token` 的敏感文件时自动脱敏（替换为 `***`，T-M4-11，见 §13.3）。
 - 日志中绝不打印完整密钥；`Authorization` 头在 trace 级别也只打前 4 字符 + `***`。
 
 ### 6.3 轮换
 
-- `auth logout` 清理 keyring 条目。
+- `minicoding cred delete` 清理 keyring 条目与文件 fallback。
 - 检测到 401/403 时提示用户重新登录，不自动重试避免锁定。
 
 ---
@@ -649,9 +660,20 @@ Windows 沙箱实现成熟度低于 macOS/Linux（与 Codex 一致）。初期�
 
 ### 13.3 敏感数据脱敏
 
-- 工具输出回灌前扫描 `.env` / `api_key` / `password` 模式，替换为 `***`。
-- 用户可配置 `redact.patterns` 增加自定义正则。
-- 脱敏在写 jsonl 前完成，避免敏感数据落盘。
+> **T-M4-11 实现**：`minicoding-policy::redact` + `minicoding-tools::fs::read::is_sensitive_path` 已落地。
+
+- **触发条件**：`fs.read` 读取以下敏感文件时自动脱敏——
+  - 文件名为 `.env` 或以 `.env.` 开头（`.env.local`/`.env.production`）；
+  - 文件名等于 `credentials` / `creds`；
+  - 扩展名 `.pem` / `.key` / `.pfx` / `.p12`；
+  - 文件名含 `secret` / `password` / `token`（不区分大小写）。
+- **脱敏规则**（`redact.rs`）：
+  - `KEY=value` / `KEY: value` 字段赋值——字段名归一化（`-`/空白 → `_`）后匹配关键词 `api_key`/`token`/`secret`/`password`/`private_key`/`access_key`/`client_secret`/`refresh_token` 等，命中则把值替换为 `***`，保留 KEY 与分隔符；
+  - `Authorization: Bearer xxx` / `Bearer xxx`——替换 token 部分为 `***`；
+  - AWS access key `AKIA[0-9A-Z]{16}`——替换为 `***`。
+- **字段名归一化**：`Api-Key` / `API KEY` / `api_key` 均归一化为 `api_key` 后匹配，覆盖 `kebab-case`/`snake_case`/含空白命名差异。
+- **不在 jsonl 落盘前才脱敏**：脱敏在 `fs.read` 返回前完成，工具结果直接是脱敏后的文本，回灌 LLM 与写 jsonl 均为安全内容。
+- 用户可配置 `redact.patterns` 增加自定义正则（M5+ 接入）。
 
 ### 13.4 回放安全
 

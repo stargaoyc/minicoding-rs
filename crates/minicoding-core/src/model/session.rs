@@ -1,6 +1,6 @@
 //! 会话模型：`Session` / `SessionId` / `StopReason` / `TurnOutcome` / `UserInput`。
 
-use crate::model::Message;
+use crate::model::{Message, Task};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -15,6 +15,12 @@ pub struct SessionMeta {
     pub created_at: OffsetDateTime,
     pub message_count: usize,
     pub last_message_at: OffsetDateTime,
+    /// 任务列表（跨压缩保留，见 `design.md` §18.5、C-31）。
+    ///
+    /// 任务列表存 `SessionMeta` 而非 `messages`，不受上下文压缩管道影响；
+    /// Runtime 负责在 `TaskStore` 与该字段间同步状态。
+    #[serde(default)]
+    pub tasks: Vec<Task>,
 }
 
 /// 会话（运行时镜像，与 storage 一致）。

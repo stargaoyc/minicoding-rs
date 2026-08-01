@@ -17,7 +17,13 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod audit;
+mod export;
+mod index;
 mod jsonl;
+mod lock;
 
 pub use audit::FileAuditSink;
+pub use export::{ExportFormat, export_session_jsonl, export_session_md};
+pub use index::{SessionIndex, SessionIndexEntry};
 pub use jsonl::JsonlStorage;
+pub use lock::SessionLock;

@@ -212,9 +212,9 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 | 约束 | 实现位置 |
 |------|---------|
 | C-01 | `design.md` §2.3 `run_one`、§9；`api.md` §3.6 |
-| C-02 | `modules.md` `policy/builtin.rs`；`security.md` §2.3、§4.2 |
+| C-02 | `modules.md` `policy/builtin.rs`；`security.md` §2.3、§4.2；`policy/ssrf.rs`（SSRF 内网黑名单，T-M4-11） |
 | C-03 | `design.md` §4.4；`security.md` §3 |
-| C-04 | `security.md` §6；`design.md` §4.4（env 不含凭证） |
+| C-04 | `security.md` §6；`design.md` §4.4（env 不含凭证）；`cli/cred.rs`（keyring + 文件 fallback，T-M4-11）；`policy/redact.rs`（敏感文件脱敏，T-M4-11）；`tools/fs/read.rs::is_sensitive_path`（脱敏触发） |
 | C-05 | `security.md` §2.5；系统提示词 `[Security]` |
 | C-06 | `security.md` §9.4；`design.md` §10 |
 | C-07 | `design.md` §4.4 `ToolContext`；`security.md` §4.3 |

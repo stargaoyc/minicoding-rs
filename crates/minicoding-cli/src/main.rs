@@ -9,6 +9,10 @@
 //!
 //! - 单次提问模式：`minicoding "你的问题"`（M1）
 //! - 交互会话模式：`minicoding --session` 进入多轮 REPL（M2）
+//! - 恢复会话：`minicoding --resume <id>` 继续历史会话（M3）
+//! - 回放会话：`minicoding --replay <id>`（默认禁副作用，C-06）
+//! - 分叉会话：`minicoding --fork-session <id>`
+//! - 会话管理：`minicoding session list`/`delete <id>`
 //! - 流式 token 渲染（实时打印到 stdout）
 //! - 配置从环境变量或默认值加载（`OPENAI_API_KEY`/`OPENAI_API_BASE`/`OPENAI_MODEL`）
 //! - 只读工具组（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`）自动注册
@@ -22,12 +26,43 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod builder;
+mod commands;
+mod cred;
+mod otel_init;
 mod session;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use builder::SessionLoadMode;
+use clap::{Parser, Subcommand};
+#[cfg(feature = "mcp")]
+use commands::McpCommand;
+use commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
 use minicoding_core::model::{TurnOutcome, UserInput};
 use minicoding_core::runtime::Event;
+
+/// 顶层子命令（除默认运行模式外的独立操作）。
+///
+/// `session`/`doctor`/`mcp`/`cred` 不构建 `Runtime`，无需 API key。
+/// `exec` 构建完整 `Runtime` 但强制非交互（CI 场景）。
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// 会话管理（列出 / 删除）。
+    #[command(name = "session")]
+    Session(SessionCommand),
+    /// 非交互批量执行（CI/脚本场景）。
+    #[command(name = "exec")]
+    Exec(ExecCommand),
+    /// 安全自检（沙箱驱动/硬化状态）。
+    #[command(name = "doctor")]
+    Doctor(DoctorCommand),
+    /// MCP server 管理（list/approve/reject/reset，`mcp` feature）。
+    #[cfg(feature = "mcp")]
+    #[command(name = "mcp")]
+    Mcp(McpCommand),
+    /// 凭证管理（store/load/delete）。
+    #[command(name = "cred")]
+    Cred(CredCommand),
+}
 
 /// minicoding — 终端 AI Coding 助手
 #[derive(Parser, Debug)]
@@ -39,6 +74,22 @@ struct Cli {
     /// 进入交互会话模式（多轮 REPL）
     #[arg(long)]
     session: bool,
+
+    /// 恢复指定会话继续对话。
+    #[arg(long, value_name = "SESSION_ID")]
+    resume: Option<String>,
+
+    /// 回放指定会话，默认禁用副作用工具（C-06）。
+    #[arg(long, value_name = "SESSION_ID")]
+    replay: Option<String>,
+
+    /// 从指定会话分叉到新会话（原会话不变）。
+    #[arg(long, value_name = "SESSION_ID")]
+    fork_session: Option<String>,
+
+    /// `--replay` 时显式允许副作用工具（每条仍走权限策略，C-06）。
+    #[arg(long)]
+    allow_side_effects: bool,
 
     /// 模型名称（覆盖配置/环境变量）
     #[arg(long, env = "OPENAI_MODEL")]
@@ -63,39 +114,119 @@ struct Cli {
     /// 启用详细日志
     #[arg(long, short = 'v')]
     verbose: bool,
+
+    /// 顶层子命令（如 `session list`/`delete`）。出现时跳过 Runtime 构建。
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// 从 CLI 参数解析会话加载模式（`--resume`/`--replay`/`--fork-session` 互斥）。
+fn resolve_session_mode(cli: &Cli) -> Result<SessionLoadMode> {
+    let modes: Vec<&str> = [
+        cli.resume.as_deref().map(|_| "resume"),
+        cli.replay.as_deref().map(|_| "replay"),
+        cli.fork_session.as_deref().map(|_| "fork"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if modes.len() > 1 {
+        anyhow::bail!("--resume/--replay/--fork-session 互斥，只能指定一个");
+    }
+    if let Some(id) = &cli.resume {
+        return Ok(SessionLoadMode::Resume(id.clone()));
+    }
+    if let Some(id) = &cli.replay {
+        return Ok(SessionLoadMode::Replay {
+            id: id.clone(),
+            allow_side_effects: cli.allow_side_effects,
+        });
+    }
+    if let Some(id) = &cli.fork_session {
+        return Ok(SessionLoadMode::Fork(id.clone()));
+    }
+    if cli.allow_side_effects {
+        anyhow::bail!("--allow-side-effects 仅在 --replay 时有效");
+    }
+    Ok(SessionLoadMode::None)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 初始化日志
-    let filter = if cli.verbose { "debug" } else { "warn" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    // 初始化日志/trace（OTLP 导出 + 降级 fmt）
+    // `OTEL_EXPORTER_OTLP_ENDPOINT` 配置且 `otel` feature 启用时安装 OTLP layer；
+    // 否则降级为纯本地 fmt 日志。guard drop 时 flush OTLP exporter。
+    let _otel_guard = otel_init::init_tracing(cli.verbose);
+
+    // 顶层子命令分派：session/doctor/mcp 不构建 Runtime；exec 构建 Runtime 但非交互。
+    match &cli.command {
+        Some(Command::Session(sess_cmd)) => {
+            commands::run_session_command(sess_cmd).context("session 子命令失败")?;
+            return Ok(());
+        }
+        Some(Command::Exec(exec_cmd)) => {
+            let code = commands::exec::run_exec_command(exec_cmd).context("exec 子命令失败")?;
+            std::process::exit(code);
+        }
+        Some(Command::Doctor(doctor_cmd)) => {
+            commands::doctor::run_doctor_command(doctor_cmd);
+            return Ok(());
+        }
+        #[cfg(feature = "mcp")]
+        Some(Command::Mcp(mcp_cmd)) => {
+            commands::mcp::run_mcp_command(mcp_cmd, &cli.workdir).context("mcp 子命令失败")?;
+            return Ok(());
+        }
+        Some(Command::Cred(cred_cmd)) => {
+            commands::run_cred_command(cred_cmd).context("cred 子命令失败")?;
+            return Ok(());
+        }
+        None => {}
+    }
+
+    // 解析会话加载模式（互斥校验）
+    let mode = resolve_session_mode(&cli)?;
+    let has_preloaded_session = !matches!(mode, SessionLoadMode::None);
 
     // 分派：`--session` 或无 prompt → 交互 REPL；有 prompt 且无 `--session` → 单次
     let interactive = cli.session || cli.prompt.is_none();
 
-    // 构建 Runtime
+    // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
     let rt = builder::build_runtime(
         cli.api_base.as_deref(),
         cli.api_key.as_deref(),
         cli.model.as_deref(),
         &cli.workdir,
         cli.system.as_deref(),
+        &mode,
+        None,
     )
     .context("构建 Runtime 失败")?;
 
     // 运行
     let runtime = tokio::runtime::Runtime::new()?;
     let exit_code = if interactive {
-        runtime.block_on(session::run_interactive_session(&rt))
+        runtime.block_on(async {
+            if has_preloaded_session {
+                if let Err(e) = rt.restore_history().await {
+                    eprintln!("恢复会话历史失败: {e}");
+                    return 1;
+                }
+            }
+            session::run_interactive_session(&rt).await
+        })
     } else {
-        // 单次模式：此处 prompt 必为 Some（interactive 为 false 已保证）
         let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
-        runtime.block_on(run_single_turn(&rt, prompt))
+        runtime.block_on(async {
+            if has_preloaded_session {
+                if let Err(e) = rt.restore_history().await {
+                    eprintln!("恢复会话历史失败: {e}");
+                    return 1;
+                }
+            }
+            run_single_turn(&rt, prompt).await
+        })
     };
 
     std::process::exit(exit_code);

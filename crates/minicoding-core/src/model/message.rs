@@ -20,7 +20,9 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text(String),
+    Text {
+        text: String,
+    },
     Image {
         mime: String,
         /// base64 编码（传输态），运行态可解为 `Vec<u8>`。
@@ -78,7 +80,7 @@ impl Message {
         Self {
             id: ulid::Ulid::new().to_string(),
             role: Role::User,
-            content: vec![ContentBlock::Text(text.into())],
+            content: vec![ContentBlock::Text { text: text.into() }],
             tool_calls: Vec::new(),
             tool_call_id: None,
             created_at: OffsetDateTime::now_utc(),
@@ -95,7 +97,7 @@ impl Message {
         Self {
             id: ulid::Ulid::new().to_string(),
             role: Role::System,
-            content: vec![ContentBlock::Text(text.into())],
+            content: vec![ContentBlock::Text { text: text.into() }],
             tool_calls: Vec::new(),
             tool_call_id: None,
             created_at: OffsetDateTime::now_utc(),
@@ -112,7 +114,7 @@ impl Message {
         Self {
             id: ulid::Ulid::new().to_string(),
             role: Role::Assistant,
-            content: vec![ContentBlock::Text(text.into())],
+            content: vec![ContentBlock::Text { text: text.into() }],
             tool_calls: Vec::new(),
             tool_call_id: None,
             created_at: OffsetDateTime::now_utc(),
@@ -129,7 +131,7 @@ impl Message {
         self.content
             .iter()
             .filter_map(|b| {
-                if let ContentBlock::Text(t) = b {
+                if let ContentBlock::Text { text: t } = b {
                     Some(t.as_str())
                 } else {
                     None

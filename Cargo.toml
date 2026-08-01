@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license = "AGPLv3"
 repository = "https://github.com/minicoding/minicoding-rs"
 version = "0.1.0"
 authors = ["minicoding-rs contributors"]
@@ -46,7 +46,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
-tracing-opentelemetry = "0.30"
+tracing-opentelemetry = "0.29"
 opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.28", features = ["trace", "http-proto", "reqwest-rustls"] }
@@ -64,6 +64,9 @@ home = "0.5"
 
 # HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# URL 解析（轻量，无网络 IO；SSRF 校验用，见 policy/ssrf.rs）
+url = "2.5"
 
 # CLI（仅 cli 引入，见 tech-stack.md §4）
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
@@ -96,6 +99,9 @@ assert_cmd = "2.0"
 
 # 跨进程锁
 fs2 = "0.4"
+
+# 凭证存储（OS keychain，见 tech-stack.md §8）
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 
 # 内部 crate 互引（path 引用，确保本地开发一致性）
 minicoding-core = { path = "crates/minicoding-core" }

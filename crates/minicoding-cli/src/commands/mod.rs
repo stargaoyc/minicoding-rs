@@ -1,0 +1,24 @@
+//! CLI 子命令（`session`/`exec`/`doctor`/`mcp`/`cred`）。
+//!
+//! - `session list`/`delete`：会话管理（不构建 Runtime）；
+//! - `exec`：非交互批量执行（构建 Runtime + 沙箱策略）；
+//! - `doctor --security`：安全自检（沙箱驱动/硬化状态）；
+//! - `mcp list`/`approve`/`reject`/`reset-project-choices`：MCP server 管理（`mcp` feature）；
+//! - `cred store`/`load`/`delete`：API key 凭证管理（keyring + 文件 fallback）。
+//!
+//! `session`/`doctor`/`mcp`/`cred` 不构建 Runtime（无需 API key），直接复用存储层或探测函数。
+//! `exec` 构建完整 Runtime 但强制非交互。
+
+pub mod cred;
+pub mod doctor;
+pub mod exec;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+pub mod session_cmd;
+
+pub use cred::{CredCommand, run_cred_command};
+pub use doctor::DoctorCommand;
+pub use exec::ExecCommand;
+#[cfg(feature = "mcp")]
+pub use mcp::McpCommand;
+pub use session_cmd::{SessionCommand, run_session_command};

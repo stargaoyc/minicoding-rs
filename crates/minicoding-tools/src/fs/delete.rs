@@ -1,6 +1,8 @@
 //! `fs.delete`：删除文件。
 
+use crate::fs::journal_helper::record_change;
 use crate::util::resolve_path;
+use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
@@ -65,17 +67,29 @@ impl Tool for FsDelete {
         ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
+        let journal = ctx.journal.clone();
         Box::pin(async move {
             let args: DeleteInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
             let path = resolve_path(&workdir, &args.path)?;
 
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => ToolError::NotFound(args.path.clone()),
-                    _ => ToolError::Io(e),
-                })?;
+            // 读取待删除文件内容用于 journal 撤销恢复（C-28）
+            let content = tokio::fs::read(&path).await.map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ToolError::NotFound(args.path.clone()),
+                _ => ToolError::Io(e),
+            })?;
+
+            tokio::fs::remove_file(&path).await.map_err(ToolError::Io)?;
+
+            // 记入 journal（若注入；C-28）
+            record_change(
+                journal.as_ref(),
+                FileChange::Deleted {
+                    path: path.clone(),
+                    content,
+                },
+            )
+            .await;
 
             Ok(ToolResult::ok_text(format!("deleted {}", args.path)))
         })
