@@ -13,6 +13,8 @@
 //! - 回放会话：`minicoding --replay <id>`（默认禁副作用，C-06，T-M3-10b）
 //! - 分叉会话：`minicoding --fork-session <id>`（T-M3-10b）
 //! - 会话管理：`minicoding session list`/`delete <id>`（T-M3-10c）
+//! - Plan 模式启动：`minicoding --plan` 进入只读规划模式（T-M5-8）
+//! - REPL 斜杠命令：`/plan`/`/undo`/`/help`/`/quit`（T-M5-8）
 //! - 流式 token 渲染（实时打印到 stdout）
 //! - 配置从环境变量或默认值加载（`OPENAI_API_KEY`/`OPENAI_API_BASE`/`OPENAI_MODEL`）
 //! - 只读工具组（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`）自动注册
@@ -67,6 +69,7 @@ enum Command {
 /// minicoding — 终端 AI Coding 助手
 #[derive(Parser, Debug)]
 #[command(name = "minicoding", version, about, long_about = None)]
+#[allow(clippy::struct_excessive_bools)] // CLI flag 集合，各 bool 语义独立，无需重构为 enum
 struct Cli {
     /// 单次提问内容（无 `--session` 时为单次模式；省略则进入交互 REPL）
     prompt: Option<String>,
@@ -110,6 +113,13 @@ struct Cli {
     /// 系统 prompt（覆盖默认）
     #[arg(long)]
     system: Option<String>,
+
+    /// 启动时进入 Plan 模式（只读强制 + plan.exit，T-M5-8）。
+    ///
+    /// 等价于 REPL 内执行 `/plan`：副作用工具被硬门拒绝，模型只能探查与规划，
+    /// 调 `plan.exit` 后切换到 Default/AcceptEdits 进入执行阶段（见 `design.md` §16）。
+    #[arg(long)]
+    plan: bool,
 
     /// 启用详细日志
     #[arg(long, short = 'v')]
@@ -201,29 +211,32 @@ fn main() -> Result<()> {
         cli.system.as_deref(),
         &mode,
         None,
+        cli.plan,
     )
     .context("构建 Runtime 失败")?;
+
+    if cli.plan {
+        anstream::eprintln!(
+            "\x1b[2m已启动 Plan 模式：副作用工具被硬门拒绝，调 plan.exit 后进入执行阶段\x1b[0m",
+        );
+    }
 
     // 运行
     let runtime = tokio::runtime::Runtime::new()?;
     let exit_code = if interactive {
         runtime.block_on(async {
-            if has_preloaded_session {
-                if let Err(e) = rt.restore_history().await {
-                    eprintln!("恢复会话历史失败: {e}");
-                    return 1;
-                }
+            if has_preloaded_session && let Err(e) = rt.restore_history().await {
+                eprintln!("恢复会话历史失败: {e}");
+                return 1;
             }
             session::run_interactive_session(&rt).await
         })
     } else {
         let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
         runtime.block_on(async {
-            if has_preloaded_session {
-                if let Err(e) = rt.restore_history().await {
-                    eprintln!("恢复会话历史失败: {e}");
-                    return 1;
-                }
+            if has_preloaded_session && let Err(e) = rt.restore_history().await {
+                eprintln!("恢复会话历史失败: {e}");
+                return 1;
             }
             run_single_turn(&rt, prompt).await
         })

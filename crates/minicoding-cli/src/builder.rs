@@ -9,7 +9,7 @@ use minicoding_context::{ContextManagerImpl, SimpleContextManager};
 use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
 use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
-use minicoding_core::policy::{PermissionPolicy, PermissionPrompter};
+use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
 use minicoding_core::provider::{BoxFuture, LlmProvider};
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
 use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
@@ -88,6 +88,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 /// `mode` 控制会话加载方式（`--resume`/`--replay`/`--fork-session`，T-M3-10）。
 /// `sandbox_override` 为 `Some` 时覆盖默认沙箱策略（`exec --sandbox` 用），
 /// 为 `None` 时用默认 `WorkspaceWrite { workdir, [] }`。
+/// `start_in_plan_mode = true` 时初始 `PermissionMode::Plan`（`--plan`，T-M5-8）。
 /// 预加载会话时，调用方需在 `build_runtime` 后调用 `Runtime::restore_history`
 /// 将消息注入上下文管理器。
 ///
@@ -95,6 +96,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 /// API key 缺失、provider 构造失败、存储目录不可用、会话不存在或加载失败时返回错误。
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_lines)] // 组装流程线性展开，拆分反而降低可读性
+#[allow(clippy::too_many_arguments)] // CLI 组装入口，参数由调用方 CLI flag 决定，聚合为 struct 反而增删不便
 pub fn build_runtime(
     api_base: Option<&str>,
     api_key: Option<&str>,
@@ -103,6 +105,7 @@ pub fn build_runtime(
     system: Option<&str>,
     mode: &SessionLoadMode,
     sandbox_override: Option<SandboxPolicy>,
+    start_in_plan_mode: bool,
 ) -> Result<Runtime> {
     // 1. 加载配置
     let mut config = RuntimeConfig::default();
@@ -128,10 +131,10 @@ pub fn build_runtime(
     }
 
     // 2. 校验 API key：CLI/env 未提供时尝试 OS keyring / 文件 fallback（T-M4-11，C-04）
-    if config.provider.api_key.is_empty() {
-        if let Some(key) = crate::cred::load_api_key().context("加载凭证失败")? {
-            config.provider.api_key = key;
-        }
+    if config.provider.api_key.is_empty()
+        && let Some(key) = crate::cred::load_api_key().context("加载凭证失败")?
+    {
+        config.provider.api_key = key;
     }
     if config.provider.api_key.is_empty() {
         anyhow::bail!(
@@ -281,6 +284,20 @@ pub fn build_runtime(
     ));
 
     // 11. 组装 Runtime（provider/ctx 已是 Arc，直接传入）
+    //     `config` 在此处 move 进 builder，所有需读 `config` 字段的逻辑（如 hooks）
+    //     必须在 move 之前完成（见下方 hooks registry 提前构建）。
+    let initial_mode = if start_in_plan_mode {
+        PermissionMode::Plan
+    } else {
+        PermissionMode::Default
+    };
+
+    // 11a. 预构建 Hook registry（`hooks` feature 启用时，T-M5-8）
+    //      必须在 `config` move 进 builder 之前读 `config.hooks`。
+    //      未启用 hooks feature 时不构建（RuntimeBuilder 默认 NoopHookRegistry）。
+    #[cfg(feature = "hooks")]
+    let hook_registry = build_hook_registry(&config.hooks);
+
     let mut builder = RuntimeBuilder::new()
         .provider(provider)
         .context(ctx)
@@ -291,7 +308,8 @@ pub fn build_runtime(
         .policy(policy)
         .prompter(prompter)
         .audit(audit)
-        .session_summarizer(summarizer);
+        .session_summarizer(summarizer)
+        .permission_mode(initial_mode);
 
     // 11b. 注入沙箱驱动 + 策略（T-M4-9，C-22：沙箱为第二道防线）
     //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。
@@ -322,12 +340,115 @@ pub fn build_runtime(
         builder = builder.journal(journal);
     }
 
+    // 11d. 注入 Hook 注册表（`hooks` feature 启用时，T-M5-8）
+    //      `hook_registry` 在 `config` move 之前预构建（见 11a）。
+    #[cfg(feature = "hooks")]
+    {
+        use minicoding_core::hooks::HookRegistry;
+        if hook_registry.count() > 0 {
+            tracing::info!(
+                hook_count = hook_registry.count(),
+                "hooks 已加载并注入 Runtime"
+            );
+        }
+        builder = builder.hook_registry(Arc::new(hook_registry));
+    }
+
     if let Some(s) = session {
         builder = builder.session(s);
     }
-    let rt = builder.build().map_err(anyhow::Error::msg)?;
+    let mut rt = builder.build().map_err(anyhow::Error::msg)?;
+
+    // 12. 补注册依赖 Runtime 自身引用的工具（T-M5-8）
+    //     `plan.exit` 与 `task.spawn` 需 `plan_controller()`/`subagent_runner()`，
+    //     只能在 Runtime 构造后注册（chicken-and-egg：tools ↔ Runtime 互依）。
+    //     直接构造工具实例并调 `register_dynamic_tool`，绕过 `register_plan_tools`/
+    //     `register_spawn_tool` 的 `&mut ToolRegistry` 签名约束。
+    let plan_controller = rt.plan_controller();
+    let subagent_runner = rt.subagent_runner();
+    rt.register_dynamic_tool(Arc::new(minicoding_tools::PlanExit::new(
+        plan_controller.clone(),
+    )));
+    rt.register_dynamic_tool(Arc::new(minicoding_tools::TaskSpawn::new(
+        subagent_runner,
+        plan_controller,
+    )));
 
     Ok(rt)
+}
+
+/// 从 `HooksConfig` 构造 `HookRegistryImpl`（T-M5-8）。
+///
+/// 把每个 `HookEntry` 转为 `ScriptHook`（外部脚本 Hook）并注册。`matcher` 字段
+/// 解析为 `HookMatcher::for_tools`（工具相关事件）或 `HookMatcher::for_events`
+/// （非工具事件）。`timeout_sec` 缺省时用 `default_timeout_sec`。
+#[cfg(feature = "hooks")]
+fn build_hook_registry(
+    cfg: &minicoding_core::config::HooksConfig,
+) -> minicoding_hooks::HookRegistryImpl {
+    use minicoding_core::hooks::{HookEvent, HookMatcher, HookRegistry};
+    use minicoding_hooks::ScriptHook;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let registry = minicoding_hooks::HookRegistryImpl::new();
+    let default_timeout = Duration::from_secs(cfg.default_timeout_sec);
+
+    // 事件 → 对应配置段的映射。非工具事件忽略 `matcher`；工具事件解析 `matcher`。
+    // 元组：(events, entries, is_tool_event)
+    let groups: [(&[HookEvent], &[minicoding_core::config::HookEntry], bool); 10] = [
+        (&[HookEvent::SessionStart], &cfg.session_start, false),
+        (
+            &[HookEvent::UserPromptSubmit],
+            &cfg.user_prompt_submit,
+            false,
+        ),
+        (&[HookEvent::PreToolUse], &cfg.pre_tool_use, true),
+        (&[HookEvent::PostToolUse], &cfg.post_tool_use, true),
+        (
+            &[HookEvent::PostToolUseFailure],
+            &cfg.post_tool_use_failure,
+            true,
+        ),
+        (&[HookEvent::PreCompact], &cfg.pre_compact, false),
+        (&[HookEvent::PostCompact], &cfg.post_compact, false),
+        (&[HookEvent::Stop], &cfg.stop, false),
+        (&[HookEvent::SubagentStop], &cfg.subagent_stop, false),
+        (
+            &[HookEvent::PermissionRequest],
+            &cfg.permission_request,
+            true,
+        ),
+    ];
+
+    for (events, entries, is_tool_event) in groups {
+        for (idx, entry) in entries.iter().enumerate() {
+            let matcher = if is_tool_event {
+                match &entry.matcher {
+                    Some(patterns) => HookMatcher::for_tools(
+                        events.to_vec(),
+                        patterns
+                            .split('|')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .collect(),
+                    ),
+                    None => HookMatcher::for_events(events.to_vec()),
+                }
+            } else {
+                HookMatcher::for_events(events.to_vec())
+            };
+            let timeout = entry
+                .timeout_sec
+                .map_or(default_timeout, Duration::from_secs);
+            let name = format!("{}[{idx}]", events[0].as_str());
+            let hook = ScriptHook::new(name, matcher, entry.command.clone(), timeout);
+            registry.register(Arc::new(hook));
+        }
+    }
+
+    registry
 }
 
 /// 按 `SessionLoadMode` 加载会话（T-M3-10a/b）。

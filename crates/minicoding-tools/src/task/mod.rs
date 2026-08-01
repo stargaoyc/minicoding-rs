@@ -12,10 +12,12 @@
 
 mod create;
 mod list;
+mod spawn;
 mod update;
 
 pub use create::TaskCreate;
 pub use list::TaskList;
+pub use spawn::{TaskSpawn, register_spawn_tool};
 pub use update::TaskUpdate;
 
 use minicoding_core::model::{Task, TaskStatus, ToolError};

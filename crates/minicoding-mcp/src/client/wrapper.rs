@@ -92,6 +92,16 @@ impl Tool for McpToolWrapper {
         let server = self.server.clone();
         let tool = self.tool.clone();
         Box::pin(async move {
+            // OTel `mcp.call` span（T-M5-8，O-08）：记录 server/tool，elapsed 由 span 自动携带。
+            // 与 `hook.run` span 同构（见 `core::hooks::HookRegistry::dispatch`），
+            // 便于在 collector 侧按 otel.name 聚合 MCP 调用延迟。
+            let span = tracing::info_span!(
+                "mcp.call",
+                mcp.server = %server,
+                mcp.tool = %tool,
+                otel.name = "mcp.call",
+            );
+            let _enter = span.enter();
             client
                 .call(&server, &tool, input)
                 .await

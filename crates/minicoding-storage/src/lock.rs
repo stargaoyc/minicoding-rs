@@ -63,7 +63,7 @@ impl SessionLock {
 impl Drop for SessionLock {
     fn drop(&mut self) {
         // fs2: unlock 在 fd 关闭前调用更安全；忽略错误（进程退出/panicked 时尽力释放）。
-        // incompatible_msrv 误报：unlock 来自 fs2::FileExt（非 std），MSRV 1.85 可用。
+        // incompatible_msrv 误报：unlock 来自 fs2::FileExt（非 std），MSRV 1.99 可用。
         #![allow(clippy::incompatible_msrv)]
         let _ = self.file.unlock();
     }

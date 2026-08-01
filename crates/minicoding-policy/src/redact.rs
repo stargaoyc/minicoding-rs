@@ -61,17 +61,17 @@ fn redact_line(line: &str) -> String {
     }
 
     // 2. Bearer token
-    if let Ok(re) = Regex::new(BEARER_PATTERN) {
-        if re.is_match(line) {
-            return re.replace_all(line, "${1}***").into_owned();
-        }
+    if let Ok(re) = Regex::new(BEARER_PATTERN)
+        && re.is_match(line)
+    {
+        return re.replace_all(line, "${1}***").into_owned();
     }
 
     // 3. AWS AKIA 模式
-    if let Ok(re) = Regex::new(AWS_AKIA_PATTERN) {
-        if re.is_match(line) {
-            return re.replace_all(line, "***").into_owned();
-        }
+    if let Ok(re) = Regex::new(AWS_AKIA_PATTERN)
+        && re.is_match(line)
+    {
+        return re.replace_all(line, "***").into_owned();
     }
 
     line.to_string()

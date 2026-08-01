@@ -37,10 +37,10 @@ pub fn clip_tool_results(
 ) {
     for msg in messages.iter_mut() {
         for block in &mut msg.content {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                if clip_tool_content(content, config) {
-                    result.clipped_count += 1;
-                }
+            if let ContentBlock::ToolResult { content, .. } = block
+                && clip_tool_content(content, config)
+            {
+                result.clipped_count += 1;
             }
         }
     }

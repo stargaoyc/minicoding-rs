@@ -4,7 +4,7 @@
 //! 权限交互不走总线（点对点 `PermissionPrompter`，见 `policy::trait`）。
 
 use crate::model::{Message, SessionId, StopReason, ToolCallId, ToolResult};
-use crate::policy::{Decision, Risk};
+use crate::policy::{Decision, PermissionMode, Risk};
 use tokio::sync::broadcast;
 
 /// 运行时事件（向前端广播，仅通知无回复通道）。
@@ -36,6 +36,11 @@ pub enum Event {
     },
     /// 权限已 resolved（带最终决策，供 UI 关闭弹窗与审计，见 `design.md` §9.2）。
     PermissionResolved { id: String, decision: Decision },
+    /// 权限模式切换（`plan.exit` / `/plan` / `--plan` 触发，见 `design.md` §16.2）。
+    PermissionModeChanged {
+        from: PermissionMode,
+        to: PermissionMode,
+    },
 }
 
 /// 事件总线（broadcast channel）。

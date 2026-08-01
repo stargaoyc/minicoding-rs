@@ -59,7 +59,7 @@ mod tests {
     use crate::BuiltinPolicy;
     use camino::Utf8PathBuf;
     use minicoding_core::model::SideEffect;
-    use minicoding_core::policy::PermissionContext;
+    use minicoding_core::policy::{PermissionContext, PermissionMode};
 
     fn ctx(side_effect: SideEffect) -> PermissionContext {
         PermissionContext {
@@ -68,6 +68,8 @@ mod tests {
             side_effect,
             turn: 0,
             history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
         }
     }
 

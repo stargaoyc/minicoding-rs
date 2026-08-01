@@ -13,7 +13,7 @@
 | 项 | 选择 | 说明 |
 |----|------|------|
 | 语言 | Rust (edition 2024) | 性能、内存安全、零成本抽象；适合构建长驻 CLI/Agent |
-| MSRV | 1.85+ | edition 2024 稳定门槛（1.85 正式包含 edition 2024 与稳定的 `async fn in trait`） |
+| MSRV | 1.99+ | edition 2024 稳定门槛（1.99 持续包含 edition 2024 与稳定的 `async fn in trait`，并对最新 std/lib API 提供支持） |
 | 工具链 | `cargo` + `rustfmt` + `clippy` | 标准组合 |
 | Workspace | Cargo Workspace + 多 crate | 见 `modules.md` |
 
@@ -67,6 +67,52 @@
 | 行编辑 | `rustyline` | `reedline` | 成熟、依赖少；后续 TUI 阶段评估 `reedline` |
 | TUI（后续） | `ratatui` + `crossterm` | - | 现代化 TUI 框架，跨平台 |
 | LSP server（M8） | `tower-lsp` | 自研 JSON-RPC stdio 薄封装 | 主流 Rust LSP 框架（基于 tower），MIT/Apache-2.0；LSP 协议方法集庞大，自研易出错且落后标准；`tower-lsp` 提供类型安全的 trait 派发与生命周期管理。依赖隔离在 `minicoding-server`（feature gate `lsp`） |
+
+### 4.1 前端与桌面应用（M9，低优先级）
+
+> **范围说明**：M9 为可选里程碑，优先级低于 M5–M8。前端栈选型遵循"最新稳定 + 类型安全 + 编译期优化"原则，技术锁定到当前主流版本，后续随社区演进升级。所有前端代码与 Rust 后端通过 `minicoding-server` 提供的 HTTP/SSE JSON-RPC 接口（见 `design.md` §16）通信，**不嵌入 Rust 进程**，保证后端可独立作为 CLI/SDK 使用。
+
+| 用途 | 选择 | 版本 | 理由 |
+|------|------|:---:|------|
+| 框架 | React | 19.2 | 主流稳定，Concurrent 渲染 + Suspense 适配流式 LLM 输出；19.x 的 Actions/useTransition 与 React Compiler 配合降低手写 memo 心智负担 |
+| 编译器 | React Compiler | latest（RC） | 编译期自动 memoization，减少 `useMemo`/`useCallback` 样板；与 React 19 深度集成 |
+| 语言 | TypeScript | 7.0 | 类型安全；7.x 持续改进类型推导与性能 |
+| 构建 | Vite (Rolldown) | 8.1 | Rolldown 后端（Rust 实现）替代 Rollup，构建速度显著提升；HMR 体验佳 |
+| 路由 | TanStack Router | 1.170 | 类型安全路由（路由参数完全类型推导），无路由配置文件，比 React Router 更适合 SPA |
+| 数据获取 | TanStack Query | 5.101 | 服务端状态管理（缓存/重试/失效），与 JSON-RPC 后端契合，流式 SSE 用 `useQuery` + 增量更新 |
+| 客户端状态 | Zustand | 5.0 | 轻量级全局状态（UI 主题、面板开关等），避免 Redux 样板；与 TanStack Query 职责正交 |
+| Schema 校验 | Zod | 4.4 | 运行时类型校验，与 TypeScript 7 类型双向推导；用于 JSON-RPC 请求/响应 schema 校验，对接 `minicoding-protocol` 的 DTO |
+| 组件库 | shadcn/ui | latest | 基于 Radix UI 的可定制组件（复制粘贴源码而非 npm 依赖），完全可控，与 Tailwind v4 深度集成 |
+| 样式 | Tailwind CSS | v4 | 原子化 CSS，v4 改用 Oxide 引擎（Rust 实现）显著提升构建速度；CSS-first 配置 |
+| 动画 | Framer Motion | latest | 声明式动画，与 React 19 兼容；用于面板过渡、权限弹窗动效 |
+| Lint | oxlint | latest | Rust 实现的 ESLint 替代，速度数十倍提升；规则集与 ESLint 兼容 |
+| 格式化 | oxfmt | latest | Rust 实现的 Prettier 替代，速度显著提升；与 oxlint 同源（Oxc 项目） |
+| 桌面壳 | Tauri | 2.x | Rust 实现的桌面应用壳，体积远小于 Electron（5–10MB vs 100MB+）；2.x 支持 mobile，IPC 用 Rust 命令直接调用，性能优 |
+
+> **说明**：oxlint/oxfmt/Vite (Rolldown)/Tailwind v4 均为 Rust 实现的工具链，与本项目 Rust 后端形成"全 Rust 工具链"一致性，构建/Lint/格式化速度均显著优于传统 Node 工具链。
+
+#### 4.1.1 前端与后端的通信
+
+- **协议**：HTTP/SSE JSON-RPC 2.0（复用 `minicoding-protocol` 的 wire types，见 `modules.md` §15）；
+- **传输**：
+  - Web 模式：浏览器 → HTTPS → `minicoding-server`（`minicoding serve --http`）；
+  - 桌面模式（Tauri）：前端 → Tauri IPC → Rust sidecar 进程（即 `minicoding-server`），sidecar 与前端同进程组，避免跨进程序列化开销大的操作走 IPC、其他走 HTTP；
+- **流式**：SSE 推送 `Event::Token`/`Event::ToolCall`/`Event::PermissionRequest`，前端用 TanStack Query 的 `useQuery` + `queryClient.setQueryData` 增量更新；
+- **权限交互**：`PermissionPrompt` 经 SSE 推到前端，弹出 shadcn/ui Dialog，用户决策经 JSON-RPC `permission.resolve` 回传；
+- **离线/本地**：桌面模式默认连接本地 sidecar；Web 模式可连远程 `minicoding-server`（需 CORS 配置）。
+
+#### 4.1.2 为何选 Tauri 而非 Electron
+
+| 维度 | Tauri 2.x | Electron |
+|------|-----------|----------|
+| 体积 | 5–10MB | 100MB+ |
+| 内存 | 系统 webview | 内置 Chromium + Node |
+| IPC | Rust 命令直接调用 | Node IPC |
+| 安全 | 默认禁用远程内容，CSP 严格 | 默认允许 Node 集成，需手动收紧 |
+| 与本项目契合 | Rust 后端可直接作为 sidecar/embedded | 需启动额外 Node 进程 |
+| 移动端 | 2.x 支持 iOS/Android | 不支持 |
+
+Tauri 与本项目"Rust 一等公民"理念一致，且体积/内存/安全均优于 Electron。
 
 ---
 

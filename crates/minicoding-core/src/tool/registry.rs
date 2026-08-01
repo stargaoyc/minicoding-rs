@@ -2,11 +2,12 @@
 
 use crate::model::{SideEffect, ToolCall, ToolError, ToolResult, ToolSchema};
 use crate::tool::{Tool, ToolContext};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 工具组（用于特性门控与批量启用）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// 工具组（用于特性门控与批量启用，也作为子 Agent 工具子集的粗粒度开关）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolGroup {
     Core,
     Fs,

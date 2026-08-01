@@ -2,7 +2,9 @@
 //!
 //! 基于 `rustyline` 的行编辑循环：`read_line` → `run_turn` → 渲染 → 循环。
 //!
-//! - 斜杠命令：`/quit`/`/exit` 退出、`/help` 帮助；空行跳过。
+//! - 斜杠命令：`/quit`/`/exit` 退出、`/help` 帮助、`/plan` 切换 Plan 模式
+//!   （T-M5-8）、`/undo` 回滚最近一次文件改动 operation（T-M5-8，`file-undo`
+//!   feature）；空行跳过。
 //! - Ctrl-C：在提示符处连续两次退出；在 turn 运行时取消当前回合（graceful stop，
 //!   C-13：已落盘消息不丢失）。
 //! - Ctrl-D（EOF）：退出。
@@ -20,6 +22,7 @@ use std::time::Duration;
 
 use anstyle::{AnsiColor, Color, Style};
 use minicoding_core::model::{ToolContent, TurnOutcome, UserInput};
+use minicoding_core::policy::PermissionMode;
 use minicoding_core::runtime::{Event, Runtime};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -43,6 +46,8 @@ const DIM: Style = Style::new().dimmed();
 const RED: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
 /// 绿色样式（成功）。
 const GREEN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
+/// 黄色样式（Plan 模式 / 提醒）。
+const YELLOW: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
 
 /// 运行交互 REPL 会话。
 ///
@@ -55,6 +60,14 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
             return 1;
         }
     };
+
+    // 启动时若处于 Plan 模式（`--plan`），打印提示。
+    let snap = rt.plan_controller().snapshot().await;
+    if snap.mode == PermissionMode::Plan {
+        anstream::eprintln!(
+            "{YELLOW}Plan 模式已激活：副作用工具被硬门拒绝，调 plan.exit 后进入执行阶段{YELLOW:#}"
+        );
+    }
 
     anstream::eprintln!("{DIM}minicoding 交互会话（/help 查看命令，/quit 或 Ctrl-D 退出）{DIM:#}");
 
@@ -86,17 +99,32 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
             continue;
         }
 
-        match trimmed {
-            "/quit" | "/exit" => break,
-            "/help" => {
-                print_help();
-                continue;
+        // 斜杠命令分派（T-M5-8：新增 /plan、/undo）
+        if let Some(cmd) = trimmed.strip_prefix('/') {
+            let mut parts = cmd.split_whitespace();
+            let name = parts.next().unwrap_or("");
+            match name {
+                "quit" | "exit" => break,
+                "help" => {
+                    print_help();
+                    continue;
+                }
+                "plan" => {
+                    handle_plan_command(rt, parts.next()).await;
+                    continue;
+                }
+                "undo" => {
+                    handle_undo_command(rt).await;
+                    continue;
+                }
+                "" => {
+                    continue;
+                }
+                _ => {
+                    anstream::eprintln!("{RED}未知命令: /{name}（/help 查看可用命令）{RED:#}");
+                    continue;
+                }
             }
-            _ if trimmed.starts_with('/') => {
-                anstream::eprintln!("{RED}未知命令: {trimmed}（/help 查看可用命令）{RED:#}");
-                continue;
-            }
-            _ => {}
         }
 
         let _ = rl.add_history_entry(&line);
@@ -107,12 +135,89 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
     0
 }
 
+/// 处理 `/plan` 命令（T-M5-8）。
+///
+/// - `/plan` 或 `/plan on`：切换到 Plan 模式（只读强制）；
+/// - `/plan off`：切换回 Default 模式；
+/// - `/plan status`：查询当前模式。
+///
+/// 切换走 `PlanModeController::set_mode`（与 `plan.exit` 工具的 `exit_plan` 不同：
+/// `set_mode` 不校验当前模式，CLI 显式切换；不重置 `allowed_prompts` 缓存）。
+async fn handle_plan_command(rt: &Runtime, sub: Option<&str>) {
+    let controller = rt.plan_controller();
+    let snap = controller.snapshot().await;
+    match sub {
+        None | Some("on") => {
+            if snap.mode == PermissionMode::Plan {
+                anstream::eprintln!("{DIM}已在 Plan 模式{DIM:#}");
+                return;
+            }
+            controller.set_mode(PermissionMode::Plan).await;
+            anstream::eprintln!("{YELLOW}已切换到 Plan 模式：副作用工具被硬门拒绝{YELLOW:#}");
+        }
+        Some("off") => {
+            if snap.mode == PermissionMode::Default {
+                anstream::eprintln!("{DIM}已处于 Default 模式{DIM:#}");
+                return;
+            }
+            controller.set_mode(PermissionMode::Default).await;
+            anstream::eprintln!("{GREEN}已切换到 Default 模式{GREEN:#}");
+        }
+        Some("status") => {
+            anstream::eprintln!("{DIM}当前权限模式：{:?}{DIM:#}", snap.mode);
+        }
+        Some(other) => {
+            anstream::eprintln!(
+                "{RED}未知子命令: /plan {other}（用法：/plan [on|off|status]）{RED:#}"
+            );
+        }
+    }
+}
+
+/// 处理 `/undo` 命令（T-M5-8）。
+///
+/// 调用 `Journal::undo(1)` 回滚最近一次文件改动 operation。`file-undo` feature
+/// 未启用或 journal 未注入时打印提示。回滚结果（成功/冲突）打印到 stderr。
+async fn handle_undo_command(rt: &Runtime) {
+    let Some(journal) = rt.journal() else {
+        anstream::eprintln!(
+            "{YELLOW}/undo 不可用：未启用 file-undo feature（重新编译时加 --features file-undo）{YELLOW:#}"
+        );
+        return;
+    };
+    let span = tracing::info_span!("undo", session = %rt.session().id, otel.name = "undo");
+    let _enter = span.enter();
+    match journal.undo(1).await {
+        Ok(report) => {
+            anstream::eprintln!(
+                "{GREEN}已回滚 {} 个 operation（{} 文件恢复，{} 文件冲突）{GREEN:#}",
+                report.undone_entries,
+                report.restored_files.len(),
+                report.failed_files.len(),
+            );
+            for path in &report.restored_files {
+                anstream::eprintln!("{DIM}  恢复：{path}{DIM:#}");
+            }
+            for (path, reason) in &report.failed_files {
+                anstream::eprintln!("{RED}  冲突：{path}（{reason}）{RED:#}");
+            }
+        }
+        Err(e) => {
+            anstream::eprintln!("{RED}/undo 失败：{e}{RED:#}");
+        }
+    }
+}
+
 /// 打印 REPL 帮助。
 fn print_help() {
     anstream::eprintln!("{DIM}可用命令：{DIM:#}");
-    anstream::eprintln!("{DIM}  /help       显示此帮助{DIM:#}");
-    anstream::eprintln!("{DIM}  /quit       退出会话（同 /exit、Ctrl-D）{DIM:#}");
-    anstream::eprintln!("{DIM}  /exit       退出会话{DIM:#}");
+    anstream::eprintln!("{DIM}  /help              显示此帮助{DIM:#}");
+    anstream::eprintln!("{DIM}  /quit              退出会话（同 /exit、Ctrl-D）{DIM:#}");
+    anstream::eprintln!("{DIM}  /exit              退出会话{DIM:#}");
+    anstream::eprintln!("{DIM}  /plan [on|off|status]  切换 Plan 模式（只读强制，T-M5-8）{DIM:#}");
+    anstream::eprintln!(
+        "{DIM}  /undo              回滚最近一次文件改动 operation（T-M5-8）{DIM:#}"
+    );
     anstream::eprintln!("{DIM}Ctrl-C：提示符处连续两次退出；turn 运行时取消当前回合{DIM:#}");
     anstream::eprintln!("{DIM}其他输入作为提问发送给助手。{DIM:#}");
 }
@@ -146,6 +251,9 @@ async fn run_one_turn(rt: &Runtime, line: String) {
                 }
                 Ok(Event::PermissionRequested { summary, .. }) => {
                     anstream::eprintln!("{DIM}[权限请求] {summary}{DIM:#}");
+                }
+                Ok(Event::PermissionModeChanged { from, to }) => {
+                    anstream::eprintln!("{YELLOW}[权限模式切换] {from:?} → {to:?}{YELLOW:#}");
                 }
                 Ok(Event::TurnEnd { .. }) | Err(RecvError::Closed) => break,
                 Ok(_) | Err(RecvError::Lagged(_)) => {}

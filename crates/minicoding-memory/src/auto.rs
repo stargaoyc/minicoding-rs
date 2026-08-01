@@ -121,10 +121,10 @@ impl AutoMemory {
         // mtime 命中且缓存存在：直接复用。
         {
             let cached_mtime = lock(&self.cached_mtime);
-            if current == *cached_mtime {
-                if let Some(entries) = lock(&self.cached_entries).clone() {
-                    return Ok(entries);
-                }
+            if current == *cached_mtime
+                && let Some(entries) = lock(&self.cached_entries).clone()
+            {
+                return Ok(entries);
             }
         }
 

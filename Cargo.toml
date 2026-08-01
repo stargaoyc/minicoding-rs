@@ -23,11 +23,11 @@ members = [
 # Workspace 全局元数据
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99"
 license = "AGPLv3"
 repository = "https://github.com/minicoding/minicoding-rs"
 version = "0.1.0"
-authors = ["minicoding-rs contributors"]
+authors = ["stargaoyc"]
 
 # 统一依赖版本管理（见 AGENTS.md §2.7、tech-stack.md §12）
 [workspace.dependencies]

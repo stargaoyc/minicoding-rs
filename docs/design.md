@@ -2,7 +2,7 @@
 
 本文是 `minicoding-rs` 的核心设计文档，描述 Agent 循环、上下文管理、工具系统、LLM 抽象、流式处理、子 Agent、记忆与权限等关键机制的详细设计与 Rust 伪代码。
 
-> 约定：本文伪代码使用 Rust 2024 edition 语法；`async fn in trait` 假设 MSRV ≥ 1.85（edition 2024 稳定门槛）；省略 `Arc`/`Send`/`Sync` 等细枝末节，仅表达设计意图。
+> 约定：本文伪代码使用 Rust 2024 edition 语法；`async fn in trait` 假设 MSRV ≥ 1.99（edition 2024 稳定门槛）；省略 `Arc`/`Send`/`Sync` 等细枝末节，仅表达设计意图。
 
 ---
 
@@ -831,16 +831,15 @@ pub struct SubagentResult {
 ### 7.3 派发与回收
 
 ```rust
-// 通过 task.spawn 工具派发
-let handle = runtime.spawn_subagent(spec, input).await?;
-let result = handle.await?;
+// 通过 task.spawn 工具派发（持有 Arc<dyn SubagentRunner> 反向调用 Runtime）
+let result = runtime.subagent_runner().spawn(spec, input).await?;
 ctx.append(Message::tool_result(call_id, result.summary)).await;
 ```
 
 派发前 Runtime 强制校验：
 
 - **不嵌套约束**：`spec.can_spawn_subagent == false` 时，从 `allowed_tools` 中移除 `task.spawn`，杜绝子 Agent 再生子 Agent 的无限递归（参考 CC 把 `Task` 工具排除出只读 Agent 工具集的做法）。
-- **Plan 模式守卫**：`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发，其它模式下退化为 `Explore`。
+- **Plan 模式守卫**：`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发，其它模式下退化为 `Explore`（不报错，避免模型因模式状态失败重试）。守卫由 `task.spawn` 工具持有 `Arc<dyn PlanModeController>` 实现：调用 `snapshot()` 读当前模式，非 Plan 时改写 `spec.ty = Explore`。
 - 子 Agent 内部仍跑完整 Agent 循环，但 `max_iters` 更小、超时更短、OTel span 通过 Context 传播挂在父会话 trace 下（见 §15）。
 
 ### 7.4 并行 map-reduce（参考 Codex `spawn_agents_on_csv`）
@@ -2684,3 +2683,181 @@ Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `Compact
 M3-M4 的双写期是"灰度过渡"——EventLog 与 JSONL 并存，验证 Event 投影的正确性后再切流。这避免大爆炸式重构，每阶段可独立回退。
 
 **与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventLog 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventLog seq，`durable_seq` 即 EventLog 的持久化进度。当前架构需额外维护 seq，事件溯源后 seq 是 EventLog 的原生属性。
+
+---
+
+## 26. Web 与桌面应用架构（M9，低优先级）
+
+> **范围说明**：本节描述 M9 的 Web 前端与 Tauri 桌面应用架构。M9 是可选里程碑，优先级低于 M5–M8。核心原则：**Rust 后端不嵌入前端**，前端通过 §24 的 HTTP/SSE JSON-RPC 协议与 `minicoding-server` 通信，保证 CLI/SDK 可独立使用。技术栈选型见 `tech-stack.md` §4.1。
+
+### 26.1 部署形态
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 形态 A：Web 模式（浏览器）                                        │
+│                                                                  │
+│  Browser (React 19.2 SPA)                                        │
+│     │  HTTPS  │  SSE (Event stream)                              │
+│     ▼        ▼                                                   │
+│  minicoding-server (--http --web ./dist --cors-origin ...)       │
+│     │                                                            │
+│     ▼                                                            │
+│  Runtime (Agent loop)                                            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 形态 B：桌面模式（Tauri 2.x）                                     │
+│                                                                  │
+│  Tauri Window (WebView 加载 minicoding-web dist)                 │
+│     │  Tauri IPC (invoke)  │  SSE (本地 HTTP)                    │
+│     ▼                      ▼                                     │
+│  Rust sidecar: minicoding-server (--http --bind 127.0.0.1:PORT) │
+│     │                                                            │
+│     ▼                                                            │
+│  Runtime (Agent loop)                                            │
+│                                                                  │
+│  OS 集成：系统托盘 / 全局快捷键 / 自动更新（Tauri updater）       │
+│  凭证：OS keyring（与 CLI cred.rs 共享，C-04）                    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 26.2 前端架构分层
+
+```
+minicoding-web/                       # 纯前端项目，独立 package.json
+├── src/
+│   ├── main.tsx                      # React 19.2 入口，React Compiler 启用
+│   ├── router.tsx                    # TanStack Router 1.170 类型安全路由
+│   ├── routes/
+│   │   ├── __root.tsx                # 根布局（主题 provider + 全局错误边界）
+│   │   ├── sessions.$sessionId.tsx   # 会话详情页（对话流 + 工具面板）
+│   │   └── settings.tsx              # 设置页（沙箱策略/审批模式/凭证管理）
+│   ├── api/
+│   │   ├── client.ts                 # JSON-RPC 2.0 客户端（fetch + Zod 4.4 校验）
+│   │   ├── sse.ts                    # SSE 订阅（EventSource + cursor 恢复）
+│   │   └── schema.ts                 # 由 minicoding-protocol DTO 生成的 Zod schema
+│   ├── hooks/
+│   │   ├── useSession.ts             # TanStack Query 5.101 useQuery 封装
+│   │   ├── useEventStream.ts         # SSE 事件 → queryClient.setQueryData 增量更新
+│   │   └── usePermission.ts          # 权限弹窗状态管理（Zustand 5.0）
+│   ├── components/
+│   │   ├── ui/                       # shadcn/ui 组件（复制粘贴源码）
+│   │   ├── chat/                     # 对话流（消息列表 + 流式 token 渲染）
+│   │   ├── tools/                    # 工具调用展开/折叠面板
+│   │   ├── permission/               # 权限确认 Dialog
+│   │   ├── tasks/                    # 任务进度面板
+│   │   └── theme/                    # 暗色/亮色主题切换（Tailwind v4）
+│   ├── store/
+│   │   ├── sessionStore.ts           # Zustand：当前会话/面板开关
+│   │   └── themeStore.ts             # Zustand：主题偏好
+│   └── lib/
+│       ├── rpc.ts                    # JSON-RPC 类型推导（Zod → TS）
+│       └── utils.ts                  # cn() 等工具函数
+├── index.html
+├── vite.config.ts                    # Vite 8.1 (Rolldown) 配置
+├── tailwind.config.ts                # Tailwind v4 (Oxide) CSS-first 配置
+├── oxlint.config.json                # oxlint 规则
+├── tsconfig.json                     # TypeScript 7.0
+└── package.json
+```
+
+### 26.3 事件流消费（SSE → TanStack Query）
+
+`minicoding-server` 通过 SSE 推送 `Event`（见 §24），前端用 `useEventStream` hook 订阅并增量更新 TanStack Query 缓存：
+
+```typescript
+// hooks/useEventStream.ts
+// SSE 事件 → TanStack Query 缓存增量更新
+// cursor 用于断线重连恢复（见 §24 E-13）
+function useEventStream(sessionId: string, cursor: number) {
+  const queryClient = useQueryClient();
+  const eventSource = new EventSource(`/api/sessions/${sessionId}/events?cursor=${cursor}`);
+
+  eventSource.addEventListener('Token', (e) => {
+    const token = TokenEventSchema.parse(JSON.parse(e.data));
+    // 增量追加到当前消息缓存
+    queryClient.setQueryData(['session', sessionId, 'messages'], (old) => {
+      const messages = old ?? [];
+      const last = messages[messages.length - 1];
+      if (last?.role === 'assistant' && last.streaming) {
+        return [...messages.slice(0, -1), { ...last, content: last.content + token.delta }];
+      }
+      return [...messages, { role: 'assistant', content: token.delta, streaming: true }];
+    });
+  });
+
+  eventSource.addEventListener('PermissionRequest', (e) => {
+    const prompt = PermissionPromptSchema.parse(JSON.parse(e.data));
+    // 推入 Zustand store，触发 shadcn/ui Dialog 弹出
+    usePermissionStore.getState().prompt(prompt);
+  });
+
+  // ToolCall / ToolResult / TaskUpdated / Compress / HookRun 等同理
+  return () => eventSource.close();
+}
+```
+
+### 26.4 权限交互流（点对点，非广播）
+
+权限确认是点对点交互（§9.1 决策/交互分离），前端通过 SSE 收到 `PermissionRequest` 事件后弹出 Dialog，用户决策经 JSON-RPC `permission.resolve` 回传：
+
+```
+1. Runtime 调用 PermissionPolicy::check → 返回 Verdict::Ask(prompt)
+2. Prompter（WebPrompter）生成 prompt_id，经 SSE 推送 PermissionRequest{prompt_id, ...}
+3. 前端 usePermissionStore 收到，弹出 shadcn/ui Dialog
+4. 用户点击 Allow/Deny/AllowAlways
+5. 前端 POST /api/rpc { method: "permission.resolve", params: {prompt_id, decision} }
+6. 后端校验 prompt_id 有效性（防伪造）+ 调用 Prompter::resolve → 返回 Decision
+7. Runtime 收到 Decision，继续执行或拒绝
+```
+
+> **安全**：`prompt_id` 由后端生成（ULID），前端不可伪造；`permission.resolve` 必须带有效 `prompt_id`，后端校验失败返回错误。这防止前端被 XSS 攻击后伪造权限批准。`AllowAlways` 写入 `policy.toml`（specificity=2），与 CLI 路径一致。
+
+### 26.5 Tauri sidecar 集成
+
+桌面模式下，Tauri 启动 `minicoding-server` 作为 sidecar 进程：
+
+```rust
+// minicoding-desktop/src/main.rs（Tauri 命令）
+// 启动 sidecar：minicoding-server --http --bind 127.0.0.1:0（随机端口）
+// sidecar 启动后通过 stdout 输出实际端口，Tauri 读取后注入前端
+#[tauri::command]
+async fn start_session(app: tauri::AppHandle) -> Result<SessionInfo, String> {
+    let sidecar = app.shell().sidecar("minicoding-server")
+        .map_err(|e| e.to_string())?;
+    let (mut rx, child) = sidecar.args(["--http", "--bind", "127.0.0.1:0"])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // 读取 sidecar stdout 获取实际监听端口
+    while let Some(event) = rx.recv().await {
+        if let tauri_plugin_shell::process::CommandEvent::Stdout(line) = event {
+            if let Some(port) = parse_port(&line) {
+                return Ok(SessionInfo { port, pid: child.pid() });
+            }
+        }
+    }
+    Err("sidecar 启动失败".to_string())
+}
+```
+
+前端通过 Tauri IPC `invoke('start_session')` 获取 sidecar 端口，然后用 `fetch` + `EventSource` 连接 `http://127.0.0.1:PORT`。凭证存储复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04），前端不接触凭证明文。
+
+### 26.6 安全考量（前端）
+
+| 威胁 | 缓解 |
+|------|------|
+| XSS 注入（工具输出含恶意脚本） | React 默认转义 + CSP 严格（`script-src 'self'`）+ 不使用 `dangerouslySetInnerHTML`（除非经 DOMPurify） |
+| 权限弹窗伪造 | `prompt_id` 后端生成校验，前端不可伪造 `permission.resolve` |
+| 凭证泄露到前端 | 凭证仅存 Rust 后端内存 + OS keyring，前端只看到脱敏后的 `***`（§13.3） |
+| SSE 跨会话串流 | SSE 端点校验 `session_id` 归属当前认证用户 |
+| Tauri WebView 远程内容 | Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格 |
+| CORS 误配 | `--cors-origin` 默认仅 `http://localhost:*`，生产部署需显式配置 |
+
+### 26.7 与 §24 协议的关系
+
+M9 前端复用 §24 定义的全部 JSON-RPC 方法与 SSE 事件格式，**不引入新协议**。新增的只是：
+- `minicoding serve --web ./dist`：静态资源托管（HTTP `GET /` 返回 `index.html`）；
+- `--cors-origin`：CORS 配置（仅 Web 模式需要，桌面模式同源无需）；
+- Tauri sidecar 管理：桌面模式专属，不影响协议层。
+
+这保证 M9 的前端可以无缝切换"连本地 sidecar"或"连远程 server"，且 LSP/ACP 适配器（E-15..E-18）与 Web 前端共享同一后端，无重复实现。

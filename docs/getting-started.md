@@ -21,7 +21,7 @@
 | 项 | 要求 | 来源 |
 |----|------|------|
 | edition | 2024 | `AGENTS.md` §2.1、`tech-stack.md` §1 |
-| MSRV | 1.85+ | edition 2024 稳定门槛，含稳定的 `async fn in trait` |
+| MSRV | 1.99+ | edition 2024 稳定门槛，含稳定的 `async fn in trait` |
 | 工具 | `cargo` + `rustfmt` + `clippy` | 标准组合 |
 
 安装 Rust（若未安装）：
@@ -36,7 +36,7 @@ irm https://sh.rustup.rs | iex
 确认版本：
 
 ```bash
-rustc --version    # 应 >= 1.85.0
+rustc --version    # 应 >= 1.99.0
 cargo --version
 ```
 
@@ -193,7 +193,7 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 
 | 维度 | minicoding-rs | Claude Code | Codex CLI | Aider |
 |------|--------------|-------------|-----------|-------|
-| 实现语言 | Rust（edition 2024，MSRV 1.85+） | TypeScript/Node | Rust | Python |
+| 实现语言 | Rust（edition 2024，MSRV 1.99+） | TypeScript/Node | Rust | Python |
 | 内存安全 | 编译期保证，无 GC 暂停 | 运行时 GC | 编译期保证 | 运行时 GC |
 | 沙箱机制 | OS 级一等公民：`sandbox-run` + Landlock + libseccomp + Seatbelt + Windows 受限令牌，两道防线（应用层 + 内核级） | 应用层为主 | Landlock + libseccomp（参考对象） | 无内核级沙箱 |
 | 沙箱默认状态 | Opt-out（`WorkspaceWrite` 默认启用内核隔离） | Opt-in | Opt-out | N/A |
@@ -565,6 +565,38 @@ UndoReport: { succeeded: 1, failed: 0 }
 ```
 
 `/undo` 是 operation 级回滚，恢复前比对当前文件内容与 `after`，不一致记入 `failed_files` 不强行覆盖（C-28，`design.md` §17.4、`modules.md` §6.3）。Journal 仅驻留内存，会话结束即销毁。
+
+#### /plan Plan 模式（M5 交付，`features.md` A-06）
+
+Plan 模式下副作用工具被硬门拒绝（`is_read_only() == false` 直接 `Deny`，C-25），模型只能探查与规划，调 `plan.exit` 后切回 Default 模式并缓存预批准 `allowed_prompts`。
+
+```bash
+# 启动时直接进入 Plan 模式
+minicoding --plan
+
+# 或在 REPL 内切换
+minicoding> /plan          # 等价于 /plan on
+minicoding> /plan status   # 查询当前模式
+minicoding> /plan off      # 切回 Default 模式
+```
+
+`--plan` 等价于 REPL 内执行 `/plan`（`cli/main.rs`）。`plan.exit` 工具仅在 `PermissionMode::Plan` 下可调用，调用后触发 `Event::PermissionModeChanged { from: Plan, to: Default|AcceptEdits }`（`design.md` §16.4、`api.md` §10.2）。`task.spawn` 在 Plan 模式下被硬门拒绝（即便 `SideEffect::None`，`modules.md` §11.3）。
+
+#### Hook 加载（M5 交付，`features.md` H-01）
+
+Hook 从 `.minicoding/hooks.toml`（项目级）或 `~/.minicoding/hooks.toml`（用户级）加载，按事件分 10 段配置（`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/...，PascalCase 段名，见 `core::config::HooksConfig`）。`hooks` feature 未启用时退化为 `NoopHookRegistry`（`modules.md` §12.3）。
+
+```toml
+# .minicoding/hooks.toml 示例（嵌套在 [hooks] 表下）
+[hooks]
+default_timeout_sec = 30
+on_hook_error = "continue"
+
+[[hooks.PostToolUse]]
+command = "cargo fmt"
+matcher = "fs.write|fs.edit"   # 工具名 glob，| 分隔、* 通配
+timeout_sec = 20
+```
 
 #### --resume 恢复会话（M3 交付，`features.md` A-08）
 

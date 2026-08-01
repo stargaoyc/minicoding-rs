@@ -100,10 +100,10 @@ impl MemoryStore for LongTermMemory {
             let cached_mtime = *guard(&self.cached_mtime);
 
             // mtime 未变且已有缓存：直接复用，零正文 IO/分词。
-            if current == cached_mtime {
-                if let Some(content) = guard(&self.cached_content).clone() {
-                    return Ok(content);
-                }
+            if current == cached_mtime
+                && let Some(content) = guard(&self.cached_content).clone()
+            {
+                return Ok(content);
             }
 
             // 文件不存在：视为空记忆，清空缓存。

@@ -1,6 +1,6 @@
 # API / 接口设计
 
-本文定义 `minicoding-rs` 的核心 trait 签名、公共数据类型、配置 schema、SDK 高层 API，以及对外暴露的稳定接口面。所有签名以 Rust 2024 + `async fn in trait`（MSRV 1.85+）表达。
+本文定义 `minicoding-rs` 的核心 trait 签名、公共数据类型、配置 schema、SDK 高层 API，以及对外暴露的稳定接口面。所有签名以 Rust 2024 + `async fn in trait`（MSRV 1.99+）表达。
 
 ---
 
@@ -189,14 +189,36 @@ pub struct SubagentSpec {
     pub ty: SubagentType,
     pub system_prompt: String,
     pub allowed_tools: ToolGroup,
-    pub model: Option<ModelId>,
+    pub model: Option<String>,        // None = 继承父会话；Explore 强制小模型由 runner 解析
     pub budget_tokens: usize,
     pub max_iters: u32,
     pub thoroughness: Thoroughness,
     pub skip_memory: bool,
     pub can_spawn_subagent: bool,
+    pub timeout: Duration,
 }
 
+pub struct SubagentResult {
+    pub summary: String,              // 给父 Agent 的结论（C-05：仅 summary，不回灌中间消息）
+    pub artifacts: Vec<String>,       // 子 Agent 改动的文件路径（仅路径）
+    pub token_used: usize,
+    pub completed: bool,              // false = 超时/取消/熔断
+}
+
+/// 子 Agent 派发器（dyn 兼容，见 design.md §7.3）。
+/// `task.spawn` 工具持有 `Arc<dyn SubagentRunner>` 反向调用 Runtime 派发。
+pub trait SubagentRunner: Send + Sync {
+    fn spawn(&self, spec: SubagentSpec, input: String)
+        -> BoxFuture<'_, Result<SubagentResult, RuntimeError>>;
+}
+
+/// 兜底实现（未注入时 `task.spawn` 直接返回 `RuntimeError::Config`）。
+pub struct NoopSubagentRunner;
+```
+
+`SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
+
+```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
 /// 旧版 `TodoWriteInput`（全量替换）作为废弃别名保留一个版本（见 §10.1）。
 pub struct TaskCreateInput {
@@ -1284,16 +1306,25 @@ pub enum ToolError {
 
 ```json
 {
-  "ty": "explore",
-  "input": "查找所有调用 foo() 的位置",
+  "type": "explore",
+  "prompt": "查找所有调用 foo() 的位置",
   "thoroughness": "medium",
   "model": null,
-  "budget_tokens": 8000,
   "max_iters": 10
 }
 ```
 
-Runtime 派发前强制校验：`can_spawn_subagent == false` 时移除子 Agent 工具集中的 `task.spawn`（防嵌套）；`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发。
+| 项 | 值 |
+|----|----|
+| 工具组 | `Task` |
+| 副作用 | `None`（父 Agent 只接收 `summary`；子 Agent 的副作用在其自身权限链处理，C-05） |
+| 只读（Plan 模式） | 是（父会话视角；子 Agent 内部仍受自身 `PermissionMode` 约束） |
+| 持有能力 | `Arc<dyn SubagentRunner>`（由 `Runtime::subagent_runner()` 注入）+ `Arc<dyn PlanModeController>`（Plan 模式守卫） |
+| 输出 | `{ summary, artifacts, token_used, completed }`（C-05：仅 `summary`，不回灌中间消息） |
+
+Runtime 派发前强制校验：`can_spawn_subagent == false` 时移除子 Agent 工具集中的 `task.spawn`（防嵌套）；`SubagentType::Plan` 仅在 `PermissionMode::Plan` 下可派发，其它模式下退化为 `Explore`（不报错，避免模型重试）。
+
+`SubagentRunner` trait 在 `minicoding-core::agent` 定义（`dyn` 兼容）；默认 `NoopSubagentRunner` 返回 `RuntimeError::Config`——未注入实现时 `task.spawn` 调用直接失败（不静默 no-op）。`task.spawn` 在 `tracing::info_span!("subagent", ty, max_iters)` 内执行，通过 `Span::current()` 自动挂在父 turn span 下（`OTel` 父子关系，design.md §15.2）。
 
 ---
 

@@ -15,20 +15,23 @@
 //!   `minicoding-journal`），仅 `file-undo=true` 时生效；
 //! - **task.create/update/list**：增量模型，状态机 `Pending→InProgress→Completed`
 //!   不可跳跃（C-31）；
+//! - **plan.exit**：退出 Plan 模式 + 缓存预批准，`SideEffect::None` 可穿透 Plan 硬门（C-25）；
 //! - **`mcp::wrapper`**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect`
 //!   据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
 //!
 //! 当前阶段：已实现 fs 工具组——只读（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`，见
 //! T-M1-6）与写入（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`，见 T-M2-3）；以及
-//! shell 工具组（`shell.run`，见 T-M2-4）；其余工具（web/git/task/plan/mcp 包装）与
-//! 领域 crate 依赖见 M3+。
+//! shell 工具组（`shell.run`，见 T-M2-4）；task 工具组（`task.*`，见 T-M3-8）；
+//! plan 工具组（`plan.exit`，见 T-M5-6）；其余工具（web/git/mcp 包装）与领域 crate
+//! 依赖见 M3+/M4+。
 //!
-//! 详见 `docs/modules.md` §11、`docs/design.md` §6。
+//! 详见 `docs/modules.md` §11、`docs/design.md` §6、§16、§18。
 
 #![deny(clippy::all, clippy::pedantic)]
 
 mod fs;
 mod memory;
+mod plan;
 mod shell;
 mod task;
 mod util;
@@ -41,8 +44,10 @@ pub use memory::{
     AutoMemoryWriter, InMemoryAutoMemory, MemoryCategory, MemoryWrite, MemoryWriteTarget,
     register_memory_tools,
 };
+pub use plan::{PlanExit, register_plan_tools};
 pub use shell::{ShellRun, register_shell_tools};
 pub use task::{
-    InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskStore, TaskUpdate, register_task_tools,
+    InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskSpawn, TaskStore, TaskUpdate,
+    register_spawn_tool, register_task_tools,
 };
 pub use util::{ensure_dir, resolve_path, truncate_output};

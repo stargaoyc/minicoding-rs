@@ -2,21 +2,32 @@
 //!
 //! M2 接入：`PermissionPolicy`/`PermissionPrompter`/`AuditSink`——副作用工具调用
 //! 必须经权限检查（C-01），决策落 `audit.log`（AGENTS.md §5.5）。
-//! 未接入：`SandboxDriver`（M4）、`HookRegistry`（M5）。
-//! 工具执行：无副作用并行、有副作用串行（串行段每个工具先过权限）。
+//! M4 接入：`SandboxDriver`/`SandboxPolicy`/`Journal`——OS 沙箱第二道防线（C-22）。
+//! M5 接入：`HookRegistry`——PreToolUse/PostToolUse/PermissionRequest Hook 触发点
+//! （见 `hooks.md` §4）。Hook 在 `policy.check` 之后、工具执行前后运行，
+//! 可阻断/改写/注入上下文，但不可覆盖内置黑名单 Deny（C-21）。
+//! M5 接入：`PermissionMode`（Plan/AcceptEdits/Default/...）+ `PlanModeController`——
+//! Plan 模式硬门（C-25）+ `plan.exit` 预批准缓存（见 `design.md` §16）。
+//! 工具执行：无副作用并行、有副作用串行（串行段每个工具先过权限 + Hook）。
 //!
-//! 详见 `design.md` §2、§9。
+//! 详见 `design.md` §2、§9、§16、§20。
 
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
+use crate::hooks::{
+    DispatchConfig, HookDecision, HookEvent, HookInput, HookRegistry, VerdictSerde,
+};
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
 use crate::model::{
-    Message, RuntimeError, Session, SideEffect, StopReason, ToolCall, ToolCallId, ToolResult,
-    TurnOutcome, UserInput,
+    Message, PolicyError, RuntimeError, Session, SideEffect, StopReason, ToolCall, ToolCallId,
+    ToolResult, TurnOutcome, UserInput,
 };
-use crate::policy::{Decision, PermissionContext, PermissionPolicy, PermissionPrompter, Verdict};
-use crate::provider::{ChatRequest, Delta, LlmProvider};
+use crate::policy::{
+    Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompter,
+    PlanModeController, PlanModeSnapshot, PreApprovedPrompt, Verdict,
+};
+use crate::provider::{BoxFuture, ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
 use crate::runtime::event::{Event, EventBus};
 use crate::sandbox::{
@@ -29,6 +40,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// Runtime 聚合根（所有可替换能力的持有者）。
@@ -64,6 +76,24 @@ pub struct Runtime {
     pub(crate) denial_detector: DenialDetector,
     /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过）。
     pub(crate) sandbox_breaker: SandboxCircuitBreaker,
+    /// Hook 注册表（M5，默认 `NoopHookRegistry` 兜底）。
+    ///
+    /// PreToolUse/PostToolUse/PermissionRequest Hook 在 `execute_side_effect_call`
+    /// 中触发（见 `hooks.md` §4）。未注入时所有 Hook 事件为 no-op。
+    pub(crate) hook_registry: Arc<dyn HookRegistry>,
+    /// Plan 模式状态（M5，`PermissionMode` + `allowed_prompts` 缓存）。
+    ///
+    /// `Runtime` 实现 `PlanModeController`，`plan.exit` 工具通过持有的
+    /// `Arc<dyn PlanModeController>` 反向调用 `exit_plan` 切换模式 + 缓存预批准。
+    /// `execute_side_effect_call` 在构造 `PermissionContext` 时读快照注入。
+    /// `tokio::sync::RwLock` 因 `exit_plan/set_mode` 是跨 await 的写操作。
+    pub(crate) plan_state: Arc<RwLock<PlanModeSnapshot>>,
+    /// 子 Agent runner（M5，默认 `NoopSubagentRunner` 兜底）。
+    ///
+    /// `task.spawn` 工具持有 `Arc<dyn SubagentRunner>` 反向调用 Runtime 派发子 Agent
+    /// （与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。未注入时
+    /// `task.spawn` 调用直接返回 `RuntimeError::Config`（不静默 no-op）。
+    pub(crate) subagent_runner: Arc<dyn crate::agent::SubagentRunner>,
 }
 
 impl Runtime {
@@ -109,6 +139,50 @@ impl Runtime {
     /// （C-13：Ctrl-C 不丢已生成消息），`run_turn` 返回 `TurnOutcome::Interrupted`。
     pub fn cancel(&self) {
         self.cancel_token.cancel();
+    }
+
+    /// 返回 `PlanModeController` 引用（`plan.exit` 工具注入用，M5 T-M5-6）。
+    ///
+    /// `plan.exit` 是 `SideEffect::None` 工具（只读桶并行调度），不经
+    /// `execute_side_effect_call`，故需通过持有的 controller 反向调用 Runtime
+    /// 切换 `PermissionMode` + 缓存 `allowed_prompts`。
+    #[must_use]
+    pub fn plan_controller(&self) -> Arc<dyn PlanModeController> {
+        // PlanModeController 由 Runtime 实现；这里返回一个共享 plan_state 的适配器。
+        Arc::new(PlanControllerHandle {
+            state: self.plan_state.clone(),
+            events: self.events.clone(),
+        })
+    }
+
+    /// 返回 `SubagentRunner` 引用（`task.spawn` 工具注入用，M5 T-M5-7）。
+    ///
+    /// `task.spawn` 是 `SideEffect::None` 工具（父 Agent 只接收 `summary`，
+    /// 子 Agent 的副作用在其自身的权限检查中处理，C-05），不经
+    /// `execute_side_effect_call`，故需通过持有的 runner 反向调用 Runtime 派发。
+    #[must_use]
+    pub fn subagent_runner(&self) -> Arc<dyn crate::agent::SubagentRunner> {
+        self.subagent_runner.clone()
+    }
+
+    /// 返回 `Journal` 引用（`/undo` REPL 命令用，M5 T-M5-8）。
+    ///
+    /// `file-undo` feature 未启用时返回 `None`，CLI 据此决定 `/undo` 是否可用。
+    #[must_use]
+    pub fn journal(&self) -> Option<Arc<dyn Journal>> {
+        self.journal.clone()
+    }
+
+    /// 注册依赖 Runtime 自身引用的工具（`plan.exit`/`task.spawn`，M5 T-M5-8）。
+    ///
+    /// 这些工具需要 `plan_controller()`/`subagent_runner()`，只能在 Runtime 构造后
+    /// 注册（chicken-and-egg：tools 需要 Runtime 引用，Runtime 需要 tools）。
+    /// CLI 在 `build_runtime` 后调用此方法补注册。
+    ///
+    /// # Panics
+    /// 不会 panic；重复注册同名工具会覆盖（与 `ToolRegistry::register` 语义一致）。
+    pub fn register_dynamic_tool(&mut self, tool: Arc<dyn crate::tool::Tool>) {
+        self.tools.register(tool);
     }
 
     /// 恢复会话历史到上下文管理器（`--resume`/`--fork-session` 用，T-M3-10a）。
@@ -454,11 +528,19 @@ impl Runtime {
         Ok(results)
     }
 
-    /// 对单个副作用工具调用执行权限检查 + 调度（C-01 实现层强制）。
+    /// 对单个副作用工具调用执行权限检查 + Hook + 调度（C-01 实现层强制）。
     ///
-    /// 流程：策略判定 → 必要时交互 → 落审计 → 按决策执行或拒绝。
-    /// `Deny`（策略或用户）返回 `Ok` 带 `is_error=true` 的结果；仅 `dispatch` 失败
-    /// 返回 `Err`（与原 `?` 传播语义一致）。
+    /// 流程（见 `hooks.md` §4）：
+    /// 1. `policy.check` → `Verdict`（C-02：内置黑名单在此优先级最高）
+    /// 2. `PreToolUse` Hook：可 deny/allow（升级 `Ask→Allow`）/`modify_input`/continue
+    ///    （C-21：内置黑名单 Deny 时 Hook 的 Allow 被忽略）
+    /// 3. 若仍 `Ask` → `PermissionRequest` Hook：可直接给 Decision 跳过 prompter
+    /// 4. 若仍 `Ask` → `PermissionPrompter` 交互
+    /// 5. 落审计 → 按决策执行或拒绝
+    /// 6. 执行成功 → `PostToolUse` Hook；执行失败 → `PostToolUseFailure` Hook
+    ///
+    /// `Deny`（策略/Hook/用户）返回 `Ok` 带 `is_error=true` 的结果；仅 `dispatch`
+    /// 失败返回 `Err`（与原 `?` 传播语义一致）。
     async fn execute_side_effect_call(
         &self,
         call: &ToolCall,
@@ -470,7 +552,7 @@ impl Runtime {
             .map_or(SideEffect::None, |t| t.side_effect());
 
         // `permission` span（design.md §15.1）：包裹权限决策流程（策略判定 →
-        // prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
+        // Hook → prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
         let span = tracing::info_span!(
             "permission",
             tool = %call.name,
@@ -479,12 +561,15 @@ impl Runtime {
         );
         let _enter = span.enter();
 
+        let plan_snap = self.plan_state.read().await.clone();
         let perm_ctx = PermissionContext {
             session: self.session.id.clone(),
             workdir: self.workdir.clone(),
             side_effect,
             turn: 0,
             history: Vec::new(),
+            permission_mode: plan_snap.mode,
+            allowed_prompts: plan_snap.allowed_prompts,
         };
 
         // 1. 策略判定（C-02：内置黑名单在此优先级最高，不可覆盖）
@@ -501,66 +586,306 @@ impl Runtime {
             }
         };
 
-        // 2. 解析为最终决策：Allow/Deny 直出，Ask 走 prompter 点对点交互
-        let (decision, prompt_id) = match verdict {
-            Verdict::Allow => (Decision::Allow, None),
-            Verdict::Deny(msg) => (Decision::Deny(msg), None),
-            Verdict::Ask(prompt) => {
-                let prompt_id = prompt.id.clone();
-                self.events.emit(Event::PermissionRequested {
-                    id: prompt.id.clone(),
-                    tool: prompt.tool.clone(),
-                    summary: prompt.summary.clone(),
-                    risk: prompt.risk,
-                });
-                let d = self.prompter.prompt(prompt).await;
-                self.events.emit(Event::PermissionResolved {
-                    id: prompt_id.clone(),
-                    decision: d.clone(),
-                });
-                (d, Some(prompt_id))
-            }
+        // 2. 构建 Hook 分发配置 + C-21 builtin_deny 标记
+        let dispatch_cfg = self.build_dispatch_config(&verdict);
+        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+
+        // 3. PreToolUse Hook（policy.check 之后、工具执行前）
+        let mut effective_call = call.clone();
+        let pre_decision = self
+            .run_pre_tool_use_hook(
+                call,
+                side_effect,
+                &verdict,
+                &dispatch_cfg,
+                &mut effective_call,
+            )
+            .await?;
+
+        // 4. 解析为最终决策（PreToolUse 直出 / Verdict Allow|Deny / Ask→PermissionRequest Hook→prompter）
+        let (decision, prompt_id) = if let Some(d) = pre_decision {
+            (d, None)
+        } else {
+            self.resolve_decision(&verdict, call, side_effect, &dispatch_cfg, is_builtin_deny)
+                .await?
         };
 
-        // 3. 落审计（所有副作用权限决策均落盘，AGENTS.md §5.5；
+        // 5. 落审计（所有副作用权限决策均落盘，AGENTS.md §5.5；
         //    C-04：detail 不含工具输入原文，避免凭证外泄）
         self.record_permission_audit(&call.name, &decision, prompt_id)
             .await;
 
-        // 4. 按决策执行或拒绝
+        // 6. 按决策执行或拒绝
         match decision {
             Decision::Deny(msg) => Ok((
                 call.id.clone(),
                 ToolResult::err_text(format!("permission denied: {msg}")),
             )),
             Decision::Allow => {
-                self.events.emit(Event::ToolCallStarted {
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                });
-                let result = match self.tools.dispatch(call, ctx).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // 沙箱拒绝检测（T-M4-5）：识别 EPERM/EACCES/landlock 等
-                        // 内核级硬反馈，更新熔断器（C-30 不可被 LLM 绕过）。
-                        if let Some(denial_result) =
-                            self.handle_sandbox_denial(&call.id, &call.name, &e)
-                        {
-                            return Ok(denial_result);
-                        }
-                        // 非 denial 错误：原样传播
-                        return Err(RuntimeError::Tool {
-                            tool: call.name.clone(),
-                            source: e,
-                        });
-                    }
-                };
-                self.events.emit(Event::ToolCallFinished {
-                    call_id: call.id.clone(),
-                    result: result.clone(),
-                });
-                Ok((call.id.clone(), result))
+                self.execute_allowed_call(call, &effective_call, side_effect, ctx)
+                    .await
             }
+        }
+    }
+
+    /// 构建 Hook 分发配置（来自 `HooksConfig` + 当前 `Verdict`）。
+    ///
+    /// C-21：policy 返回 `Deny` 时视为内置黑名单 Deny（当前 `BuiltinPolicy` 仅产出
+    /// L0 Deny：项目文档保护 C-02、路径越界 C-03），Hook 的 Allow 被忽略。
+    fn build_dispatch_config(&self, verdict: &Verdict) -> DispatchConfig {
+        let hook_config = &self.config.hooks;
+        let builtin_deny = match verdict {
+            Verdict::Deny(msg) => Some(msg.clone()),
+            _ => None,
+        };
+        DispatchConfig {
+            on_error: hook_config.on_hook_error,
+            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            builtin_deny,
+        }
+    }
+
+    /// 运行 `PreToolUse` Hook（policy.check 之后、工具执行前）。
+    ///
+    /// 返回 `Some(Decision)` 表示 Hook 直接给出决策（Deny 或 Allow 升级）；
+    /// 返回 `None` 表示 Hook 未决策（`Continue`/`Ask`/`Allow` on `builtin_deny`），由
+    /// 调用方继续走 `resolve_decision` 解析。
+    ///
+    /// `effective_call` 在 Hook 返回 `modify_input` 时被就地更新（仍经
+    /// `sandbox_path` 校验，由工具 dispatch 时执行）。
+    async fn run_pre_tool_use_hook(
+        &self,
+        call: &ToolCall,
+        side_effect: SideEffect,
+        verdict: &Verdict,
+        dispatch_cfg: &DispatchConfig,
+        effective_call: &mut ToolCall,
+    ) -> Result<Option<Decision>, RuntimeError> {
+        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+        let hook_input =
+            self.build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict));
+        let result = self
+            .hook_registry
+            .dispatch(hook_input, dispatch_cfg.clone())
+            .await;
+        if let Some(fatal) = result.fatal_error {
+            return Err(RuntimeError::Hook(fatal.to_string()));
+        }
+        // C-21：builtin_deny 时 Hook 的 Allow 被忽略（dispatch 已处理）
+        let pre_decision = match result.decision {
+            HookDecision::Deny => {
+                let reason = result
+                    .reason
+                    .unwrap_or_else(|| "blocked by hook".to_string());
+                Some(Decision::Deny(reason))
+            }
+            HookDecision::Allow if !is_builtin_deny => {
+                // Hook 升级 Ask→Allow（不降级已有 Allow）
+                Some(Decision::Allow)
+            }
+            _ => None, // Continue/Ask/Allow(builtin_deny) 不直接给决策
+        };
+        // 应用 modify_input（仍经 sandbox_path 校验，由工具 dispatch 时执行）
+        if let Some(new_input) = result.modify_input {
+            effective_call.input = new_input;
+        }
+        // exit_messages 记日志（供观测）
+        for msg in &result.exit_messages {
+            tracing::info!(tool = %call.name, hook_msg = %msg, "PreToolUse hook exit message");
+        }
+        Ok(pre_decision)
+    }
+
+    /// 解析为最终决策（PreToolUse 未直出决策时）。
+    ///
+    /// - `Allow` / `Deny` → 直出
+    /// - `Ask` → 先跑 `PermissionRequest` Hook（可能短路）；未短路则走 `prompter`
+    ///
+    /// 返回 `(Decision, Option<prompt_id>)`：`prompt_id` 为 `Some` 表示经用户交互。
+    async fn resolve_decision(
+        &self,
+        verdict: &Verdict,
+        call: &ToolCall,
+        side_effect: SideEffect,
+        dispatch_cfg: &DispatchConfig,
+        is_builtin_deny: bool,
+    ) -> Result<(Decision, Option<String>), RuntimeError> {
+        match verdict {
+            Verdict::Allow => Ok((Decision::Allow, None)),
+            Verdict::Deny(msg) => Ok((Decision::Deny(msg.clone()), None)),
+            Verdict::Ask(prompt) => {
+                // PermissionRequest Hook（Verdict::Ask 时、prompter 前）
+                let hook_input = self.build_hook_input(
+                    HookEvent::PermissionRequest,
+                    call,
+                    side_effect,
+                    Some(verdict),
+                );
+                let result = self
+                    .hook_registry
+                    .dispatch(hook_input, dispatch_cfg.clone())
+                    .await;
+                if let Some(fatal) = result.fatal_error {
+                    return Err(RuntimeError::Hook(fatal.to_string()));
+                }
+                match result.decision {
+                    HookDecision::Allow if !is_builtin_deny => {
+                        // Hook 自动批准，跳过 prompter
+                        Ok((Decision::Allow, None))
+                    }
+                    HookDecision::Deny => {
+                        let reason = result
+                            .reason
+                            .unwrap_or_else(|| "blocked by hook".to_string());
+                        Ok((Decision::Deny(reason), None))
+                    }
+                    _ => {
+                        // Hook 未决策 → 走 prompter 交互
+                        let prompt_id = prompt.id.clone();
+                        self.events.emit(Event::PermissionRequested {
+                            id: prompt.id.clone(),
+                            tool: prompt.tool.clone(),
+                            summary: prompt.summary.clone(),
+                            risk: prompt.risk,
+                        });
+                        let d = self.prompter.prompt(prompt.clone()).await;
+                        self.events.emit(Event::PermissionResolved {
+                            id: prompt_id.clone(),
+                            decision: d.clone(),
+                        });
+                        Ok((d, Some(prompt_id)))
+                    }
+                }
+            }
+        }
+    }
+
+    /// 执行已 Allow 的工具调用（含沙箱拒绝检测、PostToolUse/PostToolUseFailure Hook）。
+    async fn execute_allowed_call(
+        &self,
+        original_call: &ToolCall,
+        effective_call: &ToolCall,
+        side_effect: SideEffect,
+        ctx: &ToolContext,
+    ) -> Result<(ToolCallId, ToolResult), RuntimeError> {
+        self.events.emit(Event::ToolCallStarted {
+            call_id: original_call.id.clone(),
+            tool: original_call.name.clone(),
+        });
+        let result = match self.tools.dispatch(effective_call, ctx).await {
+            Ok(r) => r,
+            Err(e) => {
+                // 沙箱拒绝检测（T-M4-5）：识别 EPERM/EACCES/landlock 等
+                // 内核级硬反馈，更新熔断器（C-30 不可被 LLM 绕过）。
+                if let Some(denial_result) =
+                    self.handle_sandbox_denial(&original_call.id, &original_call.name, &e)
+                {
+                    return Ok(denial_result);
+                }
+                // PostToolUseFailure Hook（非 denial 错误）
+                self.run_post_failure_hook(effective_call, side_effect, &e)
+                    .await;
+                return Err(RuntimeError::Tool {
+                    tool: original_call.name.clone(),
+                    source: e,
+                });
+            }
+        };
+        // PostToolUse Hook（执行成功后）
+        self.run_post_success_hook(effective_call, side_effect, &result)
+            .await;
+        self.events.emit(Event::ToolCallFinished {
+            call_id: original_call.id.clone(),
+            result: result.clone(),
+        });
+        Ok((original_call.id.clone(), result))
+    }
+
+    /// 构造 `HookInput`（工具相关事件通用）。
+    fn build_hook_input(
+        &self,
+        event: HookEvent,
+        call: &ToolCall,
+        side_effect: SideEffect,
+        verdict: Option<&Verdict>,
+    ) -> HookInput {
+        let verdict_serde = verdict.map(|v| match v {
+            Verdict::Allow => VerdictSerde::Allow,
+            Verdict::Deny(msg) => VerdictSerde::Deny {
+                reason: msg.clone(),
+            },
+            Verdict::Ask(prompt) => VerdictSerde::Ask {
+                tool: prompt.tool.clone(),
+                summary: prompt.summary.clone(),
+            },
+        });
+        HookInput {
+            event,
+            session_id: self.session.id.clone(),
+            turn: 0,
+            tool: Some(call.clone()),
+            side_effect: Some(side_effect),
+            verdict: verdict_serde,
+            cwd: self.workdir.clone(),
+            extras: serde_json::Value::Null,
+        }
+    }
+
+    /// 运行 `PostToolUse` Hook（工具执行成功后，见 `hooks.md` §4）。
+    ///
+    /// Hook 可跑 formatter/linter（副作用在 Hook 内部完成），`exit_message` 记日志。
+    /// `async_rewake` 暂不处理（AsyncRewakeManager 集成在后续任务）。
+    async fn run_post_success_hook(
+        &self,
+        call: &ToolCall,
+        side_effect: SideEffect,
+        _result: &ToolResult,
+    ) {
+        let hook_config = &self.config.hooks;
+        if hook_config.post_tool_use.is_empty() {
+            return; // 无 PostToolUse Hook，快速跳过
+        }
+        let dispatch_cfg = DispatchConfig {
+            on_error: hook_config.on_hook_error,
+            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            builtin_deny: None,
+        };
+        let hook_input = self.build_hook_input(HookEvent::PostToolUse, call, side_effect, None);
+        let result = self.hook_registry.dispatch(hook_input, dispatch_cfg).await;
+        if let Some(fatal) = result.fatal_error {
+            tracing::error!(hook_error = %fatal, "PostToolUse hook fatal error");
+        }
+        for msg in &result.exit_messages {
+            tracing::info!(tool = %call.name, hook_msg = %msg, "PostToolUse hook exit message");
+        }
+    }
+
+    /// 运行 `PostToolUseFailure` Hook（工具执行失败后，见 `hooks.md` §4）。
+    ///
+    /// Hook 可诊断失败原因、记录错误模式。`exit_message` 记日志。
+    async fn run_post_failure_hook(
+        &self,
+        call: &ToolCall,
+        side_effect: SideEffect,
+        _error: &crate::model::ToolError,
+    ) {
+        let hook_config = &self.config.hooks;
+        if hook_config.post_tool_use_failure.is_empty() {
+            return; // 无 PostToolUseFailure Hook，快速跳过
+        }
+        let dispatch_cfg = DispatchConfig {
+            on_error: hook_config.on_hook_error,
+            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            builtin_deny: None,
+        };
+        let hook_input =
+            self.build_hook_input(HookEvent::PostToolUseFailure, call, side_effect, None);
+        let result = self.hook_registry.dispatch(hook_input, dispatch_cfg).await;
+        if let Some(fatal) = result.fatal_error {
+            tracing::error!(hook_error = %fatal, "PostToolUseFailure hook fatal error");
+        }
+        for msg in &result.exit_messages {
+            tracing::info!(tool = %call.name, hook_msg = %msg, "PostToolUseFailure hook exit message");
         }
     }
 
@@ -688,5 +1013,64 @@ impl std::fmt::Debug for Runtime {
             .field("workdir", &self.workdir)
             .field("tools_count", &self.tools.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// `PlanModeController` 适配器（共享 Runtime 的 `plan_state` + `events`）。
+///
+/// 由 `Runtime::plan_controller` 构造，注入到 `plan.exit` 工具。`plan.exit` 通过
+/// 它读写会话级 Plan 状态。设计为独立结构而非 `Runtime impl PlanModeController`，
+/// 避免给 Runtime 增加无关方法（`Arc<dyn PlanModeController>` 更显式）。
+struct PlanControllerHandle {
+    state: Arc<RwLock<PlanModeSnapshot>>,
+    events: EventBus,
+}
+
+impl PlanModeController for PlanControllerHandle {
+    fn snapshot(&self) -> BoxFuture<'_, PlanModeSnapshot> {
+        let state = self.state.clone();
+        Box::pin(async move { state.read().await.clone() })
+    }
+
+    fn exit_plan(
+        &self,
+        allowed_prompts: Vec<PreApprovedPrompt>,
+        target_mode: PermissionMode,
+    ) -> BoxFuture<'_, Result<(), PolicyError>> {
+        let state = self.state.clone();
+        let events = self.events.clone();
+        Box::pin(async move {
+            let mut snap = state.write().await;
+            if snap.mode != PermissionMode::Plan {
+                return Err(PolicyError::Policy(format!(
+                    "plan.exit 仅在 Plan 模式下可调用（当前：{:?}）",
+                    snap.mode
+                )));
+            }
+            let from = snap.mode;
+            snap.mode = target_mode;
+            snap.allowed_prompts = allowed_prompts;
+            drop(snap);
+            events.emit(Event::PermissionModeChanged {
+                from,
+                to: target_mode,
+            });
+            tracing::info!(from = ?from, to = ?target_mode, "PermissionMode switched by plan.exit");
+            Ok(())
+        })
+    }
+
+    fn set_mode(&self, mode: PermissionMode) -> BoxFuture<'_, ()> {
+        let state = self.state.clone();
+        let events = self.events.clone();
+        Box::pin(async move {
+            let mut snap = state.write().await;
+            let from = snap.mode;
+            snap.mode = mode;
+            // set_mode 是 CLI 显式切换，不重置 allowed_prompts（保留先前 plan.exit 缓存）
+            drop(snap);
+            events.emit(Event::PermissionModeChanged { from, to: mode });
+            tracing::info!(from = ?from, to = ?mode, "PermissionMode switched by CLI");
+        })
     }
 }
