@@ -22,6 +22,7 @@ pub use update::TaskUpdate;
 
 use minicoding_core::model::{Task, TaskStatus, ToolError};
 use minicoding_core::provider::BoxFuture;
+use minicoding_core::runtime::{Event, EventBus};
 use minicoding_core::tool::ToolRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,17 +53,36 @@ pub trait TaskStore: Send + Sync {
 /// 内存任务存储（默认实现，非持久化）。
 ///
 /// 使用 `tokio::sync::Mutex`（见 AGENTS.md §2.4）；临界区内无 `await`，仅做
-/// O(n) 校验与提交（n ≤ 20 任务）。
-#[derive(Default)]
+/// O(n) 校验与提交（n ≤ 20 任务）。持有可选 [`EventBus`]，在 `create`/`update`
+/// 成功后广播 `Event::TaskUpdated`，供 UI 渲染任务面板（T-M7-4）。
 pub struct InMemoryTaskStore {
     tasks: tokio::sync::Mutex<Vec<Task>>,
+    events: Option<EventBus>,
+}
+
+impl Default for InMemoryTaskStore {
+    fn default() -> Self {
+        Self {
+            tasks: tokio::sync::Mutex::new(Vec::new()),
+            events: None,
+        }
+    }
 }
 
 impl InMemoryTaskStore {
-    /// 创建空存储。
+    /// 创建空存储（不广播事件）。
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 创建带事件总线的存储（`create`/`update` 成功后广播 `TaskUpdated`，T-M7-4）。
+    #[must_use]
+    pub fn with_events(events: EventBus) -> Self {
+        Self {
+            tasks: tokio::sync::Mutex::new(Vec::new()),
+            events: Some(events),
+        }
     }
 }
 
@@ -77,6 +97,10 @@ impl TaskStore for InMemoryTaskStore {
             let task = Task::new(content);
             let mut tasks = self.tasks.lock().await;
             tasks.push(task.clone());
+            // T-M7-4：广播任务更新（无订阅者时静默丢弃）
+            if let Some(bus) = &self.events {
+                bus.emit(Event::TaskUpdated { task: task.clone() });
+            }
             Ok(task)
         })
     }
@@ -136,7 +160,14 @@ impl TaskStore for InMemoryTaskStore {
             task.blocks = new_blocks;
             task.blocked_by = new_blocked_by;
             task.touch();
-            Ok(task.clone())
+            let updated = task.clone();
+            // T-M7-4：广播任务更新（无订阅者时静默丢弃）
+            if let Some(bus) = &self.events {
+                bus.emit(Event::TaskUpdated {
+                    task: updated.clone(),
+                });
+            }
+            Ok(updated)
         })
     }
 
@@ -221,10 +252,16 @@ fn has_cycle(tasks: &[Task]) -> bool {
 
 /// 注册全部任务工具到 `registry`（共享一个 `InMemoryTaskStore`）。
 ///
+/// `events` 为 `Some` 时，存储在 `create`/`update` 成功后广播 `Event::TaskUpdated`，
+/// 供 UI 渲染任务面板（T-M7-4）；为 `None` 时退化为无广播（单元测试场景）。
+///
 /// Runtime 若需注入自定义 [`TaskStore`]，可直接用各工具的 `new(store)` 构造后
 /// 自行注册。
-pub fn register_task_tools(registry: &mut ToolRegistry) {
-    let store: Arc<dyn TaskStore> = Arc::new(InMemoryTaskStore::new());
+pub fn register_task_tools(registry: &mut ToolRegistry, events: Option<EventBus>) {
+    let store: Arc<dyn TaskStore> = match events {
+        Some(bus) => Arc::new(InMemoryTaskStore::with_events(bus)),
+        None => Arc::new(InMemoryTaskStore::new()),
+    };
     registry.register(Arc::new(TaskCreate::new(store.clone())));
     registry.register(Arc::new(TaskUpdate::new(store.clone())));
     registry.register(Arc::new(TaskList::new(store)));

@@ -22,6 +22,7 @@ mod prompter;
 mod redact;
 mod replay;
 mod ssrf;
+mod tui;
 
 pub use builtin::BuiltinPolicy;
 pub use mode::{ApprovalMode, Preset};
@@ -30,3 +31,4 @@ pub use prompter::{CallbackPrompter, InteractivePrompter, NonInteractivePrompter
 pub use redact::redact;
 pub use replay::ReplayPolicy;
 pub use ssrf::{SsrfError, SsrfOptions, check_host, check_ip, check_url};
+pub use tui::TuiPrompter;

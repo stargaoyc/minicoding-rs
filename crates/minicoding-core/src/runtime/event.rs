@@ -3,7 +3,7 @@
 //! `EventBus` 基于 `tokio::sync::broadcast`：发布者克隆事件，订阅者各自消费。
 //! 权限交互不走总线（点对点 `PermissionPrompter`，见 `policy::trait`）。
 
-use crate::model::{Message, SessionId, StopReason, ToolCallId, ToolResult};
+use crate::model::{Message, SessionId, StopReason, Task, ToolCallId, ToolResult};
 use crate::policy::{Decision, PermissionMode, Risk};
 use tokio::sync::broadcast;
 
@@ -41,6 +41,10 @@ pub enum Event {
         from: PermissionMode,
         to: PermissionMode,
     },
+    /// 任务更新（`task.create`/`task.update` 后广播，供 UI 渲染任务面板，见 `design.md` §18.4）。
+    ///
+    /// 携带更新后的 `Task` 快照；UI 据此刷新任务列表（T-M7-4）。
+    TaskUpdated { task: Task },
 }
 
 /// 事件总线（broadcast channel）。

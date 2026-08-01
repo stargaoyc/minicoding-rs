@@ -113,6 +113,7 @@ pub fn build_runtime(
     mode: &SessionLoadMode,
     sandbox_override: Option<SandboxPolicy>,
     start_in_plan_mode: bool,
+    prompter_override: Option<Arc<dyn PermissionPrompter>>,
 ) -> Result<Runtime> {
     // 1. 加载配置
     let mut config = RuntimeConfig::default();
@@ -256,12 +257,16 @@ pub fn build_runtime(
     let storage = JsonlStorage::new(sessions_dir);
 
     // 6. 构造 tool registry
+    //    T-M7-4：EventBus 提前创建，clone 给 task store 用于广播 `TaskUpdated`，
+    //    原件传入 RuntimeBuilder（EventBus 内部是 broadcast::Sender，clone 共享通道）。
+    let event_bus = minicoding_core::runtime::EventBus::new();
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
     // T-M3-8：任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
-    register_task_tools(&mut tools);
+    // T-M7-4：注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
+    register_task_tools(&mut tools, Some(event_bus.clone()));
 
     // 6b. 注册 memory.write 工具（T-M3-9：long_term + auto memory）
     //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
@@ -291,11 +296,13 @@ pub fn build_runtime(
         }
         _ => builtin,
     };
-    let prompter: Arc<dyn PermissionPrompter> = if std::io::stdin().is_terminal() {
-        Arc::new(InteractivePrompter::new())
-    } else {
-        tracing::warn!("stdin 非 TTY，切换为 NonInteractivePrompter（副作用工具将被拒绝）");
-        Arc::new(NonInteractivePrompter::new())
+    let prompter: Arc<dyn PermissionPrompter> = match prompter_override {
+        Some(p) => p,
+        None if std::io::stdin().is_terminal() => Arc::new(InteractivePrompter::new()),
+        None => {
+            tracing::warn!("stdin 非 TTY，切换为 NonInteractivePrompter（副作用工具将被拒绝）");
+            Arc::new(NonInteractivePrompter::new())
+        }
     };
 
     // 8. 构造审计 sink（AGENTS.md §5.5：权限决策必须落 audit.log，0600 权限）
@@ -346,7 +353,8 @@ pub fn build_runtime(
         .prompter(prompter)
         .audit(audit)
         .session_summarizer(summarizer)
-        .permission_mode(initial_mode);
+        .permission_mode(initial_mode)
+        .events(event_bus);
 
     // 11b. 注入沙箱驱动 + 策略（T-M4-9，C-22：沙箱为第二道防线）
     //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。

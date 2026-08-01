@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "minicoding_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "minicoding-tui"
 path = "src/main.rs"
@@ -15,12 +19,16 @@ path = "src/main.rs"
 [dependencies]
 minicoding-core = { workspace = true }
 minicoding-policy = { workspace = true }
+minicoding-cli = { workspace = true }
+minicoding-storage = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
+time = { workspace = true }
 
-# ratatui + crossterm 在 M7 引入（见 modules.md §13.3）
-# ratatui = "0.x"
-# crossterm = "0.x"
+# TUI 渲染（见 modules.md §13.3）
+ratatui = { workspace = true }
+crossterm = { workspace = true }

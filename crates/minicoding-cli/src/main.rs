@@ -27,18 +27,13 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
-mod builder;
-mod commands;
-mod cred;
-mod otel_init;
-mod session;
-
 use anyhow::{Context, Result};
-use builder::SessionLoadMode;
 use clap::{Parser, Subcommand};
+use minicoding_cli::builder::{self, SessionLoadMode};
 #[cfg(feature = "mcp")]
-use commands::McpCommand;
-use commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
+use minicoding_cli::commands::McpCommand;
+use minicoding_cli::commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
+use minicoding_cli::{commands, otel_init, session};
 use minicoding_core::model::{TurnOutcome, UserInput};
 use minicoding_core::runtime::Event;
 
@@ -221,6 +216,7 @@ fn main() -> Result<()> {
         &mode,
         None,
         cli.plan,
+        None,
     )
     .context("构建 Runtime 失败")?;
 

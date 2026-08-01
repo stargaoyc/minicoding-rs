@@ -191,14 +191,14 @@
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| F-01 | CLI 单次模式 | `minicoding "prompt"` | M1 | 规划中 |
-| F-02 | CLI 交互会话 | `--session` REPL（含 /undo /plan /mcp） | M2 | 规划中 |
-| F-03 | 流式渲染 | token 直写 stdout | M1 | 规划中 |
-| F-04 | 非 TTY 降级 | 禁 spinner/颜色 | M1 | 规划中 |
-| F-05 | TUI 全屏 | ratatui 多视图 | M7 | 规划中 |
-| F-06 | 流式 Markdown | 增量解析渲染 | M7 | 规划中 |
-| F-07 | 权限弹窗 | 非阻塞主循环（TuiPrompter） | M7 | 规划中 |
-| F-08 | 任务面板 | TUI 同步显示任务进度 | M7 | 规划中 |
+| F-01 | CLI 单次模式 | `minicoding "prompt"` | M1 | 已实现 |
+| F-02 | CLI 交互会话 | `--session` REPL（含 /undo /plan /mcp） | M2 | 已实现 |
+| F-03 | 流式渲染 | token 直写 stdout | M1 | 已实现 |
+| F-04 | 非 TTY 降级 | 禁 spinner/颜色 | M1 | 已实现 |
+| F-05 | TUI 全屏 | ratatui 多视图 | M7 | 已实现 |
+| F-06 | 流式 Markdown | 增量解析渲染 | M7 | 已实现 |
+| F-07 | 权限弹窗 | 非阻塞主循环（TuiPrompter） | M7 | 已实现 |
+| F-08 | 任务面板 | TUI 同步显示任务进度 | M7 | 已实现 |
 
 ## 12. 嵌入与跨进程
 

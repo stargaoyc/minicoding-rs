@@ -14,6 +14,7 @@ use crate::model::{PolicyError, SessionId};
 use crate::provider::BoxFuture;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 /// 策略返回的中间判定（未交互）。
 #[derive(Debug, Clone)]
@@ -114,6 +115,22 @@ pub enum PromptOption {
     AllowAlways,
     DenyOnce,
     DenyAlways,
+}
+
+/// TUI 权限询问的点对点消息（T-M7-3）。
+///
+/// 由 `TuiPrompter`（`minicoding-policy`）通过 mpsc channel 发往 TUI 主循环，
+/// UI 渲染弹窗后通过 `reply` 回传 [`Decision`]，`TuiPrompter::prompt` 的 future
+/// 在 await `reply` 时挂起，工具调用阻塞但 Runtime 调度器仍可推进其他 task。
+///
+/// 定义在 `minicoding-core` 而非 `minicoding-tui`，避免 `minicoding-policy` 反向
+/// 依赖 `minicoding-tui`（依赖方向：tui → policy → core，见 AGENTS.md §3.2）。
+#[derive(Debug)]
+pub struct TuiPermissionRequest {
+    /// 权限询问详情（工具名/摘要/风险/选项）。
+    pub prompt: PermissionPrompt,
+    /// UI 回传决策的 oneshot 通道。
+    pub reply: oneshot::Sender<Decision>,
 }
 
 /// 纯决策 trait（无交互、无 IO，`dyn` 兼容）。

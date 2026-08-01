@@ -75,6 +75,13 @@ anstream = "0.6"
 anstyle = "1.0"
 rustyline = "15.0"
 
+# TUI（仅 tui 引入，见 tech-stack.md §4.2、modules.md §13.3）
+# ratatui 0.30 默认内置 crossterm backend；MSRV 1.88（workspace 1.99 满足）。
+# 输入区用 ratatui 原生事件处理 + 轻量 InputState，不引入 reedline（与全屏
+# alternate screen 模式冲突，见 design.md §25 权衡记录）。
+ratatui = "0.30"
+crossterm = "0.29"
+
 # 文件与代码处理（见 tech-stack.md §5）
 globset = "0.4"
 regex = "1.11"
