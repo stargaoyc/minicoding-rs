@@ -4,18 +4,42 @@
 #   2. 直接复制 scripts/git-hooks/pre-commit → .git/hooks/pre-commit
 #
 # 钩子内容：
+#   - trailing whitespace / EOF newline / secrets 检查
+#   - typos 拼写检查（_typos.toml）
 #   - cargo fmt --check（格式校验）
 #   - cargo clippy --workspace --all-targets -- -D warnings（零警告）
-#   - cargo test --workspace（单元测试）
-#   - 文件尾部换行 + 大文件检查
+#   - cargo deny check（依赖治理：advisories/licenses/bans/sources）
+#   - cargo test --workspace（单元测试，pre-push 阶段）
 #
 # 与 CI 门禁（AGENTS.md §6.3）一致，本地先拦截低级错误。
 
 minimum_pre_commit_version: "3.0.0"
 
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+        exclude: 'Cargo.lock'
+      - id: end-of-file-fixer
+        exclude: '\.jsonl$'
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+        exclude: '\.jsonl$'
+
   - repo: local
     hooks:
+      - id: typos
+        name: typos (拼写检查)
+        description: 拼写检查（_typos.toml 配置）
+        entry: typos
+        language: system
+        types: [text]
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: cargo-fmt
         name: cargo fmt --check
         description: 检查 Rust 代码格式（AGENTS.md §6.3 CI 门禁）
@@ -28,7 +52,16 @@ repos:
       - id: cargo-clippy
         name: cargo clippy (deny warnings)
         description: clippy 零警告门禁（AGENTS.md §2.9 / §6.3）
-        entry: cargo clippy --workspace --all-targets -- -D warnings
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: cargo-deny
+        name: cargo deny check
+        description: 依赖治理检查（AGENTS.md §2.7 / §5.2）
+        entry: cargo deny check advisories licenses bans sources
         language: system
         types: [rust]
         pass_filenames: false
@@ -37,27 +70,11 @@ repos:
       - id: cargo-test
         name: cargo test --workspace
         description: 单元测试门禁（AGENTS.md §2.8 / §6.3，覆盖率目标 ≥80%）
-        entry: cargo test --workspace
+        entry: cargo test --workspace --all-features
         language: system
         types: [rust]
         pass_filenames: false
         stages: [pre-push]
-
-      - id: trailing-whitespace
-        name: trailing whitespace
-        description: 清除行尾空白
-        entry: bash -c 'if git diff --cached --check | grep -q "trailing whitespace"; then git diff --cached --check; exit 1; fi'
-        language: system
-        pass_filenames: false
-        stages: [pre-commit]
-
-      - id: end-of-file-fixer
-        name: end-of-file newline
-        description: 确保文件末尾有换行符
-        entry: bash -c 'rc=0; for f in $(git diff --cached --name-only --diff-filter=AM); do if [ -f "$f" ] && [ -s "$f" ] && [ "$(tail -c1 "$f")" != "" ]; then echo "missing EOF newline: $f"; rc=1; fi; done; exit $rc'
-        language: system
-        pass_filenames: false
-        stages: [pre-commit]
 
       - id: no-secrets-in-staged
         name: check no secrets staged

@@ -1,0 +1,10 @@
+# Rust 工具链固定（CI 与本地开发一致）
+#
+# 项目使用 `let chains`（`if .. && let Some(..) = ..`）等 Rust 2024 edition 特性，
+# 要求 rustc ≥ 1.99。当前 1.99 仍在 nightly/beta 通道，故固定 nightly。
+# stable 1.99 发布后可切换为 `channel = "stable"`。
+
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+profile = "minimal"

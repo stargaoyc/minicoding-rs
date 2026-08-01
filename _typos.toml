@@ -1,0 +1,38 @@
+# typos 拼写检查配置
+# https://github.com/crate-ci/typos
+
+[default.extend-words]
+# 项目专有词汇（不视为拼写错误）
+# rust 生态
+ratatui = "ratatui"
+crossterm = "crossterm"
+reedline = "reedline"
+reqwest = "reqwest"
+tiktoken = "tiktoken"
+ratatui = "ratatui"
+tokio = "tokio"
+serde = "serde"
+clippy = "clippy"
+rustc = "rustc"
+# minicoding 专有
+minicoding = "minicoding"
+otlp = "otlp"
+otel = "otel"
+mpsc = "mpsc"
+oneshot = "oneshot"
+broadcast = "broadcast"
+# 中文拼音变量名（如有）
+ndjson = "ndjson"
+landlock = "landlock"
+seccomp = "seccomp"
+seatbelt = "seatbelt"
+ulid = "ulid"
+
+[files]
+extend-exclude = [
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "docs/*.md",
+    "*.jsonl",
+    "*.log",
+]

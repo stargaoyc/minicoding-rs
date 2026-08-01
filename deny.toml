@@ -1,10 +1,23 @@
 # cargo-deny 配置（AGENTS.md §2.7 依赖治理）
 #
 # 许可证白名单：MIT / Apache-2.0 / BSD / ISC（AGENTS.md §2.7）
-# 漏洞检测由 cargo audit 负责（CI audit job）；本配置聚焦许可证/来源/ban。
+# 漏洞检测：advisories 段（与 cargo audit 互补，CI deny job 同时检查）
+# 来源限制：仅 crates.io
 
 [graph]
 all-features = true
+
+[advisories]
+# 漏洞数据库（默认 rustsec/advisory-db）
+# 忽略的 advisory ID（需附 reason）
+ignore = [
+    # nix 0.28.0 的 future-incompat 警告非安全漏洞，M4 替换 sandbox-run 后移除 nix 依赖
+    # { id = "RUSTSEC-xxxx-xxxx", reason = "..." },
+]
+# unmaintained crate 告警级别
+unmaintained = "workspace"
+# yanked crate 告警级别
+yanked = "deny"
 
 [licenses]
 version = 2
@@ -21,14 +34,17 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "Unlicense",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
 [bans]
-# 禁止重复依赖（同名多版本需显式 allow）
+# 重复依赖告警（同名多版本需显式 skip）
 multiple-versions = "warn"
 wildcards = "warn"
-# 优先单版本
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
 deny = []
 skip = []
 skip-tree = []
