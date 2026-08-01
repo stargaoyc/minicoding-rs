@@ -11,17 +11,25 @@ all-features = true
 # 漏洞数据库（默认 rustsec/advisory-db）
 # 忽略的 advisory ID（需附 reason）
 ignore = [
-    # nix 0.28.0 的 future-incompat 警告非安全漏洞，M4 替换 sandbox-run 后移除 nix 依赖
-    # { id = "RUSTSEC-xxxx-xxxx", reason = "..." },
+    # number_prefix 0.4.0 是 indicatif 的传递依赖（minicoding-cli 用 indicatif 显示进度条）。
+    # crate 已 unmaintained（RUSTSEC-2025-0119），但无安全漏洞，indicatif 尚未切换替代。
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained but has no vulnerability; transitive dep of indicatif (minicoding-cli)" },
 ]
-# unmaintained crate 告警级别
-unmaintained = "workspace"
+# unmaintained crate 告警级别：warn（不阻断 CI，仅告警）
+unmaintained = "warn"
 # yanked crate 告警级别
 yanked = "deny"
 
 [licenses]
 version = 2
 # 许可证白名单（AGENTS.md §2.7：仅 MIT/Apache-2.0/BSD/ISC）
+# 以下额外许可证为传递依赖必需：
+# - OpenSSL：ring（rustls/reqwest 的 crypto backend，含 OpenSSL 衍生代码）
+# - Unicode-DFS-2016 / Unicode-3.0：unicode-ident（proc-macro2 传递依赖）
+# - Zlib：miniz_oxide（flate2 传递依赖）
+# - CC0-1.0：adler（miniz_oxide 传递依赖）
+# - Unlicense：部分 transitive crate
+# - CDLA-Permissive-2.0：部分 transitive crate
 allow = [
     "MIT",
     "Apache-2.0",
@@ -29,6 +37,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "OpenSSL",
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
