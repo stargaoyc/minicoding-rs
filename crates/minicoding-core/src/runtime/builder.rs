@@ -5,12 +5,16 @@
 //! `policy`/`prompter`/`audit`（默认 `NoopPolicy`/`NoopPrompter`/`NoopAudit` 兜底，
 //! 真实场景由 frontend 注入 `minicoding-policy`/`minicoding-storage` 实现，见 M2）。
 
+use crate::agent::{NoopSubagentRunner, SubagentRunner};
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
+use crate::hooks::{HookRegistry, NoopHookRegistry};
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
 use crate::model::Session;
-use crate::policy::{NoopPolicy, NoopPrompter, PermissionPolicy, PermissionPrompter};
+use crate::policy::{
+    NoopPolicy, NoopPrompter, PermissionMode, PermissionPolicy, PermissionPrompter,
+};
 use crate::provider::LlmProvider;
 use crate::runtime::Runtime;
 use crate::runtime::event::EventBus;
@@ -21,6 +25,7 @@ use crate::storage::{AuditSink, NoopAudit, Storage};
 use crate::tool::ToolRegistry;
 use camino::Utf8PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// `Runtime` 构造器。
@@ -47,6 +52,12 @@ pub struct RuntimeBuilder {
     sandbox_policy: Option<SandboxPolicy>,
     /// 文件改动 journal（默认 `None`，仅 `file-undo` feature 启用时注入）。
     journal: Option<Arc<dyn Journal>>,
+    /// Hook 注册表（默认 `NoopHookRegistry`，M5 由 CLI 注入 `HookRegistryImpl`）。
+    hook_registry: Option<Arc<dyn HookRegistry>>,
+    /// 初始权限模式（默认 `Default`，`--plan` 启动时设为 `Plan`）。
+    permission_mode: PermissionMode,
+    /// 子 Agent runner（默认 `NoopSubagentRunner`，M5 由 CLI 注入实现）。
+    subagent_runner: Option<Arc<dyn SubagentRunner>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -77,6 +88,9 @@ impl RuntimeBuilder {
             sandbox_driver: None,
             sandbox_policy: None,
             journal: None,
+            hook_registry: None,
+            permission_mode: PermissionMode::Default,
+            subagent_runner: None,
         }
     }
 
@@ -215,6 +229,38 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置 Hook 注册表（默认 `NoopHookRegistry`，M5 由 CLI 注入 `HookRegistryImpl`）。
+    ///
+    /// 注入后 `execute_side_effect_call` 在 `policy.check` 之后触发
+    /// `PreToolUse`/`PermissionRequest`/`PostToolUse`/`PostToolUseFailure` Hook
+    /// （见 `hooks.md` §4）。Hook 不可覆盖内置黑名单 Deny（C-21）。
+    #[must_use]
+    pub fn hook_registry(mut self, h: Arc<dyn HookRegistry>) -> Self {
+        self.hook_registry = Some(h);
+        self
+    }
+
+    /// 设置初始权限模式（默认 `Default`，`--plan` 启动时设为 `Plan`）。
+    ///
+    /// Runtime 启动时按此值初始化 `plan_state`。运行时切换通过
+    /// `PlanModeController::set_mode`（CLI `/plan`）或 `exit_plan`（`plan.exit` 工具）。
+    #[must_use]
+    pub fn permission_mode(mut self, m: PermissionMode) -> Self {
+        self.permission_mode = m;
+        self
+    }
+
+    /// 设置子 Agent runner（默认 `NoopSubagentRunner`，M5 由 CLI 注入实现）。
+    ///
+    /// 注入后 `task.spawn` 工具可通过 `Runtime::subagent_runner()` 获取引用并派发
+    /// 子 Agent（见 `design.md` §7.3）。未注入时 `task.spawn` 调用直接返回
+    /// `RuntimeError::Config`（不静默 no-op，避免模型误以为已派发）。
+    #[must_use]
+    pub fn subagent_runner(mut self, r: Arc<dyn SubagentRunner>) -> Self {
+        self.subagent_runner = Some(r);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// # Errors
@@ -256,6 +302,16 @@ impl RuntimeBuilder {
             journal: self.journal,
             denial_detector: DenialDetector::new(),
             sandbox_breaker: SandboxCircuitBreaker::default_thresholds(),
+            hook_registry: self
+                .hook_registry
+                .unwrap_or_else(|| Arc::new(NoopHookRegistry)),
+            plan_state: Arc::new(RwLock::new(crate::policy::PlanModeSnapshot {
+                mode: self.permission_mode,
+                allowed_prompts: Vec::new(),
+            })),
+            subagent_runner: self
+                .subagent_runner
+                .unwrap_or_else(|| Arc::new(NoopSubagentRunner::new())),
         })
     }
 }

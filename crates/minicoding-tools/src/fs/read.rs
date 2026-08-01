@@ -157,10 +157,10 @@ fn is_sensitive_path(path: &camino::Utf8Path) -> bool {
     }
 
     // 扩展名匹配
-    if let Some(ext) = path.extension() {
-        if SENSITIVE_EXT.contains(&ext) {
-            return true;
-        }
+    if let Some(ext) = path.extension()
+        && SENSITIVE_EXT.contains(&ext)
+    {
+        return true;
     }
 
     // 关键词包含匹配

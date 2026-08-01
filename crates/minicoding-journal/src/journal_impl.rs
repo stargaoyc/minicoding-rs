@@ -267,16 +267,16 @@ fn validate_restore_path(
         }
     }
     // 若有 workdir，相对路径规范化后检查是否越界
-    if let Some(wd) = workdir {
-        if path.is_relative() {
-            let joined = wd.join(path);
-            // 简化检查：规范化后不以 workdir 开头则越界
-            // （canonicalize 需要文件存在，这里用逻辑比对）
-            let joined_str = joined.as_str();
-            let wd_str = wd.as_str();
-            if !joined_str.starts_with(wd_str) {
-                return Err(JournalError::PathEscaped(path.to_string()));
-            }
+    if let Some(wd) = workdir
+        && path.is_relative()
+    {
+        let joined = wd.join(path);
+        // 简化检查：规范化后不以 workdir 开头则越界
+        // （canonicalize 需要文件存在，这里用逻辑比对）
+        let joined_str = joined.as_str();
+        let wd_str = wd.as_str();
+        if !joined_str.starts_with(wd_str) {
+            return Err(JournalError::PathEscaped(path.to_string()));
         }
     }
     Ok(())

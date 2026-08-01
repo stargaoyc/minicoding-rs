@@ -4,6 +4,8 @@
 //! 事件总线无法承载点对点回复的架构缺陷（见 `design.md` §9.1）。
 //!
 //! M1 简化：不强制使用权限（单轮只读工具）。M2 完整接入。
+//! M5 接入：`PermissionMode`（Plan/AcceptEdits/Default/Auto/BypassPermissions，
+//! 见 `design.md` §16.2）+ `PlanModeController`（`plan.exit` 工具改写 Runtime 状态）。
 //!
 //! 手动 `Pin<Box<dyn Future + Send>>` 返回类型保证 `dyn` 兼容。
 
@@ -28,6 +30,49 @@ pub enum Decision {
     Deny(String),
 }
 
+/// 权限模式（`design.md` §16.2）。
+///
+/// 与 `ApprovalMode`（§9.5）正交：`Plan` 是"工具能力面"约束（禁写），
+/// `ApprovalMode` 是"何时问用户"约束。`Plan` 模式下 `ApprovalMode` 通常配
+/// `OnRequest`，写操作根本进不到"问不问"那一步就被硬门拦了。
+///
+/// - `Default`：§9.3 默认矩阵（写 `Ask`）；
+/// - `AcceptEdits`：文件写入自动 `Allow`，shell 仍 `Ask`（高频编辑场景）；
+/// - `Plan`：只读强制（硬门 + 软引导，见 `design.md` §16.1）；
+/// - `Auto`：分类器自动批准（含降级保护，阶段 6+，当前未启用）；
+/// - `BypassPermissions`：全放行（仅隔离容器内，对齐 CC `bypassPermissions`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    #[default]
+    Default,
+    AcceptEdits,
+    Plan,
+    Auto,
+    BypassPermissions,
+}
+
+/// `plan.exit` 预批准的命令（执行期跳过 prompter，见 `design.md` §16.4）。
+///
+/// `tool` 与 `prompt` 同时匹配时直接 `Allow`。`prompt` 为子串匹配（如
+/// `"cargo build"` 匹配 `"cargo build --release"`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreApprovedPrompt {
+    /// 工具名（如 `"shell.run"`）。
+    pub tool: String,
+    /// 命令前缀（如 `"cargo build"`、`"git add"`）。
+    pub prompt: String,
+}
+
+/// Plan 模式状态快照（`PlanModeController::snapshot` 返回）。
+#[derive(Debug, Clone, Default)]
+pub struct PlanModeSnapshot {
+    /// 当前权限模式。
+    pub mode: PermissionMode,
+    /// `plan.exit` 缓存的预批准清单（执行期命中即 `Allow`）。
+    pub allowed_prompts: Vec<PreApprovedPrompt>,
+}
+
 /// 权限上下文。
 #[derive(Debug, Clone)]
 pub struct PermissionContext {
@@ -36,6 +81,10 @@ pub struct PermissionContext {
     pub side_effect: SideEffect,
     pub turn: u32,
     pub history: Vec<Decision>,
+    /// 当前权限模式（`Plan` 模式触发硬门，见 `design.md` §16.1）。
+    pub permission_mode: PermissionMode,
+    /// 预批准清单（命中即 `Allow`，跳过 `Ask`）。
+    pub allowed_prompts: Vec<PreApprovedPrompt>,
 }
 
 /// 权限请求提示（点对点交互）。
@@ -80,6 +129,37 @@ pub trait PermissionPolicy: Send + Sync {
 /// 点对点交互器（非广播，`dyn` 兼容）。由 frontend 注入实现。
 pub trait PermissionPrompter: Send + Sync {
     fn prompt(&self, req: PermissionPrompt) -> BoxFuture<'_, Decision>;
+}
+
+/// Plan 模式控制器（`plan.exit` 工具改写 Runtime 状态用，`dyn` 兼容）。
+///
+/// `plan.exit` 是 `SideEffect::None` 工具（走只读桶并行调度，不经
+/// `execute_side_effect_call`），但它需要切换 `PermissionMode` 与缓存
+/// `allowed_prompts`。引入该 trait 让工具持有 `Arc<dyn PlanModeController>`
+/// 反向调用 Runtime，避免 core 依赖 tools。
+///
+/// Runtime 实现此 trait，工具通过它读写会话级 Plan 状态（见 `design.md` §16.4）。
+pub trait PlanModeController: Send + Sync {
+    /// 快照当前 Plan 模式状态（mode + `allowed_prompts`）。
+    fn snapshot(&self) -> BoxFuture<'_, PlanModeSnapshot>;
+
+    /// 退出 Plan 模式：切换 `mode` 为 `target_mode`，缓存 `allowed_prompts`。
+    ///
+    /// 仅当当前 `mode == Plan` 时可调用；其它模式下返回
+    /// `ToolError::InvalidStateTransition`（C-25：`plan.exit` 仅 Plan 模式可调）。
+    ///
+    /// # Errors
+    /// 当前非 Plan 模式时返回 `ToolError::InvalidStateTransition`。
+    fn exit_plan(
+        &self,
+        allowed_prompts: Vec<PreApprovedPrompt>,
+        target_mode: PermissionMode,
+    ) -> BoxFuture<'_, Result<(), PolicyError>>;
+
+    /// 直接切换权限模式（CLI `/plan`、`--plan` 用，非工具调用通道）。
+    ///
+    /// 与 `exit_plan` 区别：不校验当前是否 Plan 模式，供 CLI 显式切换。
+    fn set_mode(&self, mode: PermissionMode) -> BoxFuture<'_, ()>;
 }
 
 /// 无操作策略（兜底，未注入 policy 时使用，类似 `sandbox::NoopDriver`）。

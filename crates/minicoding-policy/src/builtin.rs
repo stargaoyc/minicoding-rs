@@ -10,6 +10,14 @@
 //! 破坏性删除操作硬 `Deny`，任何用户配置与 `Hook` 都无法覆盖（C-23）。
 //! 对项目约束文件的写入/编辑 `Ask` 且不提供 `AllowAlways` 选项（C-23）。
 //!
+//! Plan 模式硬门（C-25，`design.md` §16.1）：`PermissionMode::Plan` 下所有
+//! `side_effect != None` 工具直接 `Deny("plan mode: read-only")`。这是 L0
+//! 扩展（黑名单之后的最高优先级），不可被 L1 用户策略/Hook 覆盖。声明了
+//! `readOnlyHint` 的 MCP 工具 `side_effect == None` 不受影响（C-25 留通道）。
+//!
+//! 预批准缓存（`design.md` §16.4）：`plan.exit` 缓存的 `allowed_prompts` 命中
+//! 时直接 `Allow`，跳过 `Ask` 与 prompter（用户在批准 plan 时已一次性授权）。
+//!
 //! 决策逻辑本身是同步的，`check` 仅用薄 async 包装包裹已计算的 owned
 //! `Verdict`，避免在 `BoxFuture` 中跨越 await 捕获引用入参（与 core 中
 //! `LlmProvider::chat_stream` 取 owned 入参的 `BoxFuture` 惯例一致）。
@@ -18,7 +26,8 @@ use crate::path_sandbox::resolve_under;
 use camino::Utf8Path;
 use minicoding_core::model::{PolicyError, SideEffect};
 use minicoding_core::policy::{
-    PermissionContext, PermissionPolicy, PermissionPrompt, PromptOption, Risk, Verdict,
+    PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompt, PreApprovedPrompt,
+    PromptOption, Risk, Verdict,
 };
 use minicoding_core::provider::BoxFuture;
 use serde_json::Value;
@@ -67,6 +76,20 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             "destructive op on project doc is blacklisted: {tool}"
         ));
     }
+    // Plan 模式硬门（C-25，design.md §16.1）：Plan 模式下所有 side_effect != None
+    // 工具直接 Deny。L0 扩展，不可被 L1/Hook 覆盖。`is_read_only()` 由 Tool trait
+    // 默认 `side_effect == None` 判定（MCP 工具可据 readOnlyHint 覆盖），此处用
+    // `side_effect != None` 同义判定（policy 不依赖 tools crate）。
+    if ctx.permission_mode == PermissionMode::Plan && ctx.side_effect != SideEffect::None {
+        return Verdict::Deny("plan mode: read-only".to_string());
+    }
+    // 预批准缓存命中（design.md §16.4）：tool 与 prompt 子串匹配时直接 Allow，
+    // 跳过 Ask 与 prompter。这是 plan.exit 后用户一次性授权的便利点。
+    if ctx.side_effect != SideEffect::None
+        && matches_pre_approved(tool, input, &ctx.allowed_prompts)
+    {
+        return Verdict::Allow;
+    }
     // memory.write 特殊路由（C-23/C-27）：按 target 与内容模式细分。
     if tool == "memory.write" {
         return check_memory_write(tool, input);
@@ -87,6 +110,39 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             full_options(),
         )),
     }
+}
+
+/// 检测工具调用是否命中 `plan.exit` 缓存的预批准清单。
+///
+/// `tool` 完全相等且 `prompt` 是工具输入中对应字段的子串（前缀匹配更严格）。
+/// `prompt` 为空时仅匹配 `tool` 名（保守起见，空 prompt 不视为通配）。
+fn matches_pre_approved(tool: &str, input: &Value, allowed: &[PreApprovedPrompt]) -> bool {
+    if allowed.is_empty() {
+        return false;
+    }
+    // 提取工具的"命令文本"——shell.run 的 command/cmd，其它工具的 input 整体 JSON。
+    let command_text = extract_command_text(input);
+    allowed.iter().any(|p| {
+        if p.tool != tool || p.prompt.is_empty() {
+            return false;
+        }
+        // 子串匹配：`"cargo build"` 匹配 `"cargo build --release"`。
+        command_text
+            .as_deref()
+            .is_some_and(|c| c.contains(&p.prompt))
+    })
+}
+
+/// 从工具输入中提取"命令文本"用于预批准匹配。
+///
+/// `shell.run` 取 `command` 或 `cmd` 字段；其它工具无标准命令字段时返回 `None`
+/// （不参与预批准，保守拒绝匹配）。
+fn extract_command_text(input: &Value) -> Option<String> {
+    input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// `memory.write` 权限路由（C-23/C-27）。
@@ -287,12 +343,13 @@ fn make_prompt(
 
 #[cfg(test)]
 mod tests {
-    //! `memory.write` 权限路由测试（C-23/C-27）。
+    //! `memory.write` 权限路由测试（C-23/C-27）+ Plan 模式硬门（C-25）
+    //! + 预批准缓存（design.md §16.4）测试。
 
     use super::*;
     use camino::Utf8PathBuf;
     use minicoding_core::model::SideEffect;
-    use minicoding_core::policy::PermissionContext;
+    use minicoding_core::policy::{PermissionContext, PermissionMode};
 
     fn ctx_file_write() -> PermissionContext {
         PermissionContext {
@@ -301,6 +358,35 @@ mod tests {
             side_effect: SideEffect::FileWrite,
             turn: 0,
             history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        }
+    }
+
+    fn ctx_with_mode(side_effect: SideEffect, mode: PermissionMode) -> PermissionContext {
+        PermissionContext {
+            session: "test".to_string(),
+            workdir: Utf8PathBuf::from("/tmp/proj"),
+            side_effect,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: mode,
+            allowed_prompts: Vec::new(),
+        }
+    }
+
+    fn ctx_with_allowed(
+        side_effect: SideEffect,
+        allowed: Vec<PreApprovedPrompt>,
+    ) -> PermissionContext {
+        PermissionContext {
+            session: "test".to_string(),
+            workdir: Utf8PathBuf::from("/tmp/proj"),
+            side_effect,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: allowed,
         }
     }
 
@@ -399,5 +485,159 @@ mod tests {
         assert!(!is_instructional_content("user prefers dark theme"));
         assert!(!is_instructional_content("the project uses rust 2024"));
         assert!(!is_instructional_content(""));
+    }
+
+    // Plan 模式硬门测试（C-25，design.md §16.1）
+
+    #[tokio::test]
+    async fn plan_mode_denies_file_write() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs", "content": "x"});
+        let verdict = policy
+            .check(
+                "fs.write",
+                &input,
+                &ctx_with_mode(SideEffect::FileWrite, PermissionMode::Plan),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("plan mode")),
+            other => panic!("期望 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_denies_shell_run() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"command": "cargo build"});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_mode(SideEffect::Command, PermissionMode::Plan),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("plan mode")),
+            other => panic!("期望 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_allows_readonly_tools() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let verdict = policy
+            .check(
+                "fs.read",
+                &input,
+                &ctx_with_mode(SideEffect::None, PermissionMode::Plan),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blacklist_still_highest() {
+        // 黑名单 C-02 优先级高于 Plan 硬门：fs.delete AGENTS.md 应返回黑名单 Deny
+        // （消息含 "blacklisted"），而非 "plan mode"
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "AGENTS.md"});
+        let verdict = policy
+            .check(
+                "fs.delete",
+                &input,
+                &ctx_with_mode(SideEffect::FileWrite, PermissionMode::Plan),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("blacklisted")),
+            other => panic!("期望黑名单 Deny，实际 {other:?}"),
+        }
+    }
+
+    // 预批准缓存测试（design.md §16.4）
+
+    #[tokio::test]
+    async fn pre_approved_shell_run_matches_prefix() {
+        let policy = BuiltinPolicy::new();
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "cargo build".to_string(),
+        }];
+        // "cargo build --release" 包含 "cargo build" → Allow
+        let input = serde_json::json!({"command": "cargo build --release"});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_allowed(SideEffect::Command, allowed),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[tokio::test]
+    async fn pre_approved_mismatch_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "cargo build".to_string(),
+        }];
+        // "cargo test" 不包含 "cargo build" → Ask
+        let input = serde_json::json!({"command": "cargo test"});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_allowed(SideEffect::Command, allowed),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn pre_approved_wrong_tool_does_not_match() {
+        let policy = BuiltinPolicy::new();
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "cargo build".to_string(),
+        }];
+        // tool 不匹配 → Ask
+        let input = serde_json::json!({"command": "cargo build"});
+        let verdict = policy
+            .check(
+                "shell.run.other",
+                &input,
+                &ctx_with_allowed(SideEffect::Command, allowed),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn pre_approved_empty_prompt_does_not_match() {
+        let policy = BuiltinPolicy::new();
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: String::new(),
+        }];
+        let input = serde_json::json!({"command": "cargo build"});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_allowed(SideEffect::Command, allowed),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
     }
 }

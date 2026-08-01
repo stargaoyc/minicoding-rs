@@ -26,7 +26,7 @@
 ## M0 — 骨架与基础设施（3 人日）
 
 **范围**
-- Cargo workspace + 17 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.85。其中 M0 落地 14 个核心 crate，另 3 个（`minicoding-protocol`/`minicoding-server`/`minicoding-extension-sdk`）在 M5/M6/M8 启用时补齐 `lib.rs`。
+- Cargo workspace + 17 个 crate 骨架（空 `lib.rs` / `main.rs`），edition 2024，MSRV 1.99。其中 M0 落地 14 个核心 crate，另 3 个（`minicoding-protocol`/`minicoding-server`/`minicoding-extension-sdk`）在 M5/M6/M8 启用时补齐 `lib.rs`。
 - `Cargo.toml` 公共依赖统一管理（workspace dependencies）；平台条件依赖示例（`landlock`/`libseccomp` 仅 Linux）。
 - CI：`fmt` + `clippy -D warnings` + `test` + `cargo audit` + `cargo deny`。
 - `tracing` + `tracing-subscriber` + `tracing-opentelemetry` + `opentelemetry-otlp` 初始化（`core::otel`），支持 `OTEL_EXPORTER_OTLP_ENDPOINT` 环境变量；无后端时降级为本地 fmt 日志。
@@ -287,6 +287,51 @@
 
 **风险**
 - 协议稳定性 → 标 `experimental` 直到反馈收敛。
+
+---
+
+## M9 — Web 与桌面应用（Tauri，低优先级，预估 12 人日）
+
+> **定位**：M9 为可选里程碑，优先级低于 M5–M8。在 M8 的 HTTP/SSE JSON-RPC server（`minicoding-server`）基础上，提供浏览器可访问的 Web 前端与原生桌面应用（Tauri 壳），降低非终端用户的上手门槛。Rust 后端不嵌入前端，前端通过 HTTP/SSE JSON-RPC 通信，保证 CLI/SDK 可独立使用。技术栈详见 `tech-stack.md` §4.1。
+
+**范围**
+- 新增 crate：
+  - `minicoding-web`：纯前端项目（React 19.2 + TypeScript 7.0 + Vite 8.1 + React Compiler），独立 `package.json`，构建产物为静态资源，可被 `minicoding-server` 静态托管或独立部署；
+  - `minicoding-desktop`：Tauri 2.x 壳，前端复用 `minicoding-web`，Rust sidecar 启动 `minicoding-server`，Tauri IPC 桥接前端与 sidecar；桌面端打包 `.dmg`/`.msi`/`.AppImage`。
+- 前端核心能力：
+  - 多会话面板（左侧会话列表 + 右侧对话流），复用 TanStack Router 类型安全路由；
+  - 流式 token 渲染（SSE 订阅 `Event::Token`，TanStack Query 增量更新）；
+  - 工具调用展开/折叠面板（`Event::ToolCall`/`Event::ToolResult`）；
+  - 权限确认弹窗（`Event::PermissionRequest` → shadcn/ui Dialog → JSON-RPC `permission.resolve`）；
+  - 任务面板（`Event::TaskUpdated` 同步显示任务进度）；
+  - 上下文压缩/熔断可视化（`Event::Compress`/`Event::CompressCircuitBreak`）；
+  - Hook 执行日志面板（`Event::HookRun`）；
+  - 暗色/亮色主题切换（Tailwind v4 + shadcn/ui theme provider）；
+  - 响应式布局（移动端友好，Tauri 2.x mobile 复用同一前端）。
+- `minicoding-server` 增强：
+  - 静态资源托管（`minicoding serve --web ./dist`），便于单二进制部署；
+  - CORS 配置（`--cors-origin`，默认仅本地）；
+  - SSE cursor 恢复（E-13，M8 已规划，M9 前端消费）。
+- 桌面端特性：
+  - 系统托盘（最小化到托盘 + 通知权限请求）；
+  - 全局快捷键唤起；
+  - 凭证存储复用 OS keyring（与 CLI `cred.rs` 共享，C-04）；
+  - 自动更新（Tauri updater，签名校验）。
+- 文档：Web/桌面部署指南、前端架构说明、Tauri sidecar 配置、CORS 与安全策略。
+
+**验收**
+- `minicoding serve --http` 启动后，浏览器访问 `http://localhost:PORT` 能完整对话、工具调用、权限确认；
+- Tauri 桌面应用在 macOS/Windows/Linux 三平台可构建，体积 < 15MB；
+- 前端 Lighthouse 性能评分 ≥ 90；
+- oxlint + oxfmt + tsc 全绿；
+- 凭证经 OS keyring 存储，不出现在前端代码/日志/网络请求中（C-04 延伸到前端）。
+
+**任务追溯**：dev-plan T-M9-1..T-M9-8（8 个 task，预估 12 人日）。可度量门槛：Web 前端可对话/工具调用/权限确认三平台桌面应用可构建、Lighthouse ≥ 90、全 Rust 工具链构建（oxlint/oxfmt/Vite Rolldown/Tailwind v4）。
+
+**风险**
+- React Compiler 仍 RC → 评估稳定性，必要时回退到手写 memo；
+- Tauri 2.x mobile 不在 M9 验收范围（仅桌面），mobile 留待 M10+；
+- 前端安全：CSP 严格、不内联用户输入防 XSS，权限弹窗经 SSE 推送不可被前端伪造（后端校验 `prompt_id`）。
 
 ---
 

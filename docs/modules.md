@@ -10,6 +10,8 @@
 
 ### 0.1 Crate 列表
 
+> **当前 Cargo workspace 含 17 个 crate（M0–M8 范围）**。M9（低优先级，规划中）将新增 `minicoding-web`（独立 npm 项目，不入 workspace）与 `minicoding-desktop`（Tauri 壳，加入 workspace），见 §18/§19。下表列出全部 19 个 crate（含 M9 规划项）。
+
 ```
 minicoding-rs (workspace)
 ├── crates/
@@ -29,14 +31,18 @@ minicoding-rs (workspace)
 │   ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar + Manifest）
 │   ├── minicoding-cli           # CLI frontend
 │   ├── minicoding-tui           # TUI frontend（M7）
-│   └── minicoding-sdk           # 嵌入 SDK（M8）
+│   ├── minicoding-sdk           # 嵌入 SDK（M8）
+│   ├── minicoding-web           # Web 前端（React 19.2 + TS 7.0 + Vite 8.1，M9 规划，独立 package.json 不入 workspace）
+│   └── minicoding-desktop       # Tauri 2.x 桌面壳（M9 规划，sidecar 启动 minicoding-server）
 ```
 
 ### 0.2 依赖方向
 
 ```
-              cli / tui / sdk      server
-                    │                │
+              cli / tui / sdk      server ◄── web（HTTP/SSE，M9）
+                    │                │            │
+                    │                │            ▼
+                    │                │        desktop（Tauri sidecar，M9）
                     └────┬───────────┘
                          ▼
                        tools ──┬─► context   (压缩、token 预算)
@@ -133,13 +139,15 @@ full    = ["memory", "hooks", "file-undo", "sandbox", "mcp"]
 ```
 minicoding-core/src/
 ├── lib.rs                 # prelude 再导出
-├── runtime.rs             # Runtime 聚合根 + RuntimeBuilder
+├── runtime/
+│   ├── mod.rs             # Runtime 聚合根 + AgentLoop 主循环（并行/串行分桶，见 design.md §2.3）
+│   ├── rt.rs              # Runtime 实现（聚合各 trait，含 register_dynamic_tool/journal/subagent_runner）
+│   ├── builder.rs         # RuntimeBuilder（链式注入 provider/ctx/policy/sandbox/hooks/journal/...）
+│   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
+│   └── accumulator.rs     # 流式 delta 聚合
 ├── agent/
 │   ├── mod.rs
-│   ├── loop.rs            # AgentLoop 主循环（并行/串行分桶，见 design.md §2.3）
-│   ├── subagent.rs        # 类型化子 Agent 派发（SubagentType）
-│   ├── plan_mode.rs       # Plan 模式状态机（仅编排，权限判断委托 policy）
-│   └── accumulator.rs     # 流式 delta 聚合
+│   └── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
 ├── model/
 │   ├── message.rs         # Message / Role / Content
 │   ├── tool.rs            # ToolCall / ToolResult / ToolSchema
@@ -152,26 +160,35 @@ minicoding-core/src/
 │   ├── trait.rs           # Tool trait（含 is_read_only()，见 api.md §3.3）
 │   ├── registry.rs        # ToolRegistry（按 side_effect 调度）
 │   └── context.rs         # ToolContext / SideEffect
-├── policy/trait.rs        # PermissionPolicy + PermissionPrompter + Verdict + Decision（见 api.md §3.6）
-├── sandbox/trait.rs       # SandboxDriver trait + SandboxPolicy 枚举 + NoopDriver 兜底（见 api.md §3.9）
-├── hooks/trait.rs         # Hook trait + HookEvent + HookDecision + HookOutput + AsyncRewakeSpec（见 api.md §3.8）
+├── policy/
+│   ├── trait.rs           # PermissionPolicy + PermissionPrompter + Verdict + Decision + PlanModeController（见 api.md §3.6）
+│   └── mod.rs             # PermissionMode 枚举（Default/AcceptEdits/Plan/Auto/BypassPermissions）
+├── sandbox/
+│   ├── trait.rs           # SandboxDriver trait + SandboxPolicy 枚举 + NoopDriver 兜底（见 api.md §3.9）
+│   ├── denial.rs          # SandboxDenial（EPERM/Seatbelt 拒绝检测，C-30）
+│   └── mod.rs
+├── hooks/
+│   ├── trait_def.rs       # Hook trait + HookEvent + HookDecision + HookOutput + AsyncRewakeSpec + dispatch 默认实现（见 api.md §3.8）
+│   └── mod.rs
 ├── context/trait.rs       # ContextManager trait + ChatRequest + ContextSnapshot
-├── memory/trait.rs        # ProjectDocLoader trait + MemoryStore trait（长期/Auto 记忆加载抽象）
-├── journal/trait.rs       # Journal trait + ChangeEntry + UndoReport（见 api.md §3.11）
-├── mcp/trait.rs           # McpClient trait + McpServerConfig + McpTransport + McpScope（见 api.md §11）
-├── storage/trait.rs       # Storage trait + AuditSink trait
-├── prompt/
-│   ├── mod.rs             # Prompt 管道：PromptContributor trait + PromptSection + PromptSectionOrder
-│   ├── identity.rs        # Identity contributor（默认身份 + ~/.minicoding/IDENTITY.md 覆盖）
-│   ├── system_rules.rs    # System rules contributor
-│   ├── environment.rs     # Environment contributor（工作区/平台/git 信息）
-│   └── tool_summary.rs    # Tool summary contributor（工具 schema 摘要）
-├── extension/trait.rs     # ExtensionHost + Extension + ExtensionManifest + Registrar trait（见 api.md §3.12）
-├── event.rs               # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
-├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles）
+├── memory/
+│   ├── trait.rs           # ProjectDocLoader trait + MemoryStore trait（长期/Auto 记忆加载抽象）
+│   └── mod.rs
+├── journal/
+│   ├── trait_def.rs       # Journal trait + ChangeEntry + UndoReport（见 api.md §3.11）
+│   └── mod.rs
+├── mcp/
+│   ├── trait_def.rs       # McpClient trait + McpServerConfig + McpTransport + McpScope（见 api.md §11）
+│   └── mod.rs
+├── storage/
+│   ├── trait.rs           # Storage trait + AuditSink trait
+│   └── mod.rs
+├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles + HooksConfig）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 └── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
 ```
+
+> **未实现（M5 roadmap，T-M5-1..T-M5-8 范围外）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/trait.rs`（ExtensionHost/Extension/Registrar，X-20..X-22）属 M5 roadmap 范围但未在 dev-plan T-M5-1..T-M5-8 中排期，当前为规划态，文件未创建。
 
 ### 1.3 公共 API（prelude）
 
@@ -321,19 +338,13 @@ minicoding-memory/src/
 
 ```
 minicoding-hooks/src/
-├── lib.rs                 # 工厂
+├── lib.rs                 # 工厂 + re-export
 ├── registry.rs            # HookRegistryImpl 实现 HookRegistry（串行聚合，见 hooks.md §5）
 ├── script.rs              # ScriptHook 适配器（外部可执行 + JSON over stdio + 退出码语义）
 ├── async_rewake.rs        # asyncRewake 异步唤醒管理（后台任务 + 唤醒注入，见 hooks.md §11）
-├── builtin/
-│   ├── mod.rs             # 6 个内置示例 Hook
-│   ├── fmt_on_write.rs    # PostToolUse 跑 formatter
-│   ├── auto_approve_tests.rs
-│   ├── block_secrets.rs
-│   ├── git_status_inject.rs
-│   ├── backup_before_compact.rs
-│   └── test_on_stop.rs
-└── protocol.rs            # HookInput/HookOutput JSON 协议 + 退出码映射
+├── builtin.rs             # 6 个内置示例 Hook（FmtOnWrite/AutoApproveTests/BlockSecrets/
+│                          #   GitStatusInject/BackupBeforeCompact/TestOnStop）
+└── protocol.rs            # HookInput/HookOutput JSON 编解码 + 退出码映射
 ```
 
 ### 5.3 关键设计点
@@ -341,7 +352,7 @@ minicoding-hooks/src/
 - **10 类事件**：`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`PostToolUseFailure`/`PreCompact`/`PostCompact`/`Stop`/`SubagentStop`/`PermissionRequest`（见 hooks.md §2）。
 - **asyncRewake 后台进程同等待遇**：后台 Hook 子进程遵守凭证隔离（C-04）、沙箱（C-22）、路径沙箱（C-03）约束（C-26）。
 - **L0 不可覆盖**：`registry.rs` 在分发 Hook 前先应用内置黑名单 `Deny`，Hook 的 `allow` 对黑名单 `Deny` 无效（C-21）。
-- **依赖**：`minicoding-core` + `tokio`（子进程）+ `serde_json`（协议）+ `globset`（matcher）。
+- **依赖**：`minicoding-core` + `tokio`（子进程）+ `serde_json`（协议）。matcher 的工具名 glob 在 core 用轻量实现（不引入 `globset` 重依赖到 core）。
 
 ---
 
@@ -421,21 +432,16 @@ minicoding-sandbox/src/
 
 ```
 minicoding-mcp/src/
-├── lib.rs                 # build_client() 工厂
+├── lib.rs                 # re-export + build_client() 工厂
 ├── client/
 │   ├── mod.rs
-│   ├── rmcp.rs            # 基于 rmcp 2.x 的实现（stdio + streamable HTTP + OAuth）
-│   ├── lifecycle.rs       # 启动/握手/超时/优雅关闭
-│   ├── wrapper.rs         # 把 rmcp 工具包装为 minicoding Tool trait
-│   ├── pool.rs            # MCP 进程池：跨 turn 复用连接（见 design.md §19.5）
-│   ├── prewarm.rs         # 后台预热：全局 server 启动时预热，项目级 session 创建时预热
-│   └── inflight.rs        # inflight merge：同 server 并发请求合并
-├── server/
-│   └── expose.rs          # 把 minicoding 内置工具暴露为 MCP server（rmcp #[tool] 宏）
-├── approval.rs            # project 作用域首次批准流（mcp_choices.toml）
-├── naming.rs              # mcp__<server>__<tool> 命名 + 权限通配匹配
-└── tool_search.rs         # BM25 工具检索（M7+，工具多时按需检索）
+│   ├── rmcp.rs            # RmcpClient：基于 rmcp 2.x 的实现（stdio，M4；HTTP+OAuth 留 M6）
+│   └── wrapper.rs         # McpToolWrapper：把远程工具包装为 minicoding Tool（含 mcp.call span）
+├── approval.rs            # project 作用域首次批准流（mcp_choices.toml，C-24）
+└── naming.rs              # mcp__<server>__<tool> 命名 + 解析 + 权限通配匹配
 ```
+
+> **未实现（M6+/M7+/M8）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+；`server/expose.rs`（MCP server 暴露）规划在 M8；`tool_search.rs`（BM25 检索）规划在 M7+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。
 
 ### 8.3 库选型（不自研）
 
@@ -452,10 +458,11 @@ minicoding-mcp/src/
 - **project 作用域批准**：首次遇到含 `.minicoding/mcp.json` 的仓库时逐个 server 弹窗，防恶意仓库植入（C-24）。
 - **凭证隔离**：MCP server 子进程不继承 minicoding 凭证环境变量（C-04）。
 - **`required` 语义**：`required = true` 的 server 启动失败则 minicoding 拒绝启动；`required = false`（默认）失败仅 warn 跳过。
-- **进程池复用**：MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5）；
-- **后台预热**：全局 server（`~/.minicoding/mcp.json`）启动时预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞；
-- **inflight merge**：同 server 并发请求合并，避免重复调用。
-- **依赖**：`minicoding-core` + `rmcp` 2.2（features: `client`/`server`/`macros`/`transport-child-process`/`transport-streamable-http-client-reqwest`）+ `tokio`。
+- **进程池复用**：MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5）。M4 交付基础复用（`RmcpClient` 持有子进程 handle）；
+- **后台预热**（M6+）：全局 server（`~/.minicoding/mcp.json`）启动时预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞；
+- **inflight merge**（M6+）：同 server 并发请求合并，避免重复调用。
+- **OTel `mcp.call` span**（T-M5-8，O-08）：`McpToolWrapper::execute` 内开 `mcp.call` span（`mcp.server`/`mcp.tool` 属性），便于 collector 侧聚合 MCP 调用延迟。
+- **依赖**：`minicoding-core` + `rmcp` 2.2（features: `client`/`macros`/`transport-child-process`；`server`/`transport-streamable-http-client-reqwest` 留 M6/M8）+ `tokio`。
 
 ---
 
@@ -580,6 +587,8 @@ minicoding-tools/src/
 - **fs.read 敏感文件脱敏（T-M4-11，C-04）**：`fs::read::is_sensitive_path` 识别 `.env`/`credentials`/`*.pem`/`*.key`/`*.pfx`/`*.p12` 及文件名含 `secret`/`password`/`token` 的文件，调用 `minicoding_policy::redact` 把字段值替换为 `***` 再返回，避免密钥回灌 LLM。
 - **fs.write/edit/delete + Journal**：成功后调 `Journal::record`（来自 `minicoding-journal`），仅 `file-undo=true` 时生效。
 - **task.create/update/list**：增量模型，状态机 `Pending→InProgress→Completed` 不可跳跃（C-31）。
+- **task.spawn（T-M5-7，T-13）**：启动类型化子 Agent（`SubagentType::Explore/Plan/GeneralPurpose/Custom`），隔离上下文（独立 ContextManager），Plan 模式下被硬门拒绝（`SideEffect::None` 仍受 `PermissionMode::Plan` 约束）。OTel `subagent` span 挂在父 turn span 下（O-04）。子 Agent env 不含凭证（C-04）。
+- **plan.exit（T-M5-6，T-15）**：退出 Plan 模式并提交计划，切回 Default 模式并缓存 `allowed_prompts`（预批准），避免 ExitPlanMode 后逐条重新确认。Plan 模式硬门用 `is_read_only()` 判断（C-25）。
 - **mcp::wrapper**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
 - **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）+ 按需依赖 context/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。
 
@@ -625,6 +634,9 @@ minicoding-cli/src/
 - **feature 组装**：`builder.rs` 根据 cargo feature 启用的实现 crate 装配 Runtime（如未启用 `minicoding-sandbox` 则用 core 的 `NoopDriver`）。
 - **非 TTY 降级**：检测 `stdout.is_terminal()`，非交互时禁 spinner/颜色，权限走 `NonInteractivePrompter`。
 - **凭证管理（T-M4-11，C-04）**：`cred.rs` 实现 OS keyring 优先 + 文件 fallback（`~/.minicoding/credentials` 0600 权限 + 原子 rename）的凭证存储；`minicoding cred store/load/delete` 子命令从 stdin 读取 key（不回显），`load` 不打印 key 本身只验证存在性。keyring 不可用时降级并打 warn 日志。
+- **Hook 加载（T-M5-8，H-01）**：`builder.rs::build_hook_registry` 从 `config.hooks`（`.minicoding/hooks.toml`）把每个 `HookEntry` 转为 `ScriptHook`（matcher 解析为 `HookMatcher::for_tools`/`for_events`），注册到 `HookRegistryImpl`。`hooks` feature 未启用时退化为 `NoopHookRegistry`。
+- **Plan 模式（T-M5-8，A-06）**：`--plan` 启动时初始 `PermissionMode::Plan`（副作用工具被硬门拒绝）；REPL `/plan [on|off|status]` 切换模式。`plan.exit` 与 `task.spawn` 工具在 Runtime 构造后通过 `register_dynamic_tool` 补注册（chicken-and-egg：tools 需 Runtime 引用，Runtime 需 tools）。
+- **/undo REPL（T-M5-8，A-10）**：`/undo` 调 `Journal::undo(1)` 回滚最近一次 operation。`file-undo` feature 未启用或 journal 未注入时打印提示；回滚结果（成功/冲突）打印到 stderr。
 - **退出码**：成功 0；运行时错误 1；配置错误 2；中断 130。
 - **依赖**：`minicoding-core` + 各实现 crate（按 feature）+ `clap`/`indicatif`/`anstream`/`rustyline`/`keyring`/`anyhow`。
 
@@ -775,68 +787,142 @@ minicoding-extension-sdk/src/
 
 ---
 
-## 18. 跨模块约定
+## 18. `minicoding-web`（Web 前端，M9，低优先级）
 
-### 18.1 命名
+> **范围**：纯前端项目，独立 `package.json`，**不属于 Cargo workspace**（用 npm/pnpm 管理）。构建产物为静态资源，可被 `minicoding-server` 静态托管或独立部署到任何静态主机。技术栈选型见 `tech-stack.md` §4.1，架构设计见 `design.md` §26。
+
+### 18.1 职责
+
+- 提供 Web 浏览器可访问的对话 UI（流式 token、工具调用面板、权限确认弹窗、任务进度）；
+- 通过 HTTP/SSE JSON-RPC 与 `minicoding-server` 通信（复用 `minicoding-protocol` wire types）；
+- 不包含任何业务逻辑（Agent 循环、权限决策、压缩等均在后端）。
+
+### 18.2 技术栈锁定
+
+| 用途 | 选择 | 版本 |
+|------|------|:---:|
+| 框架 | React + React Compiler | 19.2 |
+| 语言 | TypeScript | 7.0 |
+| 构建 | Vite (Rolldown) | 8.1 |
+| 路由 | TanStack Router | 1.170 |
+| 数据获取 | TanStack Query | 5.101 |
+| 客户端状态 | Zustand | 5.0 |
+| Schema 校验 | Zod | 4.4 |
+| 组件库 | shadcn/ui（基于 Radix UI） | latest |
+| 样式 | Tailwind CSS（Oxide 引擎） | v4 |
+| 动画 | Framer Motion | latest |
+| Lint | oxlint | latest |
+| 格式化 | oxfmt | latest |
+
+### 18.3 目录结构
+
+详见 `design.md` §26.2。核心分层：`api/`（JSON-RPC 客户端 + SSE 订阅 + Zod schema）→ `hooks/`（TanStack Query + Zustand 封装）→ `components/`（shadcn/ui + 业务组件）→ `routes/`（TanStack Router 页面）。
+
+### 18.4 与后端的契约
+
+- **协议**：HTTP/SSE JSON-RPC 2.0（见 `design.md` §24），前端不引入新协议；
+- **类型同步**：`minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 生成 TypeScript 类型 + Zod schema，避免手写双份；
+- **CORS**：`minicoding serve --cors-origin` 配置允许的前端来源（默认仅 `http://localhost:*`）。
+
+---
+
+## 19. `minicoding-desktop`（Tauri 桌面壳，M9，低优先级）
+
+> **范围**：Tauri 2.x 桌面应用壳，**属于 Cargo workspace**（Rust 部分），前端复用 `minicoding-web` 构建产物。打包 `.dmg`（macOS）/`.msi`（Windows）/`.AppImage`（Linux）。
+
+### 19.1 职责
+
+- 启动 `minicoding-server` 作为 sidecar 进程（`--http --bind 127.0.0.1:0` 随机端口）；
+- Tauri WebView 加载 `minicoding-web` 的 `dist/`；
+- 提供 OS 集成：系统托盘、全局快捷键、自动更新（Tauri updater 签名校验）；
+- 凭证存储复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04）。
+
+### 19.2 关键设计
+
+- **sidecar 管理**：Tauri 启动 sidecar，读取 stdout 获取实际监听端口，注入前端；
+- **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信走 HTTP/SSE（同源，无 CORS 问题）；
+- **自动更新**：Tauri updater 配置签名公钥，更新包需签名校验通过才安装；
+- **安全**：Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格（`script-src 'self'`）。
+
+### 19.3 依赖
+
+- Tauri 2.x + `tauri-plugin-shell`（sidecar）+ `tauri-plugin-updater`（自动更新）+ `tauri-plugin-global-shortcut` + `tauri-plugin-notification`；
+- `minicoding-server`（作为 sidecar 二进制，构建时通过 `tauri.conf.json` 的 `externalBin` 打包）；
+- 不直接依赖 `minicoding-core`（sidecar 是独立进程，通过 HTTP/SSE 通信）。
+
+### 19.4 Mobile（不在 M9 验收范围）
+
+Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M10+，前端复用 `minicoding-web` 响应式布局。
+
+---
+
+## 20. 跨模块约定
+
+### 20.1 命名
 
 - crate：`minicoding-<sub>`；
 - 模块：单数小写下划线（`fs`、`tool`、`provider`）；
 - trait：名词或动词（`LlmProvider`、`Tool`、`Storage`）；
 - 错误：`<Domain>Error`（`LlmError`、`ToolError`、`HookError`）。
 
-### 18.2 可见性
+### 20.2 可见性
 
 - 每个 crate 只在 `lib.rs` 暴露稳定 API，内部模块默认 `pub(crate)`。
 - `core` 的 trait 与数据模型必须 `pub`，实现细节 `pub(crate)`。
 - 实现 crate 的具体实现类型（如 `PolicyEngine`）可 `pub` 供组装，但内部方法 `pub(crate)`。
 
-### 18.3 错误传播
+### 20.3 错误传播
 
 - 各 crate 定义自己的错误类型，实现 `Into<RuntimeError>`（core 定义）。
 - 边界（CLI / SDK）统一转 `anyhow::Error` 输出。
 
-### 18.4 日志
+### 20.4 日志
 
 - 每个 crate 启用 `tracing`，不直接 `println!`。
 - span 命名：`<crate>::<module>`，关键操作打 `info!`，细节打 `debug!`/`trace!`。
 - OTel span 字段命名遵循 `design.md` §15.2。
 
-### 18.5 测试组织
+### 20.5 测试组织
 
 - 单元测试与源码同文件 `#[cfg(test)] mod tests`。
 - 集成测试放 `tests/` 目录，按场景命名（`agent_loop.rs`、`compression.rs`、`sandbox.rs`）。
 - 跨 crate 共享测试工具放 `crates/minicoding-core/tests/common/`。
 - 各实现 crate 独立测试，不依赖其他实现 crate（用 mock trait）。
+- `minicoding-web` 测试用 Vitest + React Testing Library（与 Vite 集成），不纳入 `cargo test`。
+- `minicoding-desktop` 的 Rust 部分用 `cargo test`，Tauri IPC 命令用 mock sidecar 测试。
 
-### 18.6 依赖治理
+### 20.6 依赖治理
 
 - core 的依赖必须是"轻量 + 无平台/网络"的（tokio/serde/tracing/thiserror/uuid/time/camino/trait-variant）。
-- 重依赖（reqwest/landlock/libseccomp/rmcp/ratatui）只能出现在对应实现 crate。
+- 重依赖（reqwest/landlock/libseccomp/rmcp/ratatui/tauri）只能出现在对应实现 crate。
 - `cargo audit` + `cargo deny` 接入 CI，许可证限制为 MIT/Apache-2.0/BSD/ISC。
 - `Cargo.lock` 提交到仓库（CLI 项目）。
+- `minicoding-web` 的 `package.json` 锁定版本，用 `pnpm-lock.yaml` 提交；`npm audit` 接入 CI。
 
 ---
 
-## 19. 模块成熟度矩阵
+## 21. 模块成熟度矩阵
 
-| 模块 | M0-M1 MVP | M2-M3 | M4-M5 | M6-M8 |
-|------|:---:|:---:|:---:|:---:|
-| core (runtime/agent/model/trait) | ✅ | 增强（subagent/plan） | 稳定 | 稳定 |
-| context (压缩/熔断) | 基础 | ✅ 完整 | 增强 | 稳定 |
-| policy (双 trait/黑名单/预设) | ✅ | 增强（risk 解释） | 稳定 | 稳定 |
-| providers (openai/anthropic) | ✅ | ollama | router | 多模态 |
-| tools (fs/shell/task/plan) | ✅ | web/git/multiedit | mcp 包装 | 稳定 |
-| storage (jsonl/audit) | ✅ | index/lock | export | 稳定 |
-| sandbox (应用层路径) | ✅ | - | ✅ OS 级（sandbox-run） | Windows 强化 |
-| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | 向量检索 |
-| hooks | - | - | ✅ 10 事件+asyncRewake | 稳定 |
-| journal | - | - | ✅ /undo | 稳定 |
-| mcp (rmcp client) | - | - | ✅ | server 暴露+检索 |
-| cli (单次+会话+exec+doctor) | ✅ | resume | mcp 子命令 | 稳定 |
-| tui | - | - | - | ✅ |
-| sdk | - | - | - | ✅ |
-| protocol (JSON-RPC DTO) | - | - | - | ✅ |
-| server (HTTP/SSE/ACP/LSP) | - | - | - | ✅ |
-| extension-sdk | - | - | 骨架 | ✅ |
+| 模块 | M0-M1 MVP | M2-M3 | M4-M5 | M6-M8 | M9 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| core (runtime/agent/model/trait) | ✅ | 增强（subagent/plan） | 稳定 | 稳定 | - |
+| context (压缩/熔断) | 基础 | ✅ 完整 | 增强 | 稳定 | - |
+| policy (双 trait/黑名单/预设) | ✅ | 增强（risk 解释） | 稳定 | 稳定 | - |
+| providers (openai/anthropic) | ✅ | ollama | router | 多模态 | - |
+| tools (fs/shell/task/plan) | ✅ | web/git/multiedit | mcp 包装 | 稳定 | - |
+| storage (jsonl/audit) | ✅ | index/lock | export | 稳定 | - |
+| sandbox (应用层路径) | ✅ | - | ✅ OS 级（sandbox-run） | Windows 强化 | - |
+| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | 向量检索 | - |
+| hooks | - | - | ✅ 10 事件+asyncRewake | 稳定 | - |
+| journal | - | - | ✅ /undo | 稳定 | - |
+| mcp (rmcp client) | - | - | ✅ | server 暴露+检索 | - |
+| cli (单次+会话+exec+doctor) | ✅ | resume | mcp 子命令 | 稳定 | - |
+| tui | - | - | - | ✅ | - |
+| sdk | - | - | - | ✅ | - |
+| protocol (JSON-RPC DTO) | - | - | - | ✅ | - |
+| server (HTTP/SSE/ACP/LSP) | - | - | - | ✅ | 增强（--web/--cors-origin） |
+| extension-sdk | - | - | 骨架 | ✅ | - |
+| web (React 前端) | - | - | - | - | ✅ |
+| desktop (Tauri 壳) | - | - | - | - | ✅ |
 
 > ✅ = 交付；增强 = 功能扩展；- = 不交付。

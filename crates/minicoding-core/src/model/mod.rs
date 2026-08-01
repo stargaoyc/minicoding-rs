@@ -5,6 +5,7 @@
 pub mod error;
 pub mod message;
 pub mod session;
+pub mod subagent;
 pub mod task;
 pub mod tool;
 
@@ -16,6 +17,7 @@ pub use message::{ContentBlock, Message, MessageMeta, MessageSource, Role};
 pub use session::{
     Attachment, ContextHint, Session, SessionId, SessionMeta, StopReason, TurnOutcome, UserInput,
 };
+pub use subagent::{SubagentResult, SubagentSpec, SubagentType, Thoroughness};
 pub use task::{Task, TaskStatus};
 pub use tool::{
     SideEffect, ToolCall, ToolCallId, ToolContent, ToolResult, ToolResultMeta, ToolSchema,

@@ -108,7 +108,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 #### T-M0-1 Cargo workspace 与 14 crate 骨架
 - **crate**：workspace 根 + 全部 14 crate
 - **输入**：无
-- **输出**：`Cargo.toml`（workspace）+ `crates/minicoding-*/Cargo.toml` + 空 `lib.rs`/`main.rs`；edition 2024，MSRV 1.85
+- **输出**：`Cargo.toml`（workspace）+ `crates/minicoding-*/Cargo.toml` + 空 `lib.rs`/`main.rs`；edition 2024，MSRV 1.99
 - **涉及功能**：Q-01、Q-02
 - **涉及约束**：无（基础设施）
 - **验收标准**：

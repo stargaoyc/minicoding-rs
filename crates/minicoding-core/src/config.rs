@@ -3,6 +3,7 @@
 //! 支持 `env:VAR_NAME` / `env:VAR:-fallback` 环境变量语法（见 `tech-stack.md` §12）。
 //! 支持 last-known-good 回退（解析失败时用上次成功的配置，见 `design.md` §12）。
 
+use crate::hooks::OnHookError;
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ pub struct RuntimeConfig {
     pub context: ContextConfig,
     pub tools: ToolsConfig,
     pub storage: StorageConfig,
+    pub hooks: HooksConfig,
 }
 
 /// LLM provider 配置。
@@ -123,6 +125,114 @@ impl Default for StorageConfig {
     }
 }
 
+/// Hooks 配置（`[hooks]`，见 `hooks.md` §6）。
+///
+/// 顶层 `[hooks]` 配置全局 `on_hook_error` 与 `default_timeout_sec`；
+/// 各事件以 `[[hooks.<EventName>]]` 数组声明，每项为一个外部脚本 Hook。
+///
+/// ```toml
+/// [hooks]
+/// on_hook_error = "continue"
+/// default_timeout_sec = 30
+///
+/// [[hooks.PreToolUse]]
+/// matcher = "fs.write"
+/// command = "prettier --write ${TOOL_INPUT_PATH}"
+/// timeout_sec = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Hook 错误策略（默认 `continue`，见 `hooks.md` §6）。
+    pub on_hook_error: OnHookError,
+    /// 默认单 Hook 超时秒数（可被单个 Hook `timeout_sec` 覆盖）。
+    pub default_timeout_sec: u64,
+    /// `SessionStart` Hooks。
+    #[serde(rename = "SessionStart")]
+    pub session_start: Vec<HookEntry>,
+    /// `UserPromptSubmit` Hooks。
+    #[serde(rename = "UserPromptSubmit")]
+    pub user_prompt_submit: Vec<HookEntry>,
+    /// `PreToolUse` Hooks。
+    #[serde(rename = "PreToolUse")]
+    pub pre_tool_use: Vec<HookEntry>,
+    /// `PostToolUse` Hooks。
+    #[serde(rename = "PostToolUse")]
+    pub post_tool_use: Vec<HookEntry>,
+    /// `PostToolUseFailure` Hooks。
+    #[serde(rename = "PostToolUseFailure")]
+    pub post_tool_use_failure: Vec<HookEntry>,
+    /// `PreCompact` Hooks。
+    #[serde(rename = "PreCompact")]
+    pub pre_compact: Vec<HookEntry>,
+    /// `PostCompact` Hooks。
+    #[serde(rename = "PostCompact")]
+    pub post_compact: Vec<HookEntry>,
+    /// `Stop` Hooks。
+    #[serde(rename = "Stop")]
+    pub stop: Vec<HookEntry>,
+    /// `SubagentStop` Hooks。
+    #[serde(rename = "SubagentStop")]
+    pub subagent_stop: Vec<HookEntry>,
+    /// `PermissionRequest` Hooks。
+    #[serde(rename = "PermissionRequest")]
+    pub permission_request: Vec<HookEntry>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            on_hook_error: OnHookError::Continue,
+            default_timeout_sec: 30,
+            session_start: Vec::new(),
+            user_prompt_submit: Vec::new(),
+            pre_tool_use: Vec::new(),
+            post_tool_use: Vec::new(),
+            post_tool_use_failure: Vec::new(),
+            pre_compact: Vec::new(),
+            post_compact: Vec::new(),
+            stop: Vec::new(),
+            subagent_stop: Vec::new(),
+            permission_request: Vec::new(),
+        }
+    }
+}
+
+impl HooksConfig {
+    /// 统计配置中声明的 Hook 总数（诊断/`doctor` 用）。
+    #[must_use]
+    pub fn total_count(&self) -> usize {
+        self.session_start.len()
+            + self.user_prompt_submit.len()
+            + self.pre_tool_use.len()
+            + self.post_tool_use.len()
+            + self.post_tool_use_failure.len()
+            + self.pre_compact.len()
+            + self.post_compact.len()
+            + self.stop.len()
+            + self.subagent_stop.len()
+            + self.permission_request.len()
+    }
+}
+
+/// 单个外部脚本 Hook 的配置（`[[hooks.<EventName>]]`，见 `hooks.md` §6）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HookEntry {
+    /// 工具名 glob（`|` 分隔、`*` 通配），`None` = 所有工具。
+    ///
+    /// 仅对工具相关事件（`PreToolUse`/`PostToolUse`/`PostToolUseFailure`/
+    /// `PermissionRequest`）有效；其他事件忽略此字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    /// 命令模板，支持 `${TOOL_INPUT_<KEY>}` 占位符（按工具 input 字段展开，
+    /// 经 shell 转义防注入，见 `hooks.md` §6）。
+    pub command: String,
+    /// 单 Hook 超时秒数（`None` → 用 `[hooks] default_timeout_sec`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_sec: Option<u64>,
+}
+
 /// 解析 `env:VAR_NAME` 或 `env:VAR:-fallback` 语法。
 /// 返回解析后的值；若变量缺失且无 fallback，返回 `None`。
 fn resolve_env_syntax(s: &str) -> Option<String> {
@@ -166,27 +276,23 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
             Ok(mut cfg) => {
                 resolve_env_vars(&mut cfg);
                 // 原子写入 last-known-good
-                if let Ok(lkg_path) = paths::last_known_good_path() {
-                    if let Ok(serialized) = toml::to_string(&cfg) {
-                        let _ = std::fs::write(lkg_path, serialized);
-                    }
+                if let (Ok(lkg_path), Ok(serialized)) =
+                    (paths::last_known_good_path(), toml::to_string(&cfg))
+                {
+                    let _ = std::fs::write(lkg_path, serialized);
                 }
                 return Ok(cfg);
             }
             Err(e) => {
-                // 解析失败，尝试 last-known-good 回退
-                if let Ok(lkg_path) = paths::last_known_good_path() {
-                    if lkg_path.exists() {
-                        if let Ok(lkg_raw) = std::fs::read_to_string(&lkg_path) {
-                            if let Ok(mut lkg_cfg) = toml::from_str::<RuntimeConfig>(&lkg_raw) {
-                                tracing::warn!(
-                                    "config.toml 解析失败 ({e})，回退到 last-known-good"
-                                );
-                                resolve_env_vars(&mut lkg_cfg);
-                                return Ok(lkg_cfg);
-                            }
-                        }
-                    }
+                // 解析失败，尝试 last-known-good 回退（let chains 合并嵌套 if）
+                if let Ok(lkg_path) = paths::last_known_good_path()
+                    && lkg_path.exists()
+                    && let Ok(lkg_raw) = std::fs::read_to_string(&lkg_path)
+                    && let Ok(mut lkg_cfg) = toml::from_str::<RuntimeConfig>(&lkg_raw)
+                {
+                    tracing::warn!("config.toml 解析失败 ({e})，回退到 last-known-good");
+                    resolve_env_vars(&mut lkg_cfg);
+                    return Ok(lkg_cfg);
                 }
                 return Err(format!("config.toml 解析失败且无 last-known-good: {e}"));
             }
@@ -238,4 +344,69 @@ pub fn sanitize_env(env: &HashMap<String, String>) -> HashMap<String, String> {
         .filter(|(k, _)| !k.contains("API_KEY") && !k.contains("TOKEN") && !k.contains("SECRET"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+
+    #[test]
+    fn hooks_config_default_is_empty() {
+        let cfg = HooksConfig::default();
+        assert_eq!(cfg.total_count(), 0);
+        assert_eq!(cfg.on_hook_error, OnHookError::Continue);
+        assert_eq!(cfg.default_timeout_sec, 30);
+    }
+
+    #[test]
+    fn hooks_config_parses_from_toml() {
+        let toml = r#"
+[hooks]
+on_hook_error = "deny"
+default_timeout_sec = 15
+
+[[hooks.PreToolUse]]
+matcher = "fs.write"
+command = "prettier --write ${TOOL_INPUT_path}"
+timeout_sec = 10
+
+[[hooks.PreToolUse]]
+matcher = "shell.run"
+command = "~/.minicoding/hooks/block-danger.sh"
+
+[[hooks.PostToolUse]]
+matcher = "fs.write|fs.edit"
+command = "cargo fmt"
+
+[[hooks.SessionStart]]
+command = "git status --short"
+"#;
+        let cfg: RuntimeConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.hooks.on_hook_error, OnHookError::Deny);
+        assert_eq!(cfg.hooks.default_timeout_sec, 15);
+        assert_eq!(cfg.hooks.total_count(), 4);
+        assert_eq!(cfg.hooks.pre_tool_use.len(), 2);
+        assert_eq!(
+            cfg.hooks.pre_tool_use[0].matcher.as_deref(),
+            Some("fs.write")
+        );
+        assert_eq!(
+            cfg.hooks.pre_tool_use[0].command,
+            "prettier --write ${TOOL_INPUT_path}"
+        );
+        assert_eq!(cfg.hooks.pre_tool_use[0].timeout_sec, Some(10));
+        assert_eq!(cfg.hooks.post_tool_use.len(), 1);
+        assert_eq!(cfg.hooks.session_start.len(), 1);
+        assert!(cfg.hooks.session_start[0].matcher.is_none());
+    }
+
+    #[test]
+    fn hooks_config_empty_toml_uses_defaults() {
+        let toml = "";
+        let cfg: RuntimeConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.hooks.on_hook_error, OnHookError::Continue);
+        assert_eq!(cfg.hooks.default_timeout_sec, 30);
+        assert_eq!(cfg.hooks.total_count(), 0);
+    }
 }

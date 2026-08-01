@@ -30,6 +30,8 @@ pub enum RuntimeError {
     Mcp(#[from] McpError),
     #[error("sandbox: {0}")]
     Sandbox(#[from] crate::sandbox::SandboxError),
+    #[error("hook fatal: {0}")]
+    Hook(String),
     #[error("config: {0}")]
     Config(String),
     #[error("interrupted")]

@@ -87,10 +87,10 @@ impl JsonlStorage {
         // 1. 尝试缓存
         {
             let guard = self.lock_index();
-            if let Some(idx) = guard.as_ref() {
-                if !idx.is_empty() {
-                    return Ok(idx.to_metas());
-                }
+            if let Some(idx) = guard.as_ref()
+                && !idx.is_empty()
+            {
+                return Ok(idx.to_metas());
             }
         }
         // 2. 加载索引文件
@@ -479,10 +479,10 @@ impl Storage for JsonlStorage {
             // 1. 尝试缓存（短锁，不跨 await）
             {
                 let guard = self.lock_index();
-                if let Some(idx) = guard.as_ref() {
-                    if !idx.is_empty() {
-                        return Ok(idx.to_metas());
-                    }
+                if let Some(idx) = guard.as_ref()
+                    && !idx.is_empty()
+                {
+                    return Ok(idx.to_metas());
                 }
             }
             // 2. 尝试加载索引文件

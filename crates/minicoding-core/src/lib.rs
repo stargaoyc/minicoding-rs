@@ -13,8 +13,10 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+pub mod agent;
 pub mod config;
 pub mod context;
+pub mod hooks;
 pub mod journal;
 pub mod mcp;
 pub mod memory;
@@ -30,21 +32,28 @@ pub mod tool;
 
 /// 常用类型 re-export。
 pub mod prelude {
-    pub use crate::config::RuntimeConfig;
+    pub use crate::agent::{NoopSubagentRunner, SubagentRunner};
+    pub use crate::config::{HookEntry, HooksConfig, RuntimeConfig};
     pub use crate::context::{ContextManager, ContextSnapshot};
+    pub use crate::hooks::{
+        AsyncRewakeSpec, DispatchConfig, DispatchResult, Hook, HookDecision, HookError, HookEvent,
+        HookInput, HookMatcher, HookOutput, HookRegistry, NoopHookRegistry, OnHookError,
+        VerdictSerde,
+    };
     pub use crate::journal::{ChangeEntry, DiffEntry, FileChange, Journal, UndoReport};
     pub use crate::mcp::{McpClient, McpScope, McpServerConfig, McpTransport, ToolHint};
     pub use crate::memory::{MemoryStore, ProjectDocLoader};
     pub use crate::model::{
         Attachment, ContentBlock, ContextHint, JournalError, LlmError, McpError, MemoryError,
         Message, MessageMeta, MessageSource, PolicyError, PromptError, Role, RuntimeError, Session,
-        SessionId, SessionMeta, SideEffect, StopReason, StorageError, Task, TaskStatus, ToolCall,
-        ToolCallId, ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema, TurnOutcome,
-        UserInput,
+        SessionId, SessionMeta, SideEffect, StopReason, StorageError, SubagentResult, SubagentSpec,
+        SubagentType, Task, TaskStatus, Thoroughness, ToolCall, ToolCallId, ToolContent, ToolError,
+        ToolResult, ToolResultMeta, ToolSchema, TurnOutcome, UserInput,
     };
     pub use crate::policy::{
-        Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionPolicy, PermissionPrompt,
-        PermissionPrompter, PromptOption, Risk, Verdict,
+        Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionMode, PermissionPolicy,
+        PermissionPrompt, PermissionPrompter, PlanModeController, PlanModeSnapshot,
+        PreApprovedPrompt, PromptOption, Risk, Verdict,
     };
     pub use crate::provider::{
         BoxFuture, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider, Tokenizer,

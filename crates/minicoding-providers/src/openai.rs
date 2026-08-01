@@ -321,41 +321,41 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 fn parse_chunk(chunk: &Value) -> Vec<Delta> {
     let mut deltas = Vec::new();
 
-    if let Some(choices) = chunk.get("choices").and_then(Value::as_array) {
-        if let Some(choice) = choices.first() {
-            if let Some(delta) = choice.get("delta") {
-                if let Some(content) = delta.get("content").and_then(Value::as_str) {
-                    if !content.is_empty() {
-                        deltas.push(Delta::Text(content.to_string()));
-                    }
-                }
-                if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                    for tc in tool_calls {
-                        let index = u32_from_json(tc.get("index"));
-                        let id = tc.get("id").and_then(Value::as_str).map(String::from);
-                        let function = tc.get("function");
-                        let name = function
-                            .and_then(|f| f.get("name"))
-                            .and_then(Value::as_str)
-                            .map(String::from);
-                        let args_chunk = function
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(Value::as_str)
-                            .map(String::from);
-                        deltas.push(Delta::ToolCall(ToolCallDelta {
-                            index,
-                            id,
-                            name,
-                            args_chunk,
-                        }));
-                    }
+    if let Some(choices) = chunk.get("choices").and_then(Value::as_array)
+        && let Some(choice) = choices.first()
+    {
+        if let Some(delta) = choice.get("delta") {
+            if let Some(content) = delta.get("content").and_then(Value::as_str)
+                && !content.is_empty()
+            {
+                deltas.push(Delta::Text(content.to_string()));
+            }
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                for tc in tool_calls {
+                    let index = u32_from_json(tc.get("index"));
+                    let id = tc.get("id").and_then(Value::as_str).map(String::from);
+                    let function = tc.get("function");
+                    let name = function
+                        .and_then(|f| f.get("name"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    let args_chunk = function
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    deltas.push(Delta::ToolCall(ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        args_chunk,
+                    }));
                 }
             }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                if !reason.is_empty() {
-                    deltas.push(Delta::Stop(map_stop_reason(reason)));
-                }
-            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
+            && !reason.is_empty()
+        {
+            deltas.push(Delta::Stop(map_stop_reason(reason)));
         }
     }
 

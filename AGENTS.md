@@ -23,7 +23,7 @@
 
 ### 技术栈
 
-- 语言：Rust 2024 edition，MSRV 1.85+（`async fn in trait` 已稳定，无需 `async-trait`）
+- 语言：Rust 2024 edition，MSRV 1.99+（`async fn in trait` 已稳定，无需 `async-trait`）
 - 异步运行时：统一 `tokio`（不混用 `async-std`）
 - 序列化：`serde` + `serde_json` + `toml`
 - 日志/追踪：`tracing` + OpenTelemetry（OTel 一等公民，从 M0 接入）
@@ -34,7 +34,7 @@
 - MCP：`rmcp` 2.2（官方 Rust MCP SDK，**不自研** stdio/http）
 - 详见 `docs/tech-stack.md`
 
-### Workspace 结构（17 个 crate）
+### Workspace 结构（17 个 crate，M0–M8 范围；M9 新增 `minicoding-desktop` 与 `minicoding-web`，实施时加入）
 
 ```
 minicoding-rs (workspace)
@@ -58,6 +58,12 @@ minicoding-rs (workspace)
     └── minicoding-sdk           # 嵌入 SDK（M8）
 ```
 
+> **M9（低优先级，规划中）** 将新增：
+> - `crates/minicoding-desktop/`：Tauri 2.x 桌面壳（加入 Cargo workspace）；
+> - `crates/minicoding-web/`：纯前端项目（React 19.2 + TypeScript 7.0 + Vite 8.1），独立 `package.json`，不属于 Cargo workspace。
+>
+> 技术栈与架构见 `docs/tech-stack.md` §4.1 与 `docs/design.md` §26、`docs/modules.md` §18–§19。
+
 核心设计（Agent 循环、上下文管理、工具系统、权限模型、记忆、MCP、Hook、Journal）见 `docs/design.md`；模块职责边界见 `docs/modules.md`；运行时大模型约束见 `docs/rules.md`。
 
 ---
@@ -66,7 +72,7 @@ minicoding-rs (workspace)
 
 ### 2.1 edition 与 MSRV
 
-- `edition = "2024"`，`rust-version = "1.85"`
+- `edition = "2024"`，`rust-version = "1.99"`
 - `async fn in trait` 直接用；trait 需作 `dyn` 对象时用 `#[trait_variant::make(Trait: Send)]` 生成 Send 变体（Runtime 需 `Arc<dyn Trait>`）
 - 不引入 `async-trait`（已废弃路径）
 
@@ -459,7 +465,7 @@ windows = { version = "...", features = ["..."] }
 
 开发前快速自检（打勾确认）：
 
-- [ ] Rust 2024 edition？MSRV 1.85+？
+- [ ] Rust 2024 edition？MSRV 1.99+？
 - [ ] 新 crate 职责单一（见 `docs/modules.md`）？
 - [ ] trait 定义在 core，实现在领域 crate（见 §3.3）？
 - [ ] 重依赖在对应 crate 隔离（feature gate / target cfg，见 §3.5）？
