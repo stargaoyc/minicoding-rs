@@ -716,15 +716,32 @@ pub struct RetryPolicy {
 
 可重试：网络错误、5xx、429（带 `Retry-After`）。不可重试：4xx（除 429）、内容审查拒绝。
 
-### 5.4 模型路由（后续）
+### 5.4 模型路由（Router 骨架，T-M6-5）
 
 支持按任务路由到不同模型（如规划用大模型、补全用小模型），通过 `Router` trait：
 
 ```rust
 pub trait Router: Send + Sync {
-    fn pick(&self, task: &Task, ctx: &ContextSnapshot) -> &dyn LlmProvider;
+    /// 选择 provider。
+    ///
+    /// `task_kind` 为任务类型 hint（如 `"plan"`/`"code"`/`"summary"`），
+    /// `None` 表示无 hint，路由器应回退到默认 provider。
+    fn pick(&self, task_kind: Option<&str>) -> Arc<dyn LlmProvider>;
 }
 ```
+
+M6 交付骨架 + `StaticRouter`（恒返回同一 provider，等价于"无路由"）：
+```rust
+pub struct StaticRouter {
+    provider: Arc<dyn LlmProvider>,
+}
+```
+
+`StaticRouter` 保留作为配置未指定路由策略时的默认值。M7+ 可实现 `TaskBasedRouter`
+（按 `Task::kind`）、`CostAwareRouter`（按 token 预算）等。
+
+**C-13 防死循环**：`Router::pick` 是无状态纯选择，不涉及重试逻辑；重试由
+`RetryProvider` 装饰器负责（bounded `max_retries`，见 `providers::common::retry`）。
 
 ---
 
@@ -1983,6 +2000,12 @@ http_headers = { "X-Client" = "minicoding" }
 ```
 
 `McpTransport` 枚举覆盖两种主流协议；`bearer_token_env_var` 走环境变量引用而非明文，与 `security.md` §6 凭证管理一致。
+
+**传输实现**（T-M6-4）：
+- **stdio**：`TokioChildProcess`（`rmcp` 2.2 `transport-child-process` feature），子进程 `env_clear` + 白名单注入（C-04）；
+- **http**：`StreamableHttpClientTransport`（`rmcp` 2.2 `transport-streamable-http-client-reqwest` feature），bearer token 从 `bearer_token_env_var` 读取后传入 `StreamableHttpClientTransportConfig::auth_header`，自定义 headers 转为 `HeaderName`/`HeaderValue`。token 不落日志（C-04）。
+
+两种传输共用 `start_one` 流程：握手（`ClientInfo::default().serve(transport)` 带 `startup_timeout`）→ `list_all_tools` → schema 转换 + `enabled_tools` 过滤 → 缓存 `ServerConnection`。
 
 ### 19.3 工具命名与权限规则
 

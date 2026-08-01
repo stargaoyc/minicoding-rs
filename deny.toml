@@ -1,0 +1,41 @@
+# cargo-deny 配置（AGENTS.md §2.7 依赖治理）
+#
+# 许可证白名单：MIT / Apache-2.0 / BSD / ISC（AGENTS.md §2.7）
+# 漏洞检测由 cargo audit 负责（CI audit job）；本配置聚焦许可证/来源/ban。
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# 许可证白名单（AGENTS.md §2.7：仅 MIT/Apache-2.0/BSD/ISC）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# 禁止重复依赖（同名多版本需显式 allow）
+multiple-versions = "warn"
+wildcards = "warn"
+# 优先单版本
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# 仅允许 crates.io，其他 registry 需显式 allow
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

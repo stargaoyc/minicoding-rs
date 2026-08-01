@@ -30,7 +30,7 @@ impl Tokenizer for CharTokenizer {
     fn count_messages(&self, msgs: &[Message]) -> usize {
         msgs.iter().map(|m| m.text().chars().count()).sum()
     }
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "char-test"
     }
 }
@@ -67,7 +67,7 @@ impl std::fmt::Debug for ScriptedProvider {
 }
 
 impl LlmProvider for ScriptedProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "mock"
     }
     fn capabilities(&self) -> Capabilities {

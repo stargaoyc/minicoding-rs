@@ -127,7 +127,7 @@ impl Tokenizer for TiktokenTokenizer {
         total
     }
 
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         self.kind.as_str()
     }
 }
