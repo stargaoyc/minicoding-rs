@@ -278,7 +278,7 @@ mod tests {
     }
 
     impl LlmProvider for MockProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             self.id
         }
         fn capabilities(&self) -> Capabilities {

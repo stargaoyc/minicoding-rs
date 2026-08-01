@@ -83,8 +83,8 @@ pub struct Usage {
 /// 实现者写 `impl LlmProvider for MyProvider`，方法体用 `Box::pin(async move { ... })`。
 /// Runtime 持有 `Arc<dyn LlmProvider>`。详见 `api.md` §3 dyn-compatibility 约定。
 pub trait LlmProvider: Send + Sync {
-    /// provider 标识（如 "openai"/"anthropic"）。
-    fn id(&self) -> &str;
+    /// provider 标识（如 "openai"/"anthropic"），固定字符串。
+    fn id(&self) -> &'static str;
     /// 能力声明。
     fn capabilities(&self) -> Capabilities;
     /// 关联的分词器。
@@ -106,8 +106,8 @@ pub trait Tokenizer: Send + Sync {
     fn count(&self, text: &str) -> usize;
     /// 消息序列 token 数。
     fn count_messages(&self, msgs: &[Message]) -> usize;
-    /// 分词器标识（如 "cl100k"/"o200k"）。
-    fn id(&self) -> &str;
+    /// 分词器标识（如 "cl100k"/"o200k"），固定字符串。
+    fn id(&self) -> &'static str;
 }
 
 // `LlmError` → `RuntimeError` 由 `#[from]` 自动实现（见 `model::error`）。

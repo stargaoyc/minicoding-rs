@@ -20,7 +20,11 @@ use minicoding_memory::{
     inject_project_doc_sync,
 };
 use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter, ReplayPolicy};
-use minicoding_providers::{OpenAiProvider, TiktokenTokenizer};
+use minicoding_providers::{
+    ANTHROPIC_PROVIDER_ID, AnthropicProvider, OLLAMA_DEFAULT_API_BASE, OLLAMA_PROVIDER_ID,
+    OllamaProvider, OpenAiProvider, PROVIDER_ID as OPENAI_PROVIDER_ID, RetryConfig, RetryProvider,
+    TiktokenTokenizer,
+};
 use minicoding_storage::{FileAuditSink, JsonlStorage};
 use minicoding_tools::{
     AutoMemoryWriter, MemoryCategory, MemoryWrite, register_readonly_tools, register_shell_tools,
@@ -85,6 +89,8 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 
 /// 从 CLI 参数构建 `Runtime`。
 ///
+/// `provider_override` 覆盖 `config.provider.default`（`--provider`，T-M6-5），
+/// 决定调用哪家 provider 的 API 协议（`openai`/`anthropic`/`ollama`）。
 /// `mode` 控制会话加载方式（`--resume`/`--replay`/`--fork-session`，T-M3-10）。
 /// `sandbox_override` 为 `Some` 时覆盖默认沙箱策略（`exec --sandbox` 用），
 /// 为 `None` 时用默认 `WorkspaceWrite { workdir, [] }`。
@@ -98,6 +104,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 #[allow(clippy::too_many_lines)] // 组装流程线性展开，拆分反而降低可读性
 #[allow(clippy::too_many_arguments)] // CLI 组装入口，参数由调用方 CLI flag 决定，聚合为 struct 反而增删不便
 pub fn build_runtime(
+    provider_override: Option<&str>,
     api_base: Option<&str>,
     api_key: Option<&str>,
     model: Option<&str>,
@@ -129,39 +136,69 @@ pub fn build_runtime(
     if let Some(m) = model {
         config.provider.model = m.to_string();
     }
+    // `--provider` 覆盖 `config.provider.default`（T-M6-5）
+    if let Some(p) = provider_override {
+        config.provider.default = p.to_string();
+    }
 
     // 2. 校验 API key：CLI/env 未提供时尝试 OS keyring / 文件 fallback（T-M4-11，C-04）
-    if config.provider.api_key.is_empty()
+    //    Ollama 本地模型无需 API key（本地 `/api/chat` 不鉴权），跳过校验。
+    let provider_kind = config.provider.default.as_str();
+    let is_ollama = provider_kind == OLLAMA_PROVIDER_ID;
+    if !is_ollama
+        && config.provider.api_key.is_empty()
         && let Some(key) = crate::cred::load_api_key().context("加载凭证失败")?
     {
         config.provider.api_key = key;
     }
-    if config.provider.api_key.is_empty() {
+    if !is_ollama && config.provider.api_key.is_empty() {
         anyhow::bail!(
             "API key 未配置：请设置 OPENAI_API_KEY 环境变量、使用 --api-key 参数，或通过 `minicoding cred store` 写入 keyring"
         );
     }
 
-    // 3. 构造 provider（Arc 共享：主推理 + L2 摘要压缩复用同一实例）
-    let provider: Arc<OpenAiProvider> = Arc::new(
-        OpenAiProvider::new(
-            &config.provider.api_base,
-            &config.provider.api_key,
-            &config.provider.model,
-        )
-        .context("OpenAI provider 构造失败")?,
-    );
+    // 3. 构造 provider（按 `config.provider.default` 分派，T-M6-5）
+    //    三家 provider 统一包装 `RetryProvider` 装饰器（C-13：bounded retries，
+    //    `max_retries` 上限防止死循环）。Arc 共享：主推理 + L2 摘要压缩复用同一实例。
+    let main_provider: Arc<dyn LlmProvider> =
+        build_main_provider(provider_kind, &config.provider).context("provider 构造失败")?;
+    // 用 RetryProvider 包装（C-13：bounded retries，指数退避 + 429 Retry-After）
+    let retry_config = RetryConfig {
+        max_retries: config.provider.max_retries,
+        initial_backoff_ms: 500,
+        max_backoff_ms: 30_000,
+        request_timeout: std::time::Duration::from_secs(config.provider.timeout_sec),
+    };
+    let main_provider: Arc<dyn LlmProvider> =
+        Arc::new(RetryProvider::new(main_provider, retry_config));
+
     // 主 provider 的 `Arc<dyn LlmProvider>` 视图：供 SessionSummarizer 作为
     // secondary（降级兜底用），以及在 small 未配置时作 primary。
-    let main_provider_view: Arc<dyn LlmProvider> = provider.clone();
+    let main_provider_view: Arc<dyn LlmProvider> = main_provider.clone();
 
     // 3b. 构造 small provider（gap-4：[provider.small] 独立小 LLM 配置）
     //     未配置时退化为 `None`，由后续逻辑回退到主 provider。
     //     配置 `api_base`/`api_key` 为 `None` 时继承主 provider（典型：同一 OpenAI
     //     账号但换便宜模型做摘要/压缩，降本见 `design.md` §3.8）。
-    let small_provider: Option<Arc<OpenAiProvider>> = match &config.provider.small {
+    //     small provider 始终用 OpenAI 兼容协议（摘要/压缩通常用便宜 OpenAI 模型）；
+    //     如需用其他 provider 做摘要，后续可在 `[provider.small]` 加 `kind` 字段。
+    let small_provider: Option<Arc<dyn LlmProvider>> = match &config.provider.small {
         Some(small_cfg) => match build_small_provider(small_cfg, &config.provider) {
-            Ok(p) => Some(Arc::new(p)),
+            Ok(p) => {
+                let p: Arc<dyn LlmProvider> = Arc::new(p);
+                // small provider 也包装 RetryProvider（与主 provider 一致的错误恢复策略）
+                Some(Arc::new(RetryProvider::new(
+                    p,
+                    RetryConfig {
+                        max_retries: config.provider.max_retries,
+                        initial_backoff_ms: 500,
+                        max_backoff_ms: 30_000,
+                        request_timeout: std::time::Duration::from_secs(
+                            config.provider.timeout_sec,
+                        ),
+                    },
+                )))
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -175,7 +212,7 @@ pub fn build_runtime(
     // 摘要用 provider：small 优先，回退主 provider（保证 L2 摘要始终可用）。
     let summary_provider: Arc<dyn LlmProvider> = small_provider
         .clone()
-        .map_or_else(|| main_provider_view.clone(), |p| p as Arc<dyn LlmProvider>);
+        .map_or_else(|| main_provider_view.clone(), |p| p);
 
     // 4. 解析 workdir（提前到 context manager 之前，供 ProjectDocLoader 使用）
     let workdir_path = Utf8PathBuf::from(workdir)
@@ -299,7 +336,7 @@ pub fn build_runtime(
     let hook_registry = build_hook_registry(&config.hooks);
 
     let mut builder = RuntimeBuilder::new()
-        .provider(provider)
+        .provider(main_provider)
         .context(ctx)
         .storage(Arc::new(storage))
         .tools(tools)
@@ -545,6 +582,48 @@ fn load_and_inject_project_doc(workdir: &Utf8PathBuf, base_system: &str) -> Stri
             tracing::warn!("加载项目文档失败: {e}");
             base_system.to_string()
         }
+    }
+}
+
+/// 根据 `config.provider.default` 分派构造主 provider（T-M6-5）。
+///
+/// 支持 `openai`/`anthropic`/`ollama` 三家 provider：
+/// - `openai`：`/v1/chat/completions` SSE（也覆盖 DeepSeek/Moonshot/本地 vLLM）
+/// - `anthropic`：`/v1/messages` SSE
+/// - `ollama`：`/api/chat` NDJSON（本地模型，无需 API key）
+///
+/// 未知 provider 名称返回 `Err`，列出支持的值供用户纠正。
+///
+/// # Errors
+/// provider 构造失败（reqwest 初始化失败、tiktoken 词表加载失败等）时返回 `LlmError`。
+fn build_main_provider(
+    kind: &str,
+    cfg: &ProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, minicoding_core::model::LlmError> {
+    match kind {
+        OPENAI_PROVIDER_ID => Ok(Arc::new(OpenAiProvider::new(
+            &cfg.api_base,
+            &cfg.api_key,
+            &cfg.model,
+        )?)),
+        ANTHROPIC_PROVIDER_ID => Ok(Arc::new(AnthropicProvider::new(
+            &cfg.api_base,
+            &cfg.api_key,
+            &cfg.model,
+        )?)),
+        OLLAMA_PROVIDER_ID => {
+            // Ollama 默认 `http://localhost:11434`，无需 API key
+            let api_base = if cfg.api_base.is_empty() {
+                OLLAMA_DEFAULT_API_BASE.to_string()
+            } else {
+                cfg.api_base.clone()
+            };
+            Ok(Arc::new(OllamaProvider::new(api_base, &cfg.model)?))
+        }
+        other => Err(minicoding_core::model::LlmError::Client {
+            status: 400,
+            body: format!("未知 provider `{other}`：支持 `openai`/`anthropic`/`ollama`"),
+        }),
     }
 }
 

@@ -23,11 +23,14 @@ time = { workspace = true }
 ulid = { workspace = true }
 
 # rmcp 2.x 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
-# M4 仅用 stdio 传输（client）；http + OAuth 留给 M6（T-M6-4）。
+# M4 用 stdio 传输；M6（T-M6-4）补齐 streamable HTTP + bearer token 鉴权。
 rmcp = { version = "2.0", default-features = false, features = [
     "client",
     "transport-child-process",
+    "transport-streamable-http-client-reqwest",
 ] }
+# http 类型（HeaderName/HeaderValue），与 rmcp/reqwest 共用同一版本。
+http = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

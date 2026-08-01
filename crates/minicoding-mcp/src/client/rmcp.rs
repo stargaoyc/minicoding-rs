@@ -1,4 +1,4 @@
-//! `RmcpClient`：基于 `rmcp` 2.2 的 `McpClient` 实现（stdio 传输）。
+//! `RmcpClient`：基于 `rmcp` 2.2 的 `McpClient` 实现（stdio + streamable HTTP 传输）。
 //!
 //! 见 `design.md` §19、`api.md` §11、`modules.md` §8。
 //!
@@ -7,9 +7,12 @@
 //! - **进程池**：`RwLock<HashMap<ServerId, ServerConnection>>`，连接跨 turn 复用
 //!   （见 `design.md` §19.5）。M4 仅实现基础进程池；后台预热/inflight merge 留给
 //!   M6+（依赖更复杂的 `Shared<Future>` 与 mpsc 事件流）。
+//! - **传输层**（T-M6-4）：stdio（`TokioChildProcess`）+ streamable HTTP
+//!   （`StreamableHttpClientTransport`，reqwest 后端）。HTTP 支持 bearer token 鉴权
+//!   （token 从环境变量读取，C-04）与自定义 headers（见 `design.md` §19.2）。
 //! - **凭证隔离**（C-04）：spawn 子进程时 `env_clear` 后仅注入白名单 + server 配置
 //!   的 `env`（`GITHUB_TOKEN` 等），绝不继承 `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`
-//!   等凭证环境变量。
+//!   等凭证环境变量。HTTP 传输的 bearer token 仅传入 rmcp transport config，不落日志。
 //! - **超时**：启动用 `startup_timeout_sec`，工具调用用 `tool_timeout_sec`，均通过
 //!   `tokio::time::timeout` 包裹。
 //! - **`required` 语义**：`required=true` 的 server 启动失败返回 `Err`，Runtime 拒绝
@@ -21,12 +24,15 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
+use http::{HeaderName, HeaderValue};
 use minicoding_core::mcp::{McpClient, McpError, McpServerConfig, McpTransport};
 use minicoding_core::model::{ToolContent, ToolResult, ToolResultMeta, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use rmcp::model::{CallToolRequestParams, ClientInfo, ContentBlock};
 use rmcp::service::{RunningService, ServiceExt};
+use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::TokioChildProcess;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -98,9 +104,7 @@ impl RmcpClient {
             cwd,
         } = transport
         else {
-            return Err(McpError::Config(
-                "M4 仅支持 stdio 传输；http 留给 M6（T-M6-4）".into(),
-            ));
+            return Err(McpError::Config("build_command 仅支持 stdio 传输".into()));
         };
         let mut cmd = Command::new(command);
         cmd.args(args);
@@ -123,28 +127,122 @@ impl RmcpClient {
         Ok(cmd)
     }
 
-    /// 启动单个 server：spawn 子进程 → 握手 → `list_tools` → 缓存。
+    /// 构造 streamable HTTP 传输配置（T-M6-4）。
+    ///
+    /// - `bearer_token_env_var`：从环境变量读取 token，仅传入 rmcp config，不落日志（C-04）。
+    /// - `http_headers`：转换为 `HeaderName`/`HeaderValue`，无效 header 名/值返回 `Err`。
+    ///
+    /// 返回 `StreamableHttpClientTransportConfig`，由调用方交给
+    /// `StreamableHttpClientTransport::from_config` 构造传输实例。
+    fn build_http_config(
+        cfg: &McpServerConfig,
+    ) -> Result<StreamableHttpClientTransportConfig, McpError> {
+        let McpTransport::Http {
+            url,
+            bearer_token_env_var,
+            http_headers,
+        } = &cfg.transport
+        else {
+            return Err(McpError::Config(
+                "build_http_config 仅支持 http 传输".into(),
+            ));
+        };
+
+        let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+
+        // bearer token：从环境变量读取（C-04：不直接写 token，不落日志）
+        if let Some(env_var) = bearer_token_env_var {
+            match std::env::var(env_var) {
+                Ok(token) if !token.is_empty() => {
+                    // 仅传入 rmcp transport config，trace 只记 env_var 名，不记 token 值。
+                    config = config.auth_header(token);
+                    tracing::debug!(
+                        server = %cfg.name,
+                        env_var = %env_var,
+                        "mcp http server: bearer token loaded from env var"
+                    );
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        server = %cfg.name,
+                        env_var = %env_var,
+                        "mcp http server: bearer token env var is empty, connecting without auth"
+                    );
+                }
+                Err(_) => {
+                    // 未配置 token：best-effort 连接（部分 MCP server 不要求鉴权）。
+                    tracing::warn!(
+                        server = %cfg.name,
+                        env_var = %env_var,
+                        "mcp http server: bearer token env var not set, connecting without auth"
+                    );
+                }
+            }
+        }
+
+        // 自定义 headers
+        if !http_headers.is_empty() {
+            let mut headers = HashMap::with_capacity(http_headers.len());
+            for (k, v) in http_headers {
+                let name = HeaderName::try_from(k.as_str()).map_err(|e| McpError::StartFailed {
+                    server: cfg.name.clone(),
+                    reason: format!("invalid header name `{k}`: {e}"),
+                })?;
+                let value =
+                    HeaderValue::try_from(v.as_str()).map_err(|e| McpError::StartFailed {
+                        server: cfg.name.clone(),
+                        reason: format!("invalid header value for `{k}`: {e}"),
+                    })?;
+                headers.insert(name, value);
+            }
+            config = config.custom_headers(headers);
+        }
+
+        Ok(config)
+    }
+
+    /// 启动单个 server：按传输类型 dispatch → 握手 → `list_tools` → 缓存。
     async fn start_one(&self, cfg: &McpServerConfig) -> Result<Vec<ToolSchema>, McpError> {
         let startup_timeout = Duration::from_secs(cfg.startup_timeout_sec);
         let tool_timeout = Duration::from_secs(cfg.tool_timeout_sec);
+        let transport_kind = Self::transport_kind(&cfg.transport);
 
-        let cmd = Self::build_command(&cfg.transport)?;
-        let transport = TokioChildProcess::new(cmd).map_err(|e| McpError::StartFailed {
-            server: cfg.name.clone(),
-            reason: format!("spawn failed: {e}"),
-        })?;
-
-        // 握手（带 startup_timeout）
-        let service = tokio::time::timeout(startup_timeout, ClientInfo::default().serve(transport))
-            .await
-            .map_err(|_| McpError::StartFailed {
-                server: cfg.name.clone(),
-                reason: format!("startup timeout after {startup_timeout:?}"),
-            })?
-            .map_err(|e| McpError::StartFailed {
-                server: cfg.name.clone(),
-                reason: format!("handshake failed: {e}"),
-            })?;
+        // 按传输类型构造 rmcp transport 并握手（带 startup_timeout）。
+        // 两分支的 `serve` 调用签名相同，但 `IntoTransport` 的 trait bound 复杂，
+        // 内联比抽泛型函数更清晰（避免复杂的 where 子句）。
+        let service = match &cfg.transport {
+            McpTransport::Stdio { .. } => {
+                let cmd = Self::build_command(&cfg.transport)?;
+                let transport = TokioChildProcess::new(cmd).map_err(|e| McpError::StartFailed {
+                    server: cfg.name.clone(),
+                    reason: format!("spawn failed: {e}"),
+                })?;
+                tokio::time::timeout(startup_timeout, ClientInfo::default().serve(transport))
+                    .await
+                    .map_err(|_| McpError::StartFailed {
+                        server: cfg.name.clone(),
+                        reason: format!("startup timeout after {startup_timeout:?}"),
+                    })?
+                    .map_err(|e| McpError::StartFailed {
+                        server: cfg.name.clone(),
+                        reason: format!("handshake failed: {e}"),
+                    })?
+            }
+            McpTransport::Http { .. } => {
+                let config = Self::build_http_config(cfg)?;
+                let transport = StreamableHttpClientTransport::from_config(config);
+                tokio::time::timeout(startup_timeout, ClientInfo::default().serve(transport))
+                    .await
+                    .map_err(|_| McpError::StartFailed {
+                        server: cfg.name.clone(),
+                        reason: format!("startup timeout after {startup_timeout:?}"),
+                    })?
+                    .map_err(|e| McpError::StartFailed {
+                        server: cfg.name.clone(),
+                        reason: format!("handshake failed: {e}"),
+                    })?
+            }
+        };
 
         // list_tools（带 startup_timeout，复用作为初始化阶段超时）
         let rmcp_tools = tokio::time::timeout(startup_timeout, service.list_all_tools())
@@ -190,10 +288,19 @@ impl RmcpClient {
 
         tracing::info!(
             server = %cfg.name,
+            transport = %transport_kind,
             tool_count = tools.len(),
             "mcp server started"
         );
         Ok(tools)
+    }
+
+    /// 传输类型短名（用于日志）。
+    fn transport_kind(t: &McpTransport) -> &'static str {
+        match t {
+            McpTransport::Stdio { .. } => "stdio",
+            McpTransport::Http { .. } => "http",
+        }
     }
 }
 
@@ -477,5 +584,193 @@ mod tests {
         // URL-safe variant uses - and _ instead of + and /
         let decoded = base64_decode("SGVsbG8=").unwrap();
         assert_eq!(decoded, b"Hello");
+    }
+
+    /// 构造一个最小可用的 HTTP server 配置（用于 `build_http_config` 测试）。
+    fn http_cfg(
+        name: &str,
+        url: &str,
+        bearer_env_var: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Http {
+                url: url.to_string(),
+                bearer_token_env_var: bearer_env_var.map(String::from),
+                http_headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            },
+            scope: minicoding_core::mcp::McpScope::User,
+            startup_timeout_sec: 5,
+            tool_timeout_sec: 10,
+            enabled: true,
+            required: false,
+            enabled_tools: None,
+        }
+    }
+
+    #[test]
+    fn transport_kind_stdio_and_http() {
+        let stdio_cfg = McpServerConfig {
+            name: "s".into(),
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            scope: minicoding_core::mcp::McpScope::User,
+            startup_timeout_sec: 5,
+            tool_timeout_sec: 10,
+            enabled: true,
+            required: false,
+            enabled_tools: None,
+        };
+        assert_eq!(RmcpClient::transport_kind(&stdio_cfg.transport), "stdio");
+
+        let http_cfg = http_cfg("h", "http://localhost", None, &[]);
+        assert_eq!(RmcpClient::transport_kind(&http_cfg.transport), "http");
+    }
+
+    #[test]
+    fn build_http_config_no_auth_no_headers() {
+        let cfg = http_cfg("test_server", "http://localhost:8000/mcp", None, &[]);
+        let config = RmcpClient::build_http_config(&cfg).expect("build config should succeed");
+        // 无 auth_header、无 custom_headers（仅断言不 panic 且 URI 正确）
+        assert_eq!(config.uri.as_ref(), "http://localhost:8000/mcp");
+        assert!(config.auth_header.is_none());
+        assert!(config.custom_headers.is_empty());
+    }
+
+    #[test]
+    fn build_http_config_with_bearer_token() {
+        // SAFETY: 单线程测试，变量名 `MCP_HTTP_TEST_TOKEN` 独占。
+        unsafe {
+            std::env::set_var("MCP_HTTP_TEST_TOKEN", "secret-token-12345");
+        }
+        let cfg = http_cfg(
+            "auth_server",
+            "https://internal.corp/mcp",
+            Some("MCP_HTTP_TEST_TOKEN"),
+            &[],
+        );
+        let config = RmcpClient::build_http_config(&cfg).expect("build config should succeed");
+        // C-04：token 从 env var 读取，传入 config（不验证值是否落日志，仅验证读取成功）
+        assert_eq!(config.auth_header.as_deref(), Some("secret-token-12345"));
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MCP_HTTP_TEST_TOKEN");
+        }
+    }
+
+    #[test]
+    fn build_http_config_missing_token_env_var() {
+        // 未设置 env var：best-effort，不报错（部分 MCP server 不要求鉴权）
+        // SAFETY: 单线程测试，变量名独占。
+        unsafe {
+            std::env::remove_var("MCP_HTTP_MISSING_TOKEN_VAR_XYZ");
+        }
+        let cfg = http_cfg(
+            "no_token_server",
+            "https://example.com/mcp",
+            Some("MCP_HTTP_MISSING_TOKEN_VAR_XYZ"),
+            &[],
+        );
+        let config = RmcpClient::build_http_config(&cfg).expect("missing token should not fail");
+        assert!(config.auth_header.is_none());
+    }
+
+    #[test]
+    fn build_http_config_empty_token_env_var() {
+        // 空 token：best-effort，不报错（warn 但继续）
+        // SAFETY: 单线程测试，变量名独占。
+        unsafe {
+            std::env::set_var("MCP_HTTP_EMPTY_TOKEN", "");
+        }
+        let cfg = http_cfg(
+            "empty_token_server",
+            "https://example.com/mcp",
+            Some("MCP_HTTP_EMPTY_TOKEN"),
+            &[],
+        );
+        let config = RmcpClient::build_http_config(&cfg).expect("empty token should not fail");
+        assert!(config.auth_header.is_none());
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MCP_HTTP_EMPTY_TOKEN");
+        }
+    }
+
+    #[test]
+    fn build_http_config_with_custom_headers() {
+        let cfg = http_cfg(
+            "headers_server",
+            "https://api.example.com/mcp",
+            None,
+            &[("X-Client", "minicoding"), ("X-Request-Id", "abc-123")],
+        );
+        let config = RmcpClient::build_http_config(&cfg).expect("build config should succeed");
+        assert_eq!(config.custom_headers.len(), 2);
+        // HeaderName 规范化为小写；用 `from_static` 构造查找 key 避免 `Borrow<str>` 哈希不一致
+        let client_val = config
+            .custom_headers
+            .get(&HeaderName::from_static("x-client"))
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(client_val, Some("minicoding"));
+        let req_id_val = config
+            .custom_headers
+            .get(&HeaderName::from_static("x-request-id"))
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(req_id_val, Some("abc-123"));
+    }
+
+    #[test]
+    fn build_http_config_invalid_header_name() {
+        // header 名含非法字符（空格）→ 应返回 Err
+        let cfg = http_cfg(
+            "bad_header_server",
+            "https://api.example.com/mcp",
+            None,
+            &[("Bad Header Name", "value")],
+        );
+        let err = RmcpClient::build_http_config(&cfg).expect_err("invalid header should fail");
+        assert!(
+            matches!(err, McpError::StartFailed { ref server, .. } if server == "bad_header_server")
+        );
+    }
+
+    #[test]
+    fn build_http_config_rejects_stdio_transport() {
+        // 传入 stdio 传输应返回 Config 错误（防误用）
+        let cfg = McpServerConfig {
+            name: "stdio_server".into(),
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            scope: minicoding_core::mcp::McpScope::User,
+            startup_timeout_sec: 5,
+            tool_timeout_sec: 10,
+            enabled: true,
+            required: false,
+            enabled_tools: None,
+        };
+        let err =
+            RmcpClient::build_http_config(&cfg).expect_err("stdio transport should be rejected");
+        assert!(matches!(err, McpError::Config(_)));
+    }
+
+    #[test]
+    fn build_command_rejects_http_transport() {
+        // 传入 http 传输应返回 Config 错误（防误用）
+        let cfg = http_cfg("h", "http://localhost", None, &[]);
+        let err = RmcpClient::build_command(&cfg.transport)
+            .expect_err("http transport should be rejected");
+        assert!(matches!(err, McpError::Config(_)));
     }
 }

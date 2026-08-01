@@ -1,0 +1,9 @@
+# cargo 配置（T-M0-9 测试基础设施）
+#
+# 覆盖率：`cargo cov` 等价 `cargo llvm-cov --workspace --fail-under-lines 80`
+# （AGENTS.md §2.8 覆盖率目标 ≥80%）。CI 用同一命令做门禁（见 .github/workflows/ci.yml）。
+# 本地需先 `cargo install cargo-llvm-cov` 并安装 `llvm-tools-preview` 组件。
+
+[alias]
+cov = "llvm-cov --workspace --fail-under-lines 80"
+cov-html = "llvm-cov --workspace --html --output-dir target/coverage"

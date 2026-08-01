@@ -98,6 +98,14 @@ struct Cli {
     #[arg(long, env = "OPENAI_MODEL")]
     model: Option<String>,
 
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`，覆盖 `config.provider.default`，T-M6-5）
+    ///
+    /// 决定调用哪家 provider 的 API 协议：`openai` 走 `/v1/chat/completions` SSE；
+    /// `anthropic` 走 `/v1/messages` SSE；`ollama` 走 `/api/chat` NDJSON。
+    /// 配套的 `--api-base`/`--api-key`/`--model` 按所选 provider 解释。
+    #[arg(long)]
+    provider: Option<String>,
+
     /// API base URL（覆盖配置/环境变量）
     #[arg(long, env = "OPENAI_API_BASE")]
     api_base: Option<String>,
@@ -204,6 +212,7 @@ fn main() -> Result<()> {
 
     // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
     let rt = builder::build_runtime(
+        cli.provider.as_deref(),
         cli.api_base.as_deref(),
         cli.api_key.as_deref(),
         cli.model.as_deref(),

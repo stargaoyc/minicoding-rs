@@ -50,7 +50,7 @@ impl From<ToolError> for RuntimeError {
 }
 
 /// LLM 调用错误。
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum LlmError {
     #[error("network: {0}")]
     Network(String),
@@ -68,6 +68,35 @@ pub enum LlmError {
     Timeout(Duration),
     #[error("provider not configured")]
     NotConfigured,
+}
+
+impl LlmError {
+    /// 该错误是否可重试（T-M6-3 重试装饰器用）。
+    ///
+    /// 可重试：`RateLimited`（429）、`Server`（5xx，瞬时故障）、`Network`（连接抖动）、
+    /// `Timeout`（请求建立超时）。不可重试：`Client`（4xx，请求本身有问题，重试无意义）、
+    /// `Filtered`（内容审核，重试同样结果）、`Parse`（响应格式错误，重试大概率复现）、
+    /// `NotConfigured`（配置缺失）。
+    ///
+    /// 设计依据：见 `design.md` §10 错误分类与恢复策略。
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::Server { .. } | Self::Network(_) | Self::Timeout(_)
+        )
+    }
+
+    /// 返回 `RateLimited` 携带的 `Retry-After`（毫秒），其他错误返回 `None`。
+    ///
+    /// 重试装饰器优先用服务端建议的等待时间，缺省时回退到指数退避（见 `retry.rs`）。
+    #[must_use]
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited { retry_after_ms } => *retry_after_ms,
+            _ => None,
+        }
+    }
 }
 
 /// 工具执行错误。

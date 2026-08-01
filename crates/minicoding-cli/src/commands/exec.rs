@@ -60,6 +60,10 @@ pub struct ExecCommand {
     #[arg(long, default_value = ".")]
     pub workdir: String,
 
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`，覆盖 `config.provider.default`，T-M6-5）。
+    #[arg(long)]
+    pub provider: Option<String>,
+
     /// 模型名称（覆盖配置/环境变量）。
     #[arg(long, env = "OPENAI_MODEL")]
     pub model: Option<String>,
@@ -94,6 +98,7 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
     }
 
     let rt = crate::builder::build_runtime(
+        cmd.provider.as_deref(),
         cmd.api_base.as_deref(),
         cmd.api_key.as_deref(),
         cmd.model.as_deref(),

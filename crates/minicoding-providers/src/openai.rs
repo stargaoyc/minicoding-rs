@@ -4,17 +4,15 @@
 //! 协议解析响应，转换为 [`Delta`]。HTTP 状态码映射到 [`LlmError`]：
 //! 429 → `RateLimited`（携带 `Retry-After`），5xx → `Server`，其它 4xx → `Client`。
 
-use futures::stream::{self, BoxStream, Stream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
     BoxFuture, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta, Usage,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, json};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::tokenizer::TiktokenTokenizer;
 
@@ -40,7 +38,7 @@ impl std::fmt::Debug for OpenAiProvider {
             .field("model", &self.model)
             .field("tokenizer", &self.tokenizer.kind())
             // 不输出 api_key（C-04：日志脱敏，前 4 字符 + ***）
-            .field("api_key", &mask_key(&self.api_key))
+            .field("api_key", &crate::common::mask_key(&self.api_key))
             .finish_non_exhaustive()
     }
 }
@@ -141,7 +139,7 @@ impl OpenAiProvider {
 }
 
 impl LlmProvider for OpenAiProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         PROVIDER_ID
     }
 
@@ -186,14 +184,17 @@ impl LlmProvider for OpenAiProvider {
                 return Err(map_status_error(status.as_u16(), body_text, retry_after_ms));
             }
 
-            // bytes_stream() 返回的流是 'static（消费 response），转换为 Vec<u8> 避免
-            // 引入 bytes 依赖。
-            let byte_stream = resp.bytes_stream().map(|r| r.map(|b| b.to_vec())).boxed();
-            let sse = SseStream::new(byte_stream);
+            // SSE 解析复用 common::sse（T-M6-3），data payload 为字符串，此处再解析为 JSON。
+            // `[DONE]` 是 OpenAI 流结束哨兵（Anthropic 用 message_stop 事件，无此哨兵）。
+            let sse = crate::common::sse::from_response(resp);
             let delta_stream = sse
                 .flat_map(|ev| {
                     let items: Vec<Result<Delta, LlmError>> = match ev {
-                        Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
+                        Ok(data) if data == "[DONE]" => vec![],
+                        Ok(data) => match serde_json::from_str::<Value>(&data) {
+                            Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
+                            Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
+                        },
                         Err(e) => vec![Err(e)],
                     };
                     stream::iter(items)
@@ -405,119 +406,5 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
         _ => StopReason::Stopped,
-    }
-}
-
-/// API key 脱敏（前 4 字符 + `***`），用于日志输出（C-04）。
-fn mask_key(key: &str) -> String {
-    let len = key.chars().count();
-    if len <= 4 {
-        "***".to_string()
-    } else {
-        let head: String = key.chars().take(4).collect();
-        format!("{head}***")
-    }
-}
-
-/// SSE 解析流状态。
-struct SseStream {
-    /// 底层字节流（已转为 `Vec<u8>`，避免 `bytes` 依赖）。
-    inner: Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>,
-    /// 累积未消费的字节（按 UTF-8 lossy 解码）。
-    buffer: String,
-    /// 底层流是否已结束。
-    done: bool,
-}
-
-impl SseStream {
-    /// 构造 SSE 解析器。
-    fn new(inner: Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>) -> Self {
-        Self {
-            inner,
-            buffer: String::new(),
-            done: false,
-        }
-    }
-
-    /// 尝试从 buffer 取出一个完整事件（以 `\n\n` 分隔）。
-    fn take_event(&mut self) -> Option<String> {
-        let pos = self.buffer.find("\n\n")?;
-        let event: String = self.buffer.drain(..pos + 2).collect();
-        Some(event)
-    }
-
-    /// 解析单个 SSE 事件，返回 `Ok(Some(json))` / `Ok(None)`（无 data 行或 `[DONE]`）。
-    /// 返回 `Err` 表示 JSON 解析失败。
-    fn parse_event(event: &str) -> Result<Option<Value>, LlmError> {
-        let mut data_lines: Vec<&str> = Vec::new();
-        for line in event.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                let trimmed = rest.strip_prefix(' ').unwrap_or(rest).trim();
-                data_lines.push(trimmed);
-            }
-        }
-        if data_lines.is_empty() {
-            return Ok(None);
-        }
-        let data = data_lines.join("\n");
-        if data == "[DONE]" {
-            return Ok(None);
-        }
-        serde_json::from_str(&data)
-            .map(Some)
-            .map_err(|e| LlmError::Parse(e.to_string()))
-    }
-}
-
-impl Stream for SseStream {
-    type Item = Result<Value, LlmError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            // 1) 优先消费已缓冲的完整事件
-            if let Some(event) = self.take_event() {
-                let was_done = event.contains("[DONE]");
-                match Self::parse_event(&event) {
-                    Ok(Some(json)) => return Poll::Ready(Some(Ok(json))),
-                    Ok(None) => {
-                        if was_done {
-                            return Poll::Ready(None);
-                        }
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(target: "minicoding::provider::openai", error = %e, "sse parse failed");
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                }
-            }
-
-            // 2) buffer 不完整时尝试 flush 末尾残留（流结束后）
-            if self.done {
-                if !self.buffer.is_empty() {
-                    let event = std::mem::take(&mut self.buffer);
-                    match Self::parse_event(&event) {
-                        Ok(Some(json)) => return Poll::Ready(Some(Ok(json))),
-                        Ok(None) => return Poll::Ready(None),
-                        Err(e) => return Poll::Ready(Some(Err(e))),
-                    }
-                }
-                return Poll::Ready(None);
-            }
-
-            // 3) 拉取底层流
-            match self.inner.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(LlmError::Network(e.to_string()))));
-                }
-                Poll::Ready(None) => {
-                    self.done = true;
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
     }
 }

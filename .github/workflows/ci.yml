@@ -1,0 +1,97 @@
+# CI 门禁（T-M0-3 + T-M0-9，AGENTS.md §6.3）
+#
+# 7 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny
+# 平台策略：M0-M4 Linux only（见 dev-plan T-M0-3、tech-stack.md §11）；
+#           macOS matrix 由 M5 补、Windows matrix 由 M6+ 补（features Q-07）。
+# 沙箱在非 Linux 环境降级为 NoopDriver（landlock/libseccomp 仅 Linux target 引入）。
+#
+# coverage 门禁（llvm-cov --fail-under-lines 80）由 T-M0-9 补充；M0 仅验证工具链就位。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --all-features
+        env:
+          # 测试不连真实服务（AGENTS.md §5.4），mock 凭证即可
+          OPENAI_API_KEY: sk-test-ci-mock-not-real
+
+  coverage:
+    name: cargo llvm-cov (≥80%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --workspace --all-features --fail-under-lines 80
+        env:
+          OPENAI_API_KEY: sk-test-ci-mock-not-real
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check licenses bans sources

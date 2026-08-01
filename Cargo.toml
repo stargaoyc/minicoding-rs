@@ -73,7 +73,7 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 indicatif = "0.17"
 anstream = "0.6"
 anstyle = "1.0"
-rustyline = "14.0"
+rustyline = "15.0"
 
 # 文件与代码处理（见 tech-stack.md §5）
 globset = "0.4"
