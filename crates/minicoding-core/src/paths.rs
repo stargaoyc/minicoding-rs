@@ -65,3 +65,13 @@ pub fn audit_log_path() -> Result<Utf8PathBuf, std::io::Error> {
 pub fn memory_dir() -> Result<Utf8PathBuf, std::io::Error> {
     Ok(minicoding_home()?.join("memory"))
 }
+
+/// MCP project 作用域批准库路径（`~/.minicoding/mcp_choices.toml`，0600 权限）。
+///
+/// 存储用户对 project 作用域 MCP server 的批准/拒绝决策（C-24）。
+///
+/// # Errors
+/// 当 home 目录无法确定时返回错误。
+pub fn mcp_choices_path() -> Result<Utf8PathBuf, std::io::Error> {
+    Ok(minicoding_home()?.join("mcp_choices.toml"))
+}

@@ -212,6 +212,14 @@ impl Storage for InMemoryStorage {
     fn delete(&self, _session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
         Box::pin(async move { Ok(()) })
     }
+    fn update_summary(
+        &self,
+        _session: &SessionId,
+        _summary: &str,
+    ) -> BoxFuture<'_, Result<(), StorageError>> {
+        // 测试 mock：摘要更新为 no-op（InMemoryStorage 不维护 index）
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 /// 简单 context manager（用于测试，持有消息列表）。

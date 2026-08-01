@@ -112,4 +112,4 @@ minicoding-rs/
 
 ## 6. 许可证
 
-MIT 或 Apache-2.0 双许可（待定）。
+AGPLv3

@@ -5,22 +5,26 @@
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
-use minicoding_context::SimpleContextManager;
-use minicoding_core::config::{RuntimeConfig, config_hash};
-use minicoding_core::memory::MemoryStore;
+use minicoding_context::{ContextManagerImpl, SimpleContextManager};
+use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
+use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
 use minicoding_core::policy::{PermissionPolicy, PermissionPrompter};
-use minicoding_core::provider::BoxFuture;
+use minicoding_core::provider::{BoxFuture, LlmProvider};
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
+use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
-use minicoding_memory::{AutoCategory, AutoMemory, LongTermMemory};
+use minicoding_memory::{
+    AutoCategory, AutoMemory, LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl,
+    inject_project_doc_sync,
+};
 use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter, ReplayPolicy};
-use minicoding_providers::OpenAiProvider;
+use minicoding_providers::{OpenAiProvider, TiktokenTokenizer};
 use minicoding_storage::{FileAuditSink, JsonlStorage};
 use minicoding_tools::{
     AutoMemoryWriter, MemoryCategory, MemoryWrite, register_readonly_tools, register_shell_tools,
-    register_write_tools,
+    register_task_tools, register_write_tools,
 };
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -82,12 +86,15 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 /// 从 CLI 参数构建 `Runtime`。
 ///
 /// `mode` 控制会话加载方式（`--resume`/`--replay`/`--fork-session`，T-M3-10）。
+/// `sandbox_override` 为 `Some` 时覆盖默认沙箱策略（`exec --sandbox` 用），
+/// 为 `None` 时用默认 `WorkspaceWrite { workdir, [] }`。
 /// 预加载会话时，调用方需在 `build_runtime` 后调用 `Runtime::restore_history`
 /// 将消息注入上下文管理器。
 ///
 /// # Errors
 /// API key 缺失、provider 构造失败、存储目录不可用、会话不存在或加载失败时返回错误。
 #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_lines)] // 组装流程线性展开，拆分反而降低可读性
 pub fn build_runtime(
     api_base: Option<&str>,
     api_key: Option<&str>,
@@ -95,6 +102,7 @@ pub fn build_runtime(
     workdir: &str,
     system: Option<&str>,
     mode: &SessionLoadMode,
+    sandbox_override: Option<SandboxPolicy>,
 ) -> Result<Runtime> {
     // 1. 加载配置
     let mut config = RuntimeConfig::default();
@@ -119,26 +127,91 @@ pub fn build_runtime(
         config.provider.model = m.to_string();
     }
 
-    // 2. 校验 API key
+    // 2. 校验 API key：CLI/env 未提供时尝试 OS keyring / 文件 fallback（T-M4-11，C-04）
     if config.provider.api_key.is_empty() {
-        anyhow::bail!("API key 未配置：请设置 OPENAI_API_KEY 环境变量或使用 --api-key 参数");
+        if let Some(key) = crate::cred::load_api_key().context("加载凭证失败")? {
+            config.provider.api_key = key;
+        }
+    }
+    if config.provider.api_key.is_empty() {
+        anyhow::bail!(
+            "API key 未配置：请设置 OPENAI_API_KEY 环境变量、使用 --api-key 参数，或通过 `minicoding cred store` 写入 keyring"
+        );
     }
 
-    // 3. 构造 provider
-    let provider = OpenAiProvider::new(
-        &config.provider.api_base,
-        &config.provider.api_key,
-        &config.provider.model,
-    )
-    .context("OpenAI provider 构造失败")?;
+    // 3. 构造 provider（Arc 共享：主推理 + L2 摘要压缩复用同一实例）
+    let provider: Arc<OpenAiProvider> = Arc::new(
+        OpenAiProvider::new(
+            &config.provider.api_base,
+            &config.provider.api_key,
+            &config.provider.model,
+        )
+        .context("OpenAI provider 构造失败")?,
+    );
+    // 主 provider 的 `Arc<dyn LlmProvider>` 视图：供 SessionSummarizer 作为
+    // secondary（降级兜底用），以及在 small 未配置时作 primary。
+    let main_provider_view: Arc<dyn LlmProvider> = provider.clone();
 
-    // 4. 构造 context manager
-    let ctx = match system {
-        Some(s) => SimpleContextManager::new(s.to_string()),
-        None => SimpleContextManager::with_default_system(),
+    // 3b. 构造 small provider（gap-4：[provider.small] 独立小 LLM 配置）
+    //     未配置时退化为 `None`，由后续逻辑回退到主 provider。
+    //     配置 `api_base`/`api_key` 为 `None` 时继承主 provider（典型：同一 OpenAI
+    //     账号但换便宜模型做摘要/压缩，降本见 `design.md` §3.8）。
+    let small_provider: Option<Arc<OpenAiProvider>> = match &config.provider.small {
+        Some(small_cfg) => match build_small_provider(small_cfg, &config.provider) {
+            Ok(p) => Some(Arc::new(p)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "small provider 构造失败，摘要/压缩回退到主 provider"
+                );
+                None
+            }
+        },
+        None => None,
     };
+    // 摘要用 provider：small 优先，回退主 provider（保证 L2 摘要始终可用）。
+    let summary_provider: Arc<dyn LlmProvider> = small_provider
+        .clone()
+        .map_or_else(|| main_provider_view.clone(), |p| p as Arc<dyn LlmProvider>);
 
-    // 5. 构造 storage
+    // 4. 解析 workdir（提前到 context manager 之前，供 ProjectDocLoader 使用）
+    let workdir_path = Utf8PathBuf::from(workdir)
+        .canonicalize_utf8()
+        .unwrap_or_else(|_| Utf8PathBuf::from(workdir));
+
+    // 4b. 加载项目文档（AGENTS.md 分层加载，T-M3-7）
+    //     从 repo_root 到 cwd 逐级加载，注入 system 段包裹 <project_doc> 边界（C-05）。
+    //     加载失败不阻塞启动（best effort，记 warn 日志）。
+    let base_system = system.map_or_else(
+        || "You are minicoding, a terminal AI coding assistant.".to_string(),
+        std::string::ToString::to_string,
+    );
+    let system_prompt = load_and_inject_project_doc(&workdir_path, &base_system);
+
+    // 5. 构造 context manager（T-M3-1/2/3：ContextManagerImpl + 4 级压缩 + 熔断）
+    //    注入 TiktokenTokenizer 做精确 token 计数；L2 摘要 provider 用 small（如有）
+    //    降本，回退到主 provider。分词器构造失败时降级为 SimpleContextManager（无压缩）。
+    let ctx: Arc<dyn minicoding_core::context::ContextManager> =
+        match TiktokenTokenizer::new_for_model(&config.provider.model) {
+            Ok(tokenizer) => {
+                // 128K 上下文窗口（gpt-4o 系列）；TODO: 按 model 精确查询 context window
+                let context_window = 128_000;
+                Arc::new(ContextManagerImpl::new(
+                    system_prompt.clone(),
+                    Arc::new(tokenizer),
+                    context_window,
+                    Some(summary_provider.clone()),
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Tiktoken 分词器构造失败（{e}），降级为 SimpleContextManager（无压缩）"
+                );
+                Arc::new(SimpleContextManager::new(system_prompt.clone()))
+            }
+        };
+
+    // 6. 构造 storage
     let sessions_dir = minicoding_core::paths::sessions_dir().context("无法确定会话存储目录")?;
     let storage = JsonlStorage::new(sessions_dir);
 
@@ -147,6 +220,8 @@ pub fn build_runtime(
     register_readonly_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
+    // T-M3-8：任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
+    register_task_tools(&mut tools);
 
     // 6b. 注册 memory.write 工具（T-M3-9：long_term + auto memory）
     //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
@@ -187,29 +262,66 @@ pub fn build_runtime(
     let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
     let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
 
-    // 9. 解析 workdir
-    let workdir_path = Utf8PathBuf::from(workdir)
-        .canonicalize_utf8()
-        .unwrap_or_else(|_| Utf8PathBuf::from(workdir));
-
-    // 10. 按 mode 加载会话（T-M3-10a/b：resume/replay/fork）
+    // 9. 按 mode 加载会话（T-M3-10a/b：resume/replay/fork）
     //     - Resume/Replay：原 id，原存储文件追加写；
     //     - Fork：新 id，复制前缀消息到新文件（原文件不变）。
     //     消息不在此处注入上下文，由调用方 `restore_history` 完成回填。
     let config_hash_val = config_hash(&config);
     let session = load_session_by_mode(&storage, mode, workdir_path.clone(), config_hash_val)?;
 
-    // 11. 组装 Runtime
+    // 10. 构造 SessionSummarizer（gap-5/T-M3-6：会话结束时生成摘要落盘 index.json）
+    //     primary = small provider（如有，便宜模型降本），secondary = 主 provider
+    //     （降级兜底）。降级链终端为启发式兜底（C-29），永不失败。
+    //     small_provider 已 clone 给 summary_provider；此处再用 main_provider_view
+    //     作为 secondary。
+    let summarizer_primary: Arc<dyn LlmProvider> = summary_provider.clone();
+    let summarizer: Arc<dyn SessionSummarizer> = Arc::new(SessionSummarizerImpl::new(
+        summarizer_primary,
+        Some(main_provider_view),
+    ));
+
+    // 11. 组装 Runtime（provider/ctx 已是 Arc，直接传入）
     let mut builder = RuntimeBuilder::new()
-        .provider(Arc::new(provider))
-        .context(Arc::new(ctx))
+        .provider(provider)
+        .context(ctx)
         .storage(Arc::new(storage))
         .tools(tools)
         .config(config)
-        .workdir(workdir_path)
+        .workdir(workdir_path.clone())
         .policy(policy)
         .prompter(prompter)
-        .audit(audit);
+        .audit(audit)
+        .session_summarizer(summarizer);
+
+    // 11b. 注入沙箱驱动 + 策略（T-M4-9，C-22：沙箱为第二道防线）
+    //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。
+    //      沙箱驱动由 `detect_driver()` 探测（Linux Landlock / 降级 NoopDriver）。
+    let sandbox_policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+        workdir: workdir_path.clone(),
+        writable: Vec::new(),
+    });
+    #[cfg(feature = "sandbox")]
+    {
+        let driver: Arc<dyn SandboxDriver> = Arc::from(minicoding_sandbox::detect_driver());
+        builder = builder
+            .sandbox_driver(driver)
+            .sandbox_policy(sandbox_policy);
+    }
+    #[cfg(not(feature = "sandbox"))]
+    {
+        // sandbox feature 未启用时不注入（RuntimeBuilder 默认 NoopDriver + WorkspaceWrite）。
+        let _ = sandbox_policy;
+    }
+
+    // 11c. 注入 journal（`file-undo` feature 启用时，C-28：/undo 可用）
+    #[cfg(feature = "file-undo")]
+    {
+        let journal: Arc<dyn minicoding_core::journal::Journal> = Arc::new(
+            minicoding_journal::FileChangeJournal::new(Some(workdir_path.clone())),
+        );
+        builder = builder.journal(journal);
+    }
+
     if let Some(s) = session {
         builder = builder.session(s);
     }
@@ -288,4 +400,53 @@ fn load_messages(storage: &JsonlStorage, session_id: &str) -> Result<Vec<Message
         anyhow::bail!("会话 {session_id} 不存在或无消息");
     }
     Ok(messages)
+}
+
+/// 加载项目文档（AGENTS.md 分层加载）并注入 system prompt（T-M3-7）。
+///
+/// 从 `workdir` 向上探测 `repo_root`（`.git`/`.hg`/`.svn`），再从 `repo_root`
+/// 到 `workdir` 逐级加载 `AGENTS.md`/`CLAUDE.md`/`.cursorrules`，拼接后包裹
+/// `<project_doc>` 边界注入 system 段末尾（C-05：项目记忆是数据非指令）。
+///
+/// 加载失败不阻塞启动（best effort）：记 `warn` 日志，返回原 system prompt。
+fn load_and_inject_project_doc(workdir: &Utf8PathBuf, base_system: &str) -> String {
+    let repo_root = minicoding_memory::find_repo_root(workdir).unwrap_or_else(|| workdir.clone());
+    let loader = ProjectDocLoaderImpl::new(repo_root, workdir.clone());
+    match loader.load_sync() {
+        Ok(doc) => match inject_project_doc_sync(base_system, &doc) {
+            Ok(injected) => injected,
+            Err(e) => {
+                tracing::warn!("注入项目文档失败: {e}");
+                base_system.to_string()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("加载项目文档失败: {e}");
+            base_system.to_string()
+        }
+    }
+}
+
+/// 根据 `[provider.small]` 配置构造 small provider（gap-4，M2 roadmap L90）。
+///
+/// `small_cfg.api_base`/`api_key` 为 `None` 时继承主 `[provider]` 配置：
+/// 让用户用便宜模型（如 `gpt-4o-mini`）做摘要/压缩/记忆提取，降本见
+/// `design.md` §3.8。
+///
+/// # Errors
+/// `OpenAiProvider::new` 失败时返回 `LlmError` 描述（reqwest 初始化失败、
+/// tiktoken 词表加载失败等）。
+fn build_small_provider(
+    small_cfg: &SmallProviderConfig,
+    main_cfg: &ProviderConfig,
+) -> Result<OpenAiProvider, minicoding_core::model::LlmError> {
+    let api_base = small_cfg
+        .api_base
+        .clone()
+        .unwrap_or_else(|| main_cfg.api_base.clone());
+    let api_key = small_cfg
+        .api_key
+        .clone()
+        .unwrap_or_else(|| main_cfg.api_key.clone());
+    OpenAiProvider::new(&api_base, &api_key, &small_cfg.model)
 }

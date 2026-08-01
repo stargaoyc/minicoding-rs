@@ -257,28 +257,27 @@ minicoding-context/src/
 
 ```
 minicoding-policy/src/
-├── lib.rs                 # 工厂：build_policy(cfg) / build_prompter(cfg)
-├── policy.rs              # PolicyEngine 实现 PermissionPolicy
-├── builtin.rs             # 内置不可覆盖黑名单（危险命令/SSRF/敏感路径，C-02）
-├── mode.rs                # PermissionMode / ApprovalMode / Preset 枚举与解析（见 api.md §2.4）
-├── store.rs               # 决策持久化（policy.toml，AllowAlways/DenyAlways）
-├── prompter/
-│   ├── mod.rs
-│   ├── interactive.rs     # InteractivePrompter（CLI TTY）
-│   ├── non_interactive.rs # NonInteractivePrompter（非 TTY 策略化）
-│   ├── tui.rs             # TuiPrompter（TUI 非阻塞）
-│   └── callback.rs        # CallbackPrompter（SDK 闭包）
-├── risk.rs                # 命令风险解释（granular approval policies，见 design.md §9.6）
+├── lib.rs                 # 工厂：build_policy(cfg) / build_prompter(cfg) + 公共 re-export
+├── builtin.rs             # 内置不可覆盖黑名单（危险命令/SSRF/敏感路径，C-02）+ AGENTS.md 写保护（C-23）
+├── mode.rs                # ApprovalMode / Preset 枚举与解析（见 api.md §2.4）
+├── prompter.rs            # InteractivePrompter（CLI TTY）+ NonInteractivePrompter（非 TTY）+ CallbackPrompter（SDK 闭包，T-M4-11）
+├── redact.rs              # 敏感数据脱敏（.env/api_key/password 模式替换，T-M4-11，C-04）
+├── ssrf.rs                # SSRF 防护（RFC1918/链路本地/回环/CGNAT 拒绝，T-M4-11，C-02）
+├── replay.rs              # ReplayPolicy（replay 模式禁副作用，C-06）
 └── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
 ```
+
+> **说明**：`Prompter` 各实现集中在单文件 `prompter.rs`（非子目录），因为实现体量较小且共享 `PermissionPrompter` trait 与辅助逻辑；`TuiPrompter` 将在 M7 拆出独立模块。决策持久化（`policy.toml` AllowAlways/DenyAlways）暂未在 policy crate 实现，由 `minicoding-core::policy` trait 抽象 + 调用方注入，M5+ 补 `store.rs`。
 
 ### 3.3 关键设计点
 
 - **黑名单最高优先级**：`builtin.rs` 硬编码危险命令/SSRF/敏感路径，任何用户配置与 Hook 都无法覆盖（C-02）。
 - **ApprovalMode × SandboxPolicy 正交**：`mode.rs` 解析预设并展开为默认 `Verdict` 与 `SandboxPolicy`（后者传给 sandbox crate）。
-- **prompter 独立**：决策（policy）与交互（prompter）分离，解决 broadcast 事件总线无法承载点对点回复的架构缺陷（见 design.md §9.1）。
+- **prompter 独立**：决策（policy）与交互（prompter）分离，解决 broadcast 事件总线无法承载点对点回复的架构缺陷（见 design.md §9.1）。`CallbackPrompter`（T-M4-11）为 M8 SDK 提供闭包注入入口。
 - **AGENTS.md 写保护**：`builtin.rs` 对 `AGENTS.md`/`CLAUDE.md` 写操作注入 `Verdict::Ask` 且不可 `AllowAlways`（C-23）。
-- **依赖**：`minicoding-core` + `regex`（黑名单）+ `toml`/`serde`（policy.toml）+ `camino`。
+- **敏感数据脱敏（T-M4-11）**：`redact.rs` 在 `fs.read` 读取 `.env`/凭证/`*.pem` 等敏感文件时把 `KEY=value`/`KEY: value`/`Bearer xxx`/`AKIA…` 模式替换为 `***`，避免回灌 LLM 或落 jsonl（C-04）。字段名归一化（`-`/空白 → `_`）后匹配关键词，覆盖 `kebab-case`/`snake_case` 命名差异。
+- **SSRF 防护（T-M4-11）**：`ssrf.rs` 提供 `check_url`/`check_host`/`check_ip`，拒绝 RFC1918 私网、链路本地 `169.254/16`（云元数据）、回环 `127/8`/`::1`、CGNAT `100.64/10`、`0.0.0.0/8`、IPv6 ULA `fc00::/7`。用 `Url::host()` 而非 `host_str()` 取主机，避免 IPv6 字面量带方括号解析失败。`SsrfOptions::local_dev()` 允许回环（本地 Ollama）。
+- **依赖**：`minicoding-core` + `regex`（黑名单/脱敏）+ `url`（SSRF 主机解析，轻量无 IO）+ `toml`/`serde`（policy.toml）+ `camino`。
 
 ---
 
@@ -578,10 +577,11 @@ minicoding-tools/src/
 
 - **路径沙箱委托**：`util::path` 调用 `minicoding-policy::path_sandbox::resolve_under`，不重复实现。
 - **shell.run**：执行前调 `SandboxDriver::apply`（来自 `minicoding-sandbox`）应用 OS 沙箱。
+- **fs.read 敏感文件脱敏（T-M4-11，C-04）**：`fs::read::is_sensitive_path` 识别 `.env`/`credentials`/`*.pem`/`*.key`/`*.pfx`/`*.p12` 及文件名含 `secret`/`password`/`token` 的文件，调用 `minicoding_policy::redact` 把字段值替换为 `***` 再返回，避免密钥回灌 LLM。
 - **fs.write/edit/delete + Journal**：成功后调 `Journal::record`（来自 `minicoding-journal`），仅 `file-undo=true` 时生效。
 - **task.create/update/list**：增量模型，状态机 `Pending→InProgress→Completed` 不可跳跃（C-31）。
 - **mcp::wrapper**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
-- **依赖**：`minicoding-core` + 按需依赖 context/policy/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。
+- **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）+ 按需依赖 context/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。
 
 ---
 
@@ -614,8 +614,9 @@ minicoding-cli/src/
 │   ├── doctor.rs         # minicoding doctor --security 自检
 │   ├── audit.rs          # minicoding audit list/stats
 │   ├── mcp.rs            # minicoding mcp list/approve/reset-project-choices
+│   ├── cred.rs           # minicoding cred store/load/delete（T-M4-11）
 │   └── session_cmd.rs    # minicoding session list/delete（T-M3-10c）
-└── cred.rs               # 凭证读取（env / keyring）
+└── cred.rs               # 凭证存储（OS keyring + 文件 fallback 0600，T-M4-11，C-04）
 ```
 
 ### 12.3 关键设计点
@@ -623,8 +624,9 @@ minicoding-cli/src/
 - **零业务逻辑**：所有决策委托 Runtime；CLI 只做 IO 与渲染。
 - **feature 组装**：`builder.rs` 根据 cargo feature 启用的实现 crate 装配 Runtime（如未启用 `minicoding-sandbox` 则用 core 的 `NoopDriver`）。
 - **非 TTY 降级**：检测 `stdout.is_terminal()`，非交互时禁 spinner/颜色，权限走 `NonInteractivePrompter`。
+- **凭证管理（T-M4-11，C-04）**：`cred.rs` 实现 OS keyring 优先 + 文件 fallback（`~/.minicoding/credentials` 0600 权限 + 原子 rename）的凭证存储；`minicoding cred store/load/delete` 子命令从 stdin 读取 key（不回显），`load` 不打印 key 本身只验证存在性。keyring 不可用时降级并打 warn 日志。
 - **退出码**：成功 0；运行时错误 1；配置错误 2；中断 130。
-- **依赖**：`minicoding-core` + 各实现 crate（按 feature）+ `clap`/`indicatif`/`anstream`/`rustyline`/`anyhow`。
+- **依赖**：`minicoding-core` + 各实现 crate（按 feature）+ `clap`/`indicatif`/`anstream`/`rustyline`/`keyring`/`anyhow`。
 
 ---
 

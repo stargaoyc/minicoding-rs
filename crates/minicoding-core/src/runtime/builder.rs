@@ -7,11 +7,16 @@
 
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
+use crate::journal::Journal;
+use crate::memory::SessionSummarizer;
 use crate::model::Session;
 use crate::policy::{NoopPolicy, NoopPrompter, PermissionPolicy, PermissionPrompter};
 use crate::provider::LlmProvider;
 use crate::runtime::Runtime;
 use crate::runtime::event::EventBus;
+use crate::sandbox::{
+    DenialDetector, NoopDriver, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
+};
 use crate::storage::{AuditSink, NoopAudit, Storage};
 use crate::tool::ToolRegistry;
 use camino::Utf8PathBuf;
@@ -34,6 +39,14 @@ pub struct RuntimeBuilder {
     cancel_token: Option<CancellationToken>,
     /// 预加载会话（`--resume`/`--fork-session` 用，默认 `None` → 新建）。
     session: Option<Session>,
+    /// 会话摘要生成器（默认 `None`，会话结束时由 CLI 调用 `Runtime::summarize_session`）。
+    session_summarizer: Option<Arc<dyn SessionSummarizer>>,
+    /// OS 沙箱驱动（默认 `NoopDriver`，M4 由 CLI 注入 `detect_driver()` 结果）。
+    sandbox_driver: Option<Arc<dyn SandboxDriver>>,
+    /// OS 沙箱策略（默认 `WorkspaceWrite { workdir, [] }`，由 `--sandbox`/`--preset` 设定）。
+    sandbox_policy: Option<SandboxPolicy>,
+    /// 文件改动 journal（默认 `None`，仅 `file-undo` feature 启用时注入）。
+    journal: Option<Arc<dyn Journal>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -60,6 +73,10 @@ impl RuntimeBuilder {
             audit: None,
             cancel_token: None,
             session: None,
+            session_summarizer: None,
+            sandbox_driver: None,
+            sandbox_policy: None,
+            journal: None,
         }
     }
 
@@ -159,6 +176,45 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置会话摘要生成器（默认 `None`）。
+    ///
+    /// 注入后 CLI 可调用 `Runtime::summarize_session` 在会话结束时生成摘要
+    /// 并落盘 `index.json`（T-M3-6）。未注入时 `summarize_session` 为 no-op。
+    #[must_use]
+    pub fn session_summarizer(mut self, s: Arc<dyn SessionSummarizer>) -> Self {
+        self.session_summarizer = Some(s);
+        self
+    }
+
+    /// 设置 OS 沙箱驱动（默认 `NoopDriver`，M4 由 CLI 注入 `detect_driver()`）。
+    ///
+    /// 注入后 `shell.run` 在 spawn 子进程前调 `SandboxDriver::apply` 应用内核级
+    /// 沙箱（第二道防线，C-22）。未注入时退化为 `NoopDriver`（无 OS 隔离）。
+    #[must_use]
+    pub fn sandbox_driver(mut self, d: Arc<dyn SandboxDriver>) -> Self {
+        self.sandbox_driver = Some(d);
+        self
+    }
+
+    /// 设置 OS 沙箱策略（默认 `WorkspaceWrite { workdir, [] }`）。
+    ///
+    /// 由 `--sandbox`/`--preset` 解析后注入。与 `sandbox_driver` 配套使用。
+    #[must_use]
+    pub fn sandbox_policy(mut self, p: SandboxPolicy) -> Self {
+        self.sandbox_policy = Some(p);
+        self
+    }
+
+    /// 设置文件改动 journal（默认 `None`，仅 `file-undo` feature 启用时注入）。
+    ///
+    /// 注入后 `fs.write`/`fs.edit`/`fs.delete` 成功后调 `Journal::record` 记录
+    /// 改动用于 `/undo`（C-28）。未注入时不记录，`/undo` 不可用。
+    #[must_use]
+    pub fn journal(mut self, j: Arc<dyn Journal>) -> Self {
+        self.journal = Some(j);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// # Errors
@@ -173,6 +229,14 @@ impl RuntimeBuilder {
             .session
             .unwrap_or_else(|| Session::new(workdir.clone(), self.config_hash));
 
+        // 沙箱策略默认 `WorkspaceWrite { workdir, [] }`（auto 预设，C-22 默认隔离）。
+        let sandbox_policy = self
+            .sandbox_policy
+            .unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+                workdir: workdir.clone(),
+                writable: Vec::new(),
+            });
+
         Ok(Runtime {
             provider,
             ctx,
@@ -186,6 +250,12 @@ impl RuntimeBuilder {
             prompter: self.prompter.unwrap_or_else(|| Arc::new(NoopPrompter)),
             audit: self.audit.unwrap_or_else(|| Arc::new(NoopAudit)),
             cancel_token: self.cancel_token.unwrap_or_default(),
+            session_summarizer: self.session_summarizer,
+            sandbox_driver: self.sandbox_driver.unwrap_or_else(|| Arc::new(NoopDriver)),
+            sandbox_policy,
+            journal: self.journal,
+            denial_detector: DenialDetector::new(),
+            sandbox_breaker: SandboxCircuitBreaker::default_thresholds(),
         })
     }
 }

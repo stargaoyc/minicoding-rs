@@ -15,8 +15,11 @@
 
 pub mod config;
 pub mod context;
+pub mod journal;
+pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod otel;
 pub mod paths;
 pub mod policy;
 pub mod provider;
@@ -29,12 +32,15 @@ pub mod tool;
 pub mod prelude {
     pub use crate::config::RuntimeConfig;
     pub use crate::context::{ContextManager, ContextSnapshot};
+    pub use crate::journal::{ChangeEntry, DiffEntry, FileChange, Journal, UndoReport};
+    pub use crate::mcp::{McpClient, McpScope, McpServerConfig, McpTransport, ToolHint};
     pub use crate::memory::{MemoryStore, ProjectDocLoader};
     pub use crate::model::{
-        Attachment, ContentBlock, ContextHint, LlmError, MemoryError, Message, MessageMeta,
-        MessageSource, PolicyError, PromptError, Role, RuntimeError, Session, SessionId,
-        SessionMeta, SideEffect, StopReason, StorageError, Task, TaskStatus, ToolCall, ToolCallId,
-        ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema, TurnOutcome, UserInput,
+        Attachment, ContentBlock, ContextHint, JournalError, LlmError, McpError, MemoryError,
+        Message, MessageMeta, MessageSource, PolicyError, PromptError, Role, RuntimeError, Session,
+        SessionId, SessionMeta, SideEffect, StopReason, StorageError, Task, TaskStatus, ToolCall,
+        ToolCallId, ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema, TurnOutcome,
+        UserInput,
     };
     pub use crate::policy::{
         Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionPolicy, PermissionPrompt,
@@ -45,7 +51,11 @@ pub mod prelude {
         ToolCallDelta, Usage,
     };
     pub use crate::runtime::{Runtime, RuntimeBuilder};
-    pub use crate::sandbox::{NoopDriver, SandboxDriver, SandboxError, SandboxPolicy};
+    pub use crate::sandbox::{
+        BreakerState, DenialDetector, DenialMatch, DenialSignature, NoopDriver,
+        SandboxCircuitBreaker, SandboxDriver, SandboxError, SandboxPolicy, hard_trip_summary,
+        soft_trip_reminder,
+    };
     pub use crate::storage::{AuditKind, AuditRecord, AuditSink, NoopAudit, Storage};
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
 }

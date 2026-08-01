@@ -9,6 +9,8 @@
 
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
+use crate::journal::Journal;
+use crate::memory::SessionSummarizer;
 use crate::model::{
     Message, RuntimeError, Session, SideEffect, StopReason, ToolCall, ToolCallId, ToolResult,
     TurnOutcome, UserInput,
@@ -17,6 +19,9 @@ use crate::policy::{Decision, PermissionContext, PermissionPolicy, PermissionPro
 use crate::provider::{ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
 use crate::runtime::event::{Event, EventBus};
+use crate::sandbox::{
+    BreakerState, DenialDetector, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
+};
 use crate::storage::{AuditKind, AuditRecord, AuditSink, Storage};
 use crate::tool::{ToolContext, ToolRegistry};
 use camino::Utf8PathBuf;
@@ -44,6 +49,21 @@ pub struct Runtime {
     pub(crate) audit: Arc<dyn AuditSink>,
     /// Ctrl-C 取消 token（graceful stop，C-13：已落盘消息不丢失）。
     pub(crate) cancel_token: CancellationToken,
+    /// 会话摘要生成器（可选，T-M3-6）。
+    ///
+    /// `None` 时 `summarize_session` 为 no-op；`Some` 时由 CLI 在会话退出前
+    /// 显式调用 `summarize_session`，将摘要落盘到 `index.json` 供跨会话恢复。
+    pub(crate) session_summarizer: Option<Arc<dyn SessionSummarizer>>,
+    /// OS 沙箱驱动（M4，`shell.run` 在 spawn 子进程前 `apply`，C-22）。
+    pub(crate) sandbox_driver: Arc<dyn SandboxDriver>,
+    /// OS 沙箱策略（M4，与 `sandbox_driver` 配套）。
+    pub(crate) sandbox_policy: SandboxPolicy,
+    /// 文件改动 journal（M4，可选，`fs.write/edit/delete` 成功后 `record`，C-28）。
+    pub(crate) journal: Option<Arc<dyn Journal>>,
+    /// 沙箱拒绝检测器（无状态，T-M4-5）。
+    pub(crate) denial_detector: DenialDetector,
+    /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过）。
+    pub(crate) sandbox_breaker: SandboxCircuitBreaker,
 }
 
 impl Runtime {
@@ -114,6 +134,58 @@ impl Runtime {
         Ok(())
     }
 
+    /// 生成会话摘要并落盘 `index.json`（T-M3-6）。
+    ///
+    /// 在会话退出前调用：从 `ContextManager` 快照消息 → 调注入的
+    /// `SessionSummarizer` 生成摘要（降级链：主 provider → 备用 → 启发式兜底，
+    /// C-29 永不失败）→ `Storage::update_summary` 落盘。
+    ///
+    /// `session_summarizer` 未注入或会话无消息时为 no-op。摘要失败仅记 `warn`
+    /// 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
+    ///
+    /// # Errors
+    /// 仅当 `Storage::update_summary` 失败时返回 `RuntimeError::Storage`；
+    /// 摘要生成本身永不失败（启发式兜底，C-29）。
+    pub async fn summarize_session(&self) -> Result<(), RuntimeError> {
+        let Some(summarizer) = &self.session_summarizer else {
+            return Ok(());
+        };
+        let snap = self.ctx.snapshot().await;
+        if snap.messages.is_empty() {
+            return Ok(());
+        }
+        let summary = match summarizer.summarize(&snap.messages).await {
+            Ok(s) => s,
+            Err(e) => {
+                // 理论不可达：启发式兜底恒成功（C-29）。但保留兜底以防实现 bug。
+                tracing::warn!(
+                    error = %e,
+                    session = %self.session.id,
+                    "会话摘要生成失败（理论不可达，C-29 兜底应保证成功）"
+                );
+                return Ok(());
+            }
+        };
+        if let Err(e) = self
+            .storage
+            .update_summary(&self.session.id, &summary)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                session = %self.session.id,
+                "会话摘要落盘失败（best effort，不阻塞退出）"
+            );
+            return Err(RuntimeError::Storage(e));
+        }
+        tracing::info!(
+            session = %self.session.id,
+            summary_chars = summary.chars().count(),
+            "会话摘要已落盘"
+        );
+        Ok(())
+    }
+
     /// 驱动单轮对话（用户输入 → 最终回复或失败）。
     ///
     /// 循环不变量（见 `design.md` §2.1）：
@@ -126,12 +198,16 @@ impl Runtime {
     /// - 重复检测：连续 ≥3 轮相同工具调用集合 → 判定死循环提前终止
     /// - `turn_timeout`：整个 turn 超时（默认 600s）→ `Stopped`
     /// - Ctrl-C cancel：`cancel()` 触发 → `Interrupted`（已落盘消息不丢失）
+    /// - 沙箱拒绝熔断（C-30）：单 turn 内 ≥3 次拒绝注入提醒，≥5 次强制 `TurnEnd`
     ///
     /// # Errors
     /// LLM 调用失败、工具执行失败、存储失败等返回 `RuntimeError`。
     pub async fn run_turn(&self, user_input: UserInput) -> Result<TurnOutcome, RuntimeError> {
         let span = tracing::info_span!("turn", session = %self.session.id);
         let _enter = span.enter();
+
+        // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
+        self.sandbox_breaker.reset();
 
         // 1. 构造用户消息并入库
         let user_msg = Message::user_text(user_input.text);
@@ -315,7 +391,10 @@ impl Runtime {
         &self,
         calls: &[ToolCall],
     ) -> Result<Vec<(ToolCallId, ToolResult)>, RuntimeError> {
-        let ctx = ToolContext::new(self.workdir.clone(), self.session.id.clone());
+        // 构造 ToolContext：注入沙箱驱动/策略/journal（M4，shell.run/fs 用）
+        let ctx = ToolContext::new(self.workdir.clone(), self.session.id.clone())
+            .with_sandbox(self.sandbox_driver.clone(), self.sandbox_policy.clone())
+            .with_journal_opt(self.journal.clone());
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
         let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
@@ -459,7 +538,23 @@ impl Runtime {
                     call_id: call.id.clone(),
                     tool: call.name.clone(),
                 });
-                let result = self.tools.dispatch(call, ctx).await?;
+                let result = match self.tools.dispatch(call, ctx).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // 沙箱拒绝检测（T-M4-5）：识别 EPERM/EACCES/landlock 等
+                        // 内核级硬反馈，更新熔断器（C-30 不可被 LLM 绕过）。
+                        if let Some(denial_result) =
+                            self.handle_sandbox_denial(&call.id, &call.name, &e)
+                        {
+                            return Ok(denial_result);
+                        }
+                        // 非 denial 错误：原样传播
+                        return Err(RuntimeError::Tool {
+                            tool: call.name.clone(),
+                            source: e,
+                        });
+                    }
+                };
                 self.events.emit(Event::ToolCallFinished {
                     call_id: call.id.clone(),
                     result: result.clone(),
@@ -467,6 +562,70 @@ impl Runtime {
                 Ok((call.id.clone(), result))
             }
         }
+    }
+
+    /// 沙箱拒绝检测与熔断处理（T-M4-5）。
+    ///
+    /// 检测工具错误是否为沙箱拒绝（EPERM/EACCES/landlock 等）。若是：
+    /// - 更新熔断器计数；
+    /// - 软熔断（≥3 次）：附加方向提醒返回；
+    /// - 硬熔断（≥5 次）：返回带总结的错误；
+    /// - 未熔断：返回带 denial 标识的错误，提示 LLM/用户。
+    ///
+    /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
+    /// 返回 `None` 表示非 denial，调用方原样传播错误。
+    fn handle_sandbox_denial(
+        &self,
+        call_id: &ToolCallId,
+        tool: &str,
+        error: &crate::model::ToolError,
+    ) -> Option<(ToolCallId, ToolResult)> {
+        let error_text = error.to_string();
+        let m = self.denial_detector.detect(tool, &error_text)?;
+        tracing::warn!(
+            tool = %m.tool,
+            reason = m.signature.reason,
+            platform = m.signature.platform,
+            "sandbox denial detected"
+        );
+        let state = self.sandbox_breaker.record_denial();
+        let result = match state {
+            BreakerState::HardTripped => {
+                let summary = crate::sandbox::hard_trip_summary(self.sandbox_breaker.count());
+                tracing::warn!(
+                    count = self.sandbox_breaker.count(),
+                    "sandbox circuit breaker hard-tripped"
+                );
+                ToolResult {
+                    content: crate::model::ToolContent::Text(format!(
+                        "{summary}\n原始错误：{error_text}"
+                    )),
+                    is_error: true,
+                    metadata: crate::model::ToolResultMeta::default(),
+                }
+            }
+            BreakerState::SoftTripped => {
+                let reminder = crate::sandbox::soft_trip_reminder(self.sandbox_breaker.count());
+                tracing::warn!(
+                    count = self.sandbox_breaker.count(),
+                    "sandbox circuit breaker soft-tripped"
+                );
+                ToolResult {
+                    content: crate::model::ToolContent::Text(format!(
+                        "沙箱拒绝（{reason}）：{error_text}\n\n{reminder}",
+                        reason = m.signature.reason
+                    )),
+                    is_error: true,
+                    metadata: crate::model::ToolResultMeta::default(),
+                }
+            }
+            BreakerState::Closed => ToolResult::err_text(format!(
+                "sandbox denied ({reason}): {error_text}\n\
+                 提示：可切换更宽松的沙箱预设（如 --sandbox workspace-write）重试",
+                reason = m.signature.reason
+            )),
+        };
+        Some((call_id.clone(), result))
     }
 
     /// 记录权限决策审计（C-01 决策可追溯，AGENTS.md §5.5）。

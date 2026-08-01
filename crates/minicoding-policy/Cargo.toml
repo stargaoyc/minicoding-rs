@@ -18,6 +18,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 regex = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -27,23 +27,41 @@
 
 mod builder;
 mod commands;
+mod cred;
+mod otel_init;
 mod session;
 
 use anyhow::{Context, Result};
 use builder::SessionLoadMode;
 use clap::{Parser, Subcommand};
-use commands::SessionCommand;
+#[cfg(feature = "mcp")]
+use commands::McpCommand;
+use commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
 use minicoding_core::model::{TurnOutcome, UserInput};
 use minicoding_core::runtime::Event;
 
-/// 顶层子命令（除默认运行模式外的独立操作，T-M3-10c）。
+/// 顶层子命令（除默认运行模式外的独立操作）。
 ///
-/// `session list`/`delete` 不构建 `Runtime`，直接复用存储层同步方法。
+/// `session`/`doctor`/`mcp`/`cred` 不构建 `Runtime`，无需 API key。
+/// `exec` 构建完整 `Runtime` 但强制非交互（CI 场景）。
 #[derive(Subcommand, Debug)]
 enum Command {
     /// 会话管理（列出 / 删除）。
     #[command(name = "session")]
     Session(SessionCommand),
+    /// 非交互批量执行（CI/脚本场景，T-M4-10）。
+    #[command(name = "exec")]
+    Exec(ExecCommand),
+    /// 安全自检（沙箱驱动/硬化状态，T-M4-10）。
+    #[command(name = "doctor")]
+    Doctor(DoctorCommand),
+    /// MCP server 管理（list/approve/reject/reset，T-M4-10，`mcp` feature）。
+    #[cfg(feature = "mcp")]
+    #[command(name = "mcp")]
+    Mcp(McpCommand),
+    /// 凭证管理（store/load/delete，T-M4-11）。
+    #[command(name = "cred")]
+    Cred(CredCommand),
 }
 
 /// minicoding — 终端 AI Coding 助手
@@ -136,17 +154,35 @@ fn resolve_session_mode(cli: &Cli) -> Result<SessionLoadMode> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 初始化日志
-    let filter = if cli.verbose { "debug" } else { "warn" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    // 初始化日志/trace（T-M0-4：OTLP 导出 + 降级 fmt）
+    // `OTEL_EXPORTER_OTLP_ENDPOINT` 配置且 `otel` feature 启用时安装 OTLP layer；
+    // 否则降级为纯本地 fmt 日志。guard drop 时 flush OTLP exporter。
+    let _otel_guard = otel_init::init_tracing(cli.verbose);
 
-    // 顶层子命令分派（如 `session list`/`delete`）：不构建 Runtime，无需 API key。
-    if let Some(Command::Session(sess_cmd)) = &cli.command {
-        commands::run_session_command(sess_cmd).context("session 子命令失败")?;
-        return Ok(());
+    // 顶层子命令分派：session/doctor/mcp 不构建 Runtime；exec 构建 Runtime 但非交互。
+    match &cli.command {
+        Some(Command::Session(sess_cmd)) => {
+            commands::run_session_command(sess_cmd).context("session 子命令失败")?;
+            return Ok(());
+        }
+        Some(Command::Exec(exec_cmd)) => {
+            let code = commands::exec::run_exec_command(exec_cmd).context("exec 子命令失败")?;
+            std::process::exit(code);
+        }
+        Some(Command::Doctor(doctor_cmd)) => {
+            commands::doctor::run_doctor_command(doctor_cmd);
+            return Ok(());
+        }
+        #[cfg(feature = "mcp")]
+        Some(Command::Mcp(mcp_cmd)) => {
+            commands::mcp::run_mcp_command(mcp_cmd, &cli.workdir).context("mcp 子命令失败")?;
+            return Ok(());
+        }
+        Some(Command::Cred(cred_cmd)) => {
+            commands::run_cred_command(cred_cmd).context("cred 子命令失败")?;
+            return Ok(());
+        }
+        None => {}
     }
 
     // 解析会话加载模式（互斥校验）
@@ -156,7 +192,7 @@ fn main() -> Result<()> {
     // 分派：`--session` 或无 prompt → 交互 REPL；有 prompt 且无 `--session` → 单次
     let interactive = cli.session || cli.prompt.is_none();
 
-    // 构建 Runtime
+    // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
     let rt = builder::build_runtime(
         cli.api_base.as_deref(),
         cli.api_key.as_deref(),
@@ -164,6 +200,7 @@ fn main() -> Result<()> {
         &cli.workdir,
         cli.system.as_deref(),
         &mode,
+        None,
     )
     .context("构建 Runtime 失败")?;
 

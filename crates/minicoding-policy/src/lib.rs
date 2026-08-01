@@ -16,11 +16,17 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod builtin;
+mod mode;
 mod path_sandbox;
 mod prompter;
+mod redact;
 mod replay;
+mod ssrf;
 
 pub use builtin::BuiltinPolicy;
+pub use mode::{ApprovalMode, Preset};
 pub use path_sandbox::{PathSandboxError, resolve_under};
-pub use prompter::{InteractivePrompter, NonInteractivePrompter};
+pub use prompter::{CallbackPrompter, InteractivePrompter, NonInteractivePrompter};
+pub use redact::redact;
 pub use replay::ReplayPolicy;
+pub use ssrf::{SsrfError, SsrfOptions, check_host, check_ip, check_url};

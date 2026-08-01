@@ -17,3 +17,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+time = { workspace = true }

@@ -24,6 +24,12 @@ pub enum RuntimeError {
     Storage(#[from] StorageError),
     #[error("memory: {0}")]
     Memory(#[from] MemoryError),
+    #[error("journal: {0}")]
+    Journal(#[from] JournalError),
+    #[error("mcp: {0}")]
+    Mcp(#[from] McpError),
+    #[error("sandbox: {0}")]
+    Sandbox(#[from] crate::sandbox::SandboxError),
     #[error("config: {0}")]
     Config(String),
     #[error("interrupted")]
@@ -130,4 +136,53 @@ pub enum MemoryError {
     /// 路径非 UTF-8 或不可解析。
     #[error("path: {0}")]
     Path(String),
+}
+
+/// 文件改动 journal 错误（见 `design.md` §17、`rules.md` C-28）。
+///
+/// `Conflict` 用于 `/undo` 冲突检测：文件已被外部编辑，当前内容与 `after` 不一致，
+/// 不强行覆盖（C-28）。调用方将冲突文件记入 `UndoReport::failed_files`。
+#[derive(thiserror::Error, Debug)]
+pub enum JournalError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// 文件已被外部改动，与记录的 `after` 不一致（冲突，不强行覆盖，C-28）。
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// 没有可撤销的 entry（`steps` 超过已记录的 entry 数）。
+    #[error("no entries to undo")]
+    NoEntries,
+    /// 路径越界（恢复路径经 `sandbox_path` 校验失败，C-03）。
+    #[error("path escapes workdir: {0}")]
+    PathEscaped(String),
+}
+
+/// MCP client 错误（见 `design.md` §19、`api.md` §11）。
+#[derive(thiserror::Error, Debug)]
+pub enum McpError {
+    /// server 启动/握手失败（`required=true` 时 Runtime 拒绝启动）。
+    #[error("server `{server}` start failed: {reason}")]
+    StartFailed { server: String, reason: String },
+    /// 工具调用失败（超时、server 返回错误、schema 不匹配）。
+    #[error("call `{server}__{tool}` failed: {reason}")]
+    CallFailed {
+        server: String,
+        tool: String,
+        reason: String,
+    },
+    /// server 未就绪（未启动或已关闭）。
+    #[error("server `{0}` not ready")]
+    NotReady(String),
+    /// 工具未在 server schema 中声明（C-09）。
+    #[error("tool `{0}` not found in server schema")]
+    ToolNotFound(String),
+    /// project 作用域 server 未获用户批准（C-24）。
+    #[error("server `{0}` not approved (project scope)")]
+    NotApproved(String),
+    /// 配置错误（transport 字段缺失、env 展开失败等）。
+    #[error("config: {0}")]
+    Config(String),
+    /// IO 错误（stdio 子进程管道）。
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }

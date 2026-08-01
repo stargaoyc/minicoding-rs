@@ -1,6 +1,6 @@
 [package]
 name = "minicoding-sandbox"
-description = "OS 级沙箱驱动（基于 sandbox-run + landlock + libseccomp，主流库不自研）"
+description = "OS 级沙箱驱动（Linux Landlock + libseccomp，主流库不自研）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,17 +16,11 @@ thiserror = { workspace = true }
 camino = { workspace = true }
 
 # 平台重依赖按 target cfg 隔离（见 modules.md §7.4、tech-stack.md §11）
-# M0 阶段仅占位：detect_driver() 返回 NoopDriver（T-M0-7）
-# M4 起按平台补齐：
-# [target.'cfg(target_os = "linux")'.dependencies]
-# sandbox-run = "0.43"
-# landlock = "0.4.5"
-# libseccomp = "0.x"
-# libc = "0.2"
-#
-# [target.'cfg(target_os = "macos")'.dependencies]
-# sandbox-run = "0.43"
-# libc = "0.2"
-#
-# [target.'cfg(target_os = "windows")'.dependencies]
-# windows = { version = "0.x", features = ["Win32_System_JobObjects", "Win32_Security"] }
+# Linux：Landlock LSM（文件系统隔离，内核 5.13+）。libseccomp（系统调用过滤）作为
+# 后续增强，需系统 libseccomp C 库，M4 先交付 Landlock 核心隔离（C-22 文件越界写拦截）。
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

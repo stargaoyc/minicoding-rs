@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use minicoding_core::memory::SessionSummarizer as SessionSummarizerTrait;
 use minicoding_core::model::{LlmError, MemoryError, Message, Role};
-use minicoding_core::provider::{ChatRequest, Delta, GenerationParams, LlmProvider};
+use minicoding_core::provider::{BoxFuture, ChatRequest, Delta, GenerationParams, LlmProvider};
 use minicoding_storage::SessionIndex;
 
 /// 启发式兜底取每条消息首 N 字符（会话摘要规格：100，区别于 context compress 的 200）。
@@ -30,7 +31,10 @@ const MAX_SUMMARY_CHARS: usize = 500;
 /// 摘要 `max_output_tokens` 上限（512 tokens 足以覆盖 500 字符摘要）。
 const MAX_SUMMARY_TOKENS: usize = 512;
 
-/// 会话摘要生成器：持有主/备 LLM provider，按降级链生成摘要。
+/// 会话摘要生成器实现：持有主/备 LLM provider，按降级链生成摘要。
+///
+/// 实现 `core::memory::SessionSummarizer` trait。命名遵循 `ProjectDocLoaderImpl`
+/// 约定（trait 在 core，struct 在 memory 加 `Impl` 后缀，见 AGENTS.md §3.3）。
 ///
 /// 降级链与 context compress 的 `summarize_with_fallback` 同构（C-29）：
 /// 主 provider → 备用 provider（如有）→ 启发式兜底。启发式兜底必成功，故
@@ -38,12 +42,12 @@ const MAX_SUMMARY_TOKENS: usize = 512;
 ///
 /// 摘要内容是数据非指令（C-05）：调用方注入 system 段时应包裹
 /// `<session_summary>` 边界。
-pub struct SessionSummarizer {
+pub struct SessionSummarizerImpl {
     primary: Arc<dyn LlmProvider>,
     secondary: Option<Arc<dyn LlmProvider>>,
 }
 
-impl SessionSummarizer {
+impl SessionSummarizerImpl {
     /// 构造摘要生成器。
     ///
     /// `primary` 为主 provider，`secondary` 为备用（降级时使用，`None` 表示无备用）。
@@ -127,6 +131,18 @@ impl SessionSummarizer {
             "会话摘要启发式兜底（不调 LLM）：降级链终端"
         );
         Ok(summary)
+    }
+}
+
+impl SessionSummarizerTrait for SessionSummarizerImpl {
+    fn summarize<'a>(
+        &'a self,
+        messages: &'a [Message],
+    ) -> BoxFuture<'a, Result<String, MemoryError>> {
+        Box::pin(async move {
+            // 复用 inherent method（同逻辑，trait impl 仅做分发）
+            SessionSummarizerImpl::summarize(self, messages).await
+        })
     }
 }
 
@@ -334,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn primary_success_skips_fallback() {
         let (primary, primary_calls) = MockProvider::ok("primary", "LLM summary");
-        let summarizer = SessionSummarizer::new(primary, None);
+        let summarizer = SessionSummarizerImpl::new(primary, None);
         let msgs = make_messages();
 
         let result = summarizer.summarize(&msgs).await.unwrap();
@@ -347,7 +363,7 @@ mod tests {
     async fn primary_fail_secondary_success() {
         let (primary, primary_calls) = MockProvider::failing("primary");
         let (secondary, secondary_calls) = MockProvider::ok("secondary", "backup summary");
-        let summarizer = SessionSummarizer::new(primary, Some(secondary));
+        let summarizer = SessionSummarizerImpl::new(primary, Some(secondary));
         let msgs = make_messages();
 
         let result = summarizer.summarize(&msgs).await.unwrap();
@@ -360,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn primary_fail_no_secondary_uses_heuristic() {
         let (primary, primary_calls) = MockProvider::failing("primary");
-        let summarizer = SessionSummarizer::new(primary, None);
+        let summarizer = SessionSummarizerImpl::new(primary, None);
         let msgs = make_messages();
 
         let result = summarizer.summarize(&msgs).await.unwrap();
@@ -375,7 +391,7 @@ mod tests {
     async fn all_fail_uses_heuristic() {
         let (primary, primary_calls) = MockProvider::failing("primary");
         let (secondary, secondary_calls) = MockProvider::failing("secondary");
-        let summarizer = SessionSummarizer::new(primary, Some(secondary));
+        let summarizer = SessionSummarizerImpl::new(primary, Some(secondary));
         let msgs = make_messages();
 
         let result = summarizer.summarize(&msgs).await.unwrap();

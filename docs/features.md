@@ -104,22 +104,22 @@
 | P-05 | 内置安全黑名单 | 危险命令/SSRF/敏感路径不可覆盖 | M2 | 规划中 |
 | P-06 | 应用层路径沙箱 | 工作目录越界拒绝（第一道防线） | M1 | 规划中 |
 | P-07 | 命令黑名单 | 正则匹配危险命令 | M2 | 规划中 |
-| P-08 | SSRF 防护 | 内网/元数据接口拒绝 | M4+ | 规划中 |
+| P-08 | SSRF 防护 | 内网/元数据接口拒绝 | M4 | 已实现 |
 | P-09 | TLS（rustls） | 最低 TLS 1.2 | M1 | 规划中 |
-| P-10 | 凭证 keyring | OS 钥匙串存储 | M4 | 规划中 |
+| P-10 | 凭证 keyring | OS 钥匙串存储 | M4 | 已实现 |
 | P-11 | 环境变量隔离 | 凭证不下传子进程（含 MCP/Hook 子进程） | M2 | 规划中 |
-| P-12 | 敏感数据脱敏 | .env/api_key/password 模式替换 | M4 | 规划中 |
-| P-13 | 审计日志 | audit.log（含 deny/hook 决策） | M2 | 规划中 |
+| P-12 | 敏感数据脱敏 | .env/api_key/password 模式替换 | M4 | 已实现 |
+| P-13 | 审计日志 | audit.log（含 deny/hook 决策） | M2 | 已实现 |
 | P-14 | 回放安全 | replay 默认禁副作用 | M3 | 规划中 |
-| P-15 | OS 沙箱（一等公民） | seatbelt/landlock/seccomp 内核级隔离 | M4 | 规划中 |
-| P-16 | 四种沙箱策略 | ReadOnly/WorkspaceWrite/ExternalSandbox/DangerFullAccess | M4 | 规划中 |
-| P-17 | 审批模式（ApprovalMode） | Untrusted/OnFailure/OnRequest/Never | M4 | 规划中 |
-| P-18 | 预设（Preset） | read-only/auto/external-sandbox/full-access 一键选定 | M4 | 规划中 |
-| P-19 | 沙箱拒绝检测与升级 | EPERM/Seatbelt denial → 请求批准 → 放宽重试 | M4 | 规划中 |
-| P-20 | VCS 目录保护 | .git/.hg/.svn 默认只读 | M4 | 规划中 |
-| P-21 | 进程硬化（pre-main） | PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_* | M4 | 规划中 |
-| P-22 | `minicoding exec` | 非交互批量执行 + 沙箱策略 | M4 | 规划中 |
-| P-23 | `doctor --security` 自检 | 沙箱驱动/权限/VCS 保护检查 | M4 | 规划中 |
+| P-15 | OS 沙箱（一等公民） | seatbelt/landlock/seccomp 内核级隔离 | M4 | 已实现 |
+| P-16 | 四种沙箱策略 | ReadOnly/WorkspaceWrite/ExternalSandbox/DangerFullAccess | M4 | 已实现 |
+| P-17 | 审批模式（ApprovalMode） | Untrusted/OnFailure/OnRequest/Never | M4 | 已实现 |
+| P-18 | 预设（Preset） | read-only/auto/external-sandbox/full-access 一键选定 | M4 | 已实现 |
+| P-19 | 沙箱拒绝检测与升级 | EPERM/Seatbelt denial → 请求批准 → 放宽重试 | M4 | 已实现 |
+| P-20 | VCS 目录保护 | .git/.hg/.svn 默认只读 | M4 | 已实现 |
+| P-21 | 进程硬化（pre-main） | PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_* | M4 | 已实现 |
+| P-22 | `minicoding exec` | 非交互批量执行 + 沙箱策略 | M4 | 已实现 |
+| P-23 | `doctor --security` 自检 | 沙箱驱动/权限/VCS 保护检查 | M4 | 已实现 |
 | P-24 | AGENTS.md 写保护 | fs.write/edit 对 AGENTS.md 默认 Ask | M3 | 规划中 |
 
 ## 7. Hooks 系统（参考 Claude Code）
@@ -205,7 +205,7 @@
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
 | E-01 | SDK Client | `ask`/`ask_stream`/`run_task` | M8 | 规划中 |
-| E-02 | CallbackPrompter | SDK 用户闭包 | M4 | 规划中 |
+| E-02 | CallbackPrompter | SDK 用户闭包 | M4 | 已实现 |
 | E-03 | HTTP/JSON-RPC server | `minicoding serve` | M8 | 规划中 |
 | E-04 | MCP server | 被其他 Agent 调用（即 X-10） | M8 | 规划中 |
 | E-05 | stdin/stdout NDJSON | 编辑器插件协议 | M8 | 规划中 |

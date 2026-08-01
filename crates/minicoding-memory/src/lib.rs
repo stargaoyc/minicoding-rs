@@ -25,5 +25,7 @@ pub use auto::{AutoCategory, AutoMemory, is_instructional};
 pub use inject::{inject_auto_memory, inject_memory};
 pub use long_term::LongTermMemory;
 pub use minicoding_core::memory::{MemoryStore, ProjectDocLoader};
-pub use project_doc::{ProjectDocLoaderImpl, inject_project_doc};
-pub use session_sum::SessionSummarizer;
+pub use project_doc::{
+    ProjectDocLoaderImpl, find_repo_root, inject_project_doc, inject_project_doc_sync,
+};
+pub use session_sum::SessionSummarizerImpl;

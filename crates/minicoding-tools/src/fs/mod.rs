@@ -5,6 +5,7 @@ mod delete;
 mod edit;
 mod glob;
 mod grep;
+mod journal_helper;
 mod list;
 mod multiedit;
 mod read;

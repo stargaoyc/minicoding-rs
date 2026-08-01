@@ -313,6 +313,41 @@ impl JsonlStorage {
         }
     }
 
+    /// 同步更新会话索引中的摘要字段（T-M3-6）。
+    ///
+    /// 调用 `SessionIndex::update_summary` 落盘。会话不存在于索引时静默忽略
+    /// （best effort，与 `update_index_on_append` 一致）。
+    ///
+    /// # Errors
+    /// 索引文件读取或写入失败时返回 `StorageError`。
+    pub fn update_summary_sync(
+        &self,
+        session_id: &SessionId,
+        summary: &str,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.lock_index();
+        if guard.is_none() {
+            let idx = SessionIndex::load(&self.index_path())?;
+            *guard = Some(idx);
+        }
+        let Some(idx) = guard.as_mut() else {
+            return Ok(());
+        };
+        // 会话不在索引中：静默忽略（best effort）
+        if idx.get(session_id.as_str()).is_none() {
+            tracing::warn!(
+                session = %session_id,
+                "update_summary: session not in index, skipping (call append first)"
+            );
+            return Ok(());
+        }
+        idx.update_summary(session_id.as_str(), summary.to_string());
+        let idx = idx.clone();
+        drop(guard);
+        idx.save(&self.index_path())?;
+        Ok(())
+    }
+
     /// 从目录扫描构建索引（索引文件不存在时的回退路径）。
     async fn build_index_from_scan(&self) -> Result<SessionIndex, StorageError> {
         let mut entries = match tokio::fs::read_dir(&self.base_dir).await {
@@ -489,6 +524,16 @@ impl Storage for JsonlStorage {
             let _ = tokio::fs::remove_file(&lock_path).await;
             Ok(())
         })
+    }
+
+    fn update_summary(
+        &self,
+        session: &SessionId,
+        summary: &str,
+    ) -> BoxFuture<'_, Result<(), StorageError>> {
+        let session_id = session.clone();
+        let summary = summary.to_string();
+        Box::pin(async move { self.update_summary_sync(&session_id, &summary) })
     }
 }
 

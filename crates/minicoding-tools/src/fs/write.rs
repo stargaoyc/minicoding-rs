@@ -1,6 +1,8 @@
 //! `fs.write`：整文件覆盖写入。
 
+use crate::fs::journal_helper::record_change;
 use crate::util::resolve_path;
+use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
@@ -71,14 +73,33 @@ impl Tool for FsWrite {
         ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
+        let journal = ctx.journal.clone();
         Box::pin(async move {
             let args: WriteInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
             let path = resolve_path(&workdir, &args.path)?;
 
+            // 读取 before 内容（若存在）用于 journal 撤销恢复（C-28）
+            let before = tokio::fs::read(&path).await.ok();
+
+            let after = args.content.clone().into_bytes();
             tokio::fs::write(&path, args.content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
+
+            // 记入 journal（若注入；file-undo feature 启用时由 Runtime 注入）
+            let change = match &before {
+                None => FileChange::Created {
+                    path: path.clone(),
+                    content: after.clone(),
+                },
+                Some(b) => FileChange::Written {
+                    path: path.clone(),
+                    before: Some(b.clone()),
+                    after: after.clone(),
+                },
+            };
+            record_change(journal.as_ref(), change).await;
 
             Ok(ToolResult::ok_text(format!(
                 "wrote {} bytes to {}",

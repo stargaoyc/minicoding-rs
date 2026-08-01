@@ -1,4 +1,8 @@
-//! `shell.run`：执行 shell 命令（受超时、输出截断、env 过滤约束）。
+//! `shell.run`：执行 shell 命令（受超时、输出截断、env 过滤、OS 沙箱约束）。
+//!
+//! M4 接入：spawn 子进程前调 `SandboxDriver::apply` 应用内核级沙箱（第二道防线，
+//! C-22）。沙箱策略由 `ToolContext::sandbox_policy` 提供（`Runtime` 注入）。
+//! 未注入时退化为无 OS 隔离（兼容 M1-M3 测试）。
 
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
@@ -85,6 +89,9 @@ impl Tool for ShellRun {
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
         let default_timeout = ctx.timeout;
+        // 沙箱驱动/策略克隆（Option<Arc<...>> / Option<SandboxPolicy>）
+        let sandbox_driver = ctx.sandbox_driver.clone();
+        let sandbox_policy = ctx.sandbox_policy.clone();
         Box::pin(async move {
             let args: RunInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
@@ -115,6 +122,17 @@ impl Tool for ShellRun {
                 if let Ok(value) = std::env::var(name) {
                     command.env(name, value);
                 }
+            }
+
+            // M4：OS 沙箱（第二道防线，C-22）。`apply` 在 spawn 前注入 landlock/
+            // seatbelt 的 pre_exec 钩子。未注入驱动/策略时跳过（兼容测试）。
+            if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref())
+            {
+                driver.apply(policy, command.as_std_mut()).map_err(|e| {
+                    // 沙箱 apply 失败（如 landlock ruleset 构建失败）视为执行错误，
+                    // 由 Runtime 的 denial detector 进一步识别是否为 denial。
+                    ToolError::Exec(format!("sandbox apply failed: {e}"))
+                })?;
             }
 
             let child = command

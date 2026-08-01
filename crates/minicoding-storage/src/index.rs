@@ -144,6 +144,16 @@ impl SessionIndex {
         self.entries.retain(|e| e.session_id != session_id);
     }
 
+    /// 更新指定 `session_id` 的摘要字段（T-M3-6）。
+    ///
+    /// 会话不在索引中时无操作（调用方应先 `append` 建立索引项）。
+    /// 已存在则覆盖原 `summary`（无论原值是否为 `None`），其余字段保留。
+    pub fn update_summary(&mut self, session_id: &str, summary: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.session_id == session_id) {
+            entry.summary = Some(summary);
+        }
+    }
+
     /// 追加消息时更新索引：存在则递增 `message_count` + 更新 `updated_at`，
     /// 不存在则新增（携带 `summary`）。仅在原 summary 为空时补充。
     pub fn upsert_on_append(

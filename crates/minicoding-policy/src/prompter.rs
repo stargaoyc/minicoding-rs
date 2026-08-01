@@ -1,7 +1,8 @@
 //! 权限交互器实现（`PermissionPrompter`）。
 //!
 //! - [`NonInteractivePrompter`]：始终 `Deny`，CI/脚本的安全默认；
-//! - [`InteractivePrompter`]：stderr 打印风险摘要后从 stdin 读 `y/n` 确认。
+//! - [`InteractivePrompter`]：stderr 打印风险摘要后从 stdin 读 `y/n` 确认；
+//! - [`CallbackPrompter`]：闭包注入，供 M8 SDK 嵌入使用（T-M4-11）。
 //!
 //! 决策（`PermissionPolicy`）与交互（`Prompter`）分离，见 `docs/design.md` §9.1。
 
@@ -77,4 +78,114 @@ fn read_yes_no() -> bool {
     }
     let trimmed = line.trim();
     trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes")
+}
+
+/// 闭包注入式交互器（T-M4-11，供 M8 SDK 嵌入使用）。
+///
+/// SDK 调用方提供同步闭包 `Fn(PermissionPrompt) -> Decision`，由 `CallbackPrompter`
+/// 在 `prompt` 调用时同步执行并通过 `BoxFuture` 包装返回。闭包捕获的上下文（如
+/// GUI 事件循环、RPC 回调句柄）由调用方负责 `Send + Sync`。
+///
+/// 与 `InteractivePrompter` 的区别：`InteractivePrompter` 直接读 stdin，仅适用
+/// CLI；`CallbackPrompter` 把交互方式交给嵌入方，便于 SDK 适配任意 UI/RPC 后端。
+///
+/// # 示例
+///
+/// ```
+/// use minicoding_core::policy::{Decision, PermissionPrompter, PermissionPrompt, Risk};
+/// use minicoding_policy::CallbackPrompter;
+///
+/// let prompter = CallbackPrompter::new(|_req| Decision::Allow);
+/// # // 静态闭包满足 Send + Sync 要求
+/// ```
+pub struct CallbackPrompter<F>
+where
+    F: Fn(PermissionPrompt) -> Decision + Send + Sync,
+{
+    callback: F,
+}
+
+impl<F> CallbackPrompter<F>
+where
+    F: Fn(PermissionPrompt) -> Decision + Send + Sync,
+{
+    /// 创建闭包交互器。
+    #[must_use]
+    pub fn new(callback: F) -> Self {
+        Self { callback }
+    }
+}
+
+impl<F> PermissionPrompter for CallbackPrompter<F>
+where
+    F: Fn(PermissionPrompt) -> Decision + Send + Sync,
+{
+    fn prompt(&self, req: PermissionPrompt) -> BoxFuture<'_, Decision> {
+        let decision = (self.callback)(req);
+        Box::pin(async move { decision })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use minicoding_core::policy::{PromptOption, Risk};
+
+    fn sample_prompt(tool: &str) -> PermissionPrompt {
+        PermissionPrompt {
+            id: "test".to_string(),
+            tool: tool.to_string(),
+            summary: "test summary".to_string(),
+            risk: Risk::Medium,
+            options: vec![PromptOption::AllowOnce, PromptOption::DenyOnce],
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_prompter_allow() {
+        let prompter = CallbackPrompter::new(|_req| Decision::Allow);
+        let decision = prompter.prompt(sample_prompt("fs.write")).await;
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn callback_prompter_deny() {
+        let prompter = CallbackPrompter::new(|req| Decision::Deny(format!("denied: {}", req.tool)));
+        let decision = prompter.prompt(sample_prompt("shell.run")).await;
+        assert_eq!(decision, Decision::Deny("denied: shell.run".to_string()));
+    }
+
+    #[tokio::test]
+    async fn callback_prompter_inspects_request() {
+        // 闭包可读取请求字段做风险感知决策
+        let prompter = CallbackPrompter::new(|req| {
+            if req.risk == Risk::High {
+                Decision::Deny("high risk".to_string())
+            } else {
+                Decision::Allow
+            }
+        });
+        let low = prompter
+            .prompt(PermissionPrompt {
+                id: "1".into(),
+                tool: "fs.read".into(),
+                summary: "low".into(),
+                risk: Risk::Low,
+                options: vec![PromptOption::AllowOnce],
+            })
+            .await;
+        assert_eq!(low, Decision::Allow);
+
+        let high = prompter
+            .prompt(PermissionPrompt {
+                id: "2".into(),
+                tool: "shell.run".into(),
+                summary: "high".into(),
+                risk: Risk::High,
+                options: vec![PromptOption::AllowOnce],
+            })
+            .await;
+        assert_eq!(high, Decision::Deny("high risk".to_string()));
+    }
 }

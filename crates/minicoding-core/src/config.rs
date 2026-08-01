@@ -28,6 +28,24 @@ pub struct ProviderConfig {
     pub model: String,
     pub timeout_sec: u64,
     pub max_retries: u32,
+    /// 独立小 LLM 配置（摘要/compact/memory 提取用，见 `design.md` §3.8、`modules.md` §10.3）。
+    ///
+    /// 未设置（`None`）时与主 provider 相同；设置后可配更便宜模型降本。
+    /// `api_base`/`api_key` 为 `None` 时继承主 provider。
+    pub small: Option<SmallProviderConfig>,
+}
+
+/// 小 LLM 配置（`[provider.small]`，M2 roadmap L90）。
+///
+/// 仅 `model` 必填；`api_base`/`api_key` 为 `None` 时继承主 `[provider]` 配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmallProviderConfig {
+    /// 小模型名称（如 `gpt-4o-mini`）。
+    pub model: String,
+    /// API base URL（`None` → 继承主 provider）。
+    pub api_base: Option<String>,
+    /// API key（`None` → 继承主 provider）。
+    pub api_key: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -39,6 +57,7 @@ impl Default for ProviderConfig {
             model: "gpt-4o-mini".into(),
             timeout_sec: 120,
             max_retries: 3,
+            small: None,
         }
     }
 }

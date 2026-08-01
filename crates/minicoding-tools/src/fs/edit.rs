@@ -1,6 +1,8 @@
 //! `fs.edit`：精确字符串替换 + 唯一性校验。
 
+use crate::fs::journal_helper::record_change;
 use crate::util::resolve_path;
+use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
@@ -75,6 +77,7 @@ impl Tool for FsEdit {
         ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
+        let journal = ctx.journal.clone();
         Box::pin(async move {
             let args: EditInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
@@ -109,10 +112,23 @@ impl Tool for FsEdit {
                 )));
             }
 
+            let before_bytes = content.as_bytes().to_vec();
             let new_content = content.replacen(&args.old_string, &args.new_string, 1);
+            let after_bytes = new_content.as_bytes().to_vec();
             tokio::fs::write(&path, new_content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
+
+            // 记入 journal（若注入；C-28）
+            record_change(
+                journal.as_ref(),
+                FileChange::Edited {
+                    path: path.clone(),
+                    before: before_bytes,
+                    after: after_bytes,
+                },
+            )
+            .await;
 
             Ok(ToolResult::ok_text(format!("edited {}", args.path)))
         })

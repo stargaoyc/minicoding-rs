@@ -11,17 +11,23 @@ authors.workspace = true
 [dependencies]
 minicoding-core = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
+futures = { workspace = true }
+time = { workspace = true }
+ulid = { workspace = true }
 
-# rmcp 2.2 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
-# M0 阶段仅占位骨架，不引入 rmcp（T-M0-1）
-# rmcp = { version = "2.2", features = [
-#     "client", "server", "macros",
-#     "transport-child-process",
-#     "transport-streamable-http-client-reqwest",
-# ] }
-# reqwest = { workspace = true }
+# rmcp 2.x 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
+# M4 仅用 stdio 传输（client）；http + OAuth 留给 M6（T-M6-4）。
+rmcp = { version = "2.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

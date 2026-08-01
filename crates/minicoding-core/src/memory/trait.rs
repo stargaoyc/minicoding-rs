@@ -1,11 +1,11 @@
-//! `MemoryStore` / `ProjectDocLoader` trait（见 `api.md` §3、`design.md` §8）。
+//! `MemoryStore` / `ProjectDocLoader` / `SessionSummarizer` trait（见 `api.md` §3、`design.md` §8）。
 //!
-//! 实现在 `minicoding-memory`（长期记忆双文件 + Auto memory + AGENTS.md loader）。
+//! 实现在 `minicoding-memory`（长期记忆双文件 + Auto memory + AGENTS.md loader + 会话摘要）。
 //!
 //! 手动 `Pin<Box<dyn Future + Send>>` 返回类型保证 `dyn` 兼容（与
 //! `Storage`/`PermissionPolicy` 等 trait 一致，见 `provider::BoxFuture`）。
 
-use crate::model::MemoryError;
+use crate::model::{MemoryError, Message};
 use crate::provider::BoxFuture;
 use time::OffsetDateTime;
 
@@ -57,4 +57,26 @@ pub trait ProjectDocLoader: Send + Sync {
     /// # Errors
     /// IO 失败或路径不可解析时返回 `MemoryError`。
     fn load(&self) -> BoxFuture<'_, Result<String, MemoryError>>;
+}
+
+/// 会话摘要生成器 trait（`dyn` 兼容）。
+///
+/// 实现者按降级链生成会话摘要（主 provider → 备用 provider → 启发式兜底），
+/// 启发式兜底必成功（C-29：降级链不可跳过，与压缩降级同构）。摘要是数据非
+/// 指令（C-05）：调用方注入 system 段时应包裹 `<session_summary>` 边界。
+///
+/// 实现在 `minicoding-memory`（`SessionSummarizerImpl`，见 `design.md` §8、
+/// `dev-plan.md` T-M3-6）。
+pub trait SessionSummarizer: Send + Sync {
+    /// 生成会话摘要。
+    ///
+    /// 输入会话消息序列，返回摘要文本。启发式兜底恒成功，故实际不返回 `Err`；
+    /// 保留 `Result` 类型以与管道 `?` 兼容并为未来扩展预留。
+    ///
+    /// # Errors
+    /// 主/备 provider 均失败且启发式兜底也失败（理论不可达）时返回 `MemoryError`。
+    fn summarize<'a>(
+        &'a self,
+        messages: &'a [Message],
+    ) -> BoxFuture<'a, Result<String, MemoryError>>;
 }

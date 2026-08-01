@@ -28,6 +28,19 @@ pub trait Storage: Send + Sync {
     fn load(&self, session: &SessionId) -> BoxFuture<'_, Result<Vec<Message>, StorageError>>;
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>>;
     fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>>;
+    /// 更新会话摘要（写入 `index.json`，T-M3-6）。
+    ///
+    /// 用于会话结束时 `SessionSummarizer` 生成摘要后落盘，供跨会话恢复与新
+    /// 会话列出展示。会话不存在于索引时静默忽略（best effort，与 `append`
+    /// 索引更新一致）。
+    ///
+    /// # Errors
+    /// 索引文件读写失败时返回 `StorageError`。
+    fn update_summary(
+        &self,
+        session: &SessionId,
+        summary: &str,
+    ) -> BoxFuture<'_, Result<(), StorageError>>;
 }
 
 /// 审计事件记录。

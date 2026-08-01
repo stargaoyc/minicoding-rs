@@ -2,4 +2,4 @@
 
 mod r#trait;
 
-pub use r#trait::{MemoryStore, ProjectDocLoader};
+pub use r#trait::{MemoryStore, ProjectDocLoader, SessionSummarizer};

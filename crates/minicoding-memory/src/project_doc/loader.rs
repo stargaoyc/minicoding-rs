@@ -100,6 +100,60 @@ impl ProjectDocLoaderImpl {
         chain.reverse();
         chain
     }
+
+    /// 同步加载项目文档（builder 启动期用，tokio runtime 未创建）。
+    ///
+    /// 与 `load` 同语义，但用 `std::fs` 同步读取。失败时返回 `MemoryError`，
+    /// 单个文件读取失败时跳过（best effort，与 async 版一致）。
+    ///
+    /// # Errors
+    /// 路径解析失败时返回错误；单个文件读取失败时跳过而非报错。
+    pub fn load_sync(&self) -> Result<String, MemoryError> {
+        if self.skip {
+            return Ok(String::new());
+        }
+
+        let chain = self.dir_chain();
+        let mut parts: Vec<String> = Vec::new();
+        for dir in &chain {
+            let Some(path) = find_project_doc(dir) else {
+                continue;
+            };
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("skip unreadable project doc {}: {e}", path);
+                    continue;
+                }
+            };
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(self.repo_root.as_str())
+                .map_or_else(|_| path.as_str(), Utf8Path::as_str);
+            let entry = format!("# source: {rel}\n\n{trimmed}");
+            parts.push(entry);
+        }
+
+        if parts.is_empty() {
+            return Ok(String::new());
+        }
+
+        let merged = parts.join("\n\n---\n\n");
+        if merged.len() <= self.max_bytes {
+            return Ok(merged);
+        }
+
+        let mut end = self.max_bytes.min(merged.len());
+        while end > 0 && !merged.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = String::from(&merged[..end]);
+        truncated.push_str(TRUNCATED_MARKER);
+        Ok(truncated)
+    }
 }
 
 impl ProjectDocLoader for ProjectDocLoaderImpl {

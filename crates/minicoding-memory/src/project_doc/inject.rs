@@ -34,11 +34,28 @@ pub async fn inject_project_doc(
     loader: &dyn ProjectDocLoader,
 ) -> Result<String, MemoryError> {
     let doc = loader.load().await?;
+    inject_doc(system_prompt, &doc)
+}
+
+/// 同步版本：将已加载的项目文档内容注入 system prompt（builder 启动期用）。
+///
+/// 与 `inject_project_doc` 同语义，但接受已加载的文档字符串，无需 async。
+///
+/// # Errors
+/// 当前实现不返回错误，保留 `Result` 为未来扩展预留。
+pub fn inject_project_doc_sync(system_prompt: &str, doc: &str) -> Result<String, MemoryError> {
+    inject_doc(system_prompt, doc)
+}
+
+/// 内部：实际拼接逻辑（async/sync 共用）。
+///
+/// 保留 `Result` 返回类型以与公共 API（`inject_project_doc`/`inject_project_doc_sync`）
+/// 对齐，未来若注入逻辑需返回错误（如校验失败）可直接扩展。
+#[allow(clippy::unnecessary_wraps)]
+fn inject_doc(system_prompt: &str, doc: &str) -> Result<String, MemoryError> {
     if doc.trim().is_empty() {
         return Ok(system_prompt.to_owned());
     }
-
-    // 原文末尾若已有换行则不重复补；统一以空行分隔正文与项目文档块。
     let prompt = system_prompt.trim_end();
     let injected =
         format!("{prompt}\n\n<{PROJECT_DOC_BOUNDARY}>\n{doc}\n</{PROJECT_DOC_BOUNDARY}>\n");
