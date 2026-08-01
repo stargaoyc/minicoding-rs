@@ -26,6 +26,7 @@ landlock = "landlock"
 seccomp = "seccomp"
 seatbelt = "seatbelt"
 ulid = "ulid"
+flate = "flate"
 
 [files]
 extend-exclude = [

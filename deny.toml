@@ -15,8 +15,9 @@ ignore = [
     # crate 已 unmaintained（RUSTSEC-2025-0119），但无安全漏洞，indicatif 尚未切换替代。
     { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained but has no vulnerability; transitive dep of indicatif (minicoding-cli)" },
 ]
-# unmaintained crate 告警级别：warn（不阻断 CI，仅告警）
-unmaintained = "warn"
+# unmaintained 检查范围：workspace（仅检查 workspace 成员，不检查传递依赖）
+# number_prefix 0.4.0 是 indicatif 的传递依赖，已在 ignore 列表中豁免 RUSTSEC-2025-0119
+unmaintained = "workspace"
 # yanked crate 告警级别
 yanked = "deny"
 
@@ -24,6 +25,8 @@ yanked = "deny"
 version = 2
 # 许可证白名单（AGENTS.md §2.7：仅 MIT/Apache-2.0/BSD/ISC）
 # 以下额外许可证为传递依赖必需：
+# - AGPL-3.0-only：项目自身 crate（workspace 成员），非外部依赖
+# - BSL-1.0：Boost Software License，error-code 等 transitive crate（类 MIT 宽松许可证）
 # - OpenSSL：ring（rustls/reqwest 的 crypto backend，含 OpenSSL 衍生代码）
 # - Unicode-DFS-2016 / Unicode-3.0：unicode-ident（proc-macro2 传递依赖）
 # - Zlib：miniz_oxide（flate2 传递依赖）
@@ -37,6 +40,8 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "AGPL-3.0-only",
+    "BSL-1.0",
     "OpenSSL",
     "Unicode-DFS-2016",
     "Unicode-3.0",
