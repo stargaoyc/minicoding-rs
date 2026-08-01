@@ -440,6 +440,48 @@ pub struct SessionMeta {
 }
 ```
 
+`JsonlStorage` 实现 `Storage` trait，并扩展以下能力（见 `features.md` S-02/S-03/S-04）：
+
+```rust
+// 会话索引（index.json）：轻量元数据列出，无需逐个打开 .jsonl
+pub struct SessionIndex { /* Vec<SessionIndexEntry> */ }
+pub struct SessionIndexEntry {
+    pub session_id: String,
+    pub summary: Option<String>,
+    pub message_count: usize,
+    pub created_at: String,   // RFC3339
+    pub updated_at: String,   // RFC3339
+    pub parent_uuid: Option<String>,
+}
+
+impl SessionIndex {
+    pub fn load(path: &Utf8Path) -> Result<Self, StorageError>;
+    pub fn save(&self, path: &Utf8Path) -> Result<(), StorageError>;  // 原子写：.tmp + rename
+    pub fn add(&mut self, entry: SessionIndexEntry);
+    pub fn remove(&mut self, session_id: &str);
+    pub fn list(&self) -> &[SessionIndexEntry];
+    pub fn list_windowed(&self) -> String;  // 64KB 窗口：首尾各 32KB（C-07）
+}
+
+// 跨进程文件锁（fs2 排他锁）：同会话 --resume 互斥
+pub struct SessionLock { /* RAII 守卫 */ }
+impl SessionLock {
+    pub fn acquire(path: impl Into<Utf8PathBuf>) -> Result<Self, StorageError>;
+    pub fn release(self);  // Drop 自动释放
+}
+
+// 会话导出（C-04：凭证由工具层保证不入消息，导出层不额外过滤）
+pub enum ExportFormat { Markdown, Jsonl }
+pub fn export_session_md(messages: &[Message], meta: &SessionMeta) -> String;
+pub fn export_session_jsonl(messages: &[Message]) -> String;
+
+impl JsonlStorage {
+    pub async fn export(&self, id: &SessionId, format: ExportFormat) -> Result<String, StorageError>;
+}
+```
+
+`StorageError` 新增 `Locked(String)` 变体，表示会话被跨进程文件锁占用（见 `rules.md` C-22）。
+
 ### 3.6 权限：`PermissionPolicy` + `PermissionPrompter`
 
 > **架构说明（修复 broadcast/oneshot 冲突）**：权限交互是"请求-响应"的点对点语义，而 `EventBus` 是"广播-订阅"语义。二者不能复用同一通道——`broadcast::Sender` 会克隆事件，而 `oneshot::Sender<Decision>` 不可克隆，强行放入 `Event` 既无法编译也语义错误。
@@ -535,6 +577,38 @@ pub struct ContextSnapshot {
     pub compression_log: Vec<CompressionStep>,
 }
 ```
+
+`ContextManagerImpl`（`minicoding-context`）是 `ContextManager` 的完整实现，持有
+`Tokenizer`、`TokenBudget`、可选的 `LlmProvider`（供 L2 摘要使用）。`new()` 接收
+`provider: Option<Arc<dyn LlmProvider>>`，为 `None` 时跳过 L2 摘要（L1→L3→L4 仍执行）。
+
+#### 4 级压缩管道（T-M3-2，见 `design.md` §3.3）
+
+当 `token_count > budget.compact_threshold()`（usable × 0.85）时触发压缩管道，
+逐级尝试 L1→L2→L3→L4，每级后检查 token 是否降到阈值以下，降了则提前返回
+（C-29：降级链顺序不可跳）。
+
+```rust
+pub async fn compress_pipeline(
+    messages: &mut Vec<Message>,
+    tokenizer: &dyn Tokenizer,
+    budget: &TokenBudget,
+    provider: Option<&dyn LlmProvider>,
+) -> Result<CompressResult, RuntimeError>;
+
+pub struct CompressResult {
+    pub clipped_count: usize,      // L1 裁剪的 tool_result 块数
+    pub summarized_count: usize,   // L2 摘要替换的消息数
+    pub dropped_count: usize,      // L3 滚动窗口丢弃的消息数
+    pub truncated_count: usize,    // L4 硬截断丢弃的消息数
+}
+```
+
+各级职责：L1 裁剪超阈值的 `ToolResult` 文本（前 K 行 + ... + 后 K 行，C-05 保留边界）；
+L2 对权重最低的 N 条非 system 消息调 LLM 生成摘要替换原文（`[summarized @ ts]`）；
+L3 仅保留最近 W 条非 system 消息 + 全部 system 消息；L4 按 token 数从尾部保留兜底。
+
+配置 `[context] compress = false` 可关闭压缩直通（C-18 软约束，C-06 兜底）。
 
 ### 3.8 `Hook` 与 `HookRegistry`（见 `hooks.md` §5）
 
@@ -811,6 +885,17 @@ impl Runtime {
     /// 返回取消 token 克隆（供 frontend 在 select! 中组合等待 Ctrl-C）。
     pub fn cancel_token(&self) -> CancellationToken;
 
+    /// 恢复会话历史到上下文管理器（`--resume`/`--fork-session` 用，T-M3-10a）。
+    /// 将预加载会话的消息逐条注入 `ContextManager`，不重复落盘（历史已在磁盘）。
+    /// 调用方在 `RuntimeBuilder::session` 设置预加载会话后调用一次。
+    pub async fn restore_history(&self) -> Result<(), RuntimeError>;
+
+    /// 返回上下文管理器引用（供 frontend/test 查询 `message_count` 等）。
+    pub fn context(&self) -> &Arc<dyn ContextManager>;
+
+    /// 返回存储引用（供 frontend/test 查询会话消息）。
+    pub fn storage(&self) -> &Arc<dyn Storage>;
+
     /// 派发子 Agent。
     pub async fn spawn_subagent(
         &self,
@@ -849,6 +934,10 @@ impl RuntimeBuilder {
     pub fn mcp_client(mut self, c: Arc<dyn McpClient>) -> Self;  // 见 §11
     /// 取消 token（默认新建；CLI 可注入共享 token 以便 Ctrl-C 触发 graceful stop，C-13）。
     pub fn cancel_token(mut self, t: CancellationToken) -> Self;
+    /// 预加载会话（`--resume`/`--fork-session` 用，T-M3-10a）。
+    /// 设置后 Runtime 使用该会话的 id 与 messages；调用方需另行调用
+    /// `Runtime::restore_history` 将消息注入上下文管理器。
+    pub fn session(mut self, s: Session) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
@@ -973,7 +1062,7 @@ retry = { max_attempts = 4, base_delay_ms = 500 }
 
 [context]
 budget_ratio = 0.85
-compress = "summary_then_truncate"
+compress = true
 max_tool_iters = 50
 turn_timeout_sec = 600
 

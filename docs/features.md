@@ -17,7 +17,7 @@
 | A-05 | 类型化子 Agent | Explore/Plan/General/Custom，隔离上下文 | M5 | 规划中 |
 | A-06 | Plan 模式 | 双重只读强制 + plan.exit + 预批准缓存 | M5 | 规划中 |
 | A-07 | 任务管理工具 | TaskCreate/TaskUpdate/TaskList 增量模型 + 依赖 + 持久化 | M3 | 规划中 |
-| A-08 | 会话中断与恢复 | Ctrl-C graceful + `--resume` | M2/M3 | 规划中 |
+| A-08 | 会话中断与恢复 | Ctrl-C graceful + `--resume` | M2/M3 | MVP |
 | A-09 | 会话回放 | `--replay` 复现历史（默认禁副作用） | M3 | 规划中 |
 | A-10 | 文件改动回滚 | `/undo` 会话内 operation 级撤销 | M5 | 规划中 |
 | A-11 | Parent-UUID 链会话结构 | 链表式 JSONL，支持 fork/压缩边界/side-chain | M3 | 规划中 |
@@ -72,10 +72,10 @@
 |----|------|------|:---:|:---:|
 | C-01 | Token 预算 | 精确分词 + 预留输出 + 安全余量 | M1/M3 | 规划中 |
 | C-02 | 消息权重模型 | role×recency×sticky×pin | M3 | 规划中 |
-| C-03 | 4 级压缩管道 | 裁剪→摘要→滚动→硬截断 | M3 | 规划中 |
+| C-03 | 4 级压缩管道 | 裁剪→摘要→滚动→硬截断 | M3 | 开发中 |
 | C-04 | 压缩日志与快照 | 可回放、可调试 | M3 | 规划中 |
 | C-05 | 压缩备份（可选） | 压缩前原文保留 | M3 | 规划中 |
-| C-06 | `compress=off` 兜底 | 关闭压缩直通 | M3 | 规划中 |
+| C-06 | `compress=off` 兜底 | 关闭压缩直通 | M3 | 开发中 |
 | C-07 | 压缩熔断与防 Thrash | 失败计数≥3 熔断 / Thrash 检测 / 状态保留清单 / 降级链 | M3 | 规划中 |
 | C-08 | 预测性压缩 | 根据历史 turn token 增长估算，在超出窗口前提前 compact，与反应式 compact 互补（见 `design.md` §3.9）。配置 `predictive_compact_enabled = false`（默认关）/ `predictive_baseline_growth_tokens = 15000` | M3 | 规划中 |
 | C-09 | Post-compact 上下文恢复 | compact 后从历史提取最近 read 过的文件路径，按预算截断重新注入，避免模型重新 read（见 `design.md` §3.10）。配置 `post_compact_max_files = 5` / `post_compact_token_budget = 50000` / `post_compact_max_tokens_per_file = 5000` | M3 | 规划中 |
@@ -177,9 +177,9 @@
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
 | S-01 | JSONL 会话日志 | 追加写、崩溃安全 | M1 | 规划中 |
-| S-02 | 会话索引 index.json | 轻量元数据列出 | M3 | 规划中 |
-| S-03 | 跨进程文件锁 | 同会话互斥（fs2） | M3 | 规划中 |
-| S-04 | 会话导出 | md / jsonl | M3 | 规划中 |
+| S-02 | 会话索引 index.json | 轻量元数据列出 | M3 | 已实现 |
+| S-03 | 跨进程文件锁 | 同会话互斥（fs2） | M3 | 已实现 |
+| S-04 | 会话导出 | md / jsonl | M3 | 已实现 |
 | S-05 | 备份 | tar.gz 打包 | M7+ | 规划中 |
 | S-06 | `MINICODING_HOME` | 根目录覆盖 | M0 | 规划中 |
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M5 | 规划中 |

@@ -67,6 +67,10 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             "destructive op on project doc is blacklisted: {tool}"
         ));
     }
+    // memory.write 特殊路由（C-23/C-27）：按 target 与内容模式细分。
+    if tool == "memory.write" {
+        return check_memory_write(tool, input);
+    }
     match ctx.side_effect {
         SideEffect::None => Verdict::Allow,
         SideEffect::FileWrite => check_file_write(tool, input, ctx),
@@ -83,6 +87,84 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             full_options(),
         )),
     }
+}
+
+/// `memory.write` 权限路由（C-23/C-27）。
+///
+/// - `target: "long_term"` → `Ask`（C-23：手写长期记忆写入需用户确认）；
+/// - `target: "auto"` → 默认 `Allow`（隐式自动学习），但内容含指令性模式时
+///   降级 `Ask`（C-27：Auto memory 不可作为越权通道）。
+fn check_memory_write(tool: &str, input: &Value) -> Verdict {
+    let target = input.get("target").and_then(|v| v.as_str());
+    let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    match target {
+        Some("long_term") => Verdict::Ask(make_prompt(
+            tool,
+            "写入长期记忆（全量覆盖 long_term.md）".to_string(),
+            Risk::Medium,
+            full_options(),
+        )),
+        Some("auto") => {
+            if is_instructional_content(content) {
+                Verdict::Ask(make_prompt(
+                    tool,
+                    "写入 Auto memory：内容含指令性模式，需确认（C-27）".to_string(),
+                    Risk::Medium,
+                    full_options(),
+                ))
+            } else {
+                Verdict::Allow
+            }
+        }
+        _ => Verdict::Ask(make_prompt(
+            tool,
+            "写入记忆（未知 target）".to_string(),
+            Risk::Medium,
+            full_options(),
+        )),
+    }
+}
+
+/// 检测内容是否含指令性模式（C-27 降级用）。
+///
+/// 与 `minicoding-memory::auto::is_instructional` 同语义：检测祈使/模态/规则头。
+/// 此处独立实现避免 `minicoding-policy` 依赖 `minicoding-memory`（领域 crate 不交叉）。
+fn is_instructional_content(content: &str) -> bool {
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("always use")
+            || lower.starts_with("never ")
+            || lower.starts_with("must ")
+            || lower.starts_with("do not ")
+            || lower.starts_with("don't ")
+            || lower.starts_with("should ")
+        {
+            return true;
+        }
+        if line.starts_with("总是")
+            || line.starts_with("永远")
+            || line.starts_with("禁止")
+            || line.starts_with("必须")
+            || line.starts_with("不要")
+            || line.starts_with("不得")
+            || line.starts_with("应当")
+            || line.starts_with("应")
+        {
+            return true;
+        }
+        if lower.starts_with("## rules")
+            || lower.starts_with("## constraints")
+            || line.starts_with("## 规则")
+            || line.starts_with("## 约束")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// 判定是否命中内置黑名单（C-02/C-23）。
@@ -200,5 +282,122 @@ fn make_prompt(
         summary,
         risk,
         options,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `memory.write` 权限路由测试（C-23/C-27）。
+
+    use super::*;
+    use camino::Utf8PathBuf;
+    use minicoding_core::model::SideEffect;
+    use minicoding_core::policy::PermissionContext;
+
+    fn ctx_file_write() -> PermissionContext {
+        PermissionContext {
+            session: "test".to_string(),
+            workdir: Utf8PathBuf::from("/tmp/proj"),
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_write_long_term_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"target": "long_term", "content": "remember this"});
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_write_auto_non_instructional_returns_allow() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({
+            "target": "auto",
+            "content": "user prefers 4-space indent",
+            "topic": "indent"
+        });
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[tokio::test]
+    async fn memory_write_auto_instructional_english_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({
+            "target": "auto",
+            "content": "Always use cargo fmt before commit"
+        });
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_write_auto_instructional_chinese_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({
+            "target": "auto",
+            "content": "禁止提交密钥到仓库"
+        });
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_write_auto_section_header_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({
+            "target": "auto",
+            "content": "## Rules\n- rule 1\n- rule 2"
+        });
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_write_unknown_target_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"target": "unknown", "content": "x"});
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_write_missing_target_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"content": "x"});
+        let verdict = policy
+            .check("memory.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[test]
+    fn is_instructional_content_negative_descriptive() {
+        assert!(!is_instructional_content("user prefers dark theme"));
+        assert!(!is_instructional_content("the project uses rust 2024"));
+        assert!(!is_instructional_content(""));
     }
 }

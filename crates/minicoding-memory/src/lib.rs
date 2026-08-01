@@ -14,3 +14,16 @@
 //! 详见 `docs/modules.md` §4、`docs/design.md` §8。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+pub mod auto;
+pub mod inject;
+pub mod long_term;
+pub mod project_doc;
+pub mod session_sum;
+
+pub use auto::{AutoCategory, AutoMemory, is_instructional};
+pub use inject::{inject_auto_memory, inject_memory};
+pub use long_term::LongTermMemory;
+pub use minicoding_core::memory::{MemoryStore, ProjectDocLoader};
+pub use project_doc::{ProjectDocLoaderImpl, inject_project_doc};
+pub use session_sum::SessionSummarizer;

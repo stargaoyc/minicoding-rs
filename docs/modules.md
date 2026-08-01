@@ -613,7 +613,8 @@ minicoding-cli/src/
 │   ├── exec.rs           # minicoding exec（非交互批量 + 沙箱策略）
 │   ├── doctor.rs         # minicoding doctor --security 自检
 │   ├── audit.rs          # minicoding audit list/stats
-│   └── mcp.rs            # minicoding mcp list/approve/reset-project-choices
+│   ├── mcp.rs            # minicoding mcp list/approve/reset-project-choices
+│   └── session_cmd.rs    # minicoding session list/delete（T-M3-10c）
 └── cred.rs               # 凭证读取（env / keyring）
 ```
 

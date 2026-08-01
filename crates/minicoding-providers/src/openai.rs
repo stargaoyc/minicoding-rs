@@ -262,7 +262,7 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
         match block {
-            ContentBlock::Text(t) => parts.push(t.clone()),
+            ContentBlock::Text { text: t } => parts.push(t.clone()),
             ContentBlock::ToolResult { content, .. } => {
                 parts.push(tool_content_to_string(content));
             }

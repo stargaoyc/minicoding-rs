@@ -22,6 +22,8 @@ pub enum RuntimeError {
     BudgetExceeded { used: usize, budget: usize },
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
+    #[error("memory: {0}")]
+    Memory(#[from] MemoryError),
     #[error("config: {0}")]
     Config(String),
     #[error("interrupted")]
@@ -65,6 +67,8 @@ pub enum LlmError {
 pub enum ToolError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid state transition: {0}")]
+    InvalidStateTransition(String),
     #[error("path escapes workdir: {0}")]
     PathEscaped(String),
     #[error("not found: {0}")]
@@ -90,6 +94,9 @@ pub enum StorageError {
     NotFound(String),
     #[error("corrupted: {0}")]
     Corrupted(String),
+    /// 会话被跨进程文件锁占用（见 `rules.md` C-22、`SessionLock::acquire`）。
+    #[error("session locked: {0}")]
+    Locked(String),
 }
 
 /// 权限决策错误。
@@ -108,4 +115,19 @@ pub enum PromptError {
     Prompt(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// 记忆错误（长期/Auto/项目文档加载与写入，见 `design.md` §8）。
+#[derive(thiserror::Error, Debug)]
+pub enum MemoryError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("serialize: {0}")]
+    Serialize(String),
+    /// 记忆索引文件与正文不一致（mtime/size/hash 校验失败）。
+    #[error("index inconsistent: {0}")]
+    Inconsistent(String),
+    /// 路径非 UTF-8 或不可解析。
+    #[error("path: {0}")]
+    Path(String),
 }

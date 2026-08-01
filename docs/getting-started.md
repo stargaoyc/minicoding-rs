@@ -572,14 +572,17 @@ UndoReport: { succeeded: 1, failed: 0 }
 # 列出会话（万级会话 < 1s，见 dev-plan.md T-M3-4）
 minicoding session list
 
+# 删除指定会话（原文件不可恢复）
+minicoding session delete sess_01H...
+
 # 恢复指定会话继续提问
 minicoding --resume sess_01H...
 
 # Fork 会话从分叉点尝试不同方向（features.md A-12）
-minicoding --resume sess_01H... --fork-session
+minicoding --fork-session sess_01H...
 ```
 
-`--resume` 读取 `index.json` 的 `last_compaction_id` 定位起始行，避免全文件扫描（`data-model.md` §3.1、§3.3）。跨进程文件锁（`fs2`）防止两个进程同时写同一会话（`data-model.md` §10）。
+`--resume`/`--replay`/`--fork-session` 三者互斥（见 `cli/builder.rs::SessionLoadMode`）。`--resume` 读取 `index.json` 的 `last_compaction_id` 定位起始行，避免全文件扫描（`data-model.md` §3.1、§3.3）。跨进程文件锁（`fs2`）防止两个进程同时写同一会话（`data-model.md` §10）。`session list`/`delete` 子命令不构建 `Runtime`，直接复用 `JsonlStorage` 同步方法，无需 API key。
 
 #### --replay 回放（M3 交付，`features.md` A-09）
 

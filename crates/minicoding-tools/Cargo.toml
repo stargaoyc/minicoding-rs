@@ -38,6 +38,10 @@ htmd = { workspace = true }
 # reqwest 仅 web.fetch/search 工具需要（M3+）
 # reqwest = { workspace = true, optional = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+time = { workspace = true }
+
 [features]
 default = []
 # 按 modules.md §0.4 特性门控

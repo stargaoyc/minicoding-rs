@@ -86,6 +86,16 @@ impl ToolResult {
         }
     }
 
+    /// 创建成功结果（JSON，用于结构化工具输出如 `task.*`）。
+    #[must_use]
+    pub fn ok_json(value: serde_json::Value) -> Self {
+        Self {
+            content: ToolContent::Json(value),
+            is_error: false,
+            metadata: ToolResultMeta::default(),
+        }
+    }
+
     /// 创建错误结果（文本）。
     #[must_use]
     pub fn err_text(text: impl Into<String>) -> Self {

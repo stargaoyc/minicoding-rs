@@ -50,6 +50,11 @@ pub struct ContextConfig {
     pub budget_ratio: f32,
     pub max_tool_iters: u32,
     pub turn_timeout_sec: u64,
+    /// 是否启用压缩管道（默认 `true`）。
+    ///
+    /// `false` 时 `build_chat_request` 跳过压缩直通（见 `docs/design.md` §3.3、
+    /// AGENTS.md C-18 上下文经济软约束）。配置项 `[context] compress = false`。
+    pub compress: bool,
 }
 
 impl Default for ContextConfig {
@@ -58,6 +63,7 @@ impl Default for ContextConfig {
             budget_ratio: 0.85,
             max_tool_iters: 50,
             turn_timeout_sec: 600,
+            compress: true,
         }
     }
 }

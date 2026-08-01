@@ -28,12 +28,21 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod fs;
+mod memory;
 mod shell;
+mod task;
 mod util;
 
 pub use fs::{
     FsDelete, FsEdit, FsGlob, FsGrep, FsList, FsMultiEdit, FsRead, FsWrite,
     register_readonly_tools, register_write_tools,
 };
+pub use memory::{
+    AutoMemoryWriter, InMemoryAutoMemory, MemoryCategory, MemoryWrite, MemoryWriteTarget,
+    register_memory_tools,
+};
 pub use shell::{ShellRun, register_shell_tools};
+pub use task::{
+    InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskStore, TaskUpdate, register_task_tools,
+};
 pub use util::{ensure_dir, resolve_path, truncate_output};

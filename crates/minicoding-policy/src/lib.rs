@@ -18,7 +18,9 @@
 mod builtin;
 mod path_sandbox;
 mod prompter;
+mod replay;
 
 pub use builtin::BuiltinPolicy;
 pub use path_sandbox::{PathSandboxError, resolve_under};
 pub use prompter::{InteractivePrompter, NonInteractivePrompter};
+pub use replay::ReplayPolicy;

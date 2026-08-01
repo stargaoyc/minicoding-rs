@@ -32,6 +32,8 @@ pub struct RuntimeBuilder {
     prompter: Option<Arc<dyn PermissionPrompter>>,
     audit: Option<Arc<dyn AuditSink>>,
     cancel_token: Option<CancellationToken>,
+    /// 预加载会话（`--resume`/`--fork-session` 用，默认 `None` → 新建）。
+    session: Option<Session>,
 }
 
 impl Default for RuntimeBuilder {
@@ -57,6 +59,7 @@ impl RuntimeBuilder {
             prompter: None,
             audit: None,
             cancel_token: None,
+            session: None,
         }
     }
 
@@ -145,6 +148,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置预加载会话（`--resume`/`--fork-session` 用）。
+    ///
+    /// 未设置时 `build()` 新建空会话。设置后 `Runtime` 使用该会话的 `id` 与
+    /// `messages`，后续 `run_turn` 的 `storage.append` 写入同一会话文件。
+    /// 调用方需另行调用 `Runtime::restore_history` 将消息注入上下文管理器。
+    #[must_use]
+    pub fn session(mut self, s: Session) -> Self {
+        self.session = Some(s);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// # Errors
@@ -155,7 +169,9 @@ impl RuntimeBuilder {
         let storage = self.storage.ok_or("storage is required")?;
         let workdir = self.workdir.ok_or("workdir is required")?;
 
-        let session = Session::new(workdir.clone(), self.config_hash);
+        let session = self
+            .session
+            .unwrap_or_else(|| Session::new(workdir.clone(), self.config_hash));
 
         Ok(Runtime {
             provider,

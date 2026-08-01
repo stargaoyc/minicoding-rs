@@ -59,6 +59,18 @@ impl Runtime {
         &self.events
     }
 
+    /// 返回上下文管理器引用（供 frontend/test 查询 `message_count` 等）。
+    #[must_use]
+    pub fn context(&self) -> &Arc<dyn ContextManager> {
+        &self.ctx
+    }
+
+    /// 返回存储引用（供 frontend/test 查询会话消息）。
+    #[must_use]
+    pub fn storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+
     /// 返回工作目录。
     #[must_use]
     pub fn workdir(&self) -> &Utf8PathBuf {
@@ -77,6 +89,29 @@ impl Runtime {
     /// （C-13：Ctrl-C 不丢已生成消息），`run_turn` 返回 `TurnOutcome::Interrupted`。
     pub fn cancel(&self) {
         self.cancel_token.cancel();
+    }
+
+    /// 恢复会话历史到上下文管理器（`--resume`/`--fork-session` 用，T-M3-10a）。
+    ///
+    /// 将 `self.session.messages` 逐条注入 `ContextManager`，使后续 `run_turn` 能
+    /// 基于历史上下文继续对话。仅在 `RuntimeBuilder::session` 设置预加载会话后调用
+    /// 一次；对新建会话（空消息）调用是 no-op。
+    ///
+    /// 消息已在磁盘（首次 `storage.append` 时落盘），此处只回填内存上下文，
+    /// **不重复落盘**——后续 `run_turn` 的新消息才走 `storage.append`。
+    ///
+    /// # Errors
+    /// 当前 `ContextManager::append` 不返回错误；保留 `Result` 为未来扩展（如
+    /// 压缩管道在回填时触发熔断）预留。
+    pub async fn restore_history(&self) -> Result<(), RuntimeError> {
+        let count = self.session.messages.len();
+        for msg in &self.session.messages {
+            self.ctx.append(msg.clone()).await;
+        }
+        if count > 0 {
+            tracing::info!(session = %self.session.id, restored = count, "history restored");
+        }
+        Ok(())
     }
 
     /// 驱动单轮对话（用户输入 → 最终回复或失败）。
@@ -243,7 +278,18 @@ impl Runtime {
     }
 
     /// 流式调用 LLM 并聚合为 assistant 消息。
+    ///
+    /// `OTel`：`llm_call` span 包裹整次 provider 调用（design.md §15.1），字段不含
+    /// 凭证（C-04：仅记 model 与消息数，不记 input 原文）。
     async fn stream_llm(&self, req: ChatRequest) -> Result<Message, crate::model::LlmError> {
+        let span = tracing::info_span!(
+            "llm_call",
+            model = %req.params.model,
+            message_count = req.messages.len(),
+            otel.name = "llm_call",
+        );
+        let _enter = span.enter();
+
         let mut stream = self.provider.chat_stream(req).await?;
         let mut acc = DeltaAccumulator::new();
         self.events.emit(Event::TurnStreamingStarted);
@@ -287,6 +333,13 @@ impl Runtime {
             let call_id = call.id.clone();
             let tool_name = call.name.clone();
             async move {
+                // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立 span。
+                let span = tracing::debug_span!(
+                    "tool_call",
+                    tool = %tool_name,
+                    call_id = %call_id,
+                );
+                let _enter = span.enter();
                 self.events.emit(Event::ToolCallStarted {
                     call_id: call_id.clone(),
                     tool: tool_name,
@@ -306,6 +359,13 @@ impl Runtime {
 
         // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
         for call in &side_effect {
+            // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
+            let span = tracing::debug_span!(
+                "tool_call",
+                tool = %call.name,
+                call_id = %call.id,
+            );
+            let _enter = span.enter();
             results.push(self.execute_side_effect_call(call, &ctx).await?);
         }
 
@@ -329,6 +389,16 @@ impl Runtime {
             .tools
             .get(&call.name)
             .map_or(SideEffect::None, |t| t.side_effect());
+
+        // `permission` span（design.md §15.1）：包裹权限决策流程（策略判定 →
+        // prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
+        let span = tracing::info_span!(
+            "permission",
+            tool = %call.name,
+            side_effect = ?side_effect,
+            otel.name = "permission",
+        );
+        let _enter = span.enter();
 
         let perm_ctx = PermissionContext {
             session: self.session.id.clone(),
