@@ -95,3 +95,110 @@ impl Tool for FsDelete {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use camino::Utf8PathBuf;
+    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    use minicoding_core::tool::Tool;
+    use tempfile::TempDir;
+
+    /// 创建临时 workdir 并返回 `(TempDir, 规范化后的 workdir 路径)`。
+    fn make_workdir() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().expect("create tempdir");
+        let canon = Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canonicalize"))
+            .expect("utf-8 path");
+        (tmp, canon)
+    }
+
+    /// 从 `ToolResult` 提取文本内容。
+    fn text_of(result: &ToolResult) -> &str {
+        match &result.content {
+            ToolContent::Text(t) => t,
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_file_succeeds_and_file_removed() {
+        let (tmp, workdir) = make_workdir();
+        let file_path = tmp.path().join("target.txt");
+        std::fs::write(&file_path, "data").expect("write");
+        assert!(file_path.exists());
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsDelete::new();
+        let result = tool
+            .execute(json!({"path": "target.txt"}), &ctx)
+            .await
+            .expect("delete ok");
+        assert!(!result.is_error);
+        assert!(text_of(&result).contains("deleted target.txt"));
+        // 文件已被删除
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_file_returns_not_found() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsDelete::new();
+        let err = tool
+            .execute(json!({"path": "no_such_file.txt"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_path_escaped_rejected() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsDelete::new();
+        let err = tool
+            .execute(json!({"path": "../escape.txt"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PathEscaped(_)));
+    }
+
+    #[test]
+    fn delete_side_effect_is_file_write() {
+        let tool = FsDelete::new();
+        assert_eq!(tool.side_effect(), SideEffect::FileWrite);
+        // 写入副作用 → 非只读
+        assert!(!tool.is_read_only());
+    }
+
+    #[test]
+    fn delete_schema_name_correct() {
+        let tool = FsDelete::new();
+        assert_eq!(tool.name(), "fs.delete");
+        assert_eq!(tool.schema().name, "fs.delete");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_path_field_returns_invalid_input() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsDelete::new();
+        let err = tool.execute(json!({}), &ctx).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_directory_returns_io_error() {
+        let (tmp, workdir) = make_workdir();
+        // FsDelete 调用 read（文件读取）+ remove_file；对目录 read 会失败
+        std::fs::create_dir(tmp.path().join("adir")).expect("mkdir");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsDelete::new();
+        // read 目录 → Io 错误（IsADirectory / 其他 IO）
+        let err = tool
+            .execute(json!({"path": "adir"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Io(_)));
+    }
+}

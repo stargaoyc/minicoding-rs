@@ -20,7 +20,11 @@ pub enum ToolGroup {
 }
 
 /// 工具注册表。
-#[derive(Default)]
+///
+/// `Clone` 实现：内部 `HashMap<String, Arc<dyn Tool>>` 浅拷贝（仅克隆 `Arc`），
+/// 用于在异步并行执行（如 `execute_tool_calls` 的只读桶）中把 `tools` 移入
+/// `'static` async 块，避免捕获 `&Runtime` 导致 future 非 `'static`。
+#[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }

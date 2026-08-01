@@ -437,11 +437,14 @@ minicoding-mcp/src/
 │   ├── mod.rs
 │   ├── rmcp.rs            # RmcpClient：基于 rmcp 2.x 的实现（stdio，M4；HTTP+OAuth 留 M6）
 │   └── wrapper.rs         # McpToolWrapper：把远程工具包装为 minicoding Tool（含 mcp.call span）
+├── server/                # T-M8-3：MCP server 暴露侧（把内置工具暴露为 MCP server）
+│   ├── mod.rs             # 模块声明 + re-export `ToolExposer`/`serve_as_mcp_server`
+│   └── expose.rs          # ToolExposer 实现 ServerHandler，serve_as_mcp_server 启动 stdio server
 ├── approval.rs            # project 作用域首次批准流（mcp_choices.toml，C-24）
 └── naming.rs              # mcp__<server>__<tool> 命名 + 解析 + 权限通配匹配
 ```
 
-> **未实现（M6+/M7+/M8）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+；`server/expose.rs`（MCP server 暴露）规划在 M8；`tool_search.rs`（BM25 检索）规划在 M7+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。
+> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+；`tool_search.rs`（BM25 检索）规划在 M7+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。
 
 ### 8.3 库选型（不自研）
 
@@ -624,6 +627,7 @@ minicoding-cli/src/
 │   ├── audit.rs          # minicoding audit list/stats
 │   ├── mcp.rs            # minicoding mcp list/approve/reset-project-choices
 │   ├── cred.rs           # minicoding cred store/load/delete（T-M4-11）
+│   ├── serve.rs          # minicoding serve（HTTP/SSE server，T-M8-2，`serve` feature）
 │   └── session_cmd.rs    # minicoding session list/delete（T-M3-10c）
 └── cred.rs               # 凭证存储（OS keyring + 文件 fallback 0600，T-M4-11，C-04）
 ```
@@ -637,6 +641,7 @@ minicoding-cli/src/
 - **Hook 加载（T-M5-8，H-01）**：`builder.rs::build_hook_registry` 从 `config.hooks`（`.minicoding/hooks.toml`）把每个 `HookEntry` 转为 `ScriptHook`（matcher 解析为 `HookMatcher::for_tools`/`for_events`），注册到 `HookRegistryImpl`。`hooks` feature 未启用时退化为 `NoopHookRegistry`。
 - **Plan 模式（T-M5-8，A-06）**：`--plan` 启动时初始 `PermissionMode::Plan`（副作用工具被硬门拒绝）；REPL `/plan [on|off|status]` 切换模式。`plan.exit` 与 `task.spawn` 工具在 Runtime 构造后通过 `register_dynamic_tool` 补注册（chicken-and-egg：tools 需 Runtime 引用，Runtime 需 tools）。
 - **/undo REPL（T-M5-8，A-10）**：`/undo` 调 `Journal::undo(1)` 回滚最近一次 operation。`file-undo` feature 未启用或 journal 未注入时打印提示；回滚结果（成功/冲突）打印到 stderr。
+- **serve 子命令（T-M8-2，`serve` feature）**：`minicoding serve` 启动 HTTP/SSE server，等价于独立运行 `minicoding-server`，但通过 CLI 统一入口。`commands/serve.rs` 定义 `ServeCommand`（clap 参数：`--bind`/`--port`/`--provider`/`--api-base`/`--api-key`/`--model`/`--workdir`/`--system`/`--permission-timeout-sec`），`run_serve_command` 构造 `ServerConfig` 委托 `minicoding_server::serve`（阻塞当前 task）。feature gate `serve` 默认关闭，启用时引入 `minicoding-server` 依赖。HRTB 兼容见 §16.3 与 `design.md` §24。
 - **退出码**：成功 0；运行时错误 1；配置错误 2；中断 130。
 - **依赖**：`minicoding-core` + 各实现 crate（按 feature）+ `clap`/`indicatif`/`anstream`/`rustyline`/`keyring`/`anyhow`。
 
@@ -737,22 +742,27 @@ minicoding-protocol/src/
 
 提供 HTTP/SSE JSON-RPC 2.0 接口，支持多客户端并发会话；ACP stdio 适配器可被支持 ACP 的客户端（如 Zed）嵌入；LSP stdio 适配器可被任何支持 LSP 的编辑器（VS Code/Neovim/Emacs/Helix 等）嵌入。
 
-### 16.2 模块树（规划）
+### 16.2 模块树
 
 minicoding-server/src/
-├── main.rs                # minicoding-server 入口
-├── http.rs                # Axum HTTP/SSE handler
-├── session_mgr.rs         # 多会话管理（HTTP path 带 session_id）
-├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio）
-├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24）
-├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest）
+├── main.rs                # minicoding-server 入口（独立二进制）
+├── lib.rs                 # re-export + `serve(cfg)` 入口（供 CLI `serve` feature 调用）
+├── http.rs                # Axum HTTP/SSE handler + `ServerConfig` + `serve(cfg)`
+├── session_mgr.rs         # `SessionManager` 多会话管理（HTTP path 带 session_id）
+├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime）
+├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
-└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
+├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，规划）
+├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，规划）
+├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest，规划）
+└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot，规划）
 
 ### 16.3 关键设计点
 
 - **SSE cursor 恢复**：事件流携带 cursor，客户端断连后从 cursor 恢复；
 - **多会话并发**：HTTP path 带 session_id，支持多 session 并发；
+- **SessionManager API 形态（HRTB 兼容）**：`create_session`/`cancel`/`get`/`list_sessions`/`delete` 为**同步方法**（`&self` 非 async），因内部仅操作 `std::sync::Mutex<HashMap>`（纯数据查/增/删，无 IO），同步可消除 `async fn(&self, ..)` 的 future 生命周期参数，避免与 axum `Handler` trait HRTB 冲突。`send_message_boxed` 是**关联函数**（非 `&self` 方法），取 `Arc<SessionManager>` owned 参数，返回的 future 无外部借用（`'static`），内部调 `Runtime::run_turn_owned`（见 `api.md` §4.1）驱动 turn。`resolve_permission`/`get_messages` 仍为 async（涉及 await）。详见 `design.md` §24 HRTB 设计说明。
+- **ServerPrompter**：实现 `PermissionPrompter`，用 `PendingPermissions`（`Arc<TokioMutex<HashMap<String, oneshot::Sender<Decision>>>>`）+ 超时（默认 300s）完成点对点权限交互；HTTP `POST /permissions/{pid}` 通过 `SessionManager::resolve_permission` 投递决策。
 - **ACP stdio**：作为 `minicoding serve --acp` 子模式，stdio 传输 JSON-RPC；
 - **LSP stdio**：作为 `minicoding serve --lsp` 子模式，基于 `tower-lsp` 实现，把 minicoding 能力映射到 LSP 标准方法（`workspace/executeCommand`/`$/progress`/`window/showMessageRequest` 等，见 `design.md` §24 语义映射表）；`LspPrompter` 实现点对点权限交互；
 - **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）+ `tower-lsp`（feature gate `lsp`，M8 引入）。

@@ -2,14 +2,18 @@
 # minicoding-rs pre-commit hook
 # 与 .pre-commit-config.yaml 内容一致，供无 pre-commit 工具的环境使用。
 # 安装：cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
-# 门禁：AGENTS.md §6.3（fmt/clippy/test/audit/deny）
+# 门禁：AGENTS.md §6.3（fmt/clippy/test/audit/deny/coverage）
 set -euo pipefail
 
+# pre-commit 阶段（每次提交，快速门禁）
 echo "[pre-commit] cargo fmt --check ..."
 cargo fmt --all -- --check
 
 echo "[pre-commit] cargo clippy (deny warnings) ..."
 cargo clippy --workspace --all-targets -- -D warnings
+
+echo "[pre-commit] cargo deny check ..."
+cargo deny check advisories licenses bans sources
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0
@@ -33,6 +37,24 @@ if git diff --cached --name-only | grep -Eq '\.env$|\.env\.local$|credentials\.j
   echo "ERROR: 敏感文件被暂存（见 AGENTS.md §6.4）"
   git diff --cached --name-only | grep -E '\.env$|\.env\.local$|credentials\.json$|\.pem$|\.key$'
   rc=1
+fi
+
+# pre-push 阶段（推送前，完整门禁——与 CI 一致）
+# 仅在推送时运行（环境变量 MINICODING_PRE_PUSH=1 由 pre-push hook 设置，或手动运行）
+if [ "${MINICODING_PRE_PUSH:-0}" = "1" ]; then
+  echo "[pre-push] cargo audit ..."
+  # `cargo audit` 默认：vulnerabilities 失败、unmaintained/yanked/notices 仅警告
+  #（不用 `--deny vulnerabilities`——该参数无效，vulnerabilities 默认就 deny）
+  cargo audit
+
+  echo "[pre-push] cargo test --workspace ..."
+  cargo test --workspace --all-features
+
+  echo "[pre-push] cargo llvm-cov (≥80%) ..."
+  # 排除前端层（tui/cli/server），库 crate 覆盖率目标 ≥80%
+  cargo llvm-cov --workspace --all-features \
+    --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server \
+    --fail-under-lines 80
 fi
 
 exit $rc

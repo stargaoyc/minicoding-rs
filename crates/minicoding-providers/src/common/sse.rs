@@ -103,3 +103,117 @@ pub fn from_response(resp: reqwest::Response) -> SseStream {
     let byte_stream = resp.bytes_stream().map(|r| r.map(|b| b.to_vec())).boxed();
     SseStream::new(byte_stream)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::needless_pass_by_value)]
+
+    use super::*;
+    use futures::stream::{self, StreamExt};
+
+    /// 构造合成字节流：把字符串切片逐个转为 `Ok(Vec<u8>)`，模拟 `reqwest` 的 `bytes_stream`。
+    fn byte_stream(chunks: Vec<&str>) -> ByteStream {
+        let items: Vec<Result<Vec<u8>, reqwest::Error>> = chunks
+            .into_iter()
+            .map(|s| Ok(s.as_bytes().to_vec()))
+            .collect();
+        stream::iter(items).boxed()
+    }
+
+    /// 收集 `SseStream` 所有 Ok 事件为字符串向量（遇 Err 则 panic，便于定位）。
+    async fn collect_ok(mut sse: SseStream) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(item) = sse.next().await {
+            match item {
+                Ok(s) => out.push(s),
+                Err(e) => panic!("未预期的 SSE 错误: {e:?}"),
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn single_data_event_decoded() {
+        // 单行 `data: {...}\n\n` → yield 一个 payload
+        let sse = SseStream::new(byte_stream(vec!["data: {\"a\":1}\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["{\"a\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn multi_line_data_joined_with_newline() {
+        // 多行 `data:` 拼接为 `\n` 分隔的单个 payload
+        let sse = SseStream::new(byte_stream(vec!["data: line1\ndata: line2\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["line1\nline2"]);
+    }
+
+    #[tokio::test]
+    async fn done_sentinel_yielded_as_data() {
+        // SseStream 不解释 `[DONE]`，原样 yield（由消费方 chat_stream 判断流终止）
+        let sse = SseStream::new(byte_stream(vec!["data: [DONE]\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["[DONE]"]);
+    }
+
+    #[tokio::test]
+    async fn comment_and_event_only_lines_skipped() {
+        // `:heartbeat` 心跳注释行与纯 `event:` 行无 `data:` 字段，被跳过
+        let input = ":heartbeat\n\nevent: ping\ndata: hello\n\n";
+        let sse = SseStream::new(byte_stream(vec![input]));
+        assert_eq!(collect_ok(sse).await, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn cross_chunk_event_assembled() {
+        // 事件跨多个字节 chunk 边界，buffer 应正确拼接
+        let sse = SseStream::new(byte_stream(vec!["data: {\"par", "t\":1}\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["{\"part\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn multiple_events_in_one_chunk() {
+        // 单个 chunk 含多个事件，逐个 yield
+        let sse = SseStream::new(byte_stream(vec!["data: one\n\ndata: two\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["one", "two"]);
+    }
+
+    #[tokio::test]
+    async fn trailing_data_flushed_on_stream_end() {
+        // 流结束时残留 buffer（无 `\n\n` 结尾）应被 flush 为最后一个事件
+        let sse = SseStream::new(byte_stream(vec!["data: tail"]));
+        assert_eq!(collect_ok(sse).await, vec!["tail"]);
+    }
+
+    #[tokio::test]
+    async fn data_without_space_prefix() {
+        // `data:` 后无空格也应解析（strip_prefix(' ') 失败时回退原值再 trim）
+        let sse = SseStream::new(byte_stream(vec!["data:nospace\n\n"]));
+        assert_eq!(collect_ok(sse).await, vec!["nospace"]);
+    }
+
+    #[tokio::test]
+    async fn empty_stream_yields_nothing() {
+        let sse = SseStream::new(byte_stream(vec![]));
+        assert!(collect_ok(sse).await.is_empty());
+    }
+
+    #[test]
+    fn extract_data_returns_none_for_no_data_lines() {
+        // 纯 `event:` / `:comment` 行无 data，extract_data 返回 None
+        assert!(SseStream::extract_data("event: ping\n\n").is_none());
+        assert!(SseStream::extract_data(":comment\n\n").is_none());
+    }
+
+    #[test]
+    fn extract_data_trims_payload() {
+        // data 后的前导/尾随空白被 trim
+        assert_eq!(
+            SseStream::extract_data("data:   hi   \n\n"),
+            Some("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_data_joins_multi_line() {
+        let event = "data: a\ndata: b\ndata: c\n\n";
+        assert_eq!(SseStream::extract_data(event), Some("a\nb\nc".to_string()));
+    }
+}

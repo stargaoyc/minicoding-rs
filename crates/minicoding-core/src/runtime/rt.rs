@@ -37,11 +37,17 @@ use crate::storage::{AuditKind, AuditRecord, AuditSink, Storage};
 use crate::tool::{ToolContext, ToolRegistry};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+
+/// 只读工具并发执行的 future 类型（装箱擦除生命周期，避免 HRTB 问题）。
+type ToolFuture =
+    std::pin::Pin<Box<dyn Future<Output = Result<(ToolCallId, ToolResult), RuntimeError>> + Send>>;
 
 /// Runtime 聚合根（所有可替换能力的持有者）。
 ///
@@ -276,129 +282,156 @@ impl Runtime {
     ///
     /// # Errors
     /// LLM 调用失败、工具执行失败、存储失败等返回 `RuntimeError`。
-    pub async fn run_turn(&self, user_input: UserInput) -> Result<TurnOutcome, RuntimeError> {
+    pub fn run_turn(
+        &self,
+        user_input: UserInput,
+    ) -> impl Future<Output = Result<TurnOutcome, RuntimeError>> + '_ {
         let span = tracing::info_span!("turn", session = %self.session.id);
-        let _enter = span.enter();
+        // 使用 `.instrument(span)` 而非 `span.enter()`——`Entered` guard 是 `!Send`，
+        // 跨 await 持有会导致 future 非 `Send`（axum / `tokio::spawn` 需要 `Send`）。
+        async move {
+            // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
+            self.sandbox_breaker.reset();
 
-        // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
-        self.sandbox_breaker.reset();
+            // 1. 构造用户消息并入库
+            let user_msg = Message::user_text(user_input.text);
+            self.storage
+                .append(&self.session.id, &user_msg)
+                .await
+                .map_err(RuntimeError::Storage)?;
+            self.ctx.append(user_msg.clone()).await;
+            self.events.emit(Event::MessageAppended(user_msg));
 
-        // 1. 构造用户消息并入库
-        let user_msg = Message::user_text(user_input.text);
-        self.storage
-            .append(&self.session.id, &user_msg)
-            .await
-            .map_err(RuntimeError::Storage)?;
-        self.ctx.append(user_msg.clone()).await;
-        self.events.emit(Event::MessageAppended(user_msg));
+            let max_iters = self.config.context.max_tool_iters;
+            let turn_timeout = Duration::from_secs(self.config.context.turn_timeout_sec);
 
-        let max_iters = self.config.context.max_tool_iters;
-        let turn_timeout = Duration::from_secs(self.config.context.turn_timeout_sec);
+            // 主循环封装为 future，由外层 select! 与 timeout/cancel 组合。
+            // 使用 `async move` 避免 `async` 捕获 `&self` 的引用（产生 `&&self`），
+            // 让 future 类型只借用 `&self`（单层引用），可与 SDK 的 `Box::pin` 配合。
+            let turn_fut = async move {
+                // 重复检测：记录每轮工具调用签名，连续 3 轮相同 → 死循环
+                let mut call_signatures: Vec<String> = Vec::new();
 
-        // 主循环封装为 future，由外层 select! 与 timeout/cancel 组合
-        let turn_fut = async {
-            // 重复检测：记录每轮工具调用签名，连续 3 轮相同 → 死循环
-            let mut call_signatures: Vec<String> = Vec::new();
+                for _iter in 0..max_iters {
+                    // 2. 构建请求（system + tools + 压缩后的历史）
+                    let req = self
+                        .ctx
+                        .build_chat_request(&self.tools, &self.config)
+                        .await?;
 
-            for _iter in 0..max_iters {
-                // 2. 构建请求（system + tools + 压缩后的历史）
-                let req = self
-                    .ctx
-                    .build_chat_request(&self.tools, &self.config)
-                    .await?;
+                    // 3. 流式调用 LLM
+                    let assistant_msg = match self.stream_llm(req).await {
+                        Ok(msg) => msg,
+                        Err(e) => return Ok(TurnOutcome::Failed(e.into())),
+                    };
 
-                // 3. 流式调用 LLM
-                let assistant_msg = match self.stream_llm(req).await {
-                    Ok(msg) => msg,
-                    Err(e) => return Ok(TurnOutcome::Failed(e.into())),
-                };
-
-                // 4. 落盘 assistant 消息
-                self.storage
-                    .append(&self.session.id, &assistant_msg)
-                    .await
-                    .map_err(RuntimeError::Storage)?;
-                self.ctx.append(assistant_msg.clone()).await;
-                self.events
-                    .emit(Event::MessageAppended(assistant_msg.clone()));
-
-                // 5. 无工具调用 → 终止
-                if assistant_msg.tool_calls.is_empty() {
-                    self.events.emit(Event::TurnEnd {
-                        stop_reason: StopReason::EndTurn,
-                    });
-                    return Ok(TurnOutcome::Finished(assistant_msg));
-                }
-
-                // 5.1 重复检测：连续 ≥3 轮相同工具调用集合 → 死循环，提前终止
-                //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
-                let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
-                call_signatures.push(sig);
-                if Self::is_repeating(&call_signatures) {
-                    tracing::warn!("turn terminated: repeated tool calls detected");
-                    self.events.emit(Event::TurnEnd {
-                        stop_reason: StopReason::Stopped,
-                    });
-                    return Ok(TurnOutcome::Finished(Message::assistant_text(
-                        "[检测到重复工具调用，已终止以避免死循环]".to_string(),
-                    )));
-                }
-
-                // 6. 执行工具调用
-                let results = match self.execute_tool_calls(&assistant_msg.tool_calls).await {
-                    Ok(r) => r,
-                    Err(e) => return Ok(TurnOutcome::Failed(e)),
-                };
-
-                // 7. 落盘 tool_result 并入上下文
-                for (id, result) in &results {
-                    let msg = Self::tool_result_message(id.clone(), result.clone());
+                    // 4. 落盘 assistant 消息
                     self.storage
-                        .append(&self.session.id, &msg)
+                        .append(&self.session.id, &assistant_msg)
                         .await
                         .map_err(RuntimeError::Storage)?;
-                    self.ctx.append(msg.clone()).await;
-                    self.events.emit(Event::MessageAppended(msg));
+                    self.ctx.append(assistant_msg.clone()).await;
+                    self.events
+                        .emit(Event::MessageAppended(assistant_msg.clone()));
+
+                    // 5. 无工具调用 → 终止
+                    if assistant_msg.tool_calls.is_empty() {
+                        self.events.emit(Event::TurnEnd {
+                            stop_reason: StopReason::EndTurn,
+                        });
+                        return Ok(TurnOutcome::Finished(assistant_msg));
+                    }
+
+                    // 5.1 重复检测：连续 ≥3 轮相同工具调用集合 → 死循环，提前终止
+                    //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
+                    let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
+                    call_signatures.push(sig);
+                    if Self::is_repeating(&call_signatures) {
+                        tracing::warn!("turn terminated: repeated tool calls detected");
+                        self.events.emit(Event::TurnEnd {
+                            stop_reason: StopReason::Stopped,
+                        });
+                        return Ok(TurnOutcome::Finished(Message::assistant_text(
+                            "[检测到重复工具调用，已终止以避免死循环]".to_string(),
+                        )));
+                    }
+
+                    // 6. 执行工具调用
+                    let results = match self.execute_tool_calls(&assistant_msg.tool_calls).await {
+                        Ok(r) => r,
+                        Err(e) => return Ok(TurnOutcome::Failed(e)),
+                    };
+
+                    // 7. 落盘 tool_result 并入上下文
+                    for (id, result) in &results {
+                        let msg = Self::tool_result_message(id.clone(), result.clone());
+                        self.storage
+                            .append(&self.session.id, &msg)
+                            .await
+                            .map_err(RuntimeError::Storage)?;
+                        self.ctx.append(msg.clone()).await;
+                        self.events.emit(Event::MessageAppended(msg));
+                    }
                 }
-            }
 
-            // 达到 max_iters 上限
-            tracing::warn!(max_iters, "turn exceeded max tool iterations");
-            self.events.emit(Event::TurnEnd {
-                stop_reason: StopReason::Stopped,
-            });
-            Ok(TurnOutcome::Finished(Message::assistant_text(
-                "[达到最大工具调用轮次上限]".to_string(),
-            )))
-        };
-
-        // turn_timeout + Ctrl-C cancel（graceful stop；已落盘消息不丢失，C-13）
-        // 三路 select：cancel 优先返回 Interrupted；timeout 返回 Finished(Stopped)；
-        // turn_fut 正常完成则透传其 outcome（内部已 emit TurnEnd）。
-        tokio::select! {
-            () = self.cancel_token.cancelled() => {
-                tracing::info!("turn cancelled by user");
-                self.events.emit(Event::TurnEnd {
-                    stop_reason: StopReason::Interrupted,
-                });
-                Ok(TurnOutcome::Interrupted(Message::assistant_text(
-                    "[已取消]".to_string(),
-                )))
-            }
-            () = tokio::time::sleep(turn_timeout) => {
-                tracing::warn!(
-                    timeout_sec = self.config.context.turn_timeout_sec,
-                    "turn timed out"
-                );
+                // 达到 max_iters 上限
+                tracing::warn!(max_iters, "turn exceeded max tool iterations");
                 self.events.emit(Event::TurnEnd {
                     stop_reason: StopReason::Stopped,
                 });
                 Ok(TurnOutcome::Finished(Message::assistant_text(
-                    "[turn 超时终止]".to_string(),
+                    "[达到最大工具调用轮次上限]".to_string(),
                 )))
+            };
+
+            // turn_timeout + Ctrl-C cancel（graceful stop；已落盘消息不丢失，C-13）
+            // 三路 select：cancel 优先返回 Interrupted；timeout 返回 Finished(Stopped)；
+            // turn_fut 正常完成则透传其 outcome（内部已 emit TurnEnd）。
+            tokio::select! {
+                () = self.cancel_token.cancelled() => {
+                    tracing::info!("turn cancelled by user");
+                    self.events.emit(Event::TurnEnd {
+                        stop_reason: StopReason::Interrupted,
+                    });
+                    Ok(TurnOutcome::Interrupted(Message::assistant_text(
+                        "[已取消]".to_string(),
+                    )))
+                }
+                () = tokio::time::sleep(turn_timeout) => {
+                    tracing::warn!(
+                        timeout_sec = self.config.context.turn_timeout_sec,
+                        "turn timed out"
+                    );
+                    self.events.emit(Event::TurnEnd {
+                        stop_reason: StopReason::Stopped,
+                    });
+                    Ok(TurnOutcome::Finished(Message::assistant_text(
+                        "[turn 超时终止]".to_string(),
+                    )))
+                }
+                outcome = turn_fut => outcome,
             }
-            outcome = turn_fut => outcome,
         }
+        .instrument(span)
+    }
+
+    /// `run_turn` 的 `'static` 变体：取 `Arc<Runtime>` owned，返回 `BoxFuture<'static>`。
+    ///
+    /// **设计原因**：`run_turn(&self) -> impl Future + '_` 的 future 借用 `&self`，
+    /// 当被 server handler（axum `Handler` trait 要求 `'static` + HRTB）`.await` 时，
+    /// 生命周期参数泄漏到外层 future 类型，编译器报 "implementation of `FnOnce`
+    /// is not general enough"。
+    ///
+    /// **实现**：`self: Arc<Self>` owned 移入 `async move` 块，`run_turn(&*self)` 的
+    /// 借用是块内局部借用，await 后即释放。`Box::pin` 把块装箱为 `BoxFuture<'static>`。
+    ///
+    /// # Errors
+    /// 同 [`Runtime::run_turn`] 的运行时错误。
+    pub fn run_turn_owned(
+        self: Arc<Self>,
+        user_input: UserInput,
+    ) -> BoxFuture<'static, Result<TurnOutcome, RuntimeError>> {
+        Box::pin(async move { self.run_turn(user_input).await })
     }
 
     /// 计算一轮工具调用的签名（`name|规范化 input`，多调用排序后拼接）。
@@ -481,30 +514,48 @@ impl Runtime {
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
 
         // 无副作用：并发执行（最多 8 并发）
-        let ro_futs = readonly.iter().map(|call| {
-            let ctx = ctx.clone();
-            let call_id = call.id.clone();
-            let tool_name = call.name.clone();
-            async move {
-                // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立 span。
-                let span = tracing::debug_span!(
-                    "tool_call",
-                    tool = %tool_name,
-                    call_id = %call_id,
-                );
-                let _enter = span.enter();
-                self.events.emit(Event::ToolCallStarted {
-                    call_id: call_id.clone(),
-                    tool: tool_name,
+        // 克隆 `events`/`tools` 到闭包外，让 async 块只捕获 owned 数据，
+        // 避免捕获 `&self` 导致 future 非 `'static`（无法被 SDK `tokio::spawn`）。
+        //
+        // **HRTB 修复**：`readonly.iter().map(|call| async move { ... })` 中 `call`
+        // 是 `&&ToolCall`，闭包签名 `fn(&'a &'b ToolCall) -> impl Future + 'a` 不满足
+        // `buffer_unordered` 要求的 HRTB（future 类型对任意 `'a` 必须相同）。把每个
+        // future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
+        let events = self.events.clone();
+        let tools = self.tools.clone();
+        let ro_futs: Vec<ToolFuture> = readonly
+            .iter()
+            .map(|call| {
+                let ctx = ctx.clone();
+                let call_id = call.id.clone();
+                let tool_name = call.name.clone();
+                let events = events.clone();
+                let tools = tools.clone();
+                // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
+                // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
+                let call: ToolCall = (**call).clone();
+                let fut: ToolFuture = Box::pin(async move {
+                    // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立 span。
+                    let span = tracing::debug_span!(
+                        "tool_call",
+                        tool = %tool_name,
+                        call_id = %call_id,
+                    );
+                    let _enter = span.enter();
+                    events.emit(Event::ToolCallStarted {
+                        call_id: call_id.clone(),
+                        tool: tool_name,
+                    });
+                    let result = tools.dispatch(&call, &ctx).await?;
+                    events.emit(Event::ToolCallFinished {
+                        call_id: call_id.clone(),
+                        result: result.clone(),
+                    });
+                    Ok::<_, RuntimeError>((call.id.clone(), result))
                 });
-                let result = self.tools.dispatch(call, &ctx).await?;
-                self.events.emit(Event::ToolCallFinished {
-                    call_id: call_id.clone(),
-                    result: result.clone(),
-                });
-                Ok::<_, RuntimeError>((call.id.clone(), result))
-            }
-        });
+                fut
+            })
+            .collect();
         let mut ro_stream = futures::stream::iter(ro_futs).buffer_unordered(8);
         while let Some(r) = ro_stream.next().await {
             results.push(r?);
@@ -1074,3 +1125,10 @@ impl PlanModeController for PlanControllerHandle {
         })
     }
 }
+
+// 静态断言：`Runtime` 是 `Send + Sync`（多线程 runtime / axum 需要）。
+// 通过 `const` 绑定强制 trait bound 检查，无需运行时调用。
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Runtime>();
+};

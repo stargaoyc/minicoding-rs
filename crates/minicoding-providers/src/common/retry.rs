@@ -19,10 +19,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::BoxStream;
 use minicoding_core::model::LlmError;
 use minicoding_core::provider::{
-    BoxFuture, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer,
+    BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer,
 };
 use tracing::{debug, warn};
 
@@ -176,7 +175,7 @@ mod tests {
     #![allow(clippy::unnecessary_literal_bound)] // trait impl 签名须匹配 trait，不可改 &'static str
 
     use super::*;
-    use futures::stream::{self, StreamExt};
+    use futures::stream;
     use minicoding_core::model::Message;
     use minicoding_core::model::ToolSchema;
     use minicoding_core::provider::GenerationParams;
@@ -232,7 +231,7 @@ mod tests {
                 .unwrap_or(Ok(()));
             Box::pin(async move {
                 match outcome {
-                    Ok(()) => Ok(stream::empty().boxed()),
+                    Ok(()) => Ok(Box::pin(stream::empty()) as BoxStream<'static, _>),
                     Err(e) => Err(e),
                 }
             })

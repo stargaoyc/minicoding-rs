@@ -156,3 +156,164 @@ fn entry_type_of(metadata: &std::fs::Metadata) -> &'static str {
         "symlink"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    use minicoding_core::tool::Tool;
+    use tempfile::TempDir;
+
+    /// 创建临时 workdir 并返回 `(TempDir, 规范化后的 workdir 路径)`。
+    /// 保留 `TempDir` 句柄以防止临时目录在测试结束前被清理。
+    fn make_workdir() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().expect("create tempdir");
+        let canon = Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canonicalize"))
+            .expect("utf-8 path");
+        (tmp, canon)
+    }
+
+    /// 从 `ToolResult` 提取文本内容。
+    fn text_of(result: &ToolResult) -> &str {
+        match &result.content {
+            ToolContent::Text(t) => t,
+            _ => panic!("expected text content"),
+        }
+    }
+
+    /// 把结果文本解析为 JSON 数组。
+    fn parse_entries(result: &ToolResult) -> Vec<Value> {
+        serde_json::from_str(text_of(result)).expect("parse json array")
+    }
+
+    #[tokio::test]
+    async fn list_empty_directory_returns_empty_array() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let result = tool
+            .execute(json!({"path": "."}), &ctx)
+            .await
+            .expect("list ok");
+        assert!(!result.is_error);
+        assert!(parse_entries(&result).is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_directory_with_files_returns_filenames() {
+        let (tmp, workdir) = make_workdir();
+        std::fs::write(tmp.path().join("a.txt"), "hello").expect("write");
+        std::fs::write(tmp.path().join("b.txt"), "world").expect("write");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let result = tool
+            .execute(json!({"path": "."}), &ctx)
+            .await
+            .expect("list ok");
+        let entries = parse_entries(&result);
+        // 排序后顺序固定：a.txt, b.txt
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "a.txt");
+        assert_eq!(entries[1]["name"], "b.txt");
+        // 类型与 size 字段
+        assert_eq!(entries[0]["type"], "file");
+        assert_eq!(entries[0]["size"], 5); // "hello" = 5 字节
+    }
+
+    #[tokio::test]
+    async fn list_directory_with_subdir_returns_subdir_entry() {
+        let (tmp, workdir) = make_workdir();
+        std::fs::create_dir(tmp.path().join("sub")).expect("mkdir");
+        std::fs::write(tmp.path().join("a.txt"), "x").expect("write");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let result = tool
+            .execute(json!({"path": "."}), &ctx)
+            .await
+            .expect("list ok");
+        let entries = parse_entries(&result);
+        // 非递归：只列出直接子项 a.txt + sub
+        assert_eq!(entries.len(), 2);
+        let sub = entries
+            .iter()
+            .find(|e| e["name"] == "sub")
+            .expect("sub entry");
+        assert_eq!(sub["type"], "dir");
+    }
+
+    #[tokio::test]
+    async fn list_recursive_includes_subdir_contents() {
+        let (tmp, workdir) = make_workdir();
+        std::fs::write(tmp.path().join("a.txt"), "x").expect("write");
+        std::fs::create_dir(tmp.path().join("sub")).expect("mkdir");
+        std::fs::write(tmp.path().join("sub").join("b.txt"), "y").expect("write");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let result = tool
+            .execute(json!({"path": ".", "recursive": true}), &ctx)
+            .await
+            .expect("list ok");
+        let entries = parse_entries(&result);
+        // 递归：a.txt, sub, sub/b.txt
+        assert_eq!(entries.len(), 3);
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(names.contains(&"a.txt".to_string()));
+        assert!(names.contains(&"sub".to_string()));
+        assert!(names.contains(&"sub/b.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_nonexistent_directory_returns_not_found() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let err = tool
+            .execute(json!({"path": "no_such_dir"}), &ctx)
+            .await
+            .unwrap_err();
+        // resolve_path 对不存在父目录返回 NotFound，list_flat 对不存在目录返回 NotFound
+        assert!(
+            matches!(err, ToolError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_path_escaped_rejected() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let err = tool
+            .execute(json!({"path": "../escape"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PathEscaped(_)));
+    }
+
+    #[test]
+    fn list_side_effect_is_none() {
+        let tool = FsList::new();
+        assert_eq!(tool.side_effect(), SideEffect::None);
+        assert!(tool.is_read_only());
+    }
+
+    #[test]
+    fn list_schema_name_correct() {
+        let tool = FsList::new();
+        assert_eq!(tool.name(), "fs.list");
+        assert_eq!(tool.schema().name, "fs.list");
+    }
+
+    #[tokio::test]
+    async fn list_missing_path_field_returns_invalid_input() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsList::new();
+        let err = tool.execute(json!({}), &ctx).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+}

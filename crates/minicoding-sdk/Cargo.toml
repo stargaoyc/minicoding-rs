@@ -1,6 +1,6 @@
 [package]
 name = "minicoding-sdk"
-description = "嵌入 SDK（M8）"
+description = "嵌入 SDK（M8）：为第三方 Rust 程序提供高层嵌入 API，隐藏 Runtime 细节"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,12 @@ authors.workspace = true
 [dependencies]
 minicoding-core = { workspace = true }
 minicoding-policy = { workspace = true }
+minicoding-tools = { workspace = true }
+minicoding-context = { workspace = true }
+minicoding-storage = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,3 +24,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

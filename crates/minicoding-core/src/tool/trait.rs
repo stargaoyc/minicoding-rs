@@ -10,7 +10,10 @@ use camino::Utf8PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+
+// 重导出 `CancellationToken`：上游 crate（如 `minicoding-cli`）构造 `ToolContext`
+// 时需要它，但不应直接依赖 `tokio-util`（重依赖按 crate 隔离，AGENTS.md §3.5）。
+pub use tokio_util::sync::CancellationToken;
 
 /// 工具执行上下文（每轮调用时构造）。
 ///

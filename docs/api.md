@@ -900,6 +900,19 @@ impl Runtime {
     /// 单轮对话；驱动 Agent 循环直到结束或中断。
     pub async fn run_turn(&self, input: UserInput) -> Result<TurnOutcome>;
 
+    /// `run_turn` 的 `'static` 变体：取 `Arc<Runtime>` owned，返回 `BoxFuture<'static>`。
+    ///
+    /// **设计原因**：`run_turn(&self)` 的 future 借用 `&self`，当被 server handler
+    /// （axum `Handler` trait 要求 `'static` + HRTB）`.await` 时，生命周期参数泄漏到
+    /// 外层 future 类型，编译器报 "implementation of `FnOnce` is not general enough"。
+    /// `self: Arc<Self>` owned 移入 `async move` 块，`run_turn(&*self)` 的借用是块内
+    /// 局部借用，await 后即释放；`Box::pin` 装箱为 `BoxFuture<'static>`。
+    /// 详见 `design.md` §24 HRTB 设计说明。
+    pub fn run_turn_owned(
+        self: Arc<Self>,
+        input: UserInput,
+    ) -> BoxFuture<'static, Result<TurnOutcome, RuntimeError>>;
+
     /// 触发 graceful 取消（CLI 的 Ctrl-C handler 调用）。
     /// 当前 in-flight 迭代被丢弃，已落盘消息保留（C-13），run_turn 返回 Interrupted。
     pub fn cancel(&self);
@@ -1236,6 +1249,145 @@ pub enum ToolError {
 - **LSP stdio**（`minicoding serve --lsp`）：Language Server Protocol，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等支持 LSP 的编辑器嵌入。语义映射见 `design.md` §24：`workspace/executeCommand`→发送 prompt / 斜杠命令、`$/progress`→流式 token 与工具进度、`window/showMessageRequest`→权限确认（`LspPrompter` 实现 `PermissionPrompter`）、`textDocument/codeAction`→AI 快速操作。
 
 五者共用 `core` 的数据模型与 `minicoding-protocol` 的 wire types，仅序列化协议与传输层不同。
+
+### 9.1 HTTP/SSE server 与 CLI `serve` 子命令签名
+
+`minicoding-server` crate 提供 HTTP/SSE server 入口；`minicoding-cli` 通过 `serve` feature gate 委托同一入口（见 `modules.md` §12/§16）。
+
+```rust
+// minicoding-server/src/http.rs
+
+/// HTTP server 启动配置（CLI `serve` 子命令与独立二进制共用）。
+pub struct ServerConfig {
+    pub bind: std::net::SocketAddr,
+    pub provider_kind: String,        // "openai"/"anthropic"/"ollama"
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    pub workdir: camino::Utf8PathBuf,
+    pub system: Option<String>,
+    pub permission_timeout_sec: u64,  // 权限交互超时（默认 300）
+}
+
+/// 启动 HTTP/SSE server（阻塞当前 task 直到 server 关闭）。
+///
+/// # Errors
+/// bind 冲突、IO 错误、Runtime 构造失败时返回 `anyhow::Error`。
+pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()>;
+```
+
+```rust
+// minicoding-server/src/session_mgr.rs
+
+/// 多会话管理器（HTTP handler 通过此管理会话生命周期）。
+///
+/// `create_session`/`cancel`/`get`/`list_sessions`/`delete` 为同步方法
+/// （内部仅操作 `std::sync::Mutex<HashMap>`，无 IO），避免 `async fn(&self, ..)`
+/// 与 axum `Handler` trait HRTB 冲突（见 `design.md` §24）。
+pub struct SessionManager { /* opaque */ }
+
+impl SessionManager {
+    pub fn new(
+        default_params: ServerRuntimeParams,
+        permission_timeout: Duration,
+    ) -> Self;
+
+    /// 创建新会话（同步——`build_runtime` 不涉及 await）。
+    pub fn create_session(
+        &self,
+        params_override: Option<ServerRuntimeParams>,
+    ) -> Result<Arc<ServerSession>, SessionManagerError>;
+
+    /// 查找会话（同步）。
+    pub fn get(&self, session_id: &str) -> Option<Arc<ServerSession>>;
+
+    /// 列出所有会话（同步）。
+    pub fn list_sessions(&self) -> Vec<SessionMeta>;
+
+    /// 删除会话（同步）。
+    pub fn delete(&self, session_id: &str) -> bool;
+
+    /// 取消当前 turn（同步——`Runtime::cancel` 仅触发 `CancellationToken`，无 await）。
+    pub fn cancel(&self, session_id: &str) -> Result<(), SessionManagerError>;
+
+    /// 解析权限请求（async——涉及 `TokioMutex` await）。
+    pub async fn resolve_permission(
+        &self,
+        session_id: &str,
+        permission_id: &str,
+        decision: Decision,
+    ) -> Result<(), SessionManagerError>;
+
+    /// 获取会话消息快照（async——涉及 `Storage::load` await）。
+    pub async fn get_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<Message>, SessionManagerError>;
+
+    /// 发送用户消息并驱动 turn（阻塞至 turn 完成）。
+    ///
+    /// **关联函数**（非 `&self` 方法）+ owned `Arc<SessionManager>` 参数，
+    /// 返回的 future 无外部借用（`'static`），避免 `async fn(&self, ..)` 与 axum
+    /// `Handler` trait HRTB 冲突。内部获取 `turn_lock`（串行化），订阅 `EventBus`
+    /// 收集事件分配 seq，调用 `Runtime::run_turn`（见 §4.1）。
+    ///
+    /// # Errors
+    /// - 会话不存在：`NotFound`；
+    /// - `run_turn` 失败：透传为 `BuildFailed`。
+    pub async fn send_message_boxed(
+        mgr: Arc<SessionManager>,
+        session_id: String,
+        text: String,
+    ) -> Result<TurnOutcome, SessionManagerError>;
+}
+```
+
+```rust
+// minicoding-cli/src/commands/serve.rs（`serve` feature gate）
+
+/// `minicoding serve` 子命令参数（clap derive）。
+///
+/// `--bind` 与 `--port` 互斥；省略时默认 `127.0.0.1:8080`。
+#[derive(clap::Args, Debug)]
+pub struct ServeCommand {
+    /// 监听地址（如 `127.0.0.1:8080`）。与 `--port` 互斥。
+    #[arg(long, conflicts_with = "port")]
+    pub bind: Option<String>,
+    /// 监听端口（绑定 `127.0.0.1:<port>`）。与 `--bind` 互斥。
+    #[arg(long, conflicts_with = "bind")]
+    pub port: Option<u16>,
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`）。
+    #[arg(long, env = "OPENAI_PROVIDER", default_value = "openai")]
+    pub provider: String,
+    /// API base URL（省略时按 provider 选默认）。
+    #[arg(long, env = "OPENAI_API_BASE")]
+    pub api_base: Option<String>,
+    /// API key（Ollama 可省略）。
+    #[arg(long, env = "OPENAI_API_KEY")]
+    pub api_key: Option<String>,
+    /// 模型名称。
+    #[arg(long, env = "OPENAI_MODEL", default_value = "gpt-4o")]
+    pub model: String,
+    /// 工作目录。
+    #[arg(long, default_value = ".")]
+    pub workdir: String,
+    /// 系统 prompt 覆盖。
+    #[arg(long)]
+    pub system: Option<String>,
+    /// 权限交互超时（秒）。
+    #[arg(long, default_value_t = 300)]
+    pub permission_timeout_sec: u64,
+}
+
+/// 运行 `serve` 子命令：构造 `ServerConfig` 并调用 `minicoding_server::serve`（阻塞）。
+///
+/// # Errors
+/// - bind 地址解析失败；
+/// - server 运行时错误（bind 冲突、IO 错误等）。
+pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
+```
+
+`SessionManager::send_message_boxed` 的关联函数形态是 HRTB 兼容方案的关键——`Arc<SessionManager>` owned 移入 future，无 `&self` 借用泄漏。`Runtime::run_turn_owned`（§4.1）同理。详见 `design.md` §24。
 
 ---
 

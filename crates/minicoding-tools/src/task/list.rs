@@ -68,3 +68,67 @@ impl Tool for TaskList {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use crate::task::InMemoryTaskStore;
+    use minicoding_core::model::{SideEffect, ToolContent};
+    use minicoding_core::tool::{Tool, ToolContext};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_store() -> Arc<dyn TaskStore> {
+        Arc::new(InMemoryTaskStore::new())
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp/proj".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn list_empty_store_returns_empty() {
+        let tool = TaskList::new(make_store());
+        let result = tool
+            .execute(json!({}), &make_ctx())
+            .await
+            .expect("execute ok");
+        assert!(!result.is_error);
+        let ToolContent::Json(value) = result.content else {
+            panic!("expected json content");
+        };
+        let tasks = value["tasks"].as_array().expect("tasks array");
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_returns_all_tasks() {
+        let store = make_store();
+        store.create("task a".to_string()).await.expect("create a");
+        store.create("task b".to_string()).await.expect("create b");
+        let tool = TaskList::new(store);
+        let result = tool
+            .execute(json!({}), &make_ctx())
+            .await
+            .expect("execute ok");
+        assert!(!result.is_error);
+        let ToolContent::Json(value) = result.content else {
+            panic!("expected json content");
+        };
+        let tasks = value["tasks"].as_array().expect("tasks array");
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn list_side_effect_is_none() {
+        let tool = TaskList::new(make_store());
+        assert_eq!(tool.side_effect(), SideEffect::None);
+    }
+
+    #[test]
+    fn list_schema_name_is_task_list() {
+        let tool = TaskList::new(make_store());
+        assert_eq!(tool.schema().name, "task.list");
+    }
+}

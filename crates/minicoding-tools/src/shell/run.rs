@@ -195,3 +195,202 @@ fn truncate_chars(text: String, max_chars: usize) -> (String, bool) {
     result.push_str(indicator);
     (result, true)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    use minicoding_core::tool::Tool;
+    use tempfile::TempDir;
+
+    /// 创建临时 workdir 并返回 `(TempDir, 规范化后的 workdir 路径)`。
+    fn make_workdir() -> (TempDir, camino::Utf8PathBuf) {
+        let tmp = TempDir::new().expect("create tempdir");
+        let canon =
+            camino::Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canonicalize"))
+                .expect("utf-8 path");
+        (tmp, canon)
+    }
+
+    /// 从 `ToolResult` 提取文本内容。
+    fn text_of(result: &ToolResult) -> &str {
+        match &result.content {
+            ToolContent::Text(t) => t,
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_echo_outputs_text() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        let result = tool
+            .execute(json!({"command": "echo hello"}), &ctx)
+            .await
+            .expect("run ok");
+        assert!(!result.is_error);
+        assert!(text_of(&result).contains("hello"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_nonexistent_command_exits_nonzero() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // sh -c 找不到命令 → 退出码 127（非 spawn 失败）
+        let result = tool
+            .execute(json!({"command": "this_cmd_does_not_exist_xyz123"}), &ctx)
+            .await
+            .expect("run returns ok with nonzero exit");
+        // 非 0 退出码 → 结果文本包含 [exit code: ...]
+        assert!(text_of(&result).contains("[exit code:"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_timeout_returns_timeout_error() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // sleep 2 + 100ms 超时
+        let err = tool
+            .execute(json!({"command": "sleep 2", "timeout_ms": 100}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Timeout(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_long_output_truncated() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // seq 1 20000 产生约 100k 字符，超过 MAX_OUTPUT_CHARS(10000)
+        let result = tool
+            .execute(json!({"command": "seq 1 20000"}), &ctx)
+            .await
+            .expect("run ok");
+        assert!(result.metadata.truncated, "output should be truncated");
+        assert!(text_of(&result).contains("... [output truncated]"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_stderr_captured_in_output() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // 同时产生 stdout 和 stderr，触发分隔标记逻辑
+        let result = tool
+            .execute(json!({"command": "echo out_msg; echo err_msg >&2"}), &ctx)
+            .await
+            .expect("run ok");
+        let text = text_of(&result);
+        assert!(text.contains("out_msg"));
+        assert!(text.contains("err_msg"));
+        // stdout 非空时，stderr 部分应有分隔标记
+        assert!(text.contains("--- stderr ---"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_stderr_only_no_separator() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // 仅 stderr 有内容（stdout 为空）→ 不附加分隔标记，直接拼接 stderr
+        let result = tool
+            .execute(json!({"command": "echo err_only >&2"}), &ctx)
+            .await
+            .expect("run ok");
+        let text = text_of(&result);
+        assert!(text.contains("err_only"));
+        assert!(!text.contains("--- stderr ---"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_exit_code_zero_no_prefix() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        // 退出码 0 → 不附加 [exit code: ...] 前缀
+        let result = tool
+            .execute(json!({"command": "true"}), &ctx)
+            .await
+            .expect("run ok");
+        assert!(!result.is_error);
+        assert!(!text_of(&result).contains("[exit code:"));
+    }
+
+    #[tokio::test]
+    async fn run_missing_command_returns_invalid_input() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        let err = tool.execute(json!({}), &ctx).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn run_side_effect_is_command() {
+        let tool = ShellRun::new();
+        assert_eq!(tool.side_effect(), SideEffect::Command);
+        // Command 副作用 → 非只读
+        assert!(!tool.is_read_only());
+    }
+
+    #[test]
+    fn run_schema_name_correct() {
+        let tool = ShellRun::new();
+        assert_eq!(tool.name(), "shell.run");
+        assert_eq!(tool.schema().name, "shell.run");
+    }
+
+    // === truncate_chars 单元测试 ===
+
+    #[test]
+    fn truncate_chars_short_text_not_truncated() {
+        let (result, truncated) = truncate_chars("hello".to_string(), 100);
+        assert_eq!(result, "hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_chars_exact_length_not_truncated() {
+        let text = "hello".to_string();
+        let (result, truncated) = truncate_chars(text.clone(), text.chars().count());
+        assert_eq!(result, text);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_chars_long_text_truncated_with_indicator() {
+        // 100 个字符，上限 50
+        let text = "a".repeat(100);
+        let (result, truncated) = truncate_chars(text, 50);
+        assert!(truncated);
+        assert!(result.ends_with("\n... [output truncated]"));
+    }
+
+    #[test]
+    fn truncate_chars_multibyte_at_char_boundary() {
+        // 中文字符每个 1 个 char（按 chars().count()），60 个中文字符
+        let text = "中".repeat(60);
+        let (result, truncated) = truncate_chars(text, 50);
+        assert!(truncated);
+        assert!(result.ends_with("\n... [output truncated]"));
+    }
+
+    #[test]
+    fn truncate_chars_empty_text_not_truncated() {
+        let (result, truncated) = truncate_chars(String::new(), 10);
+        assert_eq!(result, "");
+        assert!(!truncated);
+    }
+}

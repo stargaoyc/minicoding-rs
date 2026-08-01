@@ -5,6 +5,6 @@ mod r#trait;
 
 pub use router::{Router, StaticRouter};
 pub use r#trait::{
-    BoxFuture, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider, Tokenizer,
-    ToolCallDelta, Usage,
+    BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider,
+    Tokenizer, ToolCallDelta, Usage,
 };
