@@ -107,6 +107,7 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
         &SessionLoadMode::None,
         Some(sandbox_policy),
         false, // exec 子命令不支持 --plan（非交互场景 Plan 模式无意义）
+        None,
     )
     .context("构建 Runtime 失败")?;
 

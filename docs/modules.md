@@ -648,29 +648,32 @@ minicoding-cli/src/
 
 基于 `ratatui` 的全屏交互界面：多会话、工具调用面板、权限弹窗、流式 Markdown 渲染。
 
-### 13.2 模块树（规划）
+### 13.2 模块树
 
 ```
 minicoding-tui/src/
 ├── main.rs
-├── app.rs                # App 状态机
-├── event.rs              # 终端事件 → App 动作
+├── app.rs                # App 状态机（PanelMode / InputState / ChatLine）
+├── event.rs              # AppEvent：终端事件 + Runtime 事件 + TurnResult + PermissionRequest + SwitchSession
 ├── view/
-│   ├── chat.rs           # 对话主视图
-│   ├── tool_panel.rs     # 工具调用面板
-│   ├── task_panel.rs     # 任务列表面板（同步 TaskUpdated 事件）
-│   ├── prompt.rs         # 输入区
-│   └── permission.rs     # 权限弹窗（TuiPrompter 非阻塞）
+│   ├── chat.rs           # 对话主视图（流式 Markdown + 历史 + 工具调用行）
+│   ├── sidebar.rs        # 多会话侧栏（F2 切换，当前会话高亮）
+│   ├── tool_panel.rs     # 工具调用进度面板（F3 切换，进行中/已完成）
+│   └── task_panel.rs     # 任务列表面板（Ctrl+T 切换，订阅 Event::TaskUpdated）
 ├── render/
-│   └── markdown.rs       # 流式 Markdown 渲染
-└── runtime_bridge.rs     # 与 Runtime 的 channel 桥接
+│   ├── markdown.rs       # 流式 Markdown 增量解析（行级 + inline span）
+│   └── theme.rs          # 主题配色（Theme struct，深/浅色预设，集中颜色管理）
+└── runtime_bridge.rs     # 与 Runtime 的 channel 桥接（current_thread + LocalSet）
 ```
 
 ### 13.3 关键设计点
 
-- 独立线程跑 Runtime，UI 线程通过 channel 收发事件。
-- 权限弹窗非阻塞：Runtime 在 `Verdict::Ask` 时通过 `TuiPrompter`（点对点）挂起该工具调用，UI 处理后回传 `Decision`。
-- **依赖**：`minicoding-core` + `minicoding-policy`（TuiPrompter）+ `ratatui`/`crossterm`/`tokio`。
+- 独立线程跑 Runtime（`current_thread` tokio + `LocalSet`，因 `run_turn` future 非 `Send`），UI 主线程同步事件循环。
+- 权限弹窗非阻塞：Runtime 在 `Verdict::Ask` 时通过 `TuiPrompter`（点对点 mpsc channel）挂起该工具调用，UI 处理后通过 oneshot 回传 `Decision`。
+- 会话切换通过重建 Runtime 实现：`App::pending_switch` → `main.rs` 重建（`SessionLoadMode::Resume`），避免给 Runtime 加锁。
+- **T-M7-4 面板互斥**：F3 工具面板 / Ctrl+T 任务面板共享底部区域，`PanelMode` enum（Off/Tool/Task）互斥切换；`Event::TaskUpdated` 到达时自动切换到 Task 模式。
+- **主题配色**：`Theme` struct 集中管理所有颜色，视图模块按语义取色（`theme.user_prefix` 等），`F4` 在深/浅色预设间切换。
+- **依赖**：`minicoding-core` + `minicoding-policy`（TuiPrompter）+ `minicoding-cli`（builder）+ `minicoding-storage`（会话列表）+ `ratatui`/`crossterm`/`tokio`/`time`。
 
 ---
 

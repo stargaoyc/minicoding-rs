@@ -249,7 +249,7 @@
 - `tui`：`ratatui` + `crossterm` 基础框架。
 - 多会话侧栏、对话主视图、输入区、工具面板、权限弹窗、任务面板。
 - 流式 Markdown 增量渲染。
-- `reedline` 输入（历史、补全）。
+- 自研 `InputState`（字符插入/光标移动/历史切换，不引入 `reedline`——与 ratatui 全屏 alternate screen 模式冲突，见 `modules.md` §13.3）。
 - `TuiPrompter` 实现（点对点，非阻塞主循环）。
 - 主题、配色、非 TTY 降级。
 
