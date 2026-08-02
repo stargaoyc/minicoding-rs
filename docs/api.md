@@ -185,6 +185,20 @@ pub enum SubagentType {
 
 pub enum Thoroughness { Quick, Medium, VeryThorough }
 
+/// 子 Agent 隔离模式（A-15，design.md §7.5）。
+pub enum Isolation {
+    Shared,                      // 共享父会话工作目录（默认）
+    Worktree(WorktreeSpec),      // 独立 git worktree 隔离
+}
+
+pub struct WorktreeSpec {
+    pub branch_prefix: String,   // 如 "subagent/"，生成分支名 subagent/{task_id}
+    pub auto_cleanup: bool,      // true: 完成后删除 worktree + 分支
+    pub merge_back: MergeStrategy,
+}
+
+pub enum MergeStrategy { None, CherryPick, MergeCommit }
+
 pub struct SubagentSpec {
     pub ty: SubagentType,
     pub system_prompt: String,
@@ -196,6 +210,7 @@ pub struct SubagentSpec {
     pub skip_memory: bool,
     pub can_spawn_subagent: bool,
     pub timeout: Duration,
+    pub isolation: Isolation,         // A-15：默认 Shared，Worktree 时创建 git worktree
 }
 
 pub struct SubagentResult {
@@ -214,9 +229,16 @@ pub trait SubagentRunner: Send + Sync {
 
 /// 兜底实现（未注入时 `task.spawn` 直接返回 `RuntimeError::Config`）。
 pub struct NoopSubagentRunner;
+
+/// Worktree 隔离装饰器（A-15，design.md §7.5）。
+/// 包裹内部 runner，spawn 前后处理 git worktree 创建/合并/清理。
+/// 非 git 仓库时降级为 Shared（记 warn，继续委托）。
+pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: Utf8PathBuf */ }
 ```
 
-`SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
+`SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`isolation` 默认 `Shared`。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
+
+`WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。
 
 ```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。

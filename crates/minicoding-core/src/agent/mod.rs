@@ -6,5 +6,7 @@
 //! 真实场景由 frontend 注入 `InProcessSubagentRunner` 或外部实现。
 
 mod runner;
+mod worktree;
 
 pub use runner::{NoopSubagentRunner, SubagentRunner};
+pub use worktree::WorktreeSubagentRunner;

@@ -917,8 +917,9 @@ pub enum MergeStrategy {
 **约束**：
 - worktree 隔离仅对 `GeneralPurpose` 子 Agent 有效（`Explore`/`Plan` 只读无需隔离）；
 - 需仓库是 git 仓库（非 git 仓库降级为 `Shared` 并 warn）；
-- worktree 路径在 `.minicoding/worktrees/`（已加入 `.gitignore` 默认模板）；
-- 阶段 6+ 交付，MVP 不含。
+- worktree 路径在 `.minicoding/worktrees/`（已加入 `.gitignore` 默认模板）。
+
+**实现状态（A-15）**：`Isolation`/`WorktreeSpec`/`MergeStrategy` 定义在 `model/subagent.rs`，`SubagentSpec.isolation` 默认 `Shared`。`WorktreeSubagentRunner`（`agent/worktree.rs`）是装饰器，包裹内部 `Arc<dyn SubagentRunner>`：`Worktree` 模式下 `git worktree add` 创建隔离目录 → 委托内部 runner → 按 `merge_back` 合并 → `auto_cleanup` 清理。非 git 仓库降级为 `Shared`。
 
 ---
 
@@ -2106,6 +2107,8 @@ async fn call_tool(&self, server: &str, tool: &str, input: Value) -> ToolResult 
     result
 }
 ```
+
+**实现状态（X-13/X-14）**：`warm_up` 遍历所有连接调 `list_all_tools` 刷新缓存的工具 schema（server 运行期间可能增删工具），单个失败记 warn 不阻塞；inflight merge 用 `futures::future::Shared` 实现，`RequestKey = (server, tool, input_hash)`，首个请求的 `Future` 被 `Shared` 包装后存入 `inflight` map，后续同 key 调用 clone shared future 复用结果。`call` 用 `Arc<RwLock>` 读锁（允许并发调用），error 转 `String` 以满足 `Shared` 的 `Clone` 约束。
 
 `Shared` 让多个 await 同一 future，首个完成后所有等待者拿到同一结果。`input_hash` 用 `std::hash::Hasher`，避免大 input 的 clone 开销。
 

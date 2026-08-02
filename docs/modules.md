@@ -147,7 +147,8 @@ minicoding-core/src/
 │   └── accumulator.rs     # 流式 delta 聚合
 ├── agent/
 │   ├── mod.rs
-│   └── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
+│   ├── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
+│   └── worktree.rs        # WorktreeSubagentRunner 装饰器（A-15，git worktree 隔离，见 design.md §7.5）
 ├── model/
 │   ├── message.rs         # Message / Role / Content
 │   ├── tool.rs            # ToolCall / ToolResult / ToolSchema
@@ -641,6 +642,7 @@ minicoding-cli/src/
 │   ├── mcp.rs            # minicoding mcp list/approve/reset-project-choices
 │   ├── cred.rs           # minicoding cred store/load/delete（T-M4-11）
 │   ├── serve.rs          # minicoding serve（HTTP/SSE server，T-M8-2，`serve` feature）
+│   ├── backup.rs         # minicoding backup create/list（S-05，tar.gz 打包）
 │   └── session_cmd.rs    # minicoding session list/delete（T-M3-10c）
 └── cred.rs               # 凭证存储（OS keyring + 文件 fallback 0600，T-M4-11，C-04）
 ```

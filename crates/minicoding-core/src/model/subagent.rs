@@ -95,6 +95,61 @@ impl Thoroughness {
     }
 }
 
+/// 子 Agent 隔离模式（`design.md` §7.5）。
+///
+/// `Shared`：共享父会话工作目录（默认）。`Worktree`：在独立 git worktree 中运行，
+/// 文件改动隔离。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Isolation {
+    /// 共享父会话工作目录（默认）。多个 Agent 串行写同一目录，靠串行桶防竞态。
+    #[default]
+    Shared,
+    /// 在独立 git worktree 中运行（A-15）。
+    /// 子 Agent 拥有独立工作目录，文件改动不互相干扰。
+    /// 完成后按 `merge_back` 策略合并回主 worktree。
+    Worktree(WorktreeSpec),
+}
+
+/// Worktree 隔离规格（`design.md` §7.5）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSpec {
+    /// 分支名前缀（如 `"subagent/"`，生成分支名 `subagent/{task_id}`）。
+    pub branch_prefix: String,
+    /// `true`：子 Agent 完成后自动删除 worktree + 分支。
+    pub auto_cleanup: bool,
+    /// 合并回主分支的策略。
+    pub merge_back: MergeStrategy,
+}
+
+impl WorktreeSpec {
+    /// 创建默认 worktree 规格：前缀 `subagent/`，自动清理，不自动合并。
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            branch_prefix: "subagent/".to_string(),
+            auto_cleanup: true,
+            merge_back: MergeStrategy::None,
+        }
+    }
+}
+
+impl Default for WorktreeSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Worktree 改动合并策略（`design.md` §7.5）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// 不自动合并，子 Agent 结果含 worktree 路径，由父 Agent 决定。
+    None,
+    /// cherry-pick 子 Agent 的 commit 到主分支。
+    CherryPick,
+    /// 创建 merge commit。
+    MergeCommit,
+}
+
 /// 子 Agent 派发规格（`design.md` §7.2）。
 ///
 /// 由 `task.spawn` 工具入参 + `SubagentType` 默认值合并而成。Runtime 在派发前
@@ -123,6 +178,8 @@ pub struct SubagentSpec {
     pub can_spawn_subagent: bool,
     /// 单次子 Agent 执行超时。
     pub timeout: Duration,
+    /// 隔离模式（默认 `Shared`，`design.md` §7.5）。
+    pub isolation: Isolation,
 }
 
 impl SubagentSpec {
@@ -153,6 +210,7 @@ impl SubagentSpec {
             can_spawn_subagent: ty.default_can_spawn(),
             timeout,
             ty,
+            isolation: Isolation::default(),
         }
     }
 }

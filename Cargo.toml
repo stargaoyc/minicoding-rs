@@ -94,6 +94,10 @@ similar = "2.6"
 sha2 = "0.10"
 htmd = "0.1"
 
+# 备份打包（S-05，见 data-model.md §12）
+tar = "0.4"
+flate2 = "1"
+
 # Token 计数（见 tech-stack.md §6）
 tiktoken-rs = "0.6"
 

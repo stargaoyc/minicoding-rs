@@ -34,14 +34,16 @@ use minicoding_cli::builder::{self, SessionLoadMode};
 use minicoding_cli::commands::McpCommand;
 #[cfg(feature = "serve")]
 use minicoding_cli::commands::ServeCommand;
-use minicoding_cli::commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
+use minicoding_cli::commands::{
+    BackupCommand, CredCommand, DoctorCommand, ExecCommand, SessionCommand,
+};
 use minicoding_cli::{commands, otel_init, session};
 use minicoding_core::model::{TurnOutcome, UserInput};
 use minicoding_core::runtime::Event;
 
 /// 顶层子命令（除默认运行模式外的独立操作）。
 ///
-/// `session`/`doctor`/`mcp`/`cred` 不构建 `Runtime`，无需 API key。
+/// `session`/`doctor`/`mcp`/`cred`/`backup` 不构建 `Runtime`，无需 API key。
 /// `exec` 构建完整 `Runtime` 但强制非交互（CI 场景）。
 /// `serve` 委托 `minicoding_server::serve`（`serve` feature）。
 #[derive(Subcommand, Debug)]
@@ -66,6 +68,9 @@ enum Command {
     #[cfg(feature = "serve")]
     #[command(name = "serve")]
     Serve(ServeCommand),
+    /// 备份管理（create/list，S-05）。
+    #[command(name = "backup")]
+    Backup(BackupCommand),
 }
 
 /// minicoding — 终端 AI Coding 助手
@@ -200,6 +205,10 @@ fn main() -> Result<()> {
         }
         Some(Command::Cred(cred_cmd)) => {
             commands::run_cred_command(cred_cmd).context("cred 子命令失败")?;
+            return Ok(());
+        }
+        Some(Command::Backup(backup_cmd)) => {
+            commands::run_backup_command(backup_cmd).context("backup 子命令失败")?;
             return Ok(());
         }
         #[cfg(feature = "serve")]

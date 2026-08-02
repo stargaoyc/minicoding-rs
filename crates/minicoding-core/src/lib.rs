@@ -34,7 +34,7 @@ pub mod tool;
 
 /// 常用类型 re-export。
 pub mod prelude {
-    pub use crate::agent::{NoopSubagentRunner, SubagentRunner};
+    pub use crate::agent::{NoopSubagentRunner, SubagentRunner, WorktreeSubagentRunner};
     pub use crate::config::{HookEntry, HooksConfig, RuntimeConfig};
     pub use crate::context::{ContextManager, ContextSnapshot};
     pub use crate::extension::{
@@ -51,12 +51,12 @@ pub mod prelude {
     pub use crate::mcp::{McpClient, McpScope, McpServerConfig, McpTransport, ToolHint};
     pub use crate::memory::{MemoryStore, ProjectDocLoader};
     pub use crate::model::{
-        Attachment, ContentBlock, ContextHint, ExtensionError, JournalError, LlmError, McpError,
-        MemoryError, Message, MessageMeta, MessageSource, PolicyError, PromptError, Role,
-        RuntimeError, Session, SessionId, SessionMeta, SideEffect, StopReason, StorageError,
-        SubagentResult, SubagentSpec, SubagentType, Task, TaskStatus, Thoroughness, ToolCall,
-        ToolCallId, ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema, TurnOutcome,
-        UserInput,
+        Attachment, ContentBlock, ContextHint, ExtensionError, Isolation, JournalError, LlmError,
+        McpError, MemoryError, MergeStrategy, Message, MessageMeta, MessageSource, PolicyError,
+        PromptError, Role, RuntimeError, Session, SessionId, SessionMeta, SideEffect, StopReason,
+        StorageError, SubagentResult, SubagentSpec, SubagentType, Task, TaskStatus, Thoroughness,
+        ToolCall, ToolCallId, ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema,
+        TurnOutcome, UserInput, WorktreeSpec,
     };
     pub use crate::policy::{
         Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionMode, PermissionPolicy,

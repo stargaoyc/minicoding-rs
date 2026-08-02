@@ -126,6 +126,8 @@ Tauri 与本项目"Rust 一等公民"理念一致，且体积/内存/安全均�
 | 正则 | `regex` | 标配；不支持回溯但够用 |
 | 目录遍历 | `ignore` | 尊重 `.gitignore`，与 `ripgrep` 行为一致 |
 | 文件监听 | `notify` 8 | S-22 配置热更新 `ConfigWatcher` 监听 `~/.minicoding/config.toml` 变更（500ms debounce + best-effort 降级），广播 `Event::ConfigChanged`；由 `minicoding-core` 引入 |
+| tar 打包 | `tar` 0.4 | S-05 备份功能打包 `~/.minicoding/` 为 tar 归档；由 `minicoding-cli` 引入 |
+| gzip 压缩 | `flate2` 1 | S-05 备份 gzip 压缩 tar 归档为 `.tar.gz`；由 `minicoding-cli` 引入 |
 | Diff 生成 | `similar` | Myers diff 算法主流实现，`edit`/`multiedit` 工具展示变更、`/undo` 预览用 |
 | HTML→Markdown | `htmd` | `web.fetch` 工具把抓取的 HTML 转 Markdown，纯 Rust 无 C 依赖 |
 | 有序 ID | `ulid` | `task_id`/`op_id` 用 ULID（字典序可排序，比 UUID 更适合按时间顺序列出） |
@@ -196,8 +198,8 @@ OpenTelemetry 是**一等公民**（非后续可选），从 M0 起接入。业�
 | 临时文件 | `tempfile` | 文件工具测试 |
 | 快照测试 | `insta` | 配置 schema、CLI 输出快照 |
 | 覆盖率 | `cargo-llvm-cov` | 基于 LLVM，准确 |
-| 属性测试 | `proptest` | 压缩管道不变量、权限优先级、Parent-UUID 链重建（features Q-05） |
-| 性能基准 | `criterion` | 关键路径回归基准（Agent 循环/压缩/token 计数，features Q-06） |
+| 属性测试 | `proptest` | `Message` JSON roundtrip、path sandbox 不变量（features Q-05） |
+| 性能基准 | `criterion` | 压缩管道 100/500/1000 消息基准（features Q-06） |
 | 模糊测试（可选） | `cargo-fuzz` | 解析器（SSE/JSON）模糊测试 |
 
 ---

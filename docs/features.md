@@ -24,7 +24,7 @@
 | A-12 | Fork 会话 | `--fork-session` 从分叉点尝试不同方向 | M3 | 规划中 |
 | A-13 | 惰性物化 | 首条消息时才创建会话文件 | M1 | 规划中 |
 | A-14 | 64KB 窗口会话列出 | 首尾 64KB 快速列出万级会话 | M3 | 规划中 |
-| A-15 | worktree 隔离子 Agent | 并行子 Agent 在独立 git worktree 工作 | M6+ | 规划中 |
+| A-15 | worktree 隔离子 Agent | 并行子 Agent 在独立 git worktree 工作 | M6+ | 已实现 |
 
 ## 2. LLM Provider
 
@@ -156,8 +156,8 @@
 | X-10 | MCP server 暴露 | `serve --as-mcp-server` 被其他 Agent 调用 | M8 | 已实现 |
 | X-11 | `mcp` 子命令 | list/approve/reset-project-choices | M4 | 已实现 |
 | X-12 | MCP 进程池 | MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5、`modules.md` §8.4） | M4 | 已实现 |
-| X-13 | MCP 后台预热 | 全局 server 启动时并发预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞 | M6+ | 规划中 |
-| X-14 | MCP inflight merge | 同 server 并发请求合并，避免重复调用 | M6+ | 规划中 |
+| X-13 | MCP 后台预热 | `warm_up` 刷新工具列表，确保连接活跃；首 turn 仅在预热未完成时阻塞 | M6+ | 已实现 |
+| X-14 | MCP inflight merge | 同 server+tool+input 并发请求合并（`Shared<Future>`），避免重复调用 | M6+ | 已实现 |
 
 ## 9. 可观测性
 
@@ -180,7 +180,7 @@
 | S-02 | 会话索引 index.json | 轻量元数据列出 | M3 | 已实现 |
 | S-03 | 跨进程文件锁 | 同会话互斥（fs2） | M3 | 已实现 |
 | S-04 | 会话导出 | md / jsonl | M3 | 已实现 |
-| S-05 | 备份 | tar.gz 打包 | M7+ | 规划中 |
+| S-05 | 备份 | tar.gz 打包 | M7+ | 已实现 |
 | S-06 | `MINICODING_HOME` | 根目录覆盖 | M0 | 规划中 |
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M4 | 已实现 |
 | S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 规划中 |
@@ -241,9 +241,9 @@
 | Q-01 | CI（fmt/clippy/test/audit/deny） | 全绿门禁 | M0 | 规划中 |
 | Q-02 | 单元测试 ≥ 80% | 每 trait 实现 | 持续 | 规划中 |
 | Q-03 | 集成测试（wiremock） | 完整 Agent 循环 | M1+ | 规划中 |
-| Q-04 | 回放测试 | JSONL fixture | M3 | 规划中 |
-| Q-05 | 属性测试（proptest） | 压缩管道不变量 | M3 | 规划中 |
-| Q-06 | 性能基准（criterion） | 关键路径回归 | M2+ | 规划中 |
+| Q-04 | 回放测试 | JSONL fixture + `ReplayPolicy` 全副作用 Deny 单测 | M3 | 已实现 |
+| Q-05 | 属性测试（proptest） | `Message` JSON roundtrip + path sandbox 不变量 | M3 | 已实现 |
+| Q-06 | 性能基准（criterion） | 压缩管道 100/500/1000 消息基准 | M2+ | 已实现 |
 | Q-07 | 沙箱平台 CI matrix | Linux/macOS/Windows 拒绝语义 | M4+ | 规划中 |
 | Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M6+ | 规划中 |
 | Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M6+ | 规划中 |

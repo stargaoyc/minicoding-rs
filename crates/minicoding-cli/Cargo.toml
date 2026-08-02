@@ -57,6 +57,10 @@ minicoding-extension-sdk = { workspace = true, optional = true }
 # 凭证存储（OS keyring，T-M4-11）
 keyring = { workspace = true }
 
+# 备份打包（S-05，见 data-model.md §12）
+tar = { workspace = true }
+flate2 = { workspace = true }
+
 [features]
 default = ["memory", "sandbox"]
 memory = ["dep:minicoding-memory"]
