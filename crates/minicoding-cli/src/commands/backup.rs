@@ -44,27 +44,26 @@ pub enum BackupAction {
 /// # Errors
 /// IO 失败（创建/写入 tar.gz、读取目录）时返回错误。
 pub fn run_backup_command(cmd: &BackupCommand) -> Result<()> {
+    let home =
+        minicoding_core::paths::minicoding_home().context("无法确定 minicoding home 目录")?;
     match &cmd.action {
         BackupAction::Create { output } => {
             let output_path = output.as_deref().map(Utf8PathBuf::from);
-            create_backup(output_path)
+            create_backup(&home, output_path)
         }
-        BackupAction::List => list_backups(),
+        BackupAction::List => list_backups(&home),
     }
 }
 
 /// 创建 tar.gz 备份。
 ///
-/// 打包 `~/.minicoding/` 下所有文件（排除 `backups/` 自身避免递归），
-/// 输出到 `--output` 指定路径或默认 `~/.minicoding/backups/minicoding-<timestamp>.tar.gz`。
+/// 打包 `home` 下所有文件（排除 `backups/` 自身避免递归），
+/// 输出到 `--output` 指定路径或默认 `<home>/backups/minicoding-<timestamp>.tar.gz`。
 ///
 /// # Errors
-/// 无法确定 home 目录、创建/写入备份文件、读取目录失败时返回错误。
-fn create_backup(output: Option<Utf8PathBuf>) -> Result<()> {
-    let home =
-        minicoding_core::paths::minicoding_home().context("无法确定 minicoding home 目录")?;
-
-    // 默认输出路径：~/.minicoding/backups/minicoding-<timestamp>.tar.gz
+/// 创建/写入备份文件、读取目录失败时返回错误。
+fn create_backup(home: &Utf8Path, output: Option<Utf8PathBuf>) -> Result<()> {
+    // 默认输出路径：<home>/backups/minicoding-<timestamp>.tar.gz
     let output_path = if let Some(p) = output {
         p
     } else {
@@ -85,7 +84,7 @@ fn create_backup(output: Option<Utf8PathBuf>) -> Result<()> {
     let mut builder = tar::Builder::new(encoder);
 
     // 遍历 home 目录打包所有文件，排除 backups/ 避免递归
-    add_dir_to_tar(&mut builder, &home, &home, &["backups"])?;
+    add_dir_to_tar(&mut builder, home, home, &["backups"])?;
 
     builder.finish()?;
     builder.into_inner()?.finish()?;
@@ -134,13 +133,11 @@ fn add_dir_to_tar(
     Ok(())
 }
 
-/// 列出已有备份（`~/.minicoding/backups/` 下的 .tar.gz 文件）。
+/// 列出已有备份（`<home>/backups/` 下的 .tar.gz 文件）。
 ///
 /// # Errors
-/// 无法确定 home 目录或读取备份目录失败时返回错误。
-fn list_backups() -> Result<()> {
-    let home =
-        minicoding_core::paths::minicoding_home().context("无法确定 minicoding home 目录")?;
+/// 读取备份目录失败时返回错误。
+fn list_backups(home: &Utf8Path) -> Result<()> {
     let backups_dir = home.join("backups");
 
     if !backups_dir.exists() {
@@ -187,58 +184,22 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use camino::Utf8PathBuf;
     use tempfile::TempDir;
-
-    /// 序列化所有依赖 `MINICODING_HOME` 的测试，避免并行环境变量竞争。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// 测试期间临时修改环境变量，`Drop` 时恢复原值。
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            // SAFETY: ENV_LOCK 串行化所有 MINICODING_HOME 访问，无并发。
-            unsafe { std::env::set_var(key, value) };
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: 同 set()，ENV_LOCK 保证串行访问。
-            match &self.original {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     #[test]
     fn create_and_list_backup() {
-        let _g = lock_env();
         let tmp = TempDir::new().expect("创建临时目录");
-        let home_str = tmp.path().to_str().expect("tempdir 路径应为 UTF-8");
-        let _guard = EnvGuard::set("MINICODING_HOME", home_str);
+        let home =
+            Utf8PathBuf::from_path_buf(tmp.path().to_owned()).expect("tempdir 路径应为 UTF-8");
 
         // 准备测试文件
-        let home = Utf8PathBuf::from(home_str);
         std::fs::write(home.join("config.toml"), "test = true\n").expect("写 config.toml");
         std::fs::create_dir_all(home.join("sessions")).expect("创建 sessions 目录");
         std::fs::write(home.join("sessions/test.jsonl"), "{}\n").expect("写 test.jsonl");
 
         // 创建备份（默认输出路径）
-        create_backup(None).expect("创建备份失败");
+        create_backup(&home, None).expect("创建备份失败");
 
         // 验证备份文件存在
         let backups_dir = home.join("backups");
@@ -280,6 +241,6 @@ mod tests {
         );
 
         // 验证 list_backups 不报错
-        list_backups().expect("列出备份失败");
+        list_backups(&home).expect("列出备份失败");
     }
 }
