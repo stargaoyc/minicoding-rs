@@ -50,6 +50,7 @@ minicoding-hooks = { workspace = true, optional = true }
 minicoding-journal = { workspace = true, optional = true }
 minicoding-sandbox = { workspace = true, optional = true }
 minicoding-mcp = { workspace = true, optional = true }
+minicoding-server = { workspace = true, optional = true }
 
 # 凭证存储（OS keyring，T-M4-11）
 keyring = { workspace = true }
@@ -61,9 +62,10 @@ hooks = ["dep:minicoding-hooks"]
 file-undo = ["dep:minicoding-journal"]
 sandbox = ["dep:minicoding-sandbox"]
 mcp = ["dep:minicoding-mcp"]
+serve = ["dep:minicoding-server"]
 # OTLP 导出（需 reqwest，按需启用；未启用时降级为纯 fmt 日志，见 core::otel）
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
-full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "otel"]
+full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "serve", "otel"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

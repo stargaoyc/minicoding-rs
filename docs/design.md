@@ -2626,6 +2626,18 @@ POST   /sessions/{id}/permissions/{pid}   → ResolvePermission
 
 SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼容（浏览器 `EventSource` 自动重连时携带）。HTTP server 实现在 `minicoding-server` crate（新增），依赖 `minicoding-tools` + `tokio` + `axum`（或 `hyper`，选型见 `tech-stack.md`）。
 
+**HRTB 兼容设计（`run_turn_owned` + `send_message_boxed`）**：axum 的 `Handler` trait 要求 future 为 `'static` 且满足 HRTB（higher-ranked trait bound，`for<'a> Fn(&'a mut Request) -> Future<Output = Response> + 'a`）。但 `Runtime::run_turn(&self) -> impl Future + '_` 的 future 借用 `&self`，生命周期参数 `'_` 泄漏到外层 future 类型——当 handler `.await` 该 future 时，编译器报 "implementation of `FnOnce` is not general enough"（future 类型对每个具体的 `'a` 不同，不满足 HRTB "对任意 `'a` 类型相同"的要求）。
+
+解决方案是把借用转为 owned，让 future 自包含 `'static`：
+
+1. **`Runtime::run_turn_owned(self: Arc<Self>, input) -> BoxFuture<'static, Result<TurnOutcome>>`**（见 `api.md` §4.1）：`Arc<Runtime>` owned 移入 `async move` 块，`run_turn(&*self)` 的 `&self` 借用是块内局部借用（await 后即释放），`Box::pin` 装箱为 `BoxFuture<'static>`。`SessionManager::send_message_boxed`（关联函数，取 `Arc<SessionManager>` owned）同理——future 无 `&self` 借用泄漏。
+
+2. **`SessionManager` 同步方法**：`create_session`/`cancel`/`get`/`list_sessions`/`delete` 改为同步方法（非 `async fn(&self, ..)`）。这些方法内部仅操作 `std::sync::Mutex<HashMap>`（纯数据查/增/删，无 IO），同步实现消除 future 生命周期参数。`send_message_boxed`/`resolve_permission`/`get_messages` 仍为 async（涉及 await），但 `send_message_boxed` 是关联函数（无 `&self` 借用），`resolve_permission`/`get_messages` 不直接作为 axum handler（在 handler 内调用，future 不泄漏到 HRTB 边界）。
+
+3. **`ToolFuture` 装箱（`execute_tool_calls` HRTB 修复）**：Runtime 内部 `execute_tool_calls` 对只读工具并发执行时，`readonly.iter().map(|call| async move { ... })` 中 `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），闭包签名 `fn(&'a &'b ToolCall) -> impl Future + 'a` 不满足 `buffer_unordered` 要求的 HRTB（future 类型对任意 `'a` 必须相同）。把每个 future 装箱为 `Pin<Box<dyn Future<Output = Result<(ToolCallId, ToolResult), RuntimeError>> + Send>>`（type alias `ToolFuture`），擦除生命周期参数统一类型。装箱开销相对工具执行 IO 可忽略，且只读桶最多 8 并发（`buffer_unordered(8)`）。
+
+这三处修复共享同一模式：**把借用转为 owned（`Arc` clone）或装箱（`Box::pin`），让 future 自包含 `'static`，避免生命周期参数泄漏到 HRTB 边界**。这是 axum/tower 生态与"async fn in trait + `Arc<dyn Trait>`"架构交互时的通用解法。
+
 **ACP stdio 适配器**：`minicoding serve --acp` 启动 ACP（Agent Client Protocol）stdio 模式，可被 Zed 等编辑器嵌入。ACP 是 stdio 上的 JSON-RPC，与 HTTP server 共享 protocol crate 的 wire types，仅传输层不同（stdio 替代 HTTP/SSE）。这使 minicoding 既能作为独立服务（HTTP），又能作为嵌入式 Agent（ACP）。
 
 **LSP stdio 适配器**：`minicoding serve --lsp` 启动 LSP（Language Server Protocol）server 模式，可被任何支持 LSP 的编辑器（VS Code、Neovim、Emacs、Helix 等）嵌入。LSP 同样是 JSON-RPC 2.0 over stdio，与 ACP 共享 `minicoding-protocol` 的 wire types，但 LSP 拥有标准化的方法集（`textDocument/*`/`workspace/*`/`window/*`），需要把 minicoding 的对话/工具/权限能力映射到 LSP 标准方法。LSP 比 ACP 更通用（几乎所有现代编辑器原生支持），是 IDE 集成的主推路径。

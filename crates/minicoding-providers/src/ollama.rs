@@ -14,10 +14,11 @@
 //! HTTP 状态码映射同 `OpenAI`：429 → `RateLimited`，5xx → `Server`，其它 4xx → `Client`。
 //! 重试由 `RetryProvider` 装饰（T-M6-3）。
 
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
-    BoxFuture, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta, Usage,
+    BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
+    Usage,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
@@ -192,21 +193,20 @@ impl LlmProvider for OllamaProvider {
             }
 
             // NDJSON 解析：每行一个 JSON 对象，按 `done` 字段判断结束
+            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束（见 openai.rs 同样注释）。
             let ndjson = crate::common::ndjson::from_response(resp);
-            let delta_stream = ndjson
-                .flat_map(|ev| {
-                    let items: Vec<Result<Delta, LlmError>> = match ev {
-                        Ok(line) => match serde_json::from_str::<Value>(&line) {
-                            Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
-                            Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                        },
-                        Err(e) => vec![Err(e)],
-                    };
-                    stream::iter(items)
-                })
-                .boxed();
+            let delta_stream = ndjson.flat_map(|ev| {
+                let items: Vec<Result<Delta, LlmError>> = match ev {
+                    Ok(line) => match serde_json::from_str::<Value>(&line) {
+                        Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
+                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
+                    },
+                    Err(e) => vec![Err(e)],
+                };
+                stream::iter(items)
+            });
 
-            Ok(delta_stream)
+            Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
     }
 

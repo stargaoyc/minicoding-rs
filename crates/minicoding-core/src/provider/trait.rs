@@ -5,13 +5,19 @@
 //! 但更显式且不依赖宏行为。
 
 use crate::model::{LlmError, Message, ToolSchema};
-use futures::stream::BoxStream;
+use futures::Stream;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 /// 异步返回类型（`Send` future，`dyn` 兼容）。
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// 流式返回类型（`Send` stream，`dyn` 兼容）。
+///
+/// 与 `futures::stream::BoxStream` 的区别：包含 `+ Send` 约束，使持有 stream
+/// 跨 await 点的 future 仍是 `Send`（axum handler / `tokio::spawn` 需要）。
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 
 /// LLM provider 能力声明。
 #[derive(Debug, Clone)]

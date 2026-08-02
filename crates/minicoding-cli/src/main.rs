@@ -32,6 +32,8 @@ use clap::{Parser, Subcommand};
 use minicoding_cli::builder::{self, SessionLoadMode};
 #[cfg(feature = "mcp")]
 use minicoding_cli::commands::McpCommand;
+#[cfg(feature = "serve")]
+use minicoding_cli::commands::ServeCommand;
 use minicoding_cli::commands::{CredCommand, DoctorCommand, ExecCommand, SessionCommand};
 use minicoding_cli::{commands, otel_init, session};
 use minicoding_core::model::{TurnOutcome, UserInput};
@@ -41,6 +43,7 @@ use minicoding_core::runtime::Event;
 ///
 /// `session`/`doctor`/`mcp`/`cred` 不构建 `Runtime`，无需 API key。
 /// `exec` 构建完整 `Runtime` 但强制非交互（CI 场景）。
+/// `serve` 委托 `minicoding_server::serve`（`serve` feature）。
 #[derive(Subcommand, Debug)]
 enum Command {
     /// 会话管理（列出 / 删除）。
@@ -59,6 +62,10 @@ enum Command {
     /// 凭证管理（store/load/delete，T-M4-11）。
     #[command(name = "cred")]
     Cred(CredCommand),
+    /// 启动 HTTP/SSE server（T-M8-2，`serve` feature）。
+    #[cfg(feature = "serve")]
+    #[command(name = "serve")]
+    Serve(ServeCommand),
 }
 
 /// minicoding — 终端 AI Coding 助手
@@ -193,6 +200,12 @@ fn main() -> Result<()> {
         }
         Some(Command::Cred(cred_cmd)) => {
             commands::run_cred_command(cred_cmd).context("cred 子命令失败")?;
+            return Ok(());
+        }
+        #[cfg(feature = "serve")]
+        Some(Command::Serve(serve_cmd)) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(commands::serve::run_serve_command(serve_cmd))?;
             return Ok(());
         }
         None => {}

@@ -2,9 +2,9 @@
 //!
 //! 前后端协议契约：JSON-RPC 2.0 wire types + `Event`/`Command` DTO。
 //!
-//! 独立于实现 crate，定义 CLI / TUI / HTTP Server / ACP 适配器共用的线协议类型。
-//! `Event` 携带 `seq: u64` 单调递增序列号，支持 SSE cursor 恢复；broadcast 溢出时
-//! 发 `RehydrateRequired` 通知客户端重拉 snapshot。
+//! 独立于实现 crate，定义 CLI / TUI / HTTP Server / ACP 适配器 / LSP 适配器共用的
+//! 线协议类型。`Event` 携带 `seq: u64` 单调递增序列号，支持 SSE cursor 恢复；
+//! broadcast 溢出时发 `RehydrateRequired` 通知客户端重拉 snapshot。
 //!
 //! ## 设计要点
 //!
@@ -15,8 +15,18 @@
 //! - **Rehydrate 信号**：`broadcast` 溢出时发 `RehydrateRequired` delta，客户端重拉
 //!   snapshot 而非静默丢事件。
 //!
-//! 当前 M0 阶段：仅占位骨架（T-M0-1），实现见 M5（protocol）+ M6/M8（server）。
-//!
-//! 详见 `docs/modules.md` §15、`docs/design.md` §23。
+//! 详见 `docs/modules.md` §15、`docs/design.md` §24。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+pub mod command;
+pub mod cursor;
+pub mod event;
+pub mod jsonrpc;
+pub mod rehydrate;
+
+pub use command::{Command, SessionConfig};
+pub use cursor::EventCursor;
+pub use event::{EventDto, EventKind};
+pub use jsonrpc::{Error as RpcError, Id, Notification, Request, Response, Version};
+pub use rehydrate::RehydrateRequired;

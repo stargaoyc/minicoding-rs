@@ -231,9 +231,10 @@ pub fn save_summary(index: &mut SessionIndex, session_id: &str, summary: String)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream::BoxStream;
     use minicoding_core::model::{LlmError, Message, StopReason};
-    use minicoding_core::provider::{BoxFuture, Capabilities, ChatRequest, LlmProvider, Tokenizer};
+    use minicoding_core::provider::{
+        BoxFuture, BoxStream, Capabilities, ChatRequest, LlmProvider, Tokenizer,
+    };
     use minicoding_storage::SessionIndexEntry;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

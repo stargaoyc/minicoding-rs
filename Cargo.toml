@@ -34,6 +34,7 @@ authors = ["stargaoyc"]
 # 异步运行时
 tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 trait-variant = "0.1"
 
@@ -106,6 +107,14 @@ assert_cmd = "2.0"
 
 # 跨进程锁
 fs2 = "0.4"
+
+# HTTP server（仅 minicoding-server 引入，见 tech-stack.md §4、modules.md §16）
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+
+# LSP server（仅 minicoding-server 引入，feature gate `lsp`，见 modules.md §16.3）
+tower-lsp = "0.20"
 
 # 凭证存储（OS keychain，见 tech-stack.md §8）
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }

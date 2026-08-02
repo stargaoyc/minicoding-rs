@@ -59,8 +59,7 @@ impl Router for StaticRouter {
 mod tests {
     use super::*;
     use crate::model::LlmError;
-    use crate::provider::{BoxFuture, Capabilities, ChatRequest, Tokenizer};
-    use futures::stream::BoxStream;
+    use crate::provider::{BoxFuture, BoxStream, Capabilities, ChatRequest, Tokenizer};
 
     /// 测试用 stub provider（仅实现 trait 最小接口）。
     struct StubProvider {

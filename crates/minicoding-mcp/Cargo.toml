@@ -24,9 +24,12 @@ ulid = { workspace = true }
 
 # rmcp 2.x 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
 # M4 用 stdio 传输；M6（T-M6-4）补齐 streamable HTTP + bearer token 鉴权。
+# M8（T-M8-3）补齐 server + transport-io：把自身工具暴露为 MCP server。
 rmcp = { version = "2.0", default-features = false, features = [
     "client",
+    "server",
     "transport-child-process",
+    "transport-io",
     "transport-streamable-http-client-reqwest",
 ] }
 # http 类型（HeaderName/HeaderValue），与 rmcp/reqwest 共用同一版本。

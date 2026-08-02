@@ -31,6 +31,7 @@
 pub mod approval;
 pub mod client;
 pub mod naming;
+pub mod server;
 
 pub use approval::{
     ApprovalState, ChoicesStore, FileChoicesStore, check_project_scope_approval,
@@ -38,3 +39,4 @@ pub use approval::{
 };
 pub use client::{McpToolWrapper, RmcpClient};
 pub use naming::{is_mcp_tool, mcp_tool_name, parse_mcp_tool_name};
+pub use server::{ToolExposer, serve_as_mcp_server};

@@ -4,10 +4,11 @@
 //! 协议解析响应，转换为 [`Delta`]。HTTP 状态码映射到 [`LlmError`]：
 //! 429 → `RateLimited`（携带 `Retry-After`），5xx → `Server`，其它 4xx → `Client`。
 
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
-    BoxFuture, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta, Usage,
+    BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
+    Usage,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde_json::{Value, json};
@@ -186,22 +187,22 @@ impl LlmProvider for OpenAiProvider {
 
             // SSE 解析复用 common::sse（T-M6-3），data payload 为字符串，此处再解析为 JSON。
             // `[DONE]` 是 OpenAI 流结束哨兵（Anthropic 用 message_stop 事件，无此哨兵）。
+            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束，使 `Runtime::run_turn` future
+            // 是 `Send`（axum handler / `tokio::spawn` 需要）。
             let sse = crate::common::sse::from_response(resp);
-            let delta_stream = sse
-                .flat_map(|ev| {
-                    let items: Vec<Result<Delta, LlmError>> = match ev {
-                        Ok(data) if data == "[DONE]" => vec![],
-                        Ok(data) => match serde_json::from_str::<Value>(&data) {
-                            Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
-                            Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                        },
-                        Err(e) => vec![Err(e)],
-                    };
-                    stream::iter(items)
-                })
-                .boxed();
+            let delta_stream = sse.flat_map(|ev| {
+                let items: Vec<Result<Delta, LlmError>> = match ev {
+                    Ok(data) if data == "[DONE]" => vec![],
+                    Ok(data) => match serde_json::from_str::<Value>(&data) {
+                        Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
+                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
+                    },
+                    Err(e) => vec![Err(e)],
+                };
+                stream::iter(items)
+            });
 
-            Ok(delta_stream)
+            Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
     }
 

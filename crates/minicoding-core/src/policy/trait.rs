@@ -25,7 +25,8 @@ pub enum Verdict {
 }
 
 /// 交互后的最终决策（不再含 Ask）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
     Deny(String),

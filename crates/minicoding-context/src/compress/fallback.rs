@@ -146,9 +146,10 @@ fn role_label(role: &minicoding_core::model::Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream::BoxStream;
     use minicoding_core::model::{LlmError, Message};
-    use minicoding_core::provider::{BoxFuture, Capabilities, ChatRequest, LlmProvider, Tokenizer};
+    use minicoding_core::provider::{
+        BoxFuture, BoxStream, Capabilities, ChatRequest, LlmProvider, Tokenizer,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

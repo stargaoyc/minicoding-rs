@@ -6,15 +6,15 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use futures::StreamExt;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use minicoding_core::context::{ContextManager, ContextSnapshot};
 use minicoding_core::model::SessionId;
 use minicoding_core::model::{
     LlmError, Message, RuntimeError, SideEffect, ToolError, ToolResult, ToolSchema,
 };
 use minicoding_core::provider::{
-    BoxFuture, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta, Usage,
+    BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
+    Usage,
 };
 use minicoding_core::storage::{SessionMeta, Storage, StorageError};
 use minicoding_core::tool::{Tool, ToolContext};
@@ -93,8 +93,8 @@ impl LlmProvider for ScriptedProvider {
             .ok_or_else(|| LlmError::Network("no more scripts in mock".into()));
         Box::pin(async move {
             let script = script?;
-            let stream = stream::iter(script.into_iter().map(Ok::<_, LlmError>)).boxed();
-            Ok(stream)
+            let stream = stream::iter(script.into_iter().map(Ok::<_, LlmError>));
+            Ok(Box::pin(stream) as BoxStream<'static, _>)
         })
     }
     fn count_tokens(&self, messages: &[Message]) -> BoxFuture<'_, usize> {

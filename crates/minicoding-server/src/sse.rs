@@ -1,0 +1,119 @@
+//! SSE 流（Server-Sent Events，T-M8-2）。
+//!
+//! 把 `EventBus` 的 `Event` 转为 SSE 格式（`id:`/`event:`/`data:`），
+//! 支持 `Last-Event-ID` header cursor 恢复。
+//!
+//! SSE 协议格式：
+//! ```text
+//! id: 42
+//! event: token
+//! data: {"text":"hello"}
+//!
+//! ```
+//!
+//! cursor 恢复流程：
+//! 1. 客户端连接时携带 `Last-Event-ID: <seq>` header；
+//! 2. Server 从 `EventCursor` 重放 `seq+1..` 的事件；
+//! 3. 重放完毕后订阅 `EventBus` 推送新事件；
+//! 4. 若 `Last-Event-ID` 已从 ring buffer evict，发 `RehydrateRequired` 后关闭流。
+
+use crate::session_mgr::ServerSession;
+use minicoding_protocol::event::EventKind;
+use minicoding_protocol::rehydrate::RehydrateRequired;
+use std::convert::Infallible;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+
+/// 解析 `Last-Event-ID` header 为 seq。
+#[must_use]
+pub fn parse_last_event_id(header: Option<&str>) -> u64 {
+    header
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// 构造单条 SSE 事件块（`id:`/`event:`/`data:` + 空行终止符）。
+fn format_sse_event(seq: u64, kind_json: &serde_json::Value) -> String {
+    let kind_str = kind_json
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("event");
+    let data = serde_json::to_string(kind_json).unwrap_or_default();
+    format!("id: {seq}\nevent: {kind_str}\ndata: {data}\n\n")
+}
+
+/// 构造 `RehydrateRequired` SSE 事件块。
+fn format_rehydrate(session_id: &str, last_known_seq: u64) -> String {
+    let rehydrate = RehydrateRequired::new(session_id, last_known_seq);
+    let payload = serde_json::to_string(&rehydrate).unwrap_or_default();
+    format!("id: 0\nevent: rehydrate_required\ndata: {payload}\n\n")
+}
+
+/// 构造 SSE 流。
+///
+/// 1. 从 `session.replay_after(last_seq)` 重放历史事件（若 `last_seq` 已 evict，
+///    先发 `RehydrateRequired` 再关闭流）；
+/// 2. 订阅 `session.runtime.events()` 推送新事件；
+/// 3. `BroadcastStream` `Lagged` 时发 `RehydrateRequired`（事件已丢失，客户端应重拉 snapshot）。
+///
+/// 返回 `ReceiverStream<String>`，每条 item 是完整的 SSE 事件块。
+///
+/// 内部 spawn 一个 tokio task 驱动事件流，task 结束时关闭 channel（流终止）。
+pub fn sse_stream(
+    session: Arc<ServerSession>,
+    last_seq: u64,
+) -> ReceiverStream<Result<String, Infallible>> {
+    let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
+
+    tokio::spawn(async move {
+        // 1. 重放历史事件
+        let replay = session.replay_after(last_seq).await;
+        match replay {
+            None => {
+                // last_seq 已 evict，发 RehydrateRequired 后关闭
+                let _ = tx
+                    .send(Ok(format_rehydrate(session.session_id(), last_seq)))
+                    .await;
+                return;
+            }
+            Some(events) => {
+                for (seq, kind_json) in events {
+                    let sse = format_sse_event(seq, &kind_json);
+                    if tx.send(Ok(sse)).await.is_err() {
+                        // 客户端断连，停止推送
+                        return;
+                    }
+                }
+            }
+        }
+
+        // 2. 订阅 EventBus 推送新事件
+        let event_rx = session.runtime.events().subscribe();
+        let mut stream = BroadcastStream::new(event_rx);
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(event) => {
+                    let seq = session.push_event(&event).await;
+                    let kind = EventKind::from(&event);
+                    let kind_json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+                    let sse = format_sse_event(seq, &kind_json);
+                    if tx.send(Ok(sse)).await.is_err() {
+                        // 客户端断连
+                        break;
+                    }
+                }
+                Err(_lagged) => {
+                    // broadcast 溢出——发 RehydrateRequired
+                    let _ = tx.send(Ok(format_rehydrate(session.session_id(), 0))).await;
+                    // 继续推送（客户端收到 RehydrateRequired 后自行决定是否重拉 snapshot）
+                }
+            }
+        }
+        // tx drop 后 rx 返回 None，SSE 流关闭
+    });
+
+    ReceiverStream::new(rx)
+}

@@ -1,12 +1,16 @@
 [package]
 name = "minicoding-server"
-description = "HTTP/SSE server + ACP 适配器（多前端接入层）"
+description = "HTTP/SSE server + ACP/LSP 适配器（多前端接入层）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+name = "minicoding_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "minicoding-server"
@@ -17,16 +21,40 @@ minicoding-core = { workspace = true }
 minicoding-protocol = { workspace = true }
 minicoding-policy = { workspace = true }
 minicoding-tools = { workspace = true }
+minicoding-context = { workspace = true }
+minicoding-storage = { workspace = true }
+minicoding-providers = { workspace = true }
+minicoding-memory = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 camino = { workspace = true }
+time = { workspace = true }
+ulid = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { version = "1", features = ["http1", "http2"] }
+clap = { workspace = true }
 
-# HTTP server（M6/M8 引入）
-# axum = "0.8"
-# tower = "0.5"
-# tower-http = "0.6"
+# 沙箱驱动（默认启用，与 CLI 对齐；minicoding-server 直接构造 Runtime）
+minicoding-sandbox = { workspace = true }
+
+[features]
+default = []
+# LSP 适配器（T-M8-8，tower-lsp 重依赖，feature gate）
+lsp = ["dep:tower-lsp"]
+# ACP 适配器（T-M8-7）
+acp = []
+
+# 可选重依赖（feature gate 才引入）
+[dependencies.tower-lsp]
+workspace = true
+optional = true

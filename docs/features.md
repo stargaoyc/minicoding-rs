@@ -153,7 +153,7 @@
 | X-07 | project 作用域首次批准 | mcp_choices.toml，防恶意仓库植入 | M4 | 已实现 |
 | X-08 | required 语义 | required=true 启动失败则拒启动 | M4 | 已实现 |
 | X-09 | 工具检索（Tool Search） | BM25 按需检索（工具多时） | M7+ | 规划中 |
-| X-10 | MCP server 暴露 | `serve --as-mcp-server` 被其他 Agent 调用 | M8 | 规划中 |
+| X-10 | MCP server 暴露 | `serve --as-mcp-server` 被其他 Agent 调用 | M8 | 已实现 |
 | X-11 | `mcp` 子命令 | list/approve/reset-project-choices | M4 | 已实现 |
 | X-12 | MCP 进程池 | MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5、`modules.md` §8.4） | M4 | 已实现 |
 | X-13 | MCP 后台预热 | 全局 server 启动时并发预热；项目级 server 创建/resume session 时后台预热，首 turn 仅在后台预热未完成时阻塞 | M6+ | 规划中 |
@@ -204,13 +204,13 @@
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| E-01 | SDK Client | `ask`/`ask_stream`/`run_task` | M8 | 规划中 |
+| E-01 | SDK Client | `ask`/`ask_stream`/`run_task` | M8 | 已实现 |
 | E-02 | CallbackPrompter | SDK 用户闭包 | M4 | 已实现 |
-| E-03 | HTTP/JSON-RPC server | `minicoding serve` | M8 | 规划中 |
-| E-04 | MCP server | 被其他 Agent 调用（即 X-10） | M8 | 规划中 |
+| E-03 | HTTP/JSON-RPC server | `minicoding serve` | M8 | 已实现 |
+| E-04 | MCP server | 被其他 Agent 调用（即 X-10） | M8 | 已实现 |
 | E-05 | stdin/stdout NDJSON | 编辑器插件协议 | M8 | 规划中 |
 | E-10 | JSON-RPC 协议 | JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`），见 `modules.md` §15 | M6 | 规划中 |
-| E-11 | HTTP/SSE server | HTTP/SSE JSON-RPC 接口，多客户端并发会话（`minicoding-server`），见 `modules.md` §16 | M8 | 规划中 |
+| E-11 | HTTP/SSE server | HTTP/SSE JSON-RPC 接口，多客户端并发会话（`minicoding-server`），见 `modules.md` §16 | M8 | 已实现 |
 | E-12 | ACP 适配器 | ACP stdio 适配器，可被 Zed 等客户端嵌入 | M8 | 规划中 |
 | E-13 | SSE cursor 恢复 | 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复 | M8 | 规划中 |
 | E-14 | RehydrateRequired 信号 | broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot | M8 | 规划中 |

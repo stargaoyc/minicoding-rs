@@ -4,4 +4,4 @@ mod registry;
 mod r#trait;
 
 pub use registry::{ToolGroup, ToolRegistry};
-pub use r#trait::{Tool, ToolContext};
+pub use r#trait::{CancellationToken, Tool, ToolContext};
