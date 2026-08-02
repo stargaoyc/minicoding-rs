@@ -520,6 +520,63 @@ mod tests {
     }
 
     #[test]
+    fn evict_until_fit_no_eviction_at_exact_max_lines() {
+        // C3 边界测试：恰好 MAX_LINES 时不淘汰，MAX_LINES+1 时淘汰。
+        // 每条 entry 渲染为 6 行（header + blank + content + blank + confidence + updated）。
+        // 200 / 6 ≈ 33.3，取 33 条 = 198 行（< 200，不淘汰）。
+        let now = OffsetDateTime::now_utc();
+        let mut entries: Vec<AutoEntry> = (0..33)
+            .map(|i| AutoEntry {
+                topic: format!("topic-{i}"),
+                content: "line".to_string(),
+                category: AutoCategory::Decision,
+                confidence: 0.9,
+                updated: now,
+            })
+            .collect();
+        let original_len = entries.len();
+        evict_until_fit(&mut entries);
+        assert_eq!(entries.len(), original_len, "33 条（198 行 < 200）不应淘汰");
+
+        // 添加第 34 条 → 204 行 > 200，应淘汰至少 1 条。
+        entries.push(AutoEntry {
+            topic: "extra".to_string(),
+            content: "line".to_string(),
+            category: AutoCategory::Pitfall,
+            confidence: 0.1, // 最低置信度，应被优先淘汰
+            updated: now,
+        });
+        evict_until_fit(&mut entries);
+        let rendered = render_entries(&entries);
+        assert!(
+            rendered.lines().count() <= MAX_LINES,
+            "淘汰后行数 {} 应 <= {}",
+            rendered.lines().count(),
+            MAX_LINES
+        );
+        // 低置信度的 "extra" 应被淘汰
+        assert!(
+            !entries.iter().any(|e| e.topic == "extra"),
+            "最低置信度条目应被淘汰"
+        );
+    }
+
+    #[test]
+    fn evict_until_fit_preserves_single_entry() {
+        // 即使单条条目渲染后超过 MAX_LINES，也不淘汰（`while entries.len() > 1`）。
+        let now = OffsetDateTime::now_utc();
+        let mut entries = vec![AutoEntry {
+            topic: "huge".to_string(),
+            content: "x".repeat(MAX_BYTES + 100),
+            category: AutoCategory::Decision,
+            confidence: 0.5,
+            updated: now,
+        }];
+        evict_until_fit(&mut entries);
+        assert_eq!(entries.len(), 1, "单条条目即使超限也不淘汰");
+    }
+
+    #[test]
     fn is_instructional_detects_imperative_english() {
         assert!(is_instructional("Always use cargo fmt"));
         assert!(is_instructional("Never commit secrets"));

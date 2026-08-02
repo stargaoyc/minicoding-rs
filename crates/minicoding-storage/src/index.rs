@@ -9,7 +9,6 @@ use camino::{Utf8Path, Utf8PathBuf};
 use minicoding_core::storage::{SessionMeta, StorageError};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 /// 单条会话索引项（轻量，不含消息正文）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,10 +19,12 @@ pub struct SessionIndexEntry {
     pub summary: Option<String>,
     /// 消息条数。
     pub message_count: usize,
-    /// 创建时间（RFC3339 字符串，避免索引文件携带 `OffsetDateTime` 序列化歧义）。
-    pub created_at: String,
-    /// 最后更新时间（RFC3339 字符串）。
-    pub updated_at: String,
+    /// 创建时间（`OffsetDateTime` 经 RFC3339 serde 序列化，类型安全避免字符串格式漂移）。
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// 最后更新时间（同 `created_at`）。
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
     /// 父会话 ID（fork 场景，当前未用）。
     pub parent_uuid: Option<String>,
 }
@@ -36,31 +37,26 @@ impl SessionIndexEntry {
         summary: Option<String>,
         now: OffsetDateTime,
     ) -> Self {
-        let ts = now.format(&Rfc3339).unwrap_or_default();
         Self {
             session_id: session_id.into(),
             summary,
             message_count: 1,
-            created_at: ts.clone(),
-            updated_at: ts,
+            created_at: now,
+            updated_at: now,
             parent_uuid: None,
         }
     }
 
-    /// 转为 `SessionMeta`（解析 RFC3339 时间字符串为 `OffsetDateTime`）。
+    /// 转为 `SessionMeta`。
     ///
-    /// 时间字符串损坏时回退到 UNIX 元年，避免单个损坏项阻断整个列出。
+    /// 时间字段已是 `OffsetDateTime`，直接使用无需解析。
     #[must_use]
     pub fn to_meta(&self) -> SessionMeta {
-        let created_at =
-            OffsetDateTime::parse(&self.created_at, &Rfc3339).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        let last_message_at =
-            OffsetDateTime::parse(&self.updated_at, &Rfc3339).unwrap_or(OffsetDateTime::UNIX_EPOCH);
         SessionMeta {
             id: self.session_id.clone(),
-            created_at,
+            created_at: self.created_at,
             message_count: self.message_count,
-            last_message_at,
+            last_message_at: self.updated_at,
         }
     }
 }
@@ -131,7 +127,7 @@ impl SessionIndex {
         {
             // 保留原 created_at，更新其余字段（update 场景）
             *existing = SessionIndexEntry {
-                created_at: existing.created_at.clone(),
+                created_at: existing.created_at,
                 ..entry
             };
         } else {
@@ -164,7 +160,7 @@ impl SessionIndex {
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.session_id == session_id) {
             entry.message_count += 1;
-            entry.updated_at = now.format(&Rfc3339).unwrap_or_default();
+            entry.updated_at = now;
             if entry.summary.is_none() {
                 entry.summary = summary;
             }
@@ -269,14 +265,15 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use tempfile::tempdir;
+    use time::format_description::well_known::Rfc3339;
 
     fn entry(id: &str, count: usize) -> SessionIndexEntry {
         SessionIndexEntry {
             session_id: id.to_string(),
             summary: Some(format!("summary-{id}")),
             message_count: count,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            created_at: OffsetDateTime::parse("2026-01-01T00:00:00Z", &Rfc3339).unwrap(),
+            updated_at: OffsetDateTime::parse("2026-01-02T00:00:00Z", &Rfc3339).unwrap(),
             parent_uuid: None,
         }
     }
@@ -361,8 +358,8 @@ mod tests {
                 session_id: format!("01{i:020}"),
                 summary: Some("x".repeat(60)),
                 message_count: i,
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-02T00:00:00Z".to_string(),
+                created_at: OffsetDateTime::parse("2026-01-01T00:00:00Z", &Rfc3339).unwrap(),
+                updated_at: OffsetDateTime::parse("2026-01-02T00:00:00Z", &Rfc3339).unwrap(),
                 parent_uuid: None,
             });
         }
