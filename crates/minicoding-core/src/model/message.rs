@@ -8,6 +8,11 @@ use time::OffsetDateTime;
 
 /// 消息角色。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -18,6 +23,11 @@ pub enum Role {
 
 /// 消息内容块。一条消息可含多个块（如文本 + 工具调用）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -38,6 +48,11 @@ pub enum ContentBlock {
 
 /// 消息来源（用于 `MessageMeta` 审计与 `OTel` span）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageSource {
     #[default]
@@ -49,6 +64,11 @@ pub enum MessageSource {
 
 /// 消息元数据。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct MessageMeta {
     /// 该消息的 token 数（LLM 返回或启发式估算）。
     pub tokens: Option<usize>,
@@ -62,6 +82,11 @@ pub struct MessageMeta {
 
 /// 一条对话消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Message {
     pub id: String,
     pub role: Role,
@@ -69,6 +94,8 @@ pub struct Message {
     pub tool_calls: Vec<super::ToolCall>,
     /// `role=Tool` 时指向触发它的 call id。
     pub tool_call_id: Option<super::ToolCallId>,
+    /// RFC3339 时间戳（`time::OffsetDateTime` 序列化为 string，见 `design.md` §25.4）。
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: OffsetDateTime,
     pub metadata: MessageMeta,
 }

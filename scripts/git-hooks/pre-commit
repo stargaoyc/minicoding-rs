@@ -10,15 +10,22 @@ echo "[pre-commit] cargo fmt --check ..."
 cargo fmt --all -- --check
 
 echo "[pre-commit] cargo clippy (deny warnings) ..."
-cargo clippy --workspace --all-targets -- -D warnings
+# 排除 minicoding-desktop：desktop feature 需 Tauri 系统库（webkit2gtk/glib）
+cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
 
 echo "[pre-commit] cargo deny check ..."
 cargo deny check advisories licenses bans sources
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0
+# 排除 ts-rs 自动生成的文件（trailing whitespace 是库输出特性，见 gen-types 脚本后处理）
+EXCLUDE_PATTERN='crates/minicoding-web/src/api/generated/'
 while IFS= read -r f; do
   if [ -f "$f" ] && [ -s "$f" ]; then
+    # 跳过自动生成的文件
+    case "$f" in
+      *"$EXCLUDE_PATTERN"*) continue ;;
+    esac
     # trailing whitespace
     if grep -nE '[[:space:]]+$' "$f" >/dev/null 2>&1; then
       echo "  trailing whitespace: $f"
@@ -48,11 +55,12 @@ if [ "${MINICODING_PRE_PUSH:-0}" = "1" ]; then
   cargo audit
 
   echo "[pre-push] cargo test --workspace ..."
-  cargo test --workspace --all-features
+  # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库（webkit2gtk/glib）
+  cargo test --workspace --exclude minicoding-desktop --all-features
 
   echo "[pre-push] cargo llvm-cov (≥80%) ..."
-  # 排除前端层（tui/cli/server），库 crate 覆盖率目标 ≥80%
-  cargo llvm-cov --workspace --all-features \
+  # 排除前端层（tui/cli/server/desktop），库 crate 覆盖率目标 ≥80%
+  cargo llvm-cov --workspace --exclude minicoding-desktop --all-features \
     --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server \
     --fail-under-lines 80
 fi

@@ -29,7 +29,7 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: trailing-whitespace
-        exclude: '\.jsonl$'
+        exclude: '(\.jsonl$|crates/minicoding-web/src/api/generated/)'
 
   - repo: local
     hooks:
@@ -54,7 +54,8 @@ repos:
       - id: cargo-clippy
         name: cargo clippy (deny warnings)
         description: clippy 零警告门禁（AGENTS.md §2.9 / §6.3）
-        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库（webkit2gtk/glib）
+        entry: cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -83,7 +84,8 @@ repos:
       - id: cargo-test
         name: cargo test --workspace
         description: 单元测试门禁（AGENTS.md §2.8 / §6.3，覆盖率目标 ≥80%）
-        entry: cargo test --workspace --all-features
+        # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库
+        entry: cargo test --workspace --exclude minicoding-desktop --all-features
         language: system
         types: [rust]
         pass_filenames: false
@@ -92,8 +94,8 @@ repos:
       - id: cargo-coverage
         name: cargo llvm-cov (≥80%)
         description: 覆盖率门禁（AGENTS.md §2.8，与 CI coverage job 一致）
-        # 排除前端层（tui/cli/server），库 crate 覆盖率目标 ≥80%
-        entry: bash -c 'cargo llvm-cov --workspace --all-features --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server --fail-under-lines 80'
+        # 排除前端层（tui/cli/server/desktop），库 crate 覆盖率目标 ≥80%
+        entry: bash -c 'cargo llvm-cov --workspace --exclude minicoding-desktop --all-features --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server --fail-under-lines 80'
         language: system
         types: [rust]
         pass_filenames: false

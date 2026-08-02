@@ -50,6 +50,14 @@ struct Cli {
     #[arg(long, default_value_t = 300)]
     permission_timeout_sec: u64,
 
+    /// 静态资源目录（M9 `--web`，托管前端 SPA，见 `design.md` §26.7）
+    #[arg(long)]
+    web: Option<String>,
+
+    /// CORS 允许的来源（M9，可多次指定；默认允许任意来源，见 `design.md` §26.6）
+    #[arg(long = "cors-origin")]
+    cors_origins: Vec<String>,
+
     /// 启用详细日志
     #[arg(long, short = 'v')]
     verbose: bool,
@@ -85,6 +93,8 @@ async fn main() -> Result<()> {
         workdir: Utf8PathBuf::from(cli.workdir),
         system: cli.system,
         permission_timeout_sec: cli.permission_timeout_sec,
+        web_dir: cli.web.map(Utf8PathBuf::from),
+        cors_origins: cli.cors_origins,
     };
 
     serve(cfg).await

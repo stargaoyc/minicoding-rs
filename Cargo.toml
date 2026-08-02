@@ -18,6 +18,7 @@ members = [
     "crates/minicoding-cli",
     "crates/minicoding-tui",
     "crates/minicoding-sdk",
+    "crates/minicoding-desktop",
 ]
 
 # Workspace 全局元数据
@@ -120,12 +121,17 @@ assert_cmd = "2.0"
 fs2 = "0.4"
 
 # HTTP server（仅 minicoding-server 引入，见 tech-stack.md §4、modules.md §16）
+# `fs` feature 提供 `ServeDir`（M9 `--web` 静态资源托管，见 design.md §26.7）
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # LSP server（仅 minicoding-server 引入，feature gate `lsp`，见 modules.md §16.3）
 tower-lsp = "0.20"
+
+# TypeScript 类型生成（仅 minicoding-protocol 引入，M9 前端 DTO 契约，见 AGENTS.md §8.4）
+# `serde-json-impl` 提供 `serde_json::Value` → `any` 的 TS 实现（DTO 含 JSON 字段）
+ts-rs = { version = "10", features = ["no-serde-warnings", "serde-json-impl"] }
 
 # 凭证存储（OS keychain，见 tech-stack.md §8）
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }

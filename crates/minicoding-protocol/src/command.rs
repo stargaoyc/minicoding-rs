@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 /// 会话配置（创建会话时传入）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct SessionConfig {
     /// 工作目录（默认当前目录）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +35,11 @@ pub struct SessionConfig {
 
 /// 前端→后端命令（JSON-RPC method 参数）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     /// 创建会话。

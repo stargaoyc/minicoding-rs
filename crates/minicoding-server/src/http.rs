@@ -33,7 +33,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::StreamExt;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Server 配置（`serve` 子命令传入）。
 #[derive(Debug, Clone)]
@@ -54,6 +55,17 @@ pub struct ServerConfig {
     pub system: Option<String>,
     /// 权限交互超时（秒，默认 300）。
     pub permission_timeout_sec: u64,
+    /// 静态资源目录（M9 `--web`，见 `design.md` §26.7）。
+    ///
+    /// 设为 `Some(dir)` 时，HTTP server 用 `ServeDir` 托管该目录下的静态文件
+    /// （前端 SPA），`GET /` 返回 `index.html`，未匹配的路径 fallback 到
+    /// `index.html`（SPA history 路由）。设为 `None` 时仅暴露 API/SSE 路由。
+    pub web_dir: Option<Utf8PathBuf>,
+    /// CORS 允许的来源列表（M9 `--cors-origin`，见 `design.md` §26.6）。
+    ///
+    /// 空列表 = 允许任意来源（`Access-Control-Allow-Origin: *`，开发默认）；
+    /// 非空列表 = 仅允许列出的来源（精确匹配，生产部署用）。桌面模式同源无需配置。
+    pub cors_origins: Vec<String>,
 }
 
 /// 构造默认 `ServerRuntimeParams`（从 `ServerConfig` 派生）。
@@ -168,22 +180,51 @@ impl From<SessionManagerError> for HttpError {
 }
 
 /// 构造 axum Router。
-fn build_router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+///
+/// `web_dir` 设为 `Some(dir)` 时在 API/SSE 路由之外挂载 `ServeDir`（M9 `--web`，
+/// 见 `design.md` §26.7），未匹配静态文件的路径 fallback 到 `index.html`（SPA
+/// history 路由）。
+///
+/// `cors_origins` 空列表 = 允许任意来源（开发默认）；非空 = 仅允许列出的来源
+/// （生产部署，M9 `--cors-origin`，见 `design.md` §26.6）。
+fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[String]) -> Router {
+    // CORS：空列表用 Any（开发默认），非空列表精确匹配（生产部署）
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        let origins: Vec<_> = cors_origins
+            .iter()
+            .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
-    Router::new()
+    let api_routes = Router::new()
         .route("/sessions", post(create_session).get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(send_message))
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/events", get(sse_events))
         .route("/sessions/{id}/permissions/{pid}", post(resolve_permission))
-        .route("/health", get(health))
-        .layer(cors)
-        .with_state(state)
+        .route("/health", get(health));
+
+    let app = if let Some(dir) = web_dir {
+        // M9：静态资源托管（SPA）。API 路由优先匹配，未命中的路径走 `fallback_service`
+        // 到 `ServeDir`，再由 ServeDir 的 `fallback` 回退到 `ServeFile(index.html)`（SPA
+        // history 路由）。axum 0.8 不再支持 `nest_service("/")`，改用 `fallback_service`。
+        let serve_dir = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+        Router::new().merge(api_routes).fallback_service(serve_dir)
+    } else {
+        Router::new().merge(api_routes)
+    };
+
+    app.layer(cors).with_state(state)
 }
 
 /// 启动 HTTP server（阻塞当前 task）。
@@ -196,11 +237,11 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()> {
     let mgr = Arc::new(SessionManager::new(params, permission_timeout));
     let state = AppState { mgr };
 
-    let app = build_router(state);
+    let app = build_router(state, cfg.web_dir.as_ref(), &cfg.cors_origins);
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .map_err(|e| anyhow::anyhow!("bind {addr} 失败: {e}", addr = cfg.bind))?;
-    tracing::info!(addr = %cfg.bind, "minicoding-server 启动");
+    tracing::info!(addr = %cfg.bind, web_dir = ?cfg.web_dir, "minicoding-server 启动");
     axum::serve(listener, app)
         .await
         .map_err(|e| anyhow::anyhow!("server 运行错误: {e}"))?;

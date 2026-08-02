@@ -8,6 +8,15 @@ use serde_json::Value;
 
 /// JSON-RPC 版本（固定 `"2.0"`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(
+        export,
+        export_to = "../../minicoding-web/src/api/generated/",
+        type = "\"2.0\""
+    )
+)]
 pub struct Version;
 
 impl Default for Version {
@@ -41,6 +50,11 @@ impl Serialize for Version {
 
 /// 请求 ID（Number 或 String，Notification 无 ID）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(untagged)]
 pub enum Id {
     /// 数字 ID（LSP 客户端常用）。
@@ -51,6 +65,11 @@ pub enum Id {
 
 /// JSON-RPC 请求（含 ID，需响应）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Request {
     pub jsonrpc: Version,
     pub id: Id,
@@ -61,6 +80,11 @@ pub struct Request {
 
 /// JSON-RPC 通知（无 ID，不需响应）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Notification {
     pub jsonrpc: Version,
     pub method: String,
@@ -70,6 +94,11 @@ pub struct Notification {
 
 /// JSON-RPC 响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Response {
     pub jsonrpc: Version,
     pub id: Id,
@@ -105,6 +134,11 @@ impl Response {
 
 /// JSON-RPC 错误对象。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Error {
     pub code: i32,
     pub message: String,

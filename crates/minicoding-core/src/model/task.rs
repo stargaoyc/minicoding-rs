@@ -10,6 +10,11 @@ use time::OffsetDateTime;
 
 /// 任务状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending,
@@ -49,6 +54,11 @@ impl TaskStatus {
 
 /// 任务（由 `task.create` 创建，`task.update` 增量更新）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Task {
     /// ULID，由 Runtime 生成（C-31：ID 不可由 LLM 伪造）。
     pub id: String,
@@ -61,7 +71,9 @@ pub struct Task {
     pub blocks: Vec<String>,
     /// 阻塞本任务的 `task_id` 列表。
     pub blocked_by: Vec<String>,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: OffsetDateTime,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub updated_at: OffsetDateTime,
 }
 

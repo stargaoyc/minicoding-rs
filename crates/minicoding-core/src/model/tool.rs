@@ -11,6 +11,11 @@ pub type ToolCallId = String;
 
 /// 工具副作用分类（决定调度策略与权限决策）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SideEffect {
     /// 只读：无副作用（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`）。
@@ -25,6 +30,11 @@ pub enum SideEffect {
 
 /// 工具调用请求（LLM 产出）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct ToolCall {
     pub id: ToolCallId,
     pub name: String,
@@ -34,6 +44,11 @@ pub struct ToolCall {
 
 /// 工具 schema（注册时声明，供 LLM 调用参考）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
@@ -43,6 +58,11 @@ pub struct ToolSchema {
 
 /// 工具返回内容（支持文本/JSON/图片/混合）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolContent {
     Text(String),
@@ -61,7 +81,14 @@ impl ToolContent {
 
 /// 工具执行结果元数据。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct ToolResultMeta {
+    /// serde 序列化为 `{ secs, nanos }`（`std::time::Duration` 默认 impl）。
+    #[cfg_attr(feature = "ts", ts(type = "{ secs: number; nanos: number }"))]
     pub elapsed: Duration,
     pub bytes: usize,
     pub truncated: bool,
@@ -69,6 +96,11 @@ pub struct ToolResultMeta {
 
 /// 工具执行结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct ToolResult {
     pub content: ToolContent,
     pub is_error: bool,
