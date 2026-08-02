@@ -223,26 +223,75 @@ pub fn build_runtime(
     // 4b. 加载项目文档（AGENTS.md 分层加载，T-M3-7）
     //     从 repo_root 到 cwd 逐级加载，注入 system 段包裹 <project_doc> 边界（C-05）。
     //     加载失败不阻塞启动（best effort，记 warn 日志）。
+    //
+    //     `extensions` feature 启用时走 PromptPipeline 路径，project_doc 由
+    //     `ProjectRulesContributor` 注入（包裹 `<project_doc>` 边界），无需在此
+    //     预注入到 system_prompt。`extensions` 未启用时走旧路径（静态注入）。
     let base_system = system.map_or_else(
         || "You are minicoding, a terminal AI coding assistant.".to_string(),
         std::string::ToString::to_string,
     );
     let system_prompt = load_and_inject_project_doc(&workdir_path, &base_system);
 
+    // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
+    //     9 个内置 contributor 由 `minicoding-extension-sdk::builtin_contributors` 提供，
+    //     CLI 注入 user_rules（long_term.md）+ project_rules（AGENTS.md）+ git_info。
+    //     `enabled_tools` 字段在 `build_chat_request` 时由 `tools.schemas()` 动态填充。
+    #[cfg(feature = "extensions")]
+    let prompt_pipeline: Option<(
+        Arc<minicoding_core::prompt::PromptPipeline>,
+        minicoding_core::prompt::PromptContext,
+    )> = {
+        let user_rules = load_long_term_content_sync();
+        let project_rules = load_project_doc_sync(&workdir_path);
+        let identity = load_identity_content_sync();
+        let ctx_template =
+            minicoding_core::prompt::PromptContext::new(SessionId::new(), workdir_path.clone())
+                .with_user_rules(minicoding_core::prompt::MemoryBlock {
+                    content: user_rules,
+                    source_path: Some(
+                        minicoding_core::paths::memory_dir()
+                            .map(|d| d.join("long_term.md").to_string())
+                            .unwrap_or_default(),
+                    ),
+                })
+                .with_project_rules(minicoding_core::prompt::ProjectDoc {
+                    content: project_rules.content,
+                    layers: project_rules.layers,
+                });
+        let contributors = minicoding_extension_sdk::builtin_contributors(&identity);
+        let pipeline = Arc::new(minicoding_core::prompt::PromptPipeline::with_contributors(
+            contributors,
+        ));
+        Some((pipeline, ctx_template))
+    };
+
     // 5. 构造 context manager（T-M3-1/2/3：ContextManagerImpl + 4 级压缩 + 熔断）
     //    注入 TiktokenTokenizer 做精确 token 计数；L2 摘要 provider 用 small（如有）
     //    降本，回退到主 provider。分词器构造失败时降级为 SimpleContextManager（无压缩）。
+    //
+    //    `extensions` feature 启用时注入 PromptPipeline（动态 system prompt，9 段拼接）；
+    //    未启用时走静态 `system_prompt`（已含 project_doc 注入）。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
                 // 128K 上下文窗口（gpt-4o 系列）；TODO: 按 model 精确查询 context window
                 let context_window = 128_000;
-                Arc::new(ContextManagerImpl::new(
+                let mgr = ContextManagerImpl::new(
                     system_prompt.clone(),
                     Arc::new(tokenizer),
                     context_window,
                     Some(summary_provider.clone()),
-                ))
+                );
+                #[cfg(feature = "extensions")]
+                let mgr = {
+                    if let Some((pipeline, ctx_template)) = prompt_pipeline {
+                        mgr.with_prompt_pipeline(pipeline, ctx_template)
+                    } else {
+                        mgr
+                    }
+                };
+                Arc::new(mgr)
             }
             Err(e) => {
                 tracing::warn!(
@@ -402,6 +451,18 @@ pub fn build_runtime(
             );
         }
         builder = builder.hook_registry(Arc::new(hook_registry));
+    }
+
+    // 11e. 注入 ExtensionHost（`extensions` feature 启用时，T-M8-2）
+    //      `BundledExtensionHost` 管理进程内 first-party 扩展生命周期。
+    //      当前 M8 阶段仅注入空 host（无扩展加载），后续可从
+    //      `~/.minicoding/extensions/` 加载扩展并 `load_with_extension`。
+    //      `shutdown_all` 由 CLI 在会话退出前通过持有的 `Arc<BundledExtensionHost>` 调用。
+    #[cfg(feature = "extensions")]
+    {
+        let host: Arc<minicoding_extension_sdk::BundledExtensionHost> =
+            Arc::new(minicoding_extension_sdk::BundledExtensionHost::new());
+        builder = builder.extension_host(host);
     }
 
     if let Some(s) = session {
@@ -594,6 +655,76 @@ fn load_and_inject_project_doc(workdir: &Utf8PathBuf, base_system: &str) -> Stri
         Err(e) => {
             tracing::warn!("加载项目文档失败: {e}");
             base_system.to_string()
+        }
+    }
+}
+
+/// 同步加载 `~/.minicoding/memory/long_term.md` 内容（`extensions` feature 用）。
+///
+/// 供 `PromptContext.user_rules` 注入。文件不存在或读取失败时返回空串
+/// （`UserRulesContributor` 处理空内容为空 section，不阻塞启动）。
+///
+/// 与 `LongTermMemory::load` 的区别：`load` 是 `async`（`tokio::fs`），此处用
+/// `std::fs` 同步读取（CLI 启动阶段尚未进入 async 上下文，且同步 IO 简单可控）。
+#[cfg(feature = "extensions")]
+fn load_long_term_content_sync() -> String {
+    let Ok(dir) = minicoding_core::paths::memory_dir() else {
+        return String::new();
+    };
+    let path = dir.join("long_term.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "加载 long_term.md 失败");
+            String::new()
+        }
+    }
+}
+
+/// 同步加载 `~/.minicoding/IDENTITY.md` 内容（P-31，`extensions` feature 用）。
+///
+/// 供 `IdentityContributor` 注入。文件不存在或读取失败时返回空串
+/// （`IdentityContributor` 处理空内容为默认身份，不阻塞启动）。
+#[cfg(feature = "extensions")]
+fn load_identity_content_sync() -> String {
+    let Ok(home) = minicoding_core::paths::minicoding_home() else {
+        return String::new();
+    };
+    let path = home.join("IDENTITY.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "加载 IDENTITY.md 失败");
+            String::new()
+        }
+    }
+}
+
+/// 同步加载项目文档（AGENTS.md 分层）并返回 `ProjectDoc`（`extensions` feature 用）。
+///
+/// 供 `PromptContext.project_rules` 注入。与 `load_and_inject_project_doc` 共用
+/// `ProjectDocLoaderImpl::load_sync`，但不做 `inject_project_doc_sync` 包裹——
+/// `ProjectRulesContributor` 自行包裹 `<project_doc>` 边界。
+///
+/// 加载失败时返回空 `ProjectDoc`（contributor 处理空内容为空 section）。
+#[cfg(feature = "extensions")]
+fn load_project_doc_sync(workdir: &Utf8PathBuf) -> minicoding_core::prompt::ProjectDoc {
+    let repo_root = minicoding_memory::find_repo_root(workdir).unwrap_or_else(|| workdir.clone());
+    let loader = ProjectDocLoaderImpl::new(repo_root, workdir.clone());
+    match loader.load_sync() {
+        Ok(content) => {
+            // 解析 layers：从 `# source: <path>` 标注提取（loader 输出格式）
+            let layers = content
+                .lines()
+                .filter_map(|line| line.strip_prefix("# source: ").map(str::to_string))
+                .collect();
+            minicoding_core::prompt::ProjectDoc { content, layers }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "加载项目文档失败（extensions 路径）");
+            minicoding_core::prompt::ProjectDoc::default()
         }
     }
 }

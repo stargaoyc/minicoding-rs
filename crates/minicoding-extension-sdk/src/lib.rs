@@ -3,12 +3,12 @@
 //! 扩展作者稳定 API：`Extension` trait + `Registrar` + `ExtensionManifest`。
 //!
 //! 为第三方扩展作者提供稳定接口，隐藏 `Runtime` 内部细节。扩展可通过 `Registrar`
-//! 注册：工具 / Hook / Prompt contributor / 快捷键 / 状态栏项。
+//! 注册：工具 / Hook / Prompt contributor / 快捷键 / 状态栏项 / 斜杠命令。
 //!
 //! ## 三类扩展载体
 //!
-//! 1. **进程内 first-party**（本 crate 实现组合根，M5+）：内置
-//!    扩展（Plan/Task/Memory）编译为 crate，通过 `Registrar` 注册；
+//! 1. **进程内 first-party**（本 crate 实现组合根）：内置扩展（Plan/Task/Memory）
+//!    编译为 crate，通过 `BundledExtensionHost` 加载；
 //! 2. **disk IPC 子进程扩展**（M6+）：外部可执行 + JSON over stdio，通过
 //!    `ExtensionHost` 加载；
 //! 3. **MCP 远程扩展**（M4+）：通过 `minicoding-mcp` 包装为 `Tool`。
@@ -22,9 +22,14 @@
 //! - **能力声明**：`ExtensionManifest` 声明 id / version / capabilities / permissions，
 //!   `ExtensionHost` 启动时校验权限边界。
 //!
-//! 当前 M0 阶段：仅占位骨架（T-M0-1），`Extension` trait 定义在 core（M5），
-//! SDK 实现见 M5+。
-//!
-//! 详见 `docs/modules.md` §17、`docs/design.md` §25、`docs/extensions.md`。
+//! 详见 `docs/modules.md` §17、`docs/design.md` §23、`docs/extensions.md`。
 
 #![deny(clippy::all, clippy::pedantic)]
+
+pub mod bundled;
+pub mod contributors;
+pub mod registrar;
+
+pub use bundled::{BundledExtensionHost, LoadedExtension};
+pub use contributors::builtin_contributors;
+pub use registrar::{BundleRegistrar, RegistrationBundle};

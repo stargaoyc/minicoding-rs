@@ -34,6 +34,11 @@ pub enum RuntimeError {
     Hook(String),
     #[error("config: {0}")]
     Config(String),
+    #[error("extension: {0}")]
+    Extension(#[from] ExtensionError),
+    /// Prompt 管道构建失败（contributor `build` 错误，见 `prompt::pipeline`）。
+    #[error("prompt: {0}")]
+    Prompt(#[from] PromptError),
     #[error("interrupted")]
     Interrupted,
     #[error("io: {0}")]
@@ -216,4 +221,42 @@ pub enum McpError {
     /// IO 错误（stdio 子进程管道）。
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// 扩展系统错误（见 `design.md` §23、`api.md` §3.12）。
+///
+/// `ExtensionHost::load_extension`/`unload_extension`/`on_config_changed` 与
+/// `Extension::init`/`shutdown` 以及 `Registrar::register_*` 均返回此错误。
+#[derive(thiserror::Error, Debug)]
+pub enum ExtensionError {
+    /// 扩展 id 重复（同 id 已加载）。
+    #[error("extension already loaded: {0}")]
+    AlreadyLoaded(String),
+    /// 扩展未找到（`unload_extension`/`on_config_changed` 时 id 不存在）。
+    #[error("extension not found: {0}")]
+    NotFound(String),
+    /// `Extension::init` 失败（注册能力时校验不通过、配置非法等）。
+    #[error("extension `{extension}` init failed: {reason}")]
+    InitFailed { extension: String, reason: String },
+    /// `Extension::shutdown` 失败（资源释放异常）。
+    #[error("extension `{extension}` shutdown failed: {reason}")]
+    ShutdownFailed { extension: String, reason: String },
+    /// manifest 非法（缺字段、版本不兼容、capabilities 与 Registrar 注册项不匹配）。
+    #[error("invalid manifest: {0}")]
+    InvalidManifest(String),
+    /// 注册能力越界（扩展未在 manifest 中声明对应 capability 却调 `register_*`）。
+    #[error("capability `{0}` not declared in manifest")]
+    CapabilityNotDeclared(String),
+    /// 扩展申请的权限被 `PermissionPolicy` 拒绝（静态校验阶段，见 §23 安全约束）。
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+    /// 配置 JSON 不符合 manifest 声明的 `config_schema`。
+    #[error("config schema mismatch: {0}")]
+    ConfigSchema(String),
+    /// IO 错误（disk IPC 子进程加载、manifest 文件读取）。
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    /// 序列化错误（manifest/config JSON）。
+    #[error("serialize: {0}")]
+    Serialize(#[from] serde_json::Error),
 }

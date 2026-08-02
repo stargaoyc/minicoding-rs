@@ -252,16 +252,16 @@
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| X-20 | Extension SDK | 第三方扩展作者稳定 API（`Extension` trait + `Registrar` + `ExtensionManifest`），见 `design.md` §23、`modules.md` §17 | M5 | 规划中 |
-| X-21 | Prompt contributor 注入 | 扩展通过 `PromptBuild` Hook 注入 prompt section，见 `design.md` §22 | M5 | 规划中 |
-| X-22 | 扩展工具统一 dispatch | 扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过） | M5 | 规划中 |
+| X-20 | Extension SDK | 第三方扩展作者稳定 API（`Extension` trait + `Registrar` + `ExtensionManifest`），见 `design.md` §23、`modules.md` §17 | M5 | 已实现 |
+| X-21 | Prompt contributor 注入 | 扩展通过 `Registrar` 注册 contributor 注入 prompt section，见 `design.md` §22 | M5 | 已实现 |
+| X-22 | 扩展工具统一 dispatch | 扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过） | M5 | 部分实现 |
 
 ## 15. Prompt 管道
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| P-30 | Prompt 管道 | 9 个 `PromptContributor` 按固定顺序拼接，稳定段在前利于 prompt cache（见 `design.md` §22） | M5 | 规划中 |
-| P-31 | IDENTITY.md 覆盖 | `~/.minicoding/IDENTITY.md` 覆盖默认身份 | M5 | 规划中 |
+| P-30 | Prompt 管道 | 9 个 `PromptContributor` 按固定顺序拼接，稳定段在前利于 prompt cache（见 `design.md` §22） | M5 | 已实现 |
+| P-31 | IDENTITY.md 覆盖 | `~/.minicoding/IDENTITY.md` 覆盖默认身份 | M5 | 已实现 |
 
 ---
 

@@ -15,12 +15,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use minicoding_core::config::RuntimeConfig;
 use minicoding_core::context::{ContextManager, ContextSnapshot};
 use minicoding_core::model::{Message, RuntimeError};
+use minicoding_core::prompt::{PromptContext, PromptPipeline};
 use minicoding_core::provider::{BoxFuture, ChatRequest, GenerationParams, LlmProvider, Tokenizer};
 use minicoding_core::tool::ToolRegistry;
 use tokio::sync::Mutex;
 
 use crate::budget::TokenBudget;
-use crate::compress::{CircuitBreaker, StateKeep, compress_pipeline};
+use crate::compress::{
+    CircuitBreaker, PostCompactConfig, PredictiveTracker, StateKeep, compress_pipeline,
+    extract_read_files, inject_post_compact, should_predict_compact,
+};
 
 /// 完整上下文管理器（M3 T-M3-1）。
 ///
@@ -30,6 +34,19 @@ use crate::compress::{CircuitBreaker, StateKeep, compress_pipeline};
 pub struct ContextManagerImpl {
     messages: tokio::sync::RwLock<Vec<Message>>,
     system_prompt: String,
+    /// 可选 Prompt 管道（注入后 `build_chat_request` 动态构建 system prompt，
+    /// 覆盖 `system_prompt` 静态字段；未注入时回退到 `system_prompt`）。
+    ///
+    /// 设计：`PromptPipeline` 与 `PromptContext` 定义在 `minicoding-core`，
+    /// `ContextManagerImpl` 直接持有，无需引入 `extension-sdk` 依赖。
+    /// 9 个内置 contributor 由 CLI 组装后注入（`minicoding-extension-sdk::builtin_contributors`）。
+    pipeline: Option<Arc<PromptPipeline>>,
+    /// `PromptContext` 模板（pipeline 启用时使用）。
+    ///
+    /// `enabled_tools` 字段在 `build_chat_request` 时由 `tools.schemas()` 填充，
+    /// 其余字段（`session_id`/`workdir`/`platform`/`git_info`/`user_rules`/`project_rules`）
+    /// 在构造时由 CLI 注入（来自 `~/.minicoding/long_term.md` + AGENTS.md 加载结果）。
+    prompt_ctx_template: Option<PromptContext>,
     tokenizer: Arc<dyn Tokenizer>,
     budget: TokenBudget,
     // L2 摘要所需的 LLM provider；None 时跳过 L2。
@@ -41,6 +58,8 @@ pub struct ContextManagerImpl {
     token_cache: AtomicUsize,
     // 压缩熔断状态机（C-29：状态机在 Runtime 层，非 LLM 控制，见 §3.6）。
     circuit_breaker: Mutex<CircuitBreaker>,
+    // C-08：预测性压缩追踪器（记录每 turn token 历史）。
+    predictive_tracker: Mutex<PredictiveTracker>,
 }
 
 impl ContextManagerImpl {
@@ -57,12 +76,15 @@ impl ContextManagerImpl {
         Self {
             messages: tokio::sync::RwLock::new(Vec::new()),
             system_prompt,
+            pipeline: None,
+            prompt_ctx_template: None,
             tokenizer,
             budget: TokenBudget::new(context_window),
             provider,
             count: AtomicUsize::new(0),
             token_cache: AtomicUsize::new(0),
             circuit_breaker: Mutex::new(CircuitBreaker::new()),
+            predictive_tracker: Mutex::new(PredictiveTracker::new()),
         }
     }
 
@@ -83,6 +105,48 @@ impl ContextManagerImpl {
         )
     }
 
+    /// 链式注入 Prompt 管道与 context 模板（启用动态 system prompt 构建）。
+    ///
+    /// 注入后 `build_chat_request` 优先调 `pipeline.build(&ctx)` 生成 system prompt，
+    /// 跳过静态 `system_prompt` 字段。`enabled_tools` 字段在每次 `build_chat_request`
+    /// 时由 `tools.schemas()` 动态填充（template 中的值被覆盖）。
+    ///
+    /// `system_prompt` 仍保留作为 pipeline 失败时的兜底（理论不可达，contributor
+    /// 内部应自兜底；保留以防 contributor 实现异常导致启动失败）。
+    #[must_use]
+    pub fn with_prompt_pipeline(
+        mut self,
+        pipeline: Arc<PromptPipeline>,
+        prompt_ctx_template: PromptContext,
+    ) -> Self {
+        self.pipeline = Some(pipeline);
+        self.prompt_ctx_template = Some(prompt_ctx_template);
+        self
+    }
+
+    /// 构建基础 system prompt（pipeline 启用时动态构建，否则回退静态字段）。
+    ///
+    /// `enabled_tools` 由调用方传入（来自 `tools.schemas()`），覆盖 template 中的值。
+    /// pipeline 启用但 template 缺失时，回退到静态 `system_prompt`（防御性兜底，
+    /// 理论不可达——`with_prompt_pipeline` 同时设置两者）。
+    ///
+    /// # Errors
+    /// pipeline `build` 失败时返回 `RuntimeError::Prompt`。
+    async fn build_base_system_prompt(
+        &self,
+        enabled_tools: &[minicoding_core::model::ToolSchema],
+    ) -> Result<String, RuntimeError> {
+        match (&self.pipeline, &self.prompt_ctx_template) {
+            (Some(pipeline), Some(template)) => {
+                let mut ctx = template.clone();
+                ctx.enabled_tools = enabled_tools.to_vec();
+                let built = pipeline.build(&ctx).await?;
+                Ok(built.text)
+            }
+            _ => Ok(self.system_prompt.clone()),
+        }
+    }
+
     /// 压缩管道入口（T-M3-2 + T-M3-3 熔断/降级链）。
     ///
     /// 按 `docs/design.md` §3.3 实现 4 级压缩（裁剪→摘要→滚动→硬截断），并集成
@@ -98,7 +162,7 @@ impl ContextManagerImpl {
     /// # Errors
     /// - 熔断触发（`should_trip`/`should_force_end`/`is_thrashing`）→ `BudgetExceeded`
     /// - 压缩管道失败（降级链终端也失败，理论不可达）→ 原始 `RuntimeError`
-    pub async fn compress(&self) -> Result<(), RuntimeError> {
+    pub async fn compress(&self, backup_before_compress: bool) -> Result<(), RuntimeError> {
         let state_keep = StateKeep::snapshot(&self.system_prompt);
         let provider_ref = self.provider.as_deref();
 
@@ -110,6 +174,7 @@ impl ContextManagerImpl {
                 self.tokenizer.as_ref(),
                 &self.budget,
                 provider_ref,
+                backup_before_compress,
             )
             .await;
             // 压缩后重算 token 缓存（messages 可能已变更）
@@ -218,29 +283,82 @@ impl ContextManager for ContextManagerImpl {
         let tool_schemas = tools.schemas();
         let model = config.provider.model.clone();
         let compress_enabled = config.context.compress;
+        let backup_before_compress = config.context.backup_before_compress;
+        let predictive_enabled = config.context.predictive_compact_enabled;
+        let predictive_baseline = config.context.predictive_baseline_growth_tokens;
+        let post_compact_cfg = PostCompactConfig {
+            max_files: config.context.post_compact_max_files,
+            token_budget: config.context.post_compact_token_budget,
+            max_tokens_per_file: config.context.post_compact_max_tokens_per_file,
+        };
         Box::pin(async move {
+            let threshold = self.budget.compact_threshold();
+            let current_tokens = self.token_count();
+
+            // C-08：预测性压缩——当前未超阈值但预测下一 turn 会超时提前压缩
+            let need_predictive = predictive_enabled && current_tokens <= threshold && {
+                let tracker = self.predictive_tracker.lock().await;
+                should_predict_compact(current_tokens, threshold, &tracker, predictive_baseline)
+            };
+
             // 检查是否触发压缩阈值（缓存计数，无需加锁）；超阈值先压缩再读消息，
             // 避免 compress 的写锁与下方读锁死锁（RwLock 不可重入）。
             // compress=off 时跳过压缩直通（C-18 软约束，用户显式关闭）。
-            if compress_enabled && self.token_count() > self.budget.compact_threshold() {
-                // C-29：熔断状态机在 Runtime 层，压缩前检查是否已熔断。
-                // 锁获取后立即检查并释放，不与 messages 锁同时持有（无死锁风险）。
-                {
-                    let breaker = self.circuit_breaker.lock().await;
-                    if breaker.should_trip() || breaker.is_thrashing() {
-                        tracing::warn!(
-                            fail_count = breaker.fail_count(),
-                            consecutive_oversize = breaker.consecutive_oversize(),
-                            "压缩熔断已触发，拒绝 build_chat_request"
-                        );
-                        return Err(RuntimeError::BudgetExceeded {
-                            used: self.token_count(),
-                            budget: self.budget.compact_threshold(),
-                        });
-                    }
-                } // 熔断器锁释放
-                self.compress().await?;
+            let did_compress =
+                if compress_enabled && (current_tokens > threshold || need_predictive) {
+                    // C-29：熔断状态机在 Runtime 层，压缩前检查是否已熔断。
+                    {
+                        let breaker = self.circuit_breaker.lock().await;
+                        if breaker.should_trip() || breaker.is_thrashing() {
+                            tracing::warn!(
+                                fail_count = breaker.fail_count(),
+                                consecutive_oversize = breaker.consecutive_oversize(),
+                                "压缩熔断已触发，拒绝 build_chat_request"
+                            );
+                            return Err(RuntimeError::BudgetExceeded {
+                                used: current_tokens,
+                                budget: threshold,
+                            });
+                        }
+                    } // 熔断器锁释放
+                    self.compress(backup_before_compress).await?;
+                    true
+                } else {
+                    false
+                };
+
+            // 构建基础 system prompt：pipeline 启用时动态构建，否则用静态字段。
+            // post-compact 注入在 base 之上叠加（无论 pipeline/static 都适用）。
+            let base_system = self.build_base_system_prompt(&tool_schemas).await?;
+
+            // C-09：post-compact 上下文恢复——压缩后重新注入最近读过的文件
+            let system = if did_compress {
+                let guard = self.messages.read().await;
+                let read_files = extract_read_files(&guard, post_compact_cfg.max_files);
+                drop(guard);
+                if read_files.is_empty() {
+                    base_system
+                } else {
+                    let workdir =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    inject_post_compact(
+                        &base_system,
+                        &read_files,
+                        &post_compact_cfg,
+                        self.tokenizer.as_ref(),
+                        &workdir,
+                    )
+                }
+            } else {
+                base_system
+            };
+
+            // C-08：记录本 turn token 快照供下次预测
+            if predictive_enabled {
+                let mut tracker = self.predictive_tracker.lock().await;
+                tracker.record_turn(self.token_count());
             }
+
             let guard = self.messages.read().await;
             // ProviderConfig 暂无 temperature/max_output_tokens 字段，M1 置 None。
             let params = GenerationParams {
@@ -252,7 +370,7 @@ impl ContextManager for ContextManagerImpl {
                 seed: None,
             };
             Ok(ChatRequest {
-                system: self.system_prompt.clone(),
+                system,
                 messages: guard.clone(),
                 tools: tool_schemas,
                 params,
@@ -528,7 +646,7 @@ mod tests {
         assert!(tokens_before > threshold);
 
         // compress 应成功（L2 跳过，L3 rolling 足以降至阈值下）
-        mgr.compress()
+        mgr.compress(false)
             .await
             .expect("无 provider 时 compress 应成功");
 
@@ -559,7 +677,7 @@ mod tests {
         let tokens_before = mgr.token_count();
         assert!(tokens_before > TokenBudget::new(6_000).compact_threshold());
 
-        mgr.compress().await.expect("compress 应成功");
+        mgr.compress(false).await.expect("compress 应成功");
 
         let tokens_after = mgr.token_count();
         assert!(

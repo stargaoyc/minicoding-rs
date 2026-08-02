@@ -24,6 +24,7 @@ ulid = { workspace = true }
 time = { workspace = true }
 home = { workspace = true }
 trait-variant = { workspace = true }
+semver = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

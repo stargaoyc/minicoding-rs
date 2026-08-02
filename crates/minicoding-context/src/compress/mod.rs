@@ -21,6 +21,8 @@ pub mod circuit_breaker;
 pub mod clip;
 pub mod fallback;
 pub mod hard_truncate;
+pub mod post_compact;
+pub mod predictive;
 pub mod rolling;
 pub mod state_keep;
 pub mod summarize;
@@ -29,6 +31,8 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use clip::ClipConfig;
 pub use fallback::summarize_with_fallback;
 pub use hard_truncate::hard_truncate;
+pub use post_compact::{PostCompactConfig, extract_read_files, inject_post_compact};
+pub use predictive::{PredictiveTracker, should_predict_compact};
 pub use rolling::{RollingConfig, rolling_window};
 pub use state_keep::StateKeep;
 pub use summarize::{SummarizeConfig, summarize_old_messages};
@@ -46,6 +50,8 @@ pub struct CompressResult {
     pub truncated_count: usize,
     /// L2 是否降级到启发式兜底（C-29 降级链，见 `fallback.rs`）。
     pub fallback_used: bool,
+    /// C-05：压缩前的消息备份（`backup_before_compress=true` 时填充）。
+    pub backup: Option<Vec<Message>>,
 }
 
 /// 计算消息序列的 token 数。
@@ -59,6 +65,9 @@ fn token_count(messages: &[Message], tokenizer: &dyn Tokenizer) -> usize {
 /// `budget.compact_threshold()` 以下，降了则提前返回。L2 需要 `provider`，
 /// 为 `None` 时跳过 L2（L1→L3→L4 仍按序执行）。
 ///
+/// `backup_before_compress = true` 时（C-05），压缩前 clone 原始消息到
+/// `CompressResult.backup`，供调试/回放分析。
+///
 /// # Errors
 /// L2 摘要走降级链（§3.8），启发式兜底恒成功，故 LLM 失败不传播。仅当降级链
 /// 终端也失败时返回 `RuntimeError`（理论不可达）。
@@ -67,9 +76,15 @@ pub async fn compress_pipeline(
     tokenizer: &dyn Tokenizer,
     budget: &TokenBudget,
     provider: Option<&dyn LlmProvider>,
+    backup_before_compress: bool,
 ) -> Result<CompressResult, RuntimeError> {
     let mut result = CompressResult::default();
     let threshold = budget.compact_threshold();
+
+    // C-05：压缩前备份原始消息（可选，调试用）
+    if backup_before_compress {
+        result.backup = Some(messages.clone());
+    }
 
     // L1: 工具结果裁剪（同步）
     {
@@ -229,7 +244,7 @@ mod tests {
         let budget = TokenBudget::new(10_000); // threshold = (10000-4096-1024)*0.85 = 4148
         let mut msgs = vec![Message::user_text("hello"), Message::user_text("world")];
         // 10 tokens < 4148，不应触发任何压缩级别
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
             .await
             .expect("compress_pipeline 应成功");
         assert_eq!(result.clipped_count, 0);
@@ -257,7 +272,7 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
             .await
             .expect("compress_pipeline 应成功");
         // L1 应裁剪该 tool_result（9000 > 2000 阈值字符）
@@ -289,7 +304,7 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
             .await
             .expect("compress_pipeline 应成功");
         // L1：无 tool_result，不裁剪
@@ -324,7 +339,7 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
             .await
             .expect("compress_pipeline 应成功");
         // L3 丢弃 10 条
@@ -361,7 +376,7 @@ mod tests {
         assert!(tokens_before > budget.compact_threshold());
 
         let provider = MockSummaryProvider::new();
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, Some(&provider))
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, Some(&provider), false)
             .await
             .expect("compress_pipeline 应成功");
         // L2 应摘要 5 条（ratio=0.5，10 条 × 0.5 = 5）

@@ -8,6 +8,7 @@
 use crate::agent::{NoopSubagentRunner, SubagentRunner};
 use crate::config::RuntimeConfig;
 use crate::context::ContextManager;
+use crate::extension::{ExtensionHost, NoopExtensionHost};
 use crate::hooks::{HookRegistry, NoopHookRegistry};
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
@@ -58,6 +59,12 @@ pub struct RuntimeBuilder {
     permission_mode: PermissionMode,
     /// 子 Agent runner（默认 `NoopSubagentRunner`，M5 由 CLI 注入实现）。
     subagent_runner: Option<Arc<dyn SubagentRunner>>,
+    /// 扩展宿主（默认 `NoopExtensionHost`，启用扩展时由 CLI 注入 `BundledExtensionHost`）。
+    ///
+    /// Runtime 持有 `Arc<dyn ExtensionHost>` 用于运行期 `unload_extension`/
+    /// `on_config_changed`。`shutdown_all` 是 `BundledExtensionHost` 的 inherent 方法，
+    /// 由 CLI 在会话退出前通过持有的原始 `Arc<BundledExtensionHost>` 调用。
+    extension_host: Option<Arc<dyn ExtensionHost>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -91,6 +98,7 @@ impl RuntimeBuilder {
             hook_registry: None,
             permission_mode: PermissionMode::Default,
             subagent_runner: None,
+            extension_host: None,
         }
     }
 
@@ -261,6 +269,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置扩展宿主（默认 `NoopExtensionHost`，启用扩展时由 CLI 注入
+    /// `BundledExtensionHost`）。
+    ///
+    /// 注入后 Runtime 通过 `extension_host()` 暴露引用，CLI 可在会话退出前调用
+    /// `shutdown_all`（`BundledExtensionHost` inherent 方法）释放扩展资源。
+    /// 扩展注册的工具/Hook/PromptContributor 由 CLI 在 `load_extension` 后提取
+    /// bundle 并提交到 Runtime 各注册表（`ToolRegistry`/`HookRegistry`/`PromptPipeline`）。
+    #[must_use]
+    pub fn extension_host(mut self, h: Arc<dyn ExtensionHost>) -> Self {
+        self.extension_host = Some(h);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// # Errors
@@ -312,6 +333,9 @@ impl RuntimeBuilder {
             subagent_runner: self
                 .subagent_runner
                 .unwrap_or_else(|| Arc::new(NoopSubagentRunner::new())),
+            extension_host: self
+                .extension_host
+                .unwrap_or_else(|| Arc::new(NoopExtensionHost::new())),
         })
     }
 }

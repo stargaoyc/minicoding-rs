@@ -10,8 +10,8 @@ pub mod task;
 pub mod tool;
 
 pub use error::{
-    JournalError, LlmError, McpError, MemoryError, PolicyError, PromptError, RuntimeError,
-    StorageError, ToolError,
+    ExtensionError, JournalError, LlmError, McpError, MemoryError, PolicyError, PromptError,
+    RuntimeError, StorageError, ToolError,
 };
 pub use message::{ContentBlock, Message, MessageMeta, MessageSource, Role};
 pub use session::{

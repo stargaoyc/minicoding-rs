@@ -183,12 +183,21 @@ minicoding-core/src/
 ├── storage/
 │   ├── trait.rs           # Storage trait + AuditSink trait
 │   └── mod.rs
+├── prompt/
+│   ├── mod.rs             # prelude 再导出
+│   ├── trait_def.rs       # PromptContributor trait + PromptSection + PromptSectionOrder（见 api.md §3.13）
+│   ├── context.rs         # PromptContext（会话级输入聚合）
+│   └── pipeline.rs        # PromptPipeline（9 段排序拼接 + 缓存统计）
+├── extension/
+│   ├── mod.rs             # prelude 再导出
+│   ├── trait_def.rs       # Extension/ExtensionHost/Registrar trait + NoopExtensionHost + NoopRegistrar（见 api.md §3.12）
+│   └── manifest.rs        # ExtensionManifest + ExtensionCarrier + Capability + ExtensionId/Info
 ├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles + HooksConfig）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 └── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
 ```
 
-> **未实现（M5 roadmap，T-M5-1..T-M5-8 范围外）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/trait.rs`（ExtensionHost/Extension/Registrar，X-20..X-22）属 M5 roadmap 范围但未在 dev-plan T-M5-1..T-M5-8 中排期，当前为规划态，文件未创建。
+> **已实现（M5 范围）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/`（ExtensionHost/Extension/Registrar，X-20..X-22）已实现。trait 定义在 `minicoding-core`，9 个内置 contributor 与 `BundledExtensionHost`/`BundleRegistrar` 实现在 `minicoding-extension-sdk`。详见 `api.md` §3.12/§3.13 与 `design.md` §22/§23。
 
 ### 1.3 公共 API（prelude）
 
@@ -221,7 +230,7 @@ pub mod prelude {
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
 - **轻量依赖**：core 只依赖 `tokio`/`serde`/`serde_json`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`。无 `reqwest`/`landlock`/`rmcp`/`libseccomp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
-- **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `PromptBuild` Hook 注入 section（见 `design.md` §22）。
+- **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `Registrar::register_prompt_contributor` 注入 section（见 `design.md` §22）。
 
 ---
 
@@ -777,16 +786,27 @@ minicoding-server/src/
 
 为第三方扩展作者提供稳定接口，隐藏 Runtime 内部细节。扩展可通过 Registrar 注册 6 类能力：工具 / Hook / Prompt contributor / 快捷键 / 状态栏项 / 斜杠命令。本 crate 同时提供 `ExtensionHost` 的进程内 first-party 实现（disk IPC 加载器在 `minicoding-cli`）。
 
-### 17.2 模块树（规划）
+### 17.2 模块树
 
+```
 minicoding-extension-sdk/src/
-├── lib.rs                 # re-export + 扩展开发入口
-├── extension.rs           # Extension trait（生命周期 init/shutdown/on_config_changed）
-├── host.rs                # BundledExtensionHost（ExtensionHost 进程内实现，M5+）
-├── registrar.rs           # Registrar 接口（6 类注册项，Arc<dyn Trait>）
-├── manifest.rs            # ExtensionManifest + ExtensionCarrier + Capability
-├── context.rs             # ExtensionContext（扩展运行时上下文：logger/config/event_bus）
-└── protocol.rs            # disk IPC 子进程扩展协议（JSON over stdio，M6+）
+├── lib.rs                      # re-export（BundledExtensionHost/LoadedExtension/builtin_contributors/...）
+├── bundled.rs                  # BundledExtensionHost（ExtensionHost 进程内实现）+ LoadedExtension
+├── registrar.rs                # BundleRegistrar（Registrar 实现）+ RegistrationBundle（6 类注册项收集）
+└── contributors/
+    ├── mod.rs                  # builtin_contributors() 构造 9 个内置 contributor
+    ├── identity.rs             # IdentityContributor（顺序 1，IDENTITY.md 覆盖，P-31）
+    ├── system.rs               # SystemContributor（顺序 2，内置软规则）
+    ├── task_guidelines.rs      # TaskGuidelinesContributor（顺序 3，任务规划规范）
+    ├── communication.rs        # CommunicationContributor（顺序 4，输出格式规范）
+    ├── environment.rs          # EnvironmentContributor（顺序 5，工作区/平台/git 信息）
+    ├── user_rules.rs           # UserRulesContributor（顺序 6，long_term.md）
+    ├── project_rules.rs        # ProjectRulesContributor（顺序 7，AGENTS.md）
+    ├── tool_summary.rs         # ToolSummaryContributor（顺序 8，工具 schema 摘要）
+    └── extension_contrib.rs    # ExtensionContributor（顺序 9，扩展段占位）
+```
+
+> `Extension`/`ExtensionHost`/`Registrar`/`ExtensionManifest` trait 定义在 `minicoding-core`（见 `api.md` §3.12），本 crate 提供 `BundledExtensionHost`/`BundleRegistrar` 进程内实现与 9 个内置 contributor。disk IPC 子进程扩展协议（`Ipc` carrier）规划在 M6+。
 
 ### 17.3 关键设计点
 

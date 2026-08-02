@@ -19,3 +19,6 @@ thiserror = { workspace = true }
 tiktoken-rs = { workspace = true }
 time = { workspace = true }
 ulid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

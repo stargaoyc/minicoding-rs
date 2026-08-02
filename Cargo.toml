@@ -63,6 +63,9 @@ ulid = { version = "1.1", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 home = "0.5"
 
+# 语义化版本（ExtensionManifest 版本字段用，见 design.md §23）
+semver = { version = "1.0", features = ["serde"] }
+
 # HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 

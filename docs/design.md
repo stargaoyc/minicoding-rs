@@ -2347,15 +2347,14 @@ M5 测 Plan 时**不需要**真实的 Task/Journal 实现：Plan 工具的 `Exit
 | 6 | UserRules | 用户规则（来自 `long_term.md`，§8.2） | 跨会话变化 | ✗ |
 | 7 | ProjectRules | 项目规则（来自 AGENTS.md，§8.6） | 仓库内稳定 | ✗ |
 | 8 | ToolSummary | 工具 schema 摘要（含 MCP 工具） | 工具集变化时变 | ✗ |
-| 9 | Extension | 扩展注入（通过 PromptBuild Hook，§20） | 动态 | ✗ |
+| 9 | Extension | 扩展注入（通过 `Registrar::register_prompt_contributor`，§23） | 动态 | ✗ |
 
 稳定段（1-5）排前，易变段（6-9）排后。LLM provider 的 prompt cache 以前缀匹配——稳定段命中缓存，易变段仅追加增量。把 Environment 排在稳定段是因为它"会话内不变"，cache 在单会话内有效；UserRules/ProjectRules 排后是因为它们跨会话变化，cache 命中率低。
 
 **PromptContributor trait**（与 `api.md` §3.13 一致）：
 
 ```rust
-#[trait_variant::make(PromptContributor: Send)]
-pub trait PromptContributor {
+pub trait PromptContributor: Send + Sync {
     /// Contributor 唯一标识（如 "identity"、"project_rules"），用于调试与 OTel span。
     fn name(&self) -> &str;
 
@@ -2366,7 +2365,8 @@ pub trait PromptContributor {
     fn cacheable(&self) -> bool { false }
 
     /// 生成该段内容。ctx 提供会话级信息（workdir、git 状态、工具集等）。
-    async fn build(&self, ctx: &PromptContext) -> Result<PromptSection, PromptError>;
+    /// 异步方法用 BoxFuture 返回类型保证 dyn 兼容。
+    fn build(&self, ctx: &PromptContext) -> BoxFuture<'_, Result<PromptSection, PromptError>>;
 }
 
 /// Section 排序（稳定→易变，与 9 段表格一一对应）。
@@ -2379,7 +2379,7 @@ pub enum PromptSectionOrder {
     UserRules,      // 6
     ProjectRules,   // 7
     ToolSummary,    // 8
-    Extension,      // 9（仅扩展通过 PromptBuild Hook 注入）
+    Extension,      // 9（扩展通过 Registrar 注册的 contributor 注入）
 }
 
 pub struct PromptContext {
@@ -2423,7 +2423,7 @@ impl PromptPipeline {
             sections.push(c.build(ctx).await?);
         }
         // 按 PromptSectionOrder 枚举定义的固定顺序排序（同 order 内按 contributor name 稳定排序）。
-        sections.sort_by_key(|s| (s.order.clone() as u32, s.contributor_name.clone()));
+        sections.sort_by_key(|s| (s.order as u8, s.contributor_name.clone()));
 
         let mut buf = String::new();
         for s in &sections {
@@ -2441,7 +2441,7 @@ impl PromptPipeline {
 
 `sections` 字段保留分段信息，供 OTel span 记录每段 token 数（`prompt.section.{name}.tokens`），便于诊断 prompt 膨胀来源。`sort_by_key` 保证即使 contributor 注册顺序变化，最终拼接顺序仍由 `PromptSectionOrder` 枚举决定；同段内（如多个扩展注入到 `Extension` 段）按 `contributor_name` 稳定排序，避免非确定性。
 
-**扩展通过 PromptBuild Hook 注入**：第 9 段 Extension 不是固定 contributor，而是聚合所有 `PromptBuild` Hook（§20）的 `inject_section` 输出。Hook 可注册多个，按 Hook 优先级排序后依次拼入。Hook 注入的段默认 `cacheable = false`（动态内容不应缓存）。这给扩展系统（§23）提供了注入 prompt 的统一入口，无需扩展自行实现 `PromptContributor`。
+**扩展通过 Registrar 注入**：第 9 段 Extension 由内置 `ExtensionContributor`（占位，返回空 section）与扩展通过 `Registrar::register_prompt_contributor`（§23）注册的 contributor 共同组成。同 order（9）内按 `contributor_name` 稳定排序，避免非确定性。扩展注册的 contributor 默认 `cacheable = false`（动态内容不应缓存）。这给扩展系统（§23）提供了注入 prompt 的统一入口——扩展实现 `PromptContributor` trait 并通过 Registrar 注册，无需修改核心 contributor 列表。
 
 ---
 
@@ -2464,43 +2464,44 @@ impl PromptPipeline {
 **ExtensionHost trait**（Runtime 注入，管理扩展生命周期；与 `api.md` §3.12 一致）：
 
 ```rust
-#[trait_variant::make(ExtensionHost: Send)]
-pub trait ExtensionHost {
+pub trait ExtensionHost: Send + Sync {
     /// 加载扩展（读 manifest，初始化，注册能力）。
-    async fn load_extension(&self, manifest: ExtensionManifest) -> Result<ExtensionId, ExtensionError>;
+    fn load_extension(&self, manifest: ExtensionManifest)
+        -> BoxFuture<'_, Result<ExtensionId, ExtensionError>>;
 
     /// 卸载扩展（调用 shutdown，注销所有注册项）。
-    async fn unload_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError>;
+    fn unload_extension(&self, id: &ExtensionId)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 列出已加载扩展。
-    async fn list_extensions(&self) -> Vec<ExtensionInfo>;
+    fn list_extensions(&self) -> BoxFuture<'_, Vec<ExtensionInfo>>;
 
     /// 配置变更通知（热重载）。
-    async fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value)
-        -> Result<(), ExtensionError>;
+    fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 }
 ```
 
-`ExtensionHost` trait 由 `minicoding-core` 定义，实现在 `minicoding-extension-sdk`（进程内 first-party 组合根）或 `minicoding-cli`（disk IPC 子进程加载器）。Runtime 持有 `Arc<dyn ExtensionHost>`，在启动时批量加载 `~/.minicoding/extensions/` 下的扩展。
+`ExtensionHost` trait 由 `minicoding-core` 定义，实现在 `minicoding-extension-sdk`（进程内 first-party 组合根 `BundledExtensionHost`）或 `minicoding-cli`（disk IPC 子进程加载器）。`NoopExtensionHost`（`minicoding-core`）为未启用扩展时的兜底实现。Runtime 持有 `Arc<dyn ExtensionHost>`（通过 `RuntimeBuilder::extension_host` 注入），在启动时批量加载 `~/.minicoding/extensions/` 下的扩展。
 
 **Extension trait**（扩展实现侧；与 `api.md` §3.12 一致）：
 
 ```rust
-#[trait_variant::make(Extension: Send)]
-pub trait Extension {
+pub trait Extension: Send + Sync {
     /// 扩展元信息（供 Runtime 查询，无需扩展自行管理状态）。
     fn manifest(&self) -> &ExtensionManifest;
 
     /// 扩展初始化（注册能力、订阅事件、读配置）。
-    async fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value)
-        -> Result<(), ExtensionError>;
+    fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 扩展卸载（释放资源、取消订阅）。
-    async fn shutdown(&self) -> Result<(), ExtensionError>;
+    fn shutdown(&self) -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 配置变更通知（可选，默认空实现）。
-    async fn on_config_changed(&self, _new_config: serde_json::Value) -> Result<(), ExtensionError> {
-        Ok(())
+    fn on_config_changed(&self, _new_config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>> {
+        Box::pin(async move { Ok(()) })
     }
 }
 ```

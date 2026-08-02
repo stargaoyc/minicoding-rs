@@ -100,6 +100,13 @@ pub struct Runtime {
     /// （与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。未注入时
     /// `task.spawn` 调用直接返回 `RuntimeError::Config`（不静默 no-op）。
     pub(crate) subagent_runner: Arc<dyn crate::agent::SubagentRunner>,
+    /// 扩展宿主（M8，默认 `NoopExtensionHost` 兜底）。
+    ///
+    /// Runtime 持有 `Arc<dyn ExtensionHost>` 用于运行期 `unload_extension`/
+    /// `on_config_changed`。`shutdown_all` 是 `BundledExtensionHost` 的 inherent 方法，
+    /// CLI 在会话退出前通过 `extension_host()` 拿到 `Arc<dyn ExtensionHost>` 后
+    /// （或持有原始 `Arc<BundledExtensionHost>`）调用 `shutdown_all` 释放资源。
+    pub(crate) extension_host: Arc<dyn crate::extension::ExtensionHost>,
 }
 
 impl Runtime {
@@ -169,6 +176,17 @@ impl Runtime {
     #[must_use]
     pub fn subagent_runner(&self) -> Arc<dyn crate::agent::SubagentRunner> {
         self.subagent_runner.clone()
+    }
+
+    /// 返回 `ExtensionHost` 引用（CLI 调用 `unload_extension`/`on_config_changed`/
+    /// `shutdown_all` 用，M8）。
+    ///
+    /// `shutdown_all` 是 `BundledExtensionHost` 的 inherent 方法（不在 trait 中），
+    /// CLI 需通过持有的原始 `Arc<BundledExtensionHost>` 调用。此 getter 返回 trait
+    /// 对象引用，供 CLI 在运行期调用 trait 方法（如 `list_extensions`）。
+    #[must_use]
+    pub fn extension_host(&self) -> Arc<dyn crate::extension::ExtensionHost> {
+        self.extension_host.clone()
     }
 
     /// 返回 `Journal` 引用（`/undo` REPL 命令用，M5 T-M5-8）。
