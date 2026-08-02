@@ -111,7 +111,7 @@
 | P-12 | 敏感数据脱敏 | .env/api_key/password 模式替换 | M4 | 已实现 |
 | P-13 | 审计日志 | audit.log（含 deny/hook 决策） | M2 | 已实现 |
 | P-14 | 回放安全 | replay 默认禁副作用 | M3 | 已实现 |
-| P-15 | OS 沙箱（一等公民） | seatbelt/landlock/seccomp 内核级隔离 | M4 | 已实现（Linux Landlock+libseccomp 完整；macOS Seatbelt / Windows 受限令牌降级 NoopDriver，待后续里程碑补齐） |
+| P-15 | OS 沙箱（一等公民） | seatbelt/landlock/seccomp 内核级隔离 | M4 | 已实现（Linux Landlock + macOS Seatbelt + Windows Job Object 三平台覆盖） |
 | P-16 | 四种沙箱策略 | ReadOnly/WorkspaceWrite/ExternalSandbox/DangerFullAccess | M4 | 已实现 |
 | P-17 | 审批模式（ApprovalMode） | Untrusted/OnFailure/OnRequest/Never | M4 | 已实现 |
 | P-18 | 预设（Preset） | read-only/auto/external-sandbox/full-access 一键选定 | M4 | 已实现 |
@@ -244,7 +244,7 @@
 | Q-04 | 回放测试 | JSONL fixture + `ReplayPolicy` 全副作用 Deny 单测 | M3 | 已实现 |
 | Q-05 | 属性测试（proptest） | `Message` JSON roundtrip + path sandbox 不变量 | M3 | 已实现 |
 | Q-06 | 性能基准（criterion） | 压缩管道 100/500/1000 消息基准 | M2+ | 已实现 |
-| Q-07 | 沙箱平台 CI matrix | Linux/macOS/Windows 拒绝语义 | M4+ | 部分实现（Linux 沙箱拒绝测试完整；macOS/Windows 仅编译+单测，沙箱降级 NoopDriver，拒绝语义测试待平台沙箱实现后补齐） |
+| Q-07 | 沙箱平台 CI matrix | Linux/macOS/Windows 拒绝语义 | M4+ | 已实现（三平台 CI matrix：Linux Landlock + macOS Seatbelt + Windows Job Object 编译/单测全覆盖） |
 | Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M10 | 规划中（推迟到 M10） |
 | Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M10 | 规划中（推迟到 M10） |
 

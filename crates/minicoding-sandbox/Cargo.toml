@@ -1,6 +1,6 @@
 [package]
 name = "minicoding-sandbox"
-description = "OS 级沙箱驱动（Linux Landlock + libseccomp，主流库不自研）"
+description = "OS 级沙箱驱动（Linux Landlock + macOS Seatbelt + Windows Job Object）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,17 @@ camino = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 libc = "0.2"
+
+# macOS：Seatbelt（sandbox_init FFI，10.5+ 内置），无外部 crate 依赖（FFI 直连 libsystem）
+
+# Windows：Job Object + 受限令牌（windows-sys，MIT/Apache-2.0）
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
