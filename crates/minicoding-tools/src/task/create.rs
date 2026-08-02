@@ -74,3 +74,63 @@ impl Tool for TaskCreate {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use crate::task::InMemoryTaskStore;
+    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    use minicoding_core::tool::{Tool, ToolContext};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_store() -> Arc<dyn TaskStore> {
+        Arc::new(InMemoryTaskStore::new())
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp/proj".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn create_valid_input_returns_task_id_and_pending() {
+        let tool = TaskCreate::new(make_store());
+        let input = json!({"content": "做某事"});
+        let result = tool.execute(input, &make_ctx()).await.expect("execute ok");
+        assert!(!result.is_error);
+        let ToolContent::Json(value) = result.content else {
+            panic!("expected json content");
+        };
+        assert!(value.get("task_id").is_some());
+        assert_eq!(value["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn create_missing_content_returns_invalid_input() {
+        let tool = TaskCreate::new(make_store());
+        let input = json!({});
+        let err = tool.execute(input, &make_ctx()).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn create_empty_content_rejected_by_store() {
+        let tool = TaskCreate::new(make_store());
+        let input = json!({"content": "   "});
+        let err = tool.execute(input, &make_ctx()).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn create_side_effect_is_none() {
+        let tool = TaskCreate::new(make_store());
+        assert_eq!(tool.side_effect(), SideEffect::None);
+    }
+
+    #[test]
+    fn create_schema_name_is_task_create() {
+        let tool = TaskCreate::new(make_store());
+        assert_eq!(tool.schema().name, "task.create");
+    }
+}

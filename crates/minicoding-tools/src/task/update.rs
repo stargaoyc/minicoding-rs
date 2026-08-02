@@ -105,3 +105,90 @@ impl Tool for TaskUpdate {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use crate::task::InMemoryTaskStore;
+    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    use minicoding_core::tool::{Tool, ToolContext};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_store() -> Arc<dyn TaskStore> {
+        Arc::new(InMemoryTaskStore::new())
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp/proj".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn update_valid_transition_returns_updated_task() {
+        let store = make_store();
+        let task = store.create("do thing".to_string()).await.expect("create");
+        let tool = TaskUpdate::new(store);
+        let input = json!({"task_id": task.id, "status": "inprogress"});
+        let result = tool.execute(input, &make_ctx()).await.expect("execute ok");
+        assert!(!result.is_error);
+        let ToolContent::Json(value) = result.content else {
+            panic!("expected json content");
+        };
+        assert_eq!(value["id"], task.id);
+        assert_eq!(value["status"], "inprogress");
+    }
+
+    #[tokio::test]
+    async fn update_nonexistent_task_returns_not_found() {
+        let tool = TaskUpdate::new(make_store());
+        let input = json!({"task_id": "nonexistent", "status": "inprogress"});
+        let err = tool.execute(input, &make_ctx()).await.unwrap_err();
+        assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_invalid_transition_returns_error() {
+        let store = make_store();
+        let task = store.create("do thing".to_string()).await.expect("create");
+        let tool = TaskUpdate::new(store);
+        // Pending → Completed 是跳跃（须先经 InProgress），非法（C-31）
+        let input = json!({"task_id": task.id, "status": "completed", "summary": "done"});
+        let err = tool.execute(input, &make_ctx()).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidStateTransition(_)));
+    }
+
+    #[tokio::test]
+    async fn update_terminal_status_requires_summary() {
+        let store = make_store();
+        let task = store.create("do thing".to_string()).await.expect("create");
+        // 先迁到 InProgress
+        store
+            .update(
+                task.id.clone(),
+                TaskPatch {
+                    status: Some(TaskStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("transition to inprogress");
+        let tool = TaskUpdate::new(store);
+        // Completed 缺 summary → 拒绝
+        let input = json!({"task_id": task.id, "status": "completed"});
+        let err = tool.execute(input, &make_ctx()).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn update_side_effect_is_none() {
+        let tool = TaskUpdate::new(make_store());
+        assert_eq!(tool.side_effect(), SideEffect::None);
+    }
+
+    #[test]
+    fn update_schema_name_is_task_update() {
+        let tool = TaskUpdate::new(make_store());
+        assert_eq!(tool.schema().name, "task.update");
+    }
+}

@@ -27,6 +27,8 @@ seccomp = "seccomp"
 seatbelt = "seatbelt"
 ulid = "ulid"
 flate = "flate"
+# RFC 4648 base64 测试向量（f/fo/foo/foob/fooba/foobar）
+fo = "fo"
 
 [files]
 extend-exclude = [

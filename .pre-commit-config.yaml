@@ -9,6 +9,8 @@
 #   - cargo fmt --check（格式校验）
 #   - cargo clippy --workspace --all-targets -- -D warnings（零警告）
 #   - cargo deny check（依赖治理：advisories/licenses/bans/sources）
+#   - cargo audit（已知漏洞扫描，与 CI 一致）
+#   - cargo llvm-cov --fail-under-lines 80（覆盖率门禁，pre-push 阶段）
 #   - cargo test --workspace（单元测试，pre-push 阶段）
 #
 # 与 CI 门禁（AGENTS.md §6.3）一致，本地先拦截低级错误。
@@ -67,10 +69,31 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
 
+      - id: cargo-audit
+        name: cargo audit
+        description: 已知漏洞扫描（AGENTS.md §5.2，与 CI audit job 一致）
+        # `cargo audit` 默认：vulnerabilities 失败、unmaintained/yanked/notices 仅警告
+        #（不用 `--deny vulnerabilities`——该参数无效，vulnerabilities 默认就 deny）
+        entry: cargo audit
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
       - id: cargo-test
         name: cargo test --workspace
         description: 单元测试门禁（AGENTS.md §2.8 / §6.3，覆盖率目标 ≥80%）
         entry: cargo test --workspace --all-features
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-coverage
+        name: cargo llvm-cov (≥80%)
+        description: 覆盖率门禁（AGENTS.md §2.8，与 CI coverage job 一致）
+        # 排除前端层（tui/cli/server），库 crate 覆盖率目标 ≥80%
+        entry: bash -c 'cargo llvm-cov --workspace --all-features --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server --fail-under-lines 80'
         language: system
         types: [rust]
         pass_filenames: false
