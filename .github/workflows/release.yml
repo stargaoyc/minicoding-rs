@@ -1,0 +1,194 @@
+# GitHub Releases 自动构建（Q-08/Q-09）
+#
+# 触发：推送 `v*` tag（如 `v0.1.0`）
+# 产物：三平台 release 二进制（minicoding + minicoding-server）+ 安装脚本
+# 分发：Homebrew tap + Scoop bucket（通过 cargo-dist 配置，见 cargo-dist.toml）
+#
+# 不含 minicoding-desktop（Tauri 需平台 GUI 库，单独发布 .dmg/.msi/.AppImage）。
+#
+# 详见 docs/features.md Q-08/Q-09、cargo-dist.toml。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Q-08：三平台 release 二进制构建
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # aarch64-linux 交叉编译需安装交叉工具链
+      - name: Install cross toolchain (aarch64-linux)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} --workspace --exclude minicoding-desktop
+        env:
+          OPENAI_API_KEY: sk-test-ci-mock-not-real
+
+      # 打包：二进制 + LICENSE + README + AGENTS.md + cargo-dist.toml
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          PKG_NAME="minicoding-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$PKG_NAME/bin"
+          cp target/${{ matrix.target }}/release/minicoding "$PKG_NAME/bin/"
+          cp target/${{ matrix.target }}/release/minicoding-server "$PKG_NAME/bin/"
+          cp LICENSE "$PKG_NAME/" 2>/dev/null || true
+          cp README.md "$PKG_NAME/"
+          cp AGENTS.md "$PKG_NAME/"
+          cp cargo-dist.toml "$PKG_NAME/"
+          # 生成安装脚本
+          cat > "$PKG_NAME/install.sh" << 'INSTALL_EOF'
+          #!/bin/bash
+          set -e
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          BIN_DIR="$HOME/.local/bin"
+          mkdir -p "$BIN_DIR"
+          cp "$DIR/bin/minicoding" "$BIN_DIR/"
+          cp "$DIR/bin/minicoding-server" "$BIN_DIR/"
+          echo "已安装到 $BIN_DIR/minicoding"
+          echo "请确保 $BIN_DIR 在 PATH 中"
+          INSTALL_EOF
+          chmod +x "$PKG_NAME/install.sh"
+          tar czf "$PKG_NAME.tar.gz" "$PKG_NAME"
+          echo "ASSET=$PKG_NAME.tar.gz" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF_NAME.TrimStart("v")
+          $PKG_NAME = "minicoding-$VERSION-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path "$PKG_NAME/bin" -Force
+          Copy-Item "target/${{ matrix.target }}/release/minicoding.exe" "$PKG_NAME/bin/"
+          Copy-Item "target/${{ matrix.target }}/release/minicoding-server.exe" "$PKG_NAME/bin/"
+          Copy-Item "LICENSE" "$PKG_NAME/" -ErrorAction SilentlyContinue
+          Copy-Item "README.md" "$PKG_NAME/"
+          Copy-Item "AGENTS.md" "$PKG_NAME/"
+          Copy-Item "cargo-dist.toml" "$PKG_NAME/"
+          # 生成安装脚本
+          @'
+          @echo off
+          setlocal
+          set "DIR=%~dp0"
+          set "BIN_DIR=%USERPROFILE%\.local\bin"
+          if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+          copy "%DIR%bin\minicoding.exe" "%BIN_DIR%\"
+          copy "%DIR%bin\minicoding-server.exe" "%BIN_DIR%\"
+          echo Installed to %BIN_DIR%\minicoding.exe
+          echo Please ensure %BIN_DIR% is in your PATH
+          '@ | Out-File -FilePath "$PKG_NAME/install.ps1" -Encoding utf8
+          Compress-Archive -Path "$PKG_NAME" -DestinationPath "$PKG_NAME.zip"
+          echo "ASSET=$PKG_NAME.zip" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  # Q-09：创建 GitHub Release 并上传所有产物
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
+          body: |
+            ## minicoding-rs ${{ github.ref_name }}
+
+            ### 安装
+
+            **Linux/macOS (shell installer):**
+            ```bash
+            curl -LsSf https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/minicoding-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz | tar xz
+            ./minicoding-*/install.sh
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/minicoding-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip" -OutFile "minicoding.zip"
+            Expand-Archive minicoding.zip
+            .\minicoding-*/install.ps1
+            ```
+
+            **cargo install:**
+            ```bash
+            cargo install minicoding
+            ```
+
+            ### 平台支持
+
+            | 平台 | 架构 | 产物 |
+            |------|------|------|
+            | Linux | x86_64 | `minicoding-*-x86_64-unknown-linux-gnu.tar.gz` |
+            | Linux | aarch64 | `minicoding-*-aarch64-unknown-linux-gnu.tar.gz` |
+            | macOS | x86_64 | `minicoding-*-x86_64-apple-darwin.tar.gz` |
+            | macOS | aarch64 | `minicoding-*-aarch64-apple-darwin.tar.gz` |
+            | Windows | x86_64 | `minicoding-*-x86_64-pc-windows-msvc.zip` |
+
+            > 桌面版（Tauri）单独发布 `.dmg`/`.msi`/`.AppImage`。

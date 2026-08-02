@@ -222,7 +222,7 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_timeout_sec: cmd.permission_timeout_sec,
-        web_dir: cmd.web.as_ref().map(|s| Utf8PathBuf::from(s)),
+        web_dir: cmd.web.as_deref().map(Utf8PathBuf::from),
         cors_origins: cmd.cors_origins.clone(),
     };
 

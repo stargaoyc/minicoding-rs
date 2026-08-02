@@ -1,11 +1,15 @@
 # CI 门禁（T-M0-3 + T-M0-9，AGENTS.md §6.3）
 #
-# 8 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform
+# 9 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform / desktop
 # 平台策略（features Q-07）：
 #   - Linux：完整门禁（fmt/clippy/test/coverage/audit/deny/typos）+ Landlock 沙箱拒绝语义测试；
 #   - macOS：编译 + 单测 matrix（Seatbelt 沙箱驱动，sandbox_init FFI）；
 #   - Windows：编译 + 单测 matrix（Job Object 沙箱驱动，windows-sys FFI）。
 # 三平台均有原生沙箱驱动（landlock/seatbelt/windows-sys），不再降级 NoopDriver。
+#
+# desktop feature 策略（W-06/W-07）：
+#   - `minicoding-desktop` 的 `desktop` feature 依赖 Tauri（需 webkit2gtk/glib 系统库），
+#     不在常规 `--all-features` 中编译，单独在 `desktop` job 中安装依赖后编译。
 #
 # Rust 工具链：nightly（项目用 `let chains` 等 2024 edition 特性，MSRV 1.99，
 #             见 `rust-toolchain.toml`）。
@@ -46,7 +50,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库（webkit2gtk/glib），
+        # 在 desktop job 中单独编译
+        run: cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
 
   test:
     name: cargo test
@@ -56,7 +62,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --workspace --all-features
+        # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库
+        run: cargo test --workspace --exclude minicoding-desktop --all-features
         env:
           # 测试不连真实服务（AGENTS.md §5.4），mock 凭证即可
           OPENAI_API_KEY: sk-test-ci-mock-not-real
@@ -80,7 +87,8 @@ jobs:
         # - minicoding-cli：入口 bin，集成测试覆盖
         # - minicoding-server：HTTP/SSE/ACP/LSP 前端层，集成测试覆盖（HTTP server
         #   需真实端口+客户端，单测覆盖率低，与 cli/tui 同性质）
-        run: cargo llvm-cov --workspace --all-features --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server --fail-under-lines 80
+        # - minicoding-desktop：Tauri 桌面壳，需 GUI 运行时，集成测试覆盖
+        run: cargo llvm-cov --workspace --exclude minicoding-desktop --all-features --exclude minicoding-tui --exclude minicoding-cli --exclude minicoding-server --fail-under-lines 80
         env:
           OPENAI_API_KEY: sk-test-ci-mock-not-real
 
@@ -131,6 +139,7 @@ jobs:
   # macOS：Seatbelt 沙箱驱动（sandbox_init FFI），文件系统隔离。
   # Windows：Job Object 沙箱驱动（windows-sys FFI），进程遏制 + UI 隔离。
   # 三平台均有原生沙箱，不再降级 NoopDriver。
+  # 排除 minicoding-desktop：desktop feature 需平台 GUI 库，单独在 desktop job 编译。
   cross-platform:
     name: cargo test (${{ matrix.os }})
     strategy:
@@ -143,6 +152,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude minicoding-desktop --all-features
         env:
           OPENAI_API_KEY: sk-test-ci-mock-not-real
+
+  # W-06/W-07：Tauri 桌面壳编译（需 webkit2gtk/glib 系统库）。
+  # 仅编译不运行（需 GUI 运行时），验证 desktop feature 代码正确性。
+  desktop:
+    name: cargo build desktop feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+      - name: cargo build desktop
+        run: cargo build -p minicoding-desktop --features desktop
+      - name: cargo clippy desktop
+        run: cargo clippy -p minicoding-desktop --features desktop -- -D warnings
