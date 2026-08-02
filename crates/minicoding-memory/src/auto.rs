@@ -522,10 +522,10 @@ mod tests {
     #[test]
     fn evict_until_fit_no_eviction_at_exact_max_lines() {
         // C3 边界测试：恰好 MAX_LINES 时不淘汰，MAX_LINES+1 时淘汰。
-        // 每条 entry 渲染为 6 行（header + blank + content + blank + confidence + updated）。
-        // 200 / 6 ≈ 33.3，取 33 条 = 198 行（< 200，不淘汰）。
+        // 每条 entry 渲染为 7 行（header + blank + content + blank + confidence + updated + trailing blank）。
+        // 200 / 7 ≈ 28.57，取 28 条 = 196 行（< 200，不淘汰）。
         let now = OffsetDateTime::now_utc();
-        let mut entries: Vec<AutoEntry> = (0..33)
+        let mut entries: Vec<AutoEntry> = (0..28)
             .map(|i| AutoEntry {
                 topic: format!("topic-{i}"),
                 content: "line".to_string(),
@@ -536,9 +536,9 @@ mod tests {
             .collect();
         let original_len = entries.len();
         evict_until_fit(&mut entries);
-        assert_eq!(entries.len(), original_len, "33 条（198 行 < 200）不应淘汰");
+        assert_eq!(entries.len(), original_len, "28 条（196 行 < 200）不应淘汰");
 
-        // 添加第 34 条 → 204 行 > 200，应淘汰至少 1 条。
+        // 添加第 29 条 → 203 行 > 200，应淘汰至少 1 条。
         entries.push(AutoEntry {
             topic: "extra".to_string(),
             content: "line".to_string(),
