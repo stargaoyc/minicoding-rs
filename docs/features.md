@@ -185,7 +185,7 @@
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M4 | 已实现 |
 | S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 规划中 |
 | S-21 | env: 环境变量语法 | 统一使用 `env:VAR_NAME` 语法引用环境变量，支持 `env:VAR:-fallback` 回退（见 `tech-stack.md` §12） | M1 | 规划中 |
-| S-22 | 配置热更新 | `ConfigWatcher`（fsnotify）+ `Event::ConfigChanged`，扩展通过 `on_config_changed()` 接收变更（M6+） | M6+ | 规划中 |
+| S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更（见 `design.md` §11、`modules.md` §1.2） | M6+ | 已实现 |
 
 ## 11. 前端
 

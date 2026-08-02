@@ -21,9 +21,14 @@
 //!   工具不注册进 `ToolRegistry`。
 
 use std::collections::HashMap;
+use std::future::Future as StdFuture;
+use std::hash::{Hash, Hasher};
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::{FutureExt, Shared};
 use http::{HeaderName, HeaderValue};
 use minicoding_core::mcp::{McpClient, McpError, McpServerConfig, McpTransport};
 use minicoding_core::model::{ToolContent, ToolResult, ToolResultMeta, ToolSchema};
@@ -38,6 +43,38 @@ use tokio::sync::RwLock;
 
 /// 子进程 env 白名单（C-04 凭证不下传子进程，同 `shell.run`）。
 const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM"];
+
+/// Inflight 调用合并的输出（error 转 String 以满足 `Shared` 的 Clone 要求）。
+type CallOutput = Result<ToolResult, String>;
+/// 单次 dispatch 的 boxed future（`'static` + Send，不捕获 `&self`）。
+type CallFuture = Pin<Box<dyn StdFuture<Output = CallOutput> + Send>>;
+/// 共享 future：多个并发调用可 `.clone()` 同一份并共享一次实际请求结果。
+type SharedCallFuture = Shared<CallFuture>;
+
+/// 请求去重 key（同 server + tool + `input_hash` 视为同一请求，见 `design.md` §19.5 X-14）。
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RequestKey {
+    /// MCP server 名（与 `ServerConnection` key 一致）。
+    server: String,
+    /// MCP 工具名（不含 `mcp__<server>__` 前缀，与 `call` 入参一致）。
+    tool: String,
+    /// 工具入参的 hash（`DefaultHasher`，仅用于去重，不作为安全用途）。
+    input_hash: u64,
+}
+
+impl RequestKey {
+    /// 由 server/tool/入参构造去重 key。
+    #[must_use]
+    fn new(server: &str, tool: &str, input: &serde_json::Value) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        input.hash(&mut hasher);
+        Self {
+            server: server.to_string(),
+            tool: tool.to_string(),
+            input_hash: hasher.finish(),
+        }
+    }
+}
 
 /// 单个 MCP server 的连接状态（进程池条目）。
 struct ServerConnection {
@@ -54,7 +91,9 @@ struct ServerConnection {
 /// 由 `RmcpClient::new()` 构造，`RuntimeBuilder::mcp_client` 注入。
 /// 持有所有已就绪 MCP server 的连接，跨 turn 复用（进程池模式）。
 pub struct RmcpClient {
-    connections: RwLock<HashMap<String, ServerConnection>>,
+    connections: Arc<RwLock<HashMap<String, ServerConnection>>>,
+    /// Inflight 请求合并（X-14）：同 server+tool+input 的并发调用共享一次实际请求。
+    inflight: Arc<RwLock<HashMap<RequestKey, SharedCallFuture>>>,
 }
 
 impl RmcpClient {
@@ -62,7 +101,8 @@ impl RmcpClient {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            connections: RwLock::new(HashMap::new()),
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            inflight: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -367,56 +407,113 @@ impl McpClient for RmcpClient {
     ) -> BoxFuture<'_, Result<ToolResult, McpError>> {
         let server = server.to_string();
         let tool = tool.to_string();
+        let key = RequestKey::new(&server, &tool, &input);
+        let connections = self.connections.clone();
+        let inflight = self.inflight.clone();
         Box::pin(async move {
-            let mut guard = self.connections.write().await;
-            let Some(conn) = guard.get_mut(&server) else {
-                return Err(McpError::NotReady(server));
-            };
-
-            // 校验工具存在（C-09：工具名必须已注册）
-            let tool_exists = conn.tools.iter().any(|s| {
-                crate::naming::parse_mcp_tool_name(&s.name).is_some_and(|(_, t)| t == tool)
-            });
-            if !tool_exists {
-                return Err(McpError::ToolNotFound(format!("{server}__{tool}")));
-            }
-
-            // 构造调用参数
-            let args = match input {
-                serde_json::Value::Object(map) => Some(map),
-                serde_json::Value::Null => None,
-                other => {
-                    return Err(McpError::CallFailed {
+            // 1. 检查 inflight（read lock）：已有同 key 的进行中请求则共享其结果
+            {
+                let inflight_guard = inflight.read().await;
+                if let Some(shared) = inflight_guard.get(&key) {
+                    let shared = shared.clone();
+                    drop(inflight_guard);
+                    tracing::debug!(
+                        server = %server, tool = %tool,
+                        "mcp inflight merge: reusing existing request"
+                    );
+                    return shared.await.map_err(|e| McpError::CallFailed {
                         server: server.clone(),
                         tool: tool.clone(),
-                        reason: format!("MCP tool arguments must be a JSON object, got: {other}"),
+                        reason: e,
                     });
                 }
-            };
-            let params =
-                CallToolRequestParams::new(tool.clone()).with_arguments(args.unwrap_or_default());
+            }
 
-            // 调用（带 tool_timeout）
-            let result = tokio::time::timeout(conn.tool_timeout, conn.service.call_tool(params))
-                .await
-                .map_err(|_| McpError::CallFailed {
-                    server: server.clone(),
-                    tool: tool.clone(),
-                    reason: format!("tool timeout after {:?}", conn.tool_timeout),
-                })?
-                .map_err(|e| McpError::CallFailed {
-                    server: server.clone(),
-                    tool: tool.clone(),
-                    reason: format!("call failed: {e}"),
-                })?;
+            // 2. 创建 dispatch future（`'static`，仅捕获 `connections` Arc 与入参，
+            //    不捕获 `&self`）。持有 `connections` 的 read lock 整个调用周期——
+            //    由于是 READ lock，并发对其它 server（甚至同 server）的调用可并行进行。
+            let server_for_fut = server.clone();
+            let tool_for_fut = tool.clone();
+            let dispatch_fut: CallFuture = Box::pin(async move {
+                let guard = connections.read().await;
+                let Some(conn) = guard.get(&server_for_fut) else {
+                    return Err(McpError::NotReady(server_for_fut.clone()).to_string());
+                };
+                // 校验工具存在（C-09：工具名必须已注册）
+                let tool_exists = conn.tools.iter().any(|s| {
+                    crate::naming::parse_mcp_tool_name(&s.name)
+                        .is_some_and(|(_, t)| t == tool_for_fut)
+                });
+                if !tool_exists {
+                    return Err(McpError::ToolNotFound(format!(
+                        "{server_for_fut}__{tool_for_fut}"
+                    ))
+                    .to_string());
+                }
+                // 构造调用参数
+                let args = match &input {
+                    serde_json::Value::Object(map) => Some(map.clone()),
+                    serde_json::Value::Null => None,
+                    other => {
+                        return Err(format!(
+                            "MCP tool arguments must be a JSON object, got: {other}"
+                        ));
+                    }
+                };
+                let params = CallToolRequestParams::new(tool_for_fut.clone())
+                    .with_arguments(args.unwrap_or_default());
 
-            // 转换 CallToolResult → ToolResult
-            let is_error = result.is_error.unwrap_or(false);
-            let content = convert_content(&result.content);
-            Ok(ToolResult {
-                content,
-                is_error,
-                metadata: ToolResultMeta::default(),
+                // 调用（带 tool_timeout）
+                let result =
+                    tokio::time::timeout(conn.tool_timeout, conn.service.call_tool(params))
+                        .await
+                        .map_err(|_| format!("tool timeout after {:?}", conn.tool_timeout))?
+                        .map_err(|e| format!("call failed: {e}"))?;
+
+                // 转换 CallToolResult → ToolResult
+                let is_error = result.is_error.unwrap_or(false);
+                let content = convert_content(&result.content);
+                Ok(ToolResult {
+                    content,
+                    is_error,
+                    metadata: ToolResultMeta::default(),
+                })
+            });
+
+            // 3. 共享化并插入 inflight（write lock，double-check 防竞态）
+            let shared_fut = dispatch_fut.shared();
+            {
+                let mut inflight_guard = inflight.write().await;
+                // Double-check：write lock 期间可能有并发请求已插入同一 key
+                if let Some(existing) = inflight_guard.get(&key) {
+                    let existing = existing.clone();
+                    drop(inflight_guard);
+                    tracing::debug!(
+                        server = %server, tool = %tool,
+                        "mcp inflight merge: lost race, reusing existing request"
+                    );
+                    return existing.await.map_err(|e| McpError::CallFailed {
+                        server: server.clone(),
+                        tool: tool.clone(),
+                        reason: e,
+                    });
+                }
+                inflight_guard.insert(key.clone(), shared_fut.clone());
+            }
+
+            // 4. 等待结果
+            let result = shared_fut.await;
+
+            // 5. 清理 inflight（防止 HashMap 无限增长；后续同 key 请求重新发起）
+            {
+                let mut inflight_guard = inflight.write().await;
+                inflight_guard.remove(&key);
+            }
+
+            result.map_err(|e| McpError::CallFailed {
+                server,
+                tool,
+                reason: e,
             })
         })
     }
@@ -437,9 +534,53 @@ impl McpClient for RmcpClient {
     }
 
     fn warm_up(&self) -> BoxFuture<'_, Result<(), McpError>> {
-        // M4 不实现后台预热（M6+ 引入 mpsc 事件流后补齐）；
-        // 当前 `start` 已同步完成握手 + list_tools，无需额外预热。
-        Box::pin(async move { Ok(()) })
+        // X-13：刷新各 server 的工具列表（server 可能在运行期间增删工具）。
+        // 捕获 `connections` Arc，使 future 不依赖 `&self`。
+        let connections = self.connections.clone();
+        Box::pin(async move {
+            let mut guard = connections.write().await;
+            let mut errors: Vec<(String, String)> = Vec::new();
+            for (name, conn) in guard.iter_mut() {
+                // 刷新工具列表（server 可能在运行期间增删工具）
+                match tokio::time::timeout(conn.tool_timeout, conn.service.list_all_tools()).await {
+                    Ok(Ok(rmcp_tools)) => {
+                        let tools: Vec<ToolSchema> = rmcp_tools
+                            .into_iter()
+                            .map(|t| ToolSchema {
+                                name: crate::naming::mcp_tool_name(name, &t.name)
+                                    .unwrap_or_else(|_| t.name.to_string()),
+                                description: t.description.as_deref().unwrap_or("").to_string(),
+                                input_schema: serde_json::Value::Object(
+                                    t.input_schema.as_ref().clone(),
+                                ),
+                            })
+                            .collect();
+                        let old_count = conn.tools.len();
+                        conn.tools = tools;
+                        tracing::debug!(
+                            server = %name,
+                            old_count, new_count = conn.tools.len(),
+                            "mcp warm_up: tool list refreshed"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(server = %name, error = %e, "mcp warm_up: list_tools failed");
+                        errors.push((name.clone(), format!("list_tools failed: {e}")));
+                    }
+                    Err(_) => {
+                        tracing::warn!(server = %name, "mcp warm_up: list_tools timeout");
+                        errors.push((
+                            name.clone(),
+                            format!("list_tools timeout after {:?}", conn.tool_timeout),
+                        ));
+                    }
+                }
+            }
+            if let Some((server, reason)) = errors.into_iter().next() {
+                return Err(McpError::StartFailed { server, reason });
+            }
+            Ok(())
+        })
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<(), McpError>> {

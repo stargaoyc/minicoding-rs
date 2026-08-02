@@ -125,7 +125,7 @@ Tauri 与本项目"Rust 一等公民"理念一致，且体积/内存/安全均�
 | Glob 匹配 | `globset` | `ripgrep` 同源，性能强 |
 | 正则 | `regex` | 标配；不支持回溯但够用 |
 | 目录遍历 | `ignore` | 尊重 `.gitignore`，与 `ripgrep` 行为一致 |
-| 文件监听（可选） | `notify` | 用于 watch 模式 |
+| 文件监听 | `notify` 8 | S-22 配置热更新 `ConfigWatcher` 监听 `~/.minicoding/config.toml` 变更（500ms debounce + best-effort 降级），广播 `Event::ConfigChanged`；由 `minicoding-core` 引入 |
 | Diff 生成 | `similar` | Myers diff 算法主流实现，`edit`/`multiedit` 工具展示变更、`/undo` 预览用 |
 | HTML→Markdown | `htmd` | `web.fetch` 工具把抓取的 HTML 转 Markdown，纯 Rust 无 C 依赖 |
 | 有序 ID | `ulid` | `task_id`/`op_id` 用 ULID（字典序可排序，比 UUID 更适合按时间顺序列出） |

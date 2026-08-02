@@ -1487,6 +1487,10 @@ pub enum Event {
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
     /// 文件回滚执行结果（§17.4）。
     FileUndone { report: UndoReport },
+    /// 配置文件变更通知（S-22 热更新）。
+    /// `ConfigWatcher` 监听 `~/.minicoding/config.toml`，500ms debounce 后广播；
+    /// 需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）自行订阅处理。
+    ConfigChanged,
 }
 ```
 

@@ -12,7 +12,7 @@
 //!
 //! 详见 `design.md` §2、§9、§16、§20。
 
-use crate::config::RuntimeConfig;
+use crate::config::{ConfigWatcher, RuntimeConfig};
 use crate::context::ContextManager;
 use crate::hooks::{
     DispatchConfig, HookDecision, HookEvent, HookInput, HookRegistry, VerdictSerde,
@@ -29,7 +29,7 @@ use crate::policy::{
 };
 use crate::provider::{BoxFuture, ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
-use crate::runtime::event::{Event, EventBus};
+use crate::runtime::{Event, EventBus};
 use crate::sandbox::{
     BreakerState, DenialDetector, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
 };
@@ -107,6 +107,13 @@ pub struct Runtime {
     /// CLI 在会话退出前通过 `extension_host()` 拿到 `Arc<dyn ExtensionHost>` 后
     /// （或持有原始 `Arc<BundledExtensionHost>`）调用 `shutdown_all` 释放资源。
     pub(crate) extension_host: Arc<dyn crate::extension::ExtensionHost>,
+    /// 配置文件监听器（S-22，可选）。
+    ///
+    /// `Some` 时随 `Runtime` 存活，drop 时自动停止监听并结束后台 task；`None` 表示
+    /// 未启用热更新（`ConfigWatcher::start` 监听失败降级或 CLI 未注入）。
+    // 仅持有以控制生命周期（Drop 时停止后台 task），不需要读取字段值
+    #[allow(dead_code)]
+    pub(crate) config_watcher: Option<ConfigWatcher>,
 }
 
 impl Runtime {

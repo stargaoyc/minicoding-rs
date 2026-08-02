@@ -100,6 +100,10 @@ tiktoken-rs = "0.6"
 # 配置（见 tech-stack.md §8）
 figment = { version = "0.10", features = ["toml", "env"] }
 
+# 文件监听（S-22 配置热更新，见 tech-stack.md §8、features.md S-22）
+# 仅 core 引入；默认 features 含 macos_fsevent（macOS 原生后端），其余平台用 inotify/kqueue/ReadDirectoryChanges。
+notify = "8"
+
 # 测试（dev-dependencies，见 tech-stack.md §10）
 wiremock = "0.6"
 tempfile = "3.13"

@@ -997,6 +997,11 @@ impl RuntimeBuilder {
     /// 设置后 Runtime 使用该会话的 id 与 messages；调用方需另行调用
     /// `Runtime::restore_history` 将消息注入上下文管理器。
     pub fn session(mut self, s: Session) -> Self;
+    /// 配置文件监听器（S-22 热更新，默认 `None` → 不启用）。
+    /// CLI 注入 `ConfigWatcher::start(...)` 结果；`ConfigWatcher` 随 `Runtime`
+    /// 存活，drop 时自动停止监听并结束后台线程。监听失败由 `start` 内部
+    /// best-effort 处理（记 warn，返回空壳）。
+    pub fn with_config_watcher(mut self, w: ConfigWatcher) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
@@ -1036,6 +1041,10 @@ pub enum Event {
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
     /// 文件回滚执行结果（见 design.md §17.4）。
     FileUndone { report: UndoReport },
+    /// 配置文件变更通知（S-22 热更新，`ConfigWatcher` 检测到 `config.toml` 变化时广播）。
+    /// 500ms debounce 后发出；需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）
+    /// 自行订阅 `EventBus` 处理。
+    ConfigChanged,
 }
 ```
 

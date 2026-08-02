@@ -60,6 +60,8 @@ pub enum EventKind {
     },
     /// 任务更新。
     TaskUpdated { task: Task },
+    /// 配置文件变更（S-22 热更新）。
+    ConfigChanged,
     /// NDJSON 专用：`ListSessions` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
     SessionsListed { sessions: Vec<SessionMeta> },
     /// NDJSON 专用：`GetSession` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
@@ -113,6 +115,7 @@ impl From<&Event> for EventKind {
                 to: *to,
             },
             Event::TaskUpdated { task } => Self::TaskUpdated { task: task.clone() },
+            Event::ConfigChanged => Self::ConfigChanged,
         }
     }
 }

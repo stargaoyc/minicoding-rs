@@ -105,4 +105,51 @@ mod tests {
             .unwrap();
         assert!(matches!(verdict, Verdict::Allow));
     }
+
+    /// C-06：`SideEffect::Network`（`web.fetch`/`web.search`）在回放模式下同样被拒。
+    #[tokio::test]
+    async fn replay_denies_network() {
+        let policy = ReplayPolicy::new(Arc::new(BuiltinPolicy::new()));
+        let input = serde_json::json!({"url": "https://example.com"});
+        let verdict = policy
+            .check("web.fetch", &input, &ctx(SideEffect::Network))
+            .await
+            .unwrap();
+        assert!(
+            matches!(verdict, Verdict::Deny(_)),
+            "Network 副作用工具在回放模式下应被拒绝"
+        );
+    }
+
+    /// C-06：所有 `SideEffect != None` 的工具在回放模式下都必须被 `Deny`，
+    /// 不论工具名或输入。参数化遍历全部副作用类别，覆盖未来新增类别时回归。
+    #[tokio::test]
+    async fn replay_denies_all_side_effect_variants() {
+        let policy = ReplayPolicy::new(Arc::new(BuiltinPolicy::new()));
+        let input = serde_json::json!({});
+        // 遍历全部非 None 副作用类别：FileWrite / Command / Network
+        for side_effect in [
+            SideEffect::FileWrite,
+            SideEffect::Command,
+            SideEffect::Network,
+        ] {
+            let verdict = policy
+                .check("any.tool", &input, &ctx(side_effect))
+                .await
+                .unwrap();
+            assert!(
+                matches!(verdict, Verdict::Deny(_)),
+                "回放模式下 {side_effect:?} 应被 Deny，实际: {verdict:?}"
+            );
+        }
+        // None 仍走内层策略（BuiltinPolicy 对只读工具恒 Allow）
+        let verdict = policy
+            .check("fs.read", &input, &ctx(SideEffect::None))
+            .await
+            .unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "回放模式下只读工具应 Allow，实际: {verdict:?}"
+        );
+    }
 }

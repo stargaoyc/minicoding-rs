@@ -185,3 +185,72 @@ mod tests {
         assert!(!is_under(child_out, parent));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use camino::Utf8PathBuf;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// C-03：任意输入路径不应使 `resolve_under` panic（结果为 Ok 或 Err）。
+        #[test]
+        fn resolve_under_never_panics(input in "[a-zA-Z0-9_./ -]{0,64}") {
+            let tmp = tempfile::tempdir().expect("create tempdir");
+            let workdir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .expect("tempdir path is utf8");
+            let result = resolve_under(&workdir, &input);
+            // 仅断言不 panic：Ok 或 Err(Escaped)/Err(NotFound) 均合法
+            let ok_or_expected_err = result.is_ok()
+                || matches!(
+                    result,
+                    Err(PathSandboxError::Escaped { .. } | PathSandboxError::NotFound { .. })
+                );
+            prop_assert!(ok_or_expected_err);
+        }
+
+        /// C-03：若 `resolve_under` 返回 Ok，解析结果必然落在 workdir 之下（越界不可绕过）。
+        #[test]
+        fn resolved_path_always_under_workdir(input in "[a-zA-Z0-9_./]{0,64}") {
+            let tmp = tempfile::tempdir().expect("create tempdir");
+            let workdir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .expect("tempdir path is utf8");
+            let canon_workdir =
+                std::fs::canonicalize(workdir.as_std_path()).expect("canonicalize workdir");
+            let canon_workdir = Utf8PathBuf::from_path_buf(canon_workdir)
+                .expect("canonical workdir path is utf8");
+            if let Ok(resolved) = resolve_under(&workdir, &input) {
+                prop_assert!(
+                    resolved.starts_with(&canon_workdir),
+                    "resolved path '{}' must be under workdir '{}'",
+                    resolved,
+                    canon_workdir
+                );
+            }
+        }
+
+        /// C-03：绝对路径越界（workdir 之外）应始终被拒绝（Escaped）。
+        #[test]
+        fn absolute_outside_path_rejected(input in "/[a-zA-Z0-9_]{1,40}") {
+            let tmp = tempfile::tempdir().expect("create tempdir");
+            let workdir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .expect("tempdir path is utf8");
+            let canon_workdir =
+                std::fs::canonicalize(workdir.as_std_path()).expect("canonicalize workdir");
+            let canon_workdir = Utf8PathBuf::from_path_buf(canon_workdir)
+                .expect("canonical workdir path is utf8");
+            if let Ok(resolved) = resolve_under(&workdir, &input) {
+                // 若 Ok 则必在 workdir 下（巧合命中 workdir 内绝对路径的极小概率情形）
+                prop_assert!(
+                    resolved.starts_with(&canon_workdir),
+                    "absolute path '{}' resolved to '{}' outside workdir '{}'",
+                    input,
+                    resolved,
+                    canon_workdir
+                );
+            }
+        }
+    }
+}

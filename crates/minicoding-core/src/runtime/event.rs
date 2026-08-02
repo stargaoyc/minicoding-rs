@@ -45,6 +45,12 @@ pub enum Event {
     ///
     /// 携带更新后的 `Task` 快照；UI 据此刷新任务列表（T-M7-4）。
     TaskUpdated { task: Task },
+    /// 配置文件变更（S-22 热更新，`ConfigWatcher` 检测到 `config.toml` 变化时广播）。
+    ///
+    /// 仅通知无回复通道；需要响应变化的组件（扩展 `on_config_changed`、TUI 重渲染等）
+    /// 自行订阅 `EventBus` 并处理。`ConfigWatcher` 已做 500ms debounce，此处收到即代表
+    /// 配置文件确有变更。
+    ConfigChanged,
 }
 
 /// 事件总线（broadcast channel）。

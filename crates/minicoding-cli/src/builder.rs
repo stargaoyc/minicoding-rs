@@ -396,6 +396,15 @@ pub fn build_runtime(
     #[cfg(feature = "hooks")]
     let hook_registry = build_hook_registry(&config.hooks);
 
+    // 11a-2. 启动配置文件监听（S-22 热更新，best-effort：监听失败不阻塞启动）
+    //        `ConfigWatcher::start` 内部捕获错误并降级为空壳，故结果直接注入。
+    //        复用上方 `event_bus` 的 clone（原件在下方 move 进 builder）。
+    let config_watcher = minicoding_core::config::ConfigWatcher::start(
+        &minicoding_core::paths::config_path()
+            .unwrap_or_else(|_| camino::Utf8PathBuf::from("config.toml")),
+        event_bus.clone(),
+    );
+
     let mut builder = RuntimeBuilder::new()
         .provider(main_provider)
         .context(ctx)
@@ -408,7 +417,8 @@ pub fn build_runtime(
         .audit(audit)
         .session_summarizer(summarizer)
         .permission_mode(initial_mode)
-        .events(event_bus);
+        .events(event_bus)
+        .with_config_watcher(config_watcher);
 
     // 11b. 注入沙箱驱动 + 策略（T-M4-9，C-22：沙箱为第二道防线）
     //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。

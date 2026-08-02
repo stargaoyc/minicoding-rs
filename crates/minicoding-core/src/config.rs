@@ -8,6 +8,9 @@ use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod watcher;
+pub use watcher::ConfigWatcher;
+
 /// Runtime 配置（分层加载）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]

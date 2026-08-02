@@ -143,7 +143,7 @@ minicoding-core/src/
 │   ├── mod.rs             # Runtime 聚合根 + AgentLoop 主循环（并行/串行分桶，见 design.md §2.3）
 │   ├── rt.rs              # Runtime 实现（聚合各 trait，含 register_dynamic_tool/journal/subagent_runner）
 │   ├── builder.rs         # RuntimeBuilder（链式注入 provider/ctx/policy/sandbox/hooks/journal/...）
-│   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
+│   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone/ConfigChanged）
 │   └── accumulator.rs     # 流式 delta 聚合
 ├── agent/
 │   ├── mod.rs
@@ -193,6 +193,8 @@ minicoding-core/src/
 │   ├── trait_def.rs       # Extension/ExtensionHost/Registrar trait + NoopExtensionHost + NoopRegistrar（见 api.md §3.12）
 │   └── manifest.rs        # ExtensionManifest + ExtensionCarrier + Capability + ExtensionId/Info
 ├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles + HooksConfig）
+├── config/
+│   └── watcher.rs         # ConfigWatcher（S-22 配置热更新，notify 8 + 500ms debounce + best-effort）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 └── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
 ```
