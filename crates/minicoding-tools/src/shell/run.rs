@@ -125,7 +125,9 @@ impl Tool for ShellRun {
             }
 
             // M4：OS 沙箱（第二道防线，C-22）。`apply` 在 spawn 前注入 landlock/
-            // seatbelt 的 pre_exec 钩子。未注入驱动/策略时跳过（兼容测试）。
+            // seatbelt 的 pre_exec 钩子（Linux/macOS），或设置 CREATE_SUSPENDED（Windows）。
+            // 未注入驱动/策略时跳过（兼容测试）。
+            let has_sandbox = sandbox_driver.is_some() && sandbox_policy.is_some();
             if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref())
             {
                 driver.apply(policy, command.as_std_mut()).map_err(|e| {
@@ -135,9 +137,22 @@ impl Tool for ShellRun {
                 })?;
             }
 
-            let child = command
+            let mut child = command
                 .spawn()
                 .map_err(|e| ToolError::Exec(format!("failed to spawn command: {e}")))?;
+
+            // Windows Job Object：spawn 后需 post_spawn 分配 Job Object + 恢复线程。
+            // Linux/macOS 的 post_spawn 为 no-op（沙箱在 pre_exec 内一次性完成）。
+            if has_sandbox
+                && let Some(driver) = sandbox_driver.as_ref()
+                && let Some(pid) = child.id()
+            {
+                driver.post_spawn(pid).map_err(|e| {
+                    // post_spawn 失败（如 Job Object 分配失败）：kill 子进程并报错
+                    let _ = child.start_kill();
+                    ToolError::Exec(format!("sandbox post_spawn failed: {e}"))
+                })?;
+            }
 
             // C-07：超时后 kill 子进程。
             // `wait_with_output` 消耗 `child` 所有权；超时 future 被 drop 时，

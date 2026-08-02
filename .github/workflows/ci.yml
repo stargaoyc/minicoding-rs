@@ -1,9 +1,11 @@
 # CI 门禁（+ ，AGENTS.md §6.3）
 #
-# 7 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos
-# 平台策略：M0-M4 Linux only（见 dev-plan 、tech-stack.md §11）；
-#           macOS matrix 由 M5 补、Windows matrix 由 M6+ 补（features ）。
-# 沙箱在非 Linux 环境降级为 NoopDriver（landlock/libseccomp 仅 Linux target 引入）。
+# 8 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform
+# 平台策略（features ）：
+#   - Linux：完整门禁（fmt/clippy/test/coverage/audit/deny/typos）+ Landlock 沙箱拒绝语义测试；
+#   - macOS：编译 + 单测 matrix（Seatbelt 沙箱驱动，sandbox_init FFI）；
+#   - Windows：编译 + 单测 matrix（Job Object 沙箱驱动，windows-sys FFI）。
+# 三平台均有原生沙箱驱动（landlock/seatbelt/windows-sys），不再降级 NoopDriver。
 #
 # Rust 工具链：nightly（项目用 `let chains` 等 2024 edition 特性，MSRV 1.99，
 #             见 `rust-toolchain.toml`）。
@@ -124,3 +126,23 @@ jobs:
           tool: typos-cli
       - name: typos
         run: typos
+
+  #  跨平台编译+单测 matrix（macOS/Windows）。
+  # macOS：Seatbelt 沙箱驱动（sandbox_init FFI），文件系统隔离。
+  # Windows：Job Object 沙箱驱动（windows-sys FFI），进程遏制 + UI 隔离。
+  # 三平台均有原生沙箱，不再降级 NoopDriver。
+  cross-platform:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --all-features
+        env:
+          OPENAI_API_KEY: sk-test-ci-mock-not-real

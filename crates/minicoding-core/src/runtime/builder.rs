@@ -6,8 +6,9 @@
 //! 真实场景由 frontend 注入 `minicoding-policy`/`minicoding-storage` 实现，见 M2）。
 
 use crate::agent::{NoopSubagentRunner, SubagentRunner};
-use crate::config::RuntimeConfig;
+use crate::config::{ConfigWatcher, RuntimeConfig};
 use crate::context::ContextManager;
+use crate::extension::{ExtensionHost, NoopExtensionHost};
 use crate::hooks::{HookRegistry, NoopHookRegistry};
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
@@ -16,16 +17,19 @@ use crate::policy::{
     NoopPolicy, NoopPrompter, PermissionMode, PermissionPolicy, PermissionPrompter,
 };
 use crate::provider::LlmProvider;
+use crate::runtime::EventBus;
 use crate::runtime::Runtime;
-use crate::runtime::event::EventBus;
 use crate::sandbox::{
     DenialDetector, NoopDriver, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
 };
-use crate::storage::{AuditSink, NoopAudit, Storage};
+use crate::storage::{
+    AuditSink, EventStore, NoopAudit, NoopEventStore, NoopSnapshotStore, SnapshotStore, Storage,
+};
 use crate::tool::ToolRegistry;
 use camino::Utf8PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 /// `Runtime` 构造器。
@@ -58,6 +62,27 @@ pub struct RuntimeBuilder {
     permission_mode: PermissionMode,
     /// 子 Agent runner（默认 `NoopSubagentRunner`，M5 由 CLI 注入实现）。
     subagent_runner: Option<Arc<dyn SubagentRunner>>,
+    /// 扩展宿主（默认 `NoopExtensionHost`，启用扩展时由 CLI 注入 `BundledExtensionHost`）。
+    ///
+    /// Runtime 持有 `Arc<dyn ExtensionHost>` 用于运行期 `unload_extension`/
+    /// `on_config_changed`。`shutdown_all` 是 `BundledExtensionHost` 的 inherent 方法，
+    /// 由 CLI 在会话退出前通过持有的原始 `Arc<BundledExtensionHost>` 调用。
+    extension_host: Option<Arc<dyn ExtensionHost>>,
+    /// 配置文件监听器（默认 `None` → 不启用热更新）。
+    ///
+    /// CLI 注入 `ConfigWatcher::start(...)` 结果；`ConfigWatcher` 随 `Runtime` 存活，
+    /// drop 时自动停止监听并结束后台 task。未注入时不监听配置变更。
+    config_watcher: Option<ConfigWatcher>,
+    /// 事件存储（Event Sourcing，默认 `NoopEventStore`）。
+    ///
+    /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
+    /// 支持 `--replay` 事件重放与 SSE cursor durable 恢复（见 `design.md` §25）。
+    event_store: Option<Arc<dyn EventStore>>,
+    /// Snapshot 存储（Event Sourcing，默认 `NoopSnapshotStore`）。
+    ///
+    /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
+    /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -91,6 +116,10 @@ impl RuntimeBuilder {
             hook_registry: None,
             permission_mode: PermissionMode::Default,
             subagent_runner: None,
+            extension_host: None,
+            config_watcher: None,
+            event_store: None,
+            snapshot_store: None,
         }
     }
 
@@ -261,7 +290,59 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置扩展宿主（默认 `NoopExtensionHost`，启用扩展时由 CLI 注入
+    /// `BundledExtensionHost`）。
+    ///
+    /// 注入后 Runtime 通过 `extension_host()` 暴露引用，CLI 可在会话退出前调用
+    /// `shutdown_all`（`BundledExtensionHost` inherent 方法）释放扩展资源。
+    /// 扩展注册的工具/Hook/PromptContributor 由 CLI 在 `load_extension` 后提取
+    /// bundle 并提交到 Runtime 各注册表（`ToolRegistry`/`HookRegistry`/`PromptPipeline`）。
+    #[must_use]
+    pub fn extension_host(mut self, h: Arc<dyn ExtensionHost>) -> Self {
+        self.extension_host = Some(h);
+        self
+    }
+
+    /// 设置配置文件监听器（默认 `None` → 不启用热更新）。
+    ///
+    /// 注入后 `ConfigWatcher` 随 `Runtime` 存活，drop 时自动停止监听并结束后台 task。
+    /// 监听失败由 `ConfigWatcher::start` 内部 best-effort 处理（记 warn，返回空壳），
+    /// 此处直接接收其结果。
+    #[must_use]
+    pub fn with_config_watcher(mut self, w: ConfigWatcher) -> Self {
+        self.config_watcher = Some(w);
+        self
+    }
+
+    /// 设置事件存储（Event Sourcing，默认 `NoopEventStore`）。
+    ///
+    /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
+    /// 支持 `--replay` 事件重放与 SSE cursor durable 恢复（见 `design.md` §25）。
+    /// 未注入时退化为 `NoopEventStore`（不持久化），兼容旧会话。
+    #[must_use]
+    pub fn event_store(mut self, s: Arc<dyn EventStore>) -> Self {
+        self.event_store = Some(s);
+        self
+    }
+
+    /// 设置 Snapshot 存储（Event Sourcing，默认 `NoopSnapshotStore`）。
+    ///
+    /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
+    /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
+    /// 未注入时退化为 `NoopSnapshotStore`（不落盘 snapshot）。
+    #[must_use]
+    pub fn snapshot_store(mut self, s: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(s);
+        self
+    }
+
     /// 构造 `Runtime`。
+    ///
+    /// **Event Sourcing 初始化**：`event_seq` 默认初始化为 1（新会话起始 seq），
+    /// `durable_seq` 初始化为 0（无持久化进度）。`--resume`/`--replay` 场景下，
+    /// 调用方需在 `build()` 后调用 [`Runtime::init_event_stream`] 异步加载
+    /// `EventStore::next_seq` 与最近 snapshot 的 seq，并持久化 `SessionCreated`
+    /// 事件（新会话首事件）。
     ///
     /// # Errors
     /// 必填项缺失时返回错误字符串。
@@ -312,6 +393,18 @@ impl RuntimeBuilder {
             subagent_runner: self
                 .subagent_runner
                 .unwrap_or_else(|| Arc::new(NoopSubagentRunner::new())),
+            extension_host: self
+                .extension_host
+                .unwrap_or_else(|| Arc::new(NoopExtensionHost::new())),
+            config_watcher: self.config_watcher,
+            event_store: self.event_store.unwrap_or_else(|| Arc::new(NoopEventStore)),
+            snapshot_store: self
+                .snapshot_store
+                .unwrap_or_else(|| Arc::new(NoopSnapshotStore)),
+            // 默认值：新会话起始 seq=1；`init_event_stream` 会按 EventStore 实际情况修正。
+            event_seq: Arc::new(TokioMutex::new(1)),
+            message_since_snapshot: AtomicU64::new(0),
+            durable_seq: Arc::new(TokioMutex::new(0)),
         })
     }
 }

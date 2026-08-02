@@ -30,24 +30,35 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod fs;
+mod git;
 mod memory;
 mod plan;
 mod shell;
 mod task;
 mod util;
 
+#[cfg(feature = "web")]
+mod web;
+
 pub use fs::{
     FsDelete, FsEdit, FsGlob, FsGrep, FsList, FsMultiEdit, FsRead, FsWrite,
     register_readonly_tools, register_write_tools,
 };
+pub use git::{GitApply, GitDiff, register_git_tools};
 pub use memory::{
     AutoMemoryWriter, InMemoryAutoMemory, MemoryCategory, MemoryWrite, MemoryWriteTarget,
     register_memory_tools,
 };
 pub use plan::{PlanExit, register_plan_tools};
-pub use shell::{ShellRun, register_shell_tools};
+pub use shell::{
+    BackgroundShellStatus, BackgroundShellStore, InMemoryBackgroundShellStore, ShellBackground,
+    ShellKill, ShellOutput, ShellRun, register_shell_tools,
+};
 pub use task::{
     InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskSpawn, TaskStore, TaskUpdate,
     register_spawn_tool, register_task_tools,
 };
 pub use util::{ensure_dir, resolve_path, truncate_output};
+
+#[cfg(feature = "web")]
+pub use web::{WebFetch, WebSearch, register_web_tools};

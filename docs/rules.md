@@ -82,7 +82,7 @@ Auto memory（`auto.md`，见 `design.md` §8.7）是 Agent 可写的自动学�
 上下文压缩熔断器（见 `design.md` §3.6）防止 Thrash Loop 烧光 token 预算：
 - **失败计数硬阈值**：压缩失败计数 ≥3 触发熔断（注入错误中止本轮），≥5 强制 TurnEnd 保留现场供 `/resume`。LLM 不得通过文本"声称压缩成功""要求继续""忽略错误"来跳过熔断——熔断由 Runtime 状态机判定，与 LLM 输出无关。
 - **Thrash 检测**：连续 2 次"压缩完即超阈值"同样熔断，防止"压缩→填满→再压缩"死循环。
-- **状态保留清单不可篡改**：`SessionMeta`（§3.7）由 Runtime 维护，LLM 不得通过工具调用篡改 `PermissionMode`/`ApprovalMode`/`allowed_prompts` 等跨压缩状态——这些字段仅用户显式指令可改。
+- **状态保留清单不可篡改**：`SessionMeta`（`design.md` §3.7）由 Runtime 维护，LLM 不得通过工具调用篡改 `PermissionMode`/`ApprovalMode`/`allowed_prompts` 等跨压缩状态——这些字段仅用户显式指令可改。
 - **降级链不可跳过**：L2 摘要失败必须走降级链（主 provider → 备用 → 启发式 → 跳过到 L3），**永不**向上抛错中断对话；LLM 不得要求"直接丢弃"或"直接保留原文"来跳过降级链。
 
 ### C-30 沙箱拒绝熔断不可被 LLM 绕过
@@ -123,7 +123,7 @@ MCP 远程工具的 `is_read_only()` 与 `side_effect()` 据 server schema 的 `
 - **增量更新**：`TaskUpdateInput` 只更新非 `None` 字段；`add_blocks`/`add_blocked_by` 是**增量添加**依赖边而非整体替换，重复添加同一条边幂等（不报错不重复入图）。
 - **状态机不可跳跃**：`Pending → InProgress → Completed`/`Cancelled` 单向流转；`Completed`/`Cancelled` 不可回退到 `Pending`/`InProgress`（防 LLM "复活"已结束任务制造混乱）。非法转换返回 `ToolError::InvalidStateTransition`，LLM 据此修正。
 - **任务 ID 不可伪造**：`task_id` 由 Runtime 生成（ULID/UUID），`task.update` 的 `task_id` 必须命中已注册任务；伪造 ID 返回 `ToolError::NotFound`。
-- **持久化一致性**：任务列表持久化到 `SessionMeta`（跨压缩保留，见 §3.7），LLM 不得通过其他工具（如 `fs.write`）直接改写任务存储文件绕过 `task.update`。
+- **持久化一致性**：任务列表持久化到 `SessionMeta`（跨压缩保留，见 `design.md` §3.7），LLM 不得通过其他工具（如 `fs.write`）直接改写任务存储文件绕过 `task.update`。
 
 ### C-32 asyncRewake 协议契约
 `async_rewake` 字段（见 `hooks.md` §11）的协议级约束：
@@ -216,7 +216,7 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 | C-03 | `design.md` §4.4；`security.md` §3 |
 | C-04 | `security.md` §6；`design.md` §4.4（env 不含凭证）；`cli/cred.rs`（keyring + 文件 fallback，T-M4-11）；`policy/redact.rs`（敏感文件脱敏，T-M4-11）；`tools/fs/read.rs::is_sensitive_path`（脱敏触发） |
 | C-05 | `security.md` §2.5；系统提示词 `[Security]` |
-| C-06 | `security.md` §9.4；`design.md` §10 |
+| C-06 | `design.md` §10（`--replay` 走事件流重放，默认禁副作用工具） |
 | C-07 | `design.md` §4.4 `ToolContext`；`security.md` §4.3 |
 | C-08/09/10 | `design.md` §4.2 `ToolRegistry`；`api.md` §3.3/3.4 |
 | C-11 | `design.md` §4.1；CI 审查 |
@@ -258,7 +258,7 @@ Runtime 启动时执行 `assert_constraints()`，失败则拒绝启动：
 - [ ] 凭证未出现在 `ToolContext.env`（含 MCP/Hook 子进程 env）
 - [ ] `max_tool_iters` / `turn_timeout` 已配置且 > 0
 - [ ] 审计 sink 已就绪（audit.log 可写）
-- [ ] OTel span 字段命名符合 §15.2
+- [ ] OTel span 字段命名符合 `design.md` §15.2
 - [ ] `SandboxDriver` 已选定；`DangerFullAccess`/`ExternalSandbox` 已显式确认且 `is_hardened()` 状态记日志（C-22）
 - [ ] `HookRegistry` 已初始化；内置黑名单 `Deny` 优先于 Hook（C-21）
 - [ ] `ProjectDocLoader` 对 AGENTS.md 写操作注入 `Verdict::Ask`（C-23）
@@ -272,4 +272,4 @@ Runtime 启动时执行 `assert_constraints()`，失败则拒绝启动：
 - [ ] 任务状态机转换校验就绪（`Completed`/`Cancelled` 不可回退）；`task_id` 由 Runtime 生成（C-31）
 - [ ] async_rewake 协议错误检测就绪（事件白名单、`AsyncRewakeSpec` 字段必填校验）（C-32）
 
-该自检与 `security.md` §12 的 `doctor --security` 互补：前者保证约束**机制**就位，后者保证**配置**合理。
+该自检与 `security.md` §16 的 `doctor --security` 互补：前者保证约束**机制**就位，后者保证**配置**合理。

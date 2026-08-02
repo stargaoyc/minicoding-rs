@@ -141,3 +141,73 @@ impl Message {
             .join("\n")
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn arb_message()(
+            role in prop_oneof![
+                Just(Role::System),
+                Just(Role::User),
+                Just(Role::Assistant),
+                Just(Role::Tool),
+            ],
+            text in "[a-zA-Z0-9 .,!?-]{0,100}",
+            id in "[a-z0-9]{10,26}",
+            tool_call_id in proptest::option::of("[a-z0-9]{0,20}"),
+            pinned in proptest::bool::ANY,
+            summarized in proptest::bool::ANY,
+            tokens in proptest::option::of(0usize..10_000),
+            secs in 0i64..2_000_000_000i64,
+        ) -> Message {
+            let source = match role {
+                Role::System | Role::User => MessageSource::User,
+                Role::Assistant => MessageSource::Llm,
+                Role::Tool => MessageSource::Tool,
+            };
+            Message {
+                id,
+                role,
+                content: vec![ContentBlock::Text { text }],
+                tool_calls: Vec::new(),
+                tool_call_id,
+                created_at: OffsetDateTime::from_unix_timestamp(secs)
+                    .expect("secs within valid OffsetDateTime range"),
+                metadata: MessageMeta {
+                    tokens,
+                    pinned,
+                    summarized,
+                    source,
+                },
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn message_json_roundtrip(msg in arb_message()) {
+            // Message 不派生 PartialEq：序列化→反序列化→再序列化后比较 JSON 字符串，
+            // 若两次序列化结果一致则说明 roundtrip 无信息丢失。
+            let json = serde_json::to_string(&msg).expect("serialize Message");
+            let decoded: Message = serde_json::from_str(&json).expect("deserialize Message");
+            let json2 = serde_json::to_string(&decoded).expect("serialize decoded Message");
+            prop_assert_eq!(json, json2);
+        }
+
+        #[test]
+        fn role_json_roundtrip(role in prop_oneof![
+            Just(Role::System),
+            Just(Role::User),
+            Just(Role::Assistant),
+            Just(Role::Tool),
+        ]) {
+            let json = serde_json::to_string(&role).expect("serialize Role");
+            let decoded: Role = serde_json::from_str(&json).expect("deserialize Role");
+            // Role 派生 PartialEq + Eq
+            prop_assert_eq!(role, decoded);
+        }
+    }
+}

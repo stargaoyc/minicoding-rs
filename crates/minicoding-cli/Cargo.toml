@@ -51,9 +51,15 @@ minicoding-journal = { workspace = true, optional = true }
 minicoding-sandbox = { workspace = true, optional = true }
 minicoding-mcp = { workspace = true, optional = true }
 minicoding-server = { workspace = true, optional = true }
+# 扩展 SDK（Extension trait + BundledExtensionHost + 9 内置 PromptContributor）
+minicoding-extension-sdk = { workspace = true, optional = true }
 
 # 凭证存储（OS keyring）
 keyring = { workspace = true }
+
+# 备份打包（见 data-model.md §12）
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [features]
 default = ["memory", "sandbox"]
@@ -63,9 +69,15 @@ file-undo = ["dep:minicoding-journal"]
 sandbox = ["dep:minicoding-sandbox"]
 mcp = ["dep:minicoding-mcp"]
 serve = ["dep:minicoding-server"]
+# 扩展系统（PromptPipeline + BundledExtensionHost）
+extensions = ["dep:minicoding-extension-sdk"]
+# Web 工具组（web.fetch/web.search，启用 `minicoding-tools` 的 `web` feature）
+web = ["minicoding-tools/web"]
+# LSP stdio 适配器（启用 `minicoding-server` 的 `lsp` feature）
+lsp = ["serve", "minicoding-server/lsp"]
 # OTLP 导出（需 reqwest，按需启用；未启用时降级为纯 fmt 日志，见 core::otel）
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
-full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "serve", "otel"]
+full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "serve", "web", "lsp", "otel", "extensions"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -63,6 +63,9 @@ ulid = { version = "1.1", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 home = "0.5"
 
+# 语义化版本（ExtensionManifest 版本字段用，见 design.md §23）
+semver = { version = "1.0", features = ["serde"] }
+
 # HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
@@ -91,11 +94,19 @@ similar = "2.6"
 sha2 = "0.10"
 htmd = "0.1"
 
+# 备份打包（见 data-model.md §12）
+tar = "0.4"
+flate2 = "1"
+
 # Token 计数（见 tech-stack.md §6）
 tiktoken-rs = "0.6"
 
 # 配置（见 tech-stack.md §8）
 figment = { version = "0.10", features = ["toml", "env"] }
+
+# 文件监听（配置热更新，见 tech-stack.md §8、features.md ）
+# 仅 core 引入；默认 features 含 macos_fsevent（macOS 原生后端），其余平台用 inotify/kqueue/ReadDirectoryChanges。
+notify = "8"
 
 # 测试（dev-dependencies，见 tech-stack.md §10）
 wiremock = "0.6"

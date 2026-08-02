@@ -16,6 +16,7 @@
 pub mod agent;
 pub mod config;
 pub mod context;
+pub mod extension;
 pub mod hooks;
 pub mod journal;
 pub mod mcp;
@@ -24,6 +25,7 @@ pub mod model;
 pub mod otel;
 pub mod paths;
 pub mod policy;
+pub mod prompt;
 pub mod provider;
 pub mod runtime;
 pub mod sandbox;
@@ -32,9 +34,14 @@ pub mod tool;
 
 /// 常用类型 re-export。
 pub mod prelude {
-    pub use crate::agent::{NoopSubagentRunner, SubagentRunner};
+    pub use crate::agent::{NoopSubagentRunner, SubagentRunner, WorktreeSubagentRunner};
     pub use crate::config::{HookEntry, HooksConfig, RuntimeConfig};
     pub use crate::context::{ContextManager, ContextSnapshot};
+    pub use crate::extension::{
+        Capability, Extension, ExtensionCarrier, ExtensionHost, ExtensionId, ExtensionInfo,
+        ExtensionManifest, KeyBinding, NoopExtensionHost, NoopRegistrar, Registrar, SlashCommand,
+        StatusItem,
+    };
     pub use crate::hooks::{
         AsyncRewakeSpec, DispatchConfig, DispatchResult, Hook, HookDecision, HookError, HookEvent,
         HookInput, HookMatcher, HookOutput, HookRegistry, NoopHookRegistry, OnHookError,
@@ -44,16 +51,21 @@ pub mod prelude {
     pub use crate::mcp::{McpClient, McpScope, McpServerConfig, McpTransport, ToolHint};
     pub use crate::memory::{MemoryStore, ProjectDocLoader};
     pub use crate::model::{
-        Attachment, ContentBlock, ContextHint, JournalError, LlmError, McpError, MemoryError,
-        Message, MessageMeta, MessageSource, PolicyError, PromptError, Role, RuntimeError, Session,
-        SessionId, SessionMeta, SideEffect, StopReason, StorageError, SubagentResult, SubagentSpec,
-        SubagentType, Task, TaskStatus, Thoroughness, ToolCall, ToolCallId, ToolContent, ToolError,
-        ToolResult, ToolResultMeta, ToolSchema, TurnOutcome, UserInput,
+        Attachment, ContentBlock, ContextHint, ExtensionError, Isolation, JournalError, LlmError,
+        McpError, MemoryError, MergeStrategy, Message, MessageMeta, MessageSource, PolicyError,
+        PromptError, Role, RuntimeError, Session, SessionId, SessionMeta, SideEffect, StopReason,
+        StorageError, SubagentResult, SubagentSpec, SubagentType, Task, TaskStatus, Thoroughness,
+        ToolCall, ToolCallId, ToolContent, ToolError, ToolResult, ToolResultMeta, ToolSchema,
+        TurnOutcome, UserInput, WorktreeSpec,
     };
     pub use crate::policy::{
         Decision, NoopPolicy, NoopPrompter, PermissionContext, PermissionMode, PermissionPolicy,
         PermissionPrompt, PermissionPrompter, PlanModeController, PlanModeSnapshot,
         PreApprovedPrompt, PromptOption, Risk, Verdict,
+    };
+    pub use crate::prompt::{
+        GitInfo, MemoryBlock, Platform, ProjectDoc, PromptContext, PromptContributor,
+        PromptPipeline, PromptSection, PromptSectionOrder, SystemPrompt,
     };
     pub use crate::provider::{
         BoxFuture, Capabilities, ChatRequest, Delta, GenerationParams, LlmProvider, Tokenizer,
@@ -65,6 +77,11 @@ pub mod prelude {
         SandboxCircuitBreaker, SandboxDriver, SandboxError, SandboxPolicy, hard_trip_summary,
         soft_trip_reminder,
     };
-    pub use crate::storage::{AuditKind, AuditRecord, AuditSink, NoopAudit, Storage};
+    pub use crate::storage::{
+        AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
+        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
+        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
+        replay_session_state, session_from_messages, try_persist,
+    };
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
 }

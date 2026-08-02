@@ -167,6 +167,12 @@ impl ChoicesStore for InMemoryChoicesStore {
 ///
 /// 用 canonical path 而非字符串原样，保证符号链接 / `..` 归一化后稳定。
 /// canonicalize 失败时退回原 path（best effort，避免在不存在路径上崩溃）。
+///
+/// **符号链接稳定性**：canonicalize 解析所有符号链接为真实路径，使 `/symlink/to/project`
+/// 与 `/real/project` 产生相同指纹。fallback 到原始字符串时，若路径含未解析的符号链接，
+/// 同一项目可能因访问路径不同（`/symlink` vs `/real`）产生不同指纹，导致首次批准状态
+/// 不匹配。这是 best-effort 的已知限制——canonicalize 失败通常意味着路径不存在或权限不足，
+/// 此时项目尚在初始化阶段，批准状态丢失影响可控（用户重新批准即可）。
 fn project_fingerprint(project_root: &Path) -> String {
     match project_root.canonicalize() {
         Ok(p) => p.to_string_lossy().into_owned(),

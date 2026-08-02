@@ -13,7 +13,6 @@ use minicoding_core::provider::BoxFuture;
 use minicoding_core::storage::{SessionMeta, Storage, StorageError};
 use std::sync::Mutex;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio::io::AsyncWriteExt;
 
 /// `JSONL` 会话存储。
@@ -145,14 +144,12 @@ impl JsonlStorage {
                 }
             };
             let summary = find_first_user_summary(&lines);
-            let created_at = first.created_at.format(&Rfc3339).unwrap_or_default();
-            let updated_at = last.created_at.format(&Rfc3339).unwrap_or_default();
             index.add(SessionIndexEntry {
                 session_id: stem.to_string(),
                 summary,
                 message_count: lines.len(),
-                created_at,
-                updated_at,
+                created_at: first.created_at,
+                updated_at: last.created_at,
                 parent_uuid: None,
             });
         }
@@ -392,14 +389,12 @@ impl JsonlStorage {
                 }
             };
             let summary = find_first_user_summary(&lines);
-            let created_at = first.created_at.format(&Rfc3339).unwrap_or_default();
-            let updated_at = last.created_at.format(&Rfc3339).unwrap_or_default();
             index.add(SessionIndexEntry {
                 session_id: stem.to_string(),
                 summary,
                 message_count: lines.len(),
-                created_at,
-                updated_at,
+                created_at: first.created_at,
+                updated_at: last.created_at,
                 parent_uuid: None,
             });
         }

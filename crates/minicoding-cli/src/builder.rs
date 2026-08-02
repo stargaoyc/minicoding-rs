@@ -223,26 +223,75 @@ pub fn build_runtime(
     // 4b. 加载项目文档（AGENTS.md 分层加载）
     //     从 repo_root 到 cwd 逐级加载，注入 system 段包裹 <project_doc> 边界（C-05）。
     //     加载失败不阻塞启动（best effort，记 warn 日志）。
+    //
+    //     `extensions` feature 启用时走 PromptPipeline 路径，project_doc 由
+    //     `ProjectRulesContributor` 注入（包裹 `<project_doc>` 边界），无需在此
+    //     预注入到 system_prompt。`extensions` 未启用时走旧路径（静态注入）。
     let base_system = system.map_or_else(
         || "You are minicoding, a terminal AI coding assistant.".to_string(),
         std::string::ToString::to_string,
     );
     let system_prompt = load_and_inject_project_doc(&workdir_path, &base_system);
 
+    // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
+    //     9 个内置 contributor 由 `minicoding-extension-sdk::builtin_contributors` 提供，
+    //     CLI 注入 user_rules（long_term.md）+ project_rules（AGENTS.md）+ git_info。
+    //     `enabled_tools` 字段在 `build_chat_request` 时由 `tools.schemas()` 动态填充。
+    #[cfg(feature = "extensions")]
+    let prompt_pipeline: Option<(
+        Arc<minicoding_core::prompt::PromptPipeline>,
+        minicoding_core::prompt::PromptContext,
+    )> = {
+        let user_rules = load_long_term_content_sync();
+        let project_rules = load_project_doc_sync(&workdir_path);
+        let identity = load_identity_content_sync();
+        let ctx_template =
+            minicoding_core::prompt::PromptContext::new(SessionId::new(), workdir_path.clone())
+                .with_user_rules(minicoding_core::prompt::MemoryBlock {
+                    content: user_rules,
+                    source_path: Some(
+                        minicoding_core::paths::memory_dir()
+                            .map(|d| d.join("long_term.md").to_string())
+                            .unwrap_or_default(),
+                    ),
+                })
+                .with_project_rules(minicoding_core::prompt::ProjectDoc {
+                    content: project_rules.content,
+                    layers: project_rules.layers,
+                });
+        let contributors = minicoding_extension_sdk::builtin_contributors(&identity);
+        let pipeline = Arc::new(minicoding_core::prompt::PromptPipeline::with_contributors(
+            contributors,
+        ));
+        Some((pipeline, ctx_template))
+    };
+
     // 5. 构造 context manager（2/3：ContextManagerImpl + 4 级压缩 + 熔断）
     //    注入 TiktokenTokenizer 做精确 token 计数；L2 摘要 provider 用 small（如有）
     //    降本，回退到主 provider。分词器构造失败时降级为 SimpleContextManager（无压缩）。
+    //
+    //    `extensions` feature 启用时注入 PromptPipeline（动态 system prompt，9 段拼接）；
+    //    未启用时走静态 `system_prompt`（已含 project_doc 注入）。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
                 // 128K 上下文窗口（gpt-4o 系列）；TODO: 按 model 精确查询 context window
                 let context_window = 128_000;
-                Arc::new(ContextManagerImpl::new(
+                let mgr = ContextManagerImpl::new(
                     system_prompt.clone(),
                     Arc::new(tokenizer),
                     context_window,
                     Some(summary_provider.clone()),
-                ))
+                );
+                #[cfg(feature = "extensions")]
+                let mgr = {
+                    if let Some((pipeline, ctx_template)) = prompt_pipeline {
+                        mgr.with_prompt_pipeline(pipeline, ctx_template)
+                    } else {
+                        mgr
+                    }
+                };
+                Arc::new(mgr)
             }
             Err(e) => {
                 tracing::warn!(
@@ -254,7 +303,18 @@ pub fn build_runtime(
 
     // 6. 构造 storage
     let sessions_dir = minicoding_core::paths::sessions_dir().context("无法确定会话存储目录")?;
-    let storage = JsonlStorage::new(sessions_dir);
+    let storage = JsonlStorage::new(sessions_dir.clone());
+
+    // 6a. 构造 EventStore + SnapshotStore（Event Sourcing，见 `design.md` §25）
+    //     与 `JsonlStorage` 共用 `sessions_dir`：`{id}.events.jsonl` + `{id}.snapshot.json`
+    //     与消息日志 `{id}.jsonl` 同目录，便于备份/清理。
+    //     新会话双写（messages + events）平滑过渡；旧会话无事件流时回退到消息日志。
+    //     保留具体类型实例供 `load_session_by_mode` 同步加载（trait 未暴露 sync 方法），
+    //     稍后在 `RuntimeBuilder` 注入前 wrap 为 `Arc<dyn trait>`。
+    let event_store: minicoding_storage::JsonlEventStore =
+        minicoding_storage::JsonlEventStore::new(sessions_dir.clone());
+    let snapshot_store: minicoding_storage::JsonlSnapshotStore =
+        minicoding_storage::JsonlSnapshotStore::new(sessions_dir.clone());
 
     // 6. 构造 tool registry
     //    EventBus 提前创建，clone 给 task store 用于广播 `TaskUpdated`，
@@ -264,6 +324,11 @@ pub fn build_runtime(
     register_readonly_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
+    // git 工具组（git.diff 只读 / git.apply 写入）
+    minicoding_tools::register_git_tools(&mut tools);
+    // web 工具组（web.fetch/search，需 `web` feature）
+    #[cfg(feature = "web")]
+    minicoding_tools::register_web_tools(&mut tools);
     // 任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
     // 注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
     register_task_tools(&mut tools, Some(event_bus.clone()));
@@ -313,8 +378,17 @@ pub fn build_runtime(
     //     - Resume/Replay：原 id，原存储文件追加写；
     //     - Fork：新 id，复制前缀消息到新文件（原文件不变）。
     //     消息不在此处注入上下文，由调用方 `restore_history` 完成回填。
+    //     Event Sourcing（§25.4）：Resume/Replay 优先走 snapshot + 事件流重放，
+    //     旧会话无事件流时回退到消息日志（`session_from_messages`）。
     let config_hash_val = config_hash(&config);
-    let session = load_session_by_mode(&storage, mode, workdir_path.clone(), config_hash_val)?;
+    let session = load_session_by_mode(
+        &storage,
+        &event_store,
+        &snapshot_store,
+        mode,
+        workdir_path.clone(),
+        config_hash_val,
+    )?;
 
     // 10. 构造 SessionSummarizer（会话结束时生成摘要落盘 index.json）
     //     primary = small provider（如有，便宜模型降本），secondary = 主 provider
@@ -342,6 +416,15 @@ pub fn build_runtime(
     #[cfg(feature = "hooks")]
     let hook_registry = build_hook_registry(&config.hooks);
 
+    // 11a-2. 启动配置文件监听（热更新，best-effort：监听失败不阻塞启动）
+    //        `ConfigWatcher::start` 内部捕获错误并降级为空壳，故结果直接注入。
+    //        复用上方 `event_bus` 的 clone（原件在下方 move 进 builder）。
+    let config_watcher = minicoding_core::config::ConfigWatcher::start(
+        &minicoding_core::paths::config_path()
+            .unwrap_or_else(|_| camino::Utf8PathBuf::from("config.toml")),
+        event_bus.clone(),
+    );
+
     let mut builder = RuntimeBuilder::new()
         .provider(main_provider)
         .context(ctx)
@@ -354,7 +437,10 @@ pub fn build_runtime(
         .audit(audit)
         .session_summarizer(summarizer)
         .permission_mode(initial_mode)
-        .events(event_bus);
+        .events(event_bus)
+        .with_config_watcher(config_watcher)
+        .event_store(Arc::new(event_store))
+        .snapshot_store(Arc::new(snapshot_store));
 
     // 11b. 注入沙箱驱动 + 策略（C-22：沙箱为第二道防线）
     //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。
@@ -397,6 +483,18 @@ pub fn build_runtime(
             );
         }
         builder = builder.hook_registry(Arc::new(hook_registry));
+    }
+
+    // 11e. 注入 ExtensionHost（`extensions` feature 启用时）
+    //      `BundledExtensionHost` 管理进程内 first-party 扩展生命周期。
+    //      当前 M8 阶段仅注入空 host（无扩展加载），后续可从
+    //      `~/.minicoding/extensions/` 加载扩展并 `load_with_extension`。
+    //      `shutdown_all` 由 CLI 在会话退出前通过持有的 `Arc<BundledExtensionHost>` 调用。
+    #[cfg(feature = "extensions")]
+    {
+        let host: Arc<minicoding_extension_sdk::BundledExtensionHost> =
+            Arc::new(minicoding_extension_sdk::BundledExtensionHost::new());
+        builder = builder.extension_host(host);
     }
 
     if let Some(s) = session {
@@ -502,10 +600,24 @@ fn build_hook_registry(
 /// - `Resume(id)` / `Replay{id}` → 原会话（原 id，不复制）；
 /// - `Fork(id)` → 新会话（新 id，复制原消息前缀到新文件，原文件不变）。
 ///
+/// ## Event Sourcing 集成（§25.4）
+///
+/// `Resume`/`Replay` 模式优先走事件重放路径：
+/// 1. 加载 `JsonlSnapshotStore::load_sync`（如有 snapshot）；
+/// 2. 加载 `JsonlEventStore::load_events_sync` 全部事件；
+/// 3. 调 `replay_session_state` 重建 `Session`；
+/// 4. 旧会话无事件流（`load_events_sync` 返回空且无 snapshot）→ 回退到
+///    `load_messages` 消息日志路径（`session_from_messages` 构造）。
+///
+/// `Fork` 模式不走事件重放（fork 创建新会话，新会话有自己的事件流），
+/// 仅从消息日志复制前缀消息。
+///
 /// # Errors
 /// 会话不存在、加载失败或 fork 复制失败时返回错误。
 fn load_session_by_mode(
     storage: &JsonlStorage,
+    event_store: &minicoding_storage::JsonlEventStore,
+    snapshot_store: &minicoding_storage::JsonlSnapshotStore,
     mode: &SessionLoadMode,
     workdir: Utf8PathBuf,
     config_hash_val: u64,
@@ -516,15 +628,35 @@ fn load_session_by_mode(
         | SessionLoadMode::Replay { id, .. }
         | SessionLoadMode::Fork(id) => id,
     };
-    let messages = load_messages(storage, source_id)?;
-    let created_at = messages
-        .first()
-        .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
 
     match mode {
         SessionLoadMode::None => Ok(None),
         SessionLoadMode::Resume(_) | SessionLoadMode::Replay { .. } => {
-            // 原会话：保留原 id，后续 run_turn 追加写原文件
+            // Event Sourcing 路径：尝试 snapshot + 事件流重放
+            let session = load_session_via_event_sourcing(
+                event_store,
+                snapshot_store,
+                source_id,
+                workdir.clone(),
+                config_hash_val,
+            )?;
+            if let Some(s) = session {
+                tracing::info!(
+                    session = %source_id,
+                    messages = s.messages.len(),
+                    "session loaded via event sourcing replay"
+                );
+                return Ok(Some(s));
+            }
+            // 回退：消息日志路径（旧会话无事件流）
+            tracing::info!(
+                session = %source_id,
+                "no event stream found, falling back to message log"
+            );
+            let messages = load_messages(storage, source_id)?;
+            let created_at = messages
+                .first()
+                .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
             Ok(Some(Session {
                 id: source_id.clone(),
                 created_at,
@@ -535,6 +667,11 @@ fn load_session_by_mode(
         }
         SessionLoadMode::Fork(_) => {
             // Fork：新 id，复制前缀消息到新文件（原文件不变，design.md §10.5）
+            // 不走事件重放（fork 创建新会话，新会话有自己的事件流）
+            let messages = load_messages(storage, source_id)?;
+            let created_at = messages
+                .first()
+                .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
             let new_id = ulid::Ulid::new().to_string();
             storage
                 .fork_session_sync(&new_id, &messages)
@@ -554,6 +691,64 @@ fn load_session_by_mode(
             }))
         }
     }
+}
+
+/// 通过 Event Sourcing 路径加载会话（snapshot + 事件流重放，见 `design.md` §25.4）。
+///
+/// 返回 `Ok(None)` 表示无事件流（旧会话），调用方应回退到消息日志路径。
+///
+/// # Errors
+/// 事件流存在但重放失败（schema 不兼容、seq 缺口等）时返回错误。
+fn load_session_via_event_sourcing(
+    event_store: &minicoding_storage::JsonlEventStore,
+    snapshot_store: &minicoding_storage::JsonlSnapshotStore,
+    session_id: &str,
+    workdir: Utf8PathBuf,
+    config_hash_val: u64,
+) -> Result<Option<Session>> {
+    use minicoding_core::storage::{replay_session_state, session_from_messages};
+
+    // 加载 snapshot（如有）
+    let snapshot = snapshot_store
+        .load_sync(&session_id.to_string())
+        .context("加载 snapshot 失败")?;
+
+    // 加载全部事件
+    let events = event_store
+        .load_events_sync(&session_id.to_string())
+        .context("加载事件流失败")?;
+
+    // 旧会话：无事件流且无 snapshot → 回退
+    if events.is_empty() && snapshot.is_none() {
+        return Ok(None);
+    }
+
+    // 事件重放重建 Session
+    let replayed = replay_session_state(snapshot.as_ref(), events)
+        .map_err(|e| anyhow::anyhow!("事件重放失败: {e}"))?;
+
+    // 用重放结果构造 Session（workdir/config_hash 由 CLI 启动参数提供，
+    // 覆盖事件流中的值——避免 workdir 跨机器漂移）
+    let session = if replayed.session.messages.is_empty() {
+        // 边界：事件流存在但无 MessageAppended（仅 SessionCreated），
+        // 用 session_from_messages 构造（created_at 取 SessionCreated 事件时间）
+        session_from_messages(
+            session_id.to_string(),
+            workdir,
+            config_hash_val,
+            replayed.session.messages,
+        )
+    } else {
+        Session {
+            id: replayed.session.id,
+            created_at: replayed.session.created_at,
+            workdir,
+            config_hash: config_hash_val,
+            messages: replayed.session.messages,
+        }
+    };
+
+    Ok(Some(session))
 }
 
 /// 从存储同步加载会话消息（启动期 tokio runtime 未创建，用 sync 方法）。
@@ -589,6 +784,76 @@ fn load_and_inject_project_doc(workdir: &Utf8PathBuf, base_system: &str) -> Stri
         Err(e) => {
             tracing::warn!("加载项目文档失败: {e}");
             base_system.to_string()
+        }
+    }
+}
+
+/// 同步加载 `~/.minicoding/memory/long_term.md` 内容（`extensions` feature 用）。
+///
+/// 供 `PromptContext.user_rules` 注入。文件不存在或读取失败时返回空串
+/// （`UserRulesContributor` 处理空内容为空 section，不阻塞启动）。
+///
+/// 与 `LongTermMemory::load` 的区别：`load` 是 `async`（`tokio::fs`），此处用
+/// `std::fs` 同步读取（CLI 启动阶段尚未进入 async 上下文，且同步 IO 简单可控）。
+#[cfg(feature = "extensions")]
+fn load_long_term_content_sync() -> String {
+    let Ok(dir) = minicoding_core::paths::memory_dir() else {
+        return String::new();
+    };
+    let path = dir.join("long_term.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "加载 long_term.md 失败");
+            String::new()
+        }
+    }
+}
+
+/// 同步加载 `~/.minicoding/IDENTITY.md` 内容（`extensions` feature 用）。
+///
+/// 供 `IdentityContributor` 注入。文件不存在或读取失败时返回空串
+/// （`IdentityContributor` 处理空内容为默认身份，不阻塞启动）。
+#[cfg(feature = "extensions")]
+fn load_identity_content_sync() -> String {
+    let Ok(home) = minicoding_core::paths::minicoding_home() else {
+        return String::new();
+    };
+    let path = home.join("IDENTITY.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "加载 IDENTITY.md 失败");
+            String::new()
+        }
+    }
+}
+
+/// 同步加载项目文档（AGENTS.md 分层）并返回 `ProjectDoc`（`extensions` feature 用）。
+///
+/// 供 `PromptContext.project_rules` 注入。与 `load_and_inject_project_doc` 共用
+/// `ProjectDocLoaderImpl::load_sync`，但不做 `inject_project_doc_sync` 包裹——
+/// `ProjectRulesContributor` 自行包裹 `<project_doc>` 边界。
+///
+/// 加载失败时返回空 `ProjectDoc`（contributor 处理空内容为空 section）。
+#[cfg(feature = "extensions")]
+fn load_project_doc_sync(workdir: &Utf8PathBuf) -> minicoding_core::prompt::ProjectDoc {
+    let repo_root = minicoding_memory::find_repo_root(workdir).unwrap_or_else(|| workdir.clone());
+    let loader = ProjectDocLoaderImpl::new(repo_root, workdir.clone());
+    match loader.load_sync() {
+        Ok(content) => {
+            // 解析 layers：从 `# source: <path>` 标注提取（loader 输出格式）
+            let layers = content
+                .lines()
+                .filter_map(|line| line.strip_prefix("# source: ").map(str::to_string))
+                .collect();
+            minicoding_core::prompt::ProjectDoc { content, layers }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "加载项目文档失败（extensions 路径）");
+            minicoding_core::prompt::ProjectDoc::default()
         }
     }
 }

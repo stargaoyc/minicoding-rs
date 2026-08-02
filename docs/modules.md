@@ -143,11 +143,12 @@ minicoding-core/src/
 │   ├── mod.rs             # Runtime 聚合根 + AgentLoop 主循环（并行/串行分桶，见 design.md §2.3）
 │   ├── rt.rs              # Runtime 实现（聚合各 trait，含 register_dynamic_tool/journal/subagent_runner）
 │   ├── builder.rs         # RuntimeBuilder（链式注入 provider/ctx/policy/sandbox/hooks/journal/...）
-│   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone）
+│   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone/ConfigChanged）
 │   └── accumulator.rs     # 流式 delta 聚合
 ├── agent/
 │   ├── mod.rs
-│   └── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
+│   ├── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
+│   └── worktree.rs        # WorktreeSubagentRunner 装饰器（A-15，git worktree 隔离，见 design.md §7.5）
 ├── model/
 │   ├── message.rs         # Message / Role / Content
 │   ├── tool.rs            # ToolCall / ToolResult / ToolSchema
@@ -182,13 +183,27 @@ minicoding-core/src/
 │   └── mod.rs
 ├── storage/
 │   ├── trait.rs           # Storage trait + AuditSink trait
+│   ├── event.rs           # EventStore/EventRecord/PersistedEvent trait + NoopEventStore（Event Sourcing，见 design.md §25）
+│   ├── snapshot.rs        # SnapshotStore/SessionSnapshot/SessionState trait + NoopSnapshotStore
+│   ├── replay.rs          # replay_session_state + ReplayError + ReplayedSession + session_from_messages
 │   └── mod.rs
+├── prompt/
+│   ├── mod.rs             # prelude 再导出
+│   ├── trait_def.rs       # PromptContributor trait + PromptSection + PromptSectionOrder（见 api.md §3.13）
+│   ├── context.rs         # PromptContext（会话级输入聚合）
+│   └── pipeline.rs        # PromptPipeline（9 段排序拼接 + 缓存统计）
+├── extension/
+│   ├── mod.rs             # prelude 再导出
+│   ├── trait_def.rs       # Extension/ExtensionHost/Registrar trait + NoopExtensionHost + NoopRegistrar（见 api.md §3.12）
+│   └── manifest.rs        # ExtensionManifest + ExtensionCarrier + Capability + ExtensionId/Info
 ├── config.rs              # RuntimeConfig 加载与合并（含 MINICODING_HOME + profiles + HooksConfig）
+├── config/
+│   └── watcher.rs         # ConfigWatcher（S-22 配置热更新，notify 8 + 500ms debounce + best-effort）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 └── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
 ```
 
-> **未实现（M5 roadmap，T-M5-1..T-M5-8 范围外）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/trait.rs`（ExtensionHost/Extension/Registrar，X-20..X-22）属 M5 roadmap 范围但未在 dev-plan T-M5-1..T-M5-8 中排期，当前为规划态，文件未创建。
+> **已实现（M5 范围）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/`（ExtensionHost/Extension/Registrar，X-20..X-22）已实现。trait 定义在 `minicoding-core`，9 个内置 contributor 与 `BundledExtensionHost`/`BundleRegistrar` 实现在 `minicoding-extension-sdk`。详见 `api.md` §3.12/§3.13 与 `design.md` §22/§23。
 
 ### 1.3 公共 API（prelude）
 
@@ -207,7 +222,12 @@ pub mod prelude {
     pub use crate::memory::ProjectDocLoader;
     pub use crate::journal::{Journal, ChangeEntry, UndoReport};
     pub use crate::mcp::{McpClient, McpServerConfig, McpTransport, McpScope};
-    pub use crate::storage::{Storage, AuditSink};
+    pub use crate::storage::{
+        AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
+        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
+        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
+        replay_session_state, session_from_messages, try_persist,
+    };
     pub use crate::prompt::{PromptContributor, PromptSection, PromptSectionOrder};
     pub use crate::extension::{ExtensionHost, Extension, ExtensionManifest, Registrar};
     pub use crate::event::Event;
@@ -221,7 +241,7 @@ pub mod prelude {
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
 - **轻量依赖**：core 只依赖 `tokio`/`serde`/`serde_json`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`。无 `reqwest`/`landlock`/`rmcp`/`libseccomp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
-- **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `PromptBuild` Hook 注入 section（见 `design.md` §22）。
+- **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `Registrar::register_prompt_contributor` 注入 section（见 `design.md` §22）。
 
 ---
 
@@ -316,6 +336,7 @@ minicoding-memory/src/
 │   ├── mod.rs
 │   ├── loader.rs          # AGENTS.md 分层加载算法（见 design.md §8.6）
 │   └── fallback.rs        # fallback 文件名与 override 解析（CLAUDE.md/.cursorrules）
+├── vector.rs              # `@memory` BM25 语义检索（CJK 逐字分词，零外部依赖）
 └── inject.rs              # 记忆注入 system 段（包裹 <long_term_memory>/<auto_memory> 边界）
 ```
 
@@ -444,7 +465,7 @@ minicoding-mcp/src/
 └── naming.rs              # mcp__<server>__<tool> 命名 + 解析 + 权限通配匹配
 ```
 
-> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+；`tool_search.rs`（BM25 检索）规划在 M7+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。
+> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。T-M8-5（`server/tool_search.rs`）已交付：BM25 工具检索索引，工具数多时按自然语言查询返回 top-k 相关 schema。
 
 ### 8.3 库选型（不自研）
 
@@ -473,7 +494,7 @@ minicoding-mcp/src/
 
 ### 9.1 职责
 
-实现 `Storage`/`AuditSink` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志。
+实现 `Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志、事件流持久化与 snapshot（Event Sourcing，见 `design.md` §25）。
 
 ### 9.2 模块树
 
@@ -481,6 +502,8 @@ minicoding-mcp/src/
 minicoding-storage/src/
 ├── lib.rs                 # 工厂
 ├── jsonl.rs               # JsonlStorage 实现 Storage（追加写、崩溃安全）
+├── event_store.rs         # JsonlEventStore 实现 EventStore（{id}.events.jsonl，fsync 后返回）
+├── snapshot_store.rs      # JsonlSnapshotStore 实现 SnapshotStore（{id}.snapshot.json，原子写）
 ├── index.rs               # 会话索引 index.json（轻量元数据列出）
 ├── lock.rs                # 跨进程文件锁（fs2）
 ├── audit.rs               # AuditSink 实现（audit.log JSONL，0600 权限）
@@ -489,8 +512,9 @@ minicoding-storage/src/
 
 ### 9.3 关键设计点
 
-- **崩溃安全**：每条消息 `append` 后 `fsync`，崩溃时磁盘与内存一致。
+- **崩溃安全**：每条消息 `append` 后 `fsync`，崩溃时磁盘与内存一致。事件流（`{id}.events.jsonl`）同样 append + fsync；snapshot（`{id}.snapshot.json`）走 `.tmp` + `rename` 原子写。
 - **审计完整性**：`audit.log` 文件权限 0600，追加写不可篡改历史（无 update/delete API）。
+- **Event Sourcing 双写并存**：新会话同时写消息日志与事件流，旧会话无事件流时回退到消息日志路径（见 `design.md` §25.6）。`JsonlEventStore`/`JsonlSnapshotStore` 与 `JsonlStorage` 共用 `sessions_dir`。
 - **依赖**：`minicoding-core` + `serde_json` + `fs2`（文件锁）+ `tracing`。
 
 ---
@@ -563,8 +587,9 @@ minicoding-tools/src/
 │   ├── output.rs          # 读取后台命令累积输出
 │   └── kill.rs            # 终止后台命令
 ├── web/
-│   ├── fetch.rs           # reqwest + html→markdown
-│   └── search.rs          # M7+
+│   ├── fetch.rs           # reqwest + html→markdown + SSRF 防护
+│   ├── search.rs          # DuckDuckGo HTML 端点（无需 API key）
+│   └── ssrf.rs            # URL/IP 校验：拒绝私有/loopback/link-local IP
 ├── git/
 │   ├── diff.rs
 │   └── apply.rs
@@ -628,6 +653,7 @@ minicoding-cli/src/
 │   ├── mcp.rs            # minicoding mcp list/approve/reset-project-choices
 │   ├── cred.rs           # minicoding cred store/load/delete（T-M4-11）
 │   ├── serve.rs          # minicoding serve（HTTP/SSE server，T-M8-2，`serve` feature）
+│   ├── backup.rs         # minicoding backup create/list（S-05，tar.gz 打包）
 │   └── session_cmd.rs    # minicoding session list/delete（T-M3-10c）
 └── cred.rs               # 凭证存储（OS keyring + 文件 fallback 0600，T-M4-11，C-04）
 ```
@@ -752,10 +778,10 @@ minicoding-server/src/
 ├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
-├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，规划）
-├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，规划）
-├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest，规划）
-└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot，规划）
+├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
+├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，feature gate `lsp`）
+├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest 点对点权限交互）
+└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
 
 ### 16.3 关键设计点
 
@@ -775,16 +801,27 @@ minicoding-server/src/
 
 为第三方扩展作者提供稳定接口，隐藏 Runtime 内部细节。扩展可通过 Registrar 注册 6 类能力：工具 / Hook / Prompt contributor / 快捷键 / 状态栏项 / 斜杠命令。本 crate 同时提供 `ExtensionHost` 的进程内 first-party 实现（disk IPC 加载器在 `minicoding-cli`）。
 
-### 17.2 模块树（规划）
+### 17.2 模块树
 
+```
 minicoding-extension-sdk/src/
-├── lib.rs                 # re-export + 扩展开发入口
-├── extension.rs           # Extension trait（生命周期 init/shutdown/on_config_changed）
-├── host.rs                # BundledExtensionHost（ExtensionHost 进程内实现，M5+）
-├── registrar.rs           # Registrar 接口（6 类注册项，Arc<dyn Trait>）
-├── manifest.rs            # ExtensionManifest + ExtensionCarrier + Capability
-├── context.rs             # ExtensionContext（扩展运行时上下文：logger/config/event_bus）
-└── protocol.rs            # disk IPC 子进程扩展协议（JSON over stdio，M6+）
+├── lib.rs                      # re-export（BundledExtensionHost/LoadedExtension/builtin_contributors/...）
+├── bundled.rs                  # BundledExtensionHost（ExtensionHost 进程内实现）+ LoadedExtension
+├── registrar.rs                # BundleRegistrar（Registrar 实现）+ RegistrationBundle（6 类注册项收集）
+└── contributors/
+    ├── mod.rs                  # builtin_contributors() 构造 9 个内置 contributor
+    ├── identity.rs             # IdentityContributor（顺序 1，IDENTITY.md 覆盖，P-31）
+    ├── system.rs               # SystemContributor（顺序 2，内置软规则）
+    ├── task_guidelines.rs      # TaskGuidelinesContributor（顺序 3，任务规划规范）
+    ├── communication.rs        # CommunicationContributor（顺序 4，输出格式规范）
+    ├── environment.rs          # EnvironmentContributor（顺序 5，工作区/平台/git 信息）
+    ├── user_rules.rs           # UserRulesContributor（顺序 6，long_term.md）
+    ├── project_rules.rs        # ProjectRulesContributor（顺序 7，AGENTS.md）
+    ├── tool_summary.rs         # ToolSummaryContributor（顺序 8，工具 schema 摘要）
+    └── extension_contrib.rs    # ExtensionContributor（顺序 9，扩展段占位）
+```
+
+> `Extension`/`ExtensionHost`/`Registrar`/`ExtensionManifest` trait 定义在 `minicoding-core`（见 `api.md` §3.12），本 crate 提供 `BundledExtensionHost`/`BundleRegistrar` 进程内实现与 9 个内置 contributor。disk IPC 子进程扩展协议（`Ipc` carrier）规划在 M6+。
 
 ### 17.3 关键设计点
 
@@ -922,13 +959,13 @@ Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M
 | context (压缩/熔断) | 基础 | ✅ 完整 | 增强 | 稳定 | - |
 | policy (双 trait/黑名单/预设) | ✅ | 增强（risk 解释） | 稳定 | 稳定 | - |
 | providers (openai/anthropic) | ✅ | ollama | router | 多模态 | - |
-| tools (fs/shell/task/plan) | ✅ | web/git/multiedit | mcp 包装 | 稳定 | - |
+| tools (fs/shell/task/plan) | ✅ | multiedit | mcp 包装 | ✅ web/git/shell.background | - |
 | storage (jsonl/audit) | ✅ | index/lock | export | 稳定 | - |
 | sandbox (应用层路径) | ✅ | - | ✅ OS 级（sandbox-run） | Windows 强化 | - |
-| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | 向量检索 | - |
+| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | ✅ 向量检索（BM25） | - |
 | hooks | - | - | ✅ 10 事件+asyncRewake | 稳定 | - |
 | journal | - | - | ✅ /undo | 稳定 | - |
-| mcp (rmcp client) | - | - | ✅ | server 暴露+检索 | - |
+| mcp (rmcp client) | - | - | ✅ | ✅ server 暴露+检索 | - |
 | cli (单次+会话+exec+doctor) | ✅ | resume | mcp 子命令 | 稳定 | - |
 | tui | - | - | - | ✅ | - |
 | sdk | - | - | - | ✅ | - |

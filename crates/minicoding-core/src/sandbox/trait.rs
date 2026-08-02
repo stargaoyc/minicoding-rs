@@ -32,6 +32,8 @@ impl Default for SandboxPolicy {
 /// 沙箱驱动 trait（同步、`dyn` 兼容）。
 ///
 /// `apply` 在子进程 `exec` 前同步调用，应用内核级限制。
+/// `post_spawn` 在 `spawn()` 后调用，供需要 post-spawn 设置的平台（如 Windows
+/// Job Object）使用；默认 no-op，Linux/macOS 不需覆写。
 pub trait SandboxDriver: Send + Sync {
     /// 在子进程 exec 前应用沙箱策略。
     ///
@@ -48,6 +50,18 @@ pub trait SandboxDriver: Send + Sync {
 
     /// 平台名。
     fn id(&self) -> &'static str;
+
+    /// 在 `spawn()` 后调用，供需要 post-spawn 设置的平台使用。
+    ///
+    /// Windows Job Object 驱动在此创建 Job Object、分配子进程、恢复线程
+    /// （`apply` 仅设置 `CREATE_SUSPENDED` 标志）。Linux/macOS 不需覆写
+    /// （沙箱在 `pre_exec` 内一次性应用完成）。
+    ///
+    /// # Errors
+    /// post-spawn 设置失败（如 Job Object 创建/分配失败）时返回 `SandboxError`。
+    fn post_spawn(&self, _pid: u32) -> Result<(), SandboxError> {
+        Ok(())
+    }
 }
 
 /// 沙箱错误。

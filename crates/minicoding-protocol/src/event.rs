@@ -2,10 +2,16 @@
 //!
 //! 前端通过 SSE 订阅事件流，记录最后接收的 `seq`，断线重连时用 `seq` 恢复。
 //! `EventDto` 是 `core::Event` 的序列化友好表示，所有变体共享 `seq` 字段。
+//!
+//! NDJSON 协议扩展：除 `core::Event` 映射的变体外，新增
+//! `SessionsListed`/`SessionRetrieved`/`CommandError` 三个 NDJSON 专用变体——
+//! 这些变体不对应 `core::Event`，由 NDJSON 适配器在响应非流式命令时直接构造，
+//! 不经过 `From<&Event>` 转换。
 
-use minicoding_core::model::{Message, StopReason, Task, ToolCallId, ToolResult};
+use minicoding_core::model::{Message, SessionMeta, StopReason, Task, ToolCallId, ToolResult};
 use minicoding_core::policy::{Decision, PermissionMode, Risk};
 use minicoding_core::runtime::Event;
+use minicoding_core::storage::PersistedEvent;
 use serde::{Deserialize, Serialize};
 
 /// 事件 DTO（携带 `seq`，用于 SSE cursor 恢复）。
@@ -55,6 +61,19 @@ pub enum EventKind {
     },
     /// 任务更新。
     TaskUpdated { task: Task },
+    /// 配置文件变更（热更新）。
+    ConfigChanged,
+    /// NDJSON 专用：`ListSessions` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    SessionsListed { sessions: Vec<SessionMeta> },
+    /// NDJSON 专用：`GetSession` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    SessionRetrieved {
+        session_id: String,
+        messages: Vec<Message>,
+    },
+    /// NDJSON 专用：命令错误响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    ///
+    /// 用于：JSON 解析失败、会话不存在、命令不支持等。`seq` 字段为 0（非流式事件）。
+    CommandError { message: String },
 }
 
 impl From<&Event> for EventKind {
@@ -97,6 +116,7 @@ impl From<&Event> for EventKind {
                 to: *to,
             },
             Event::TaskUpdated { task } => Self::TaskUpdated { task: task.clone() },
+            Event::ConfigChanged => Self::ConfigChanged,
         }
     }
 }
@@ -108,6 +128,40 @@ impl EventDto {
         Self {
             seq,
             kind: EventKind::from(event),
+        }
+    }
+}
+
+impl EventKind {
+    /// 从 `PersistedEvent` 构造 `EventKind`（SSE durable recovery 用，见
+    /// `design.md` §25.5）。
+    ///
+    /// 与 `From<&Event>` 的区别：`PersistedEvent` 是 `Event` 的持久化子集
+    /// （仅状态变更事件），不含瞬态事件（`Token`/`TurnStreamingStarted` 等）。
+    /// SSE handler 在内存 ring buffer evict 但 `after_seq <= durable_seq` 时，
+    /// 调 `EventStore::load_after` 获取 `PersistedEvent` 列表，用此方法转为
+    /// `EventKind` JSON 推送给客户端。
+    ///
+    /// 客户端应容忍瞬态事件缺失（如 `Token` 增量已被 `MessageAppended` 捕获）。
+    #[must_use]
+    pub fn from_persisted(p: &PersistedEvent) -> Self {
+        match p {
+            PersistedEvent::SessionCreated { id, .. } => Self::SessionCreated { id: id.clone() },
+            PersistedEvent::MessageAppended { message } => Self::MessageAppended {
+                message: message.clone(),
+            },
+            PersistedEvent::PermissionResolved { id, decision } => Self::PermissionResolved {
+                id: id.clone(),
+                decision: decision.clone(),
+            },
+            PersistedEvent::PermissionModeChanged { from, to } => Self::PermissionModeChanged {
+                from: *from,
+                to: *to,
+            },
+            PersistedEvent::TaskUpdated { task } => Self::TaskUpdated { task: task.clone() },
+            PersistedEvent::TurnEnd { stop_reason } => Self::TurnEnd {
+                stop_reason: stop_reason.clone(),
+            },
         }
     }
 }

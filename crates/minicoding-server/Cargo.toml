@@ -25,7 +25,7 @@ minicoding-context = { workspace = true }
 minicoding-storage = { workspace = true }
 minicoding-providers = { workspace = true }
 minicoding-memory = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
@@ -58,3 +58,6 @@ acp = []
 [dependencies.tower-lsp]
 workspace = true
 optional = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

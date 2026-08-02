@@ -650,7 +650,7 @@ pub struct ShellKillInput {
 - `shell.background` 副作用 `SideEffect::Command`，走串行桶与完整权限流程（同 `shell.run`）；
 - `shell.output` 副作用 `None`（只读快照），可并行；
 - `shell.kill` 副作用 `Command`，串行；
-- 后台命令同样受 `SandboxDriver` 约束（§security.md §8）、`shell_environment_policy`（§security.md §10）、危险命令黑名单（§security.md §4.2）；
+- 后台命令同样受 `SandboxDriver` 约束（`security.md` §8）、`shell_environment_policy`（`security.md` §10）、危险命令黑名单（`security.md` §4.2）；
 - 后台命令的 `shell_id` 在 session 内有效，跨 session 不可访问（防混淆）。
 
 **与 `shell.run` 的选择引导**（系统提示）：短时命令（<30s）用 `shell.run` 直接拿结果；长时命令或需中途检查输出的用 `shell.background` + `shell.output` 轮询。
@@ -740,7 +740,7 @@ pub struct StaticRouter {
 `StaticRouter` 保留作为配置未指定路由策略时的默认值。M7+ 可实现 `TaskBasedRouter`
 （按 `Task::kind`）、`CostAwareRouter`（按 token 预算）等。
 
-**C-13 防死循环**：`Router::pick` 是无状态纯选择，不涉及重试逻辑；重试由
+**防死循环**：`Router::pick` 是无状态纯选择，不涉及重试逻辑；重试由
 `RetryProvider` 装饰器负责（bounded `max_retries`，见 `providers::common::retry`）。
 
 ---
@@ -917,8 +917,9 @@ pub enum MergeStrategy {
 **约束**：
 - worktree 隔离仅对 `GeneralPurpose` 子 Agent 有效（`Explore`/`Plan` 只读无需隔离）；
 - 需仓库是 git 仓库（非 git 仓库降级为 `Shared` 并 warn）；
-- worktree 路径在 `.minicoding/worktrees/`（已加入 `.gitignore` 默认模板）；
-- 阶段 6+ 交付，MVP 不含。
+- worktree 路径在 `.minicoding/worktrees/`（已加入 `.gitignore` 默认模板）。
+
+**实现状态（A-15）**：`Isolation`/`WorktreeSpec`/`MergeStrategy` 定义在 `model/subagent.rs`，`SubagentSpec.isolation` 默认 `Shared`。`WorktreeSubagentRunner`（`agent/worktree.rs`）是装饰器，包裹内部 `Arc<dyn SubagentRunner>`：`Worktree` 模式下 `git worktree add` 创建隔离目录 → 委托内部 runner → 按 `merge_back` 合并 → `auto_cleanup` 清理。非 git 仓库降级为 `Shared`。
 
 ---
 
@@ -1487,6 +1488,10 @@ pub enum Event {
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
     /// 文件回滚执行结果（§17.4）。
     FileUndone { report: UndoReport },
+    /// 配置文件变更通知（S-22 热更新）。
+    /// `ConfigWatcher` 监听 `~/.minicoding/config.toml`，500ms debounce 后广播；
+    /// 需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）自行订阅处理。
+    ConfigChanged,
 }
 ```
 
@@ -2103,6 +2108,8 @@ async fn call_tool(&self, server: &str, tool: &str, input: Value) -> ToolResult 
 }
 ```
 
+**实现状态（X-13/X-14）**：`warm_up` 遍历所有连接调 `list_all_tools` 刷新缓存的工具 schema（server 运行期间可能增删工具），单个失败记 warn 不阻塞；inflight merge 用 `futures::future::Shared` 实现，`RequestKey = (server, tool, input_hash)`，首个请求的 `Future` 被 `Shared` 包装后存入 `inflight` map，后续同 key 调用 clone shared future 复用结果。`call` 用 `Arc<RwLock>` 读锁（允许并发调用），error 转 `String` 以满足 `Shared` 的 `Clone` 约束。
+
 `Shared` 让多个 await 同一 future，首个完成后所有等待者拿到同一结果。`input_hash` 用 `std::hash::Hasher`，避免大 input 的 clone 开销。
 
 **健康检查**：定期 `ping` 检测连接活性：
@@ -2347,15 +2354,14 @@ M5 测 Plan 时**不需要**真实的 Task/Journal 实现：Plan 工具的 `Exit
 | 6 | UserRules | 用户规则（来自 `long_term.md`，§8.2） | 跨会话变化 | ✗ |
 | 7 | ProjectRules | 项目规则（来自 AGENTS.md，§8.6） | 仓库内稳定 | ✗ |
 | 8 | ToolSummary | 工具 schema 摘要（含 MCP 工具） | 工具集变化时变 | ✗ |
-| 9 | Extension | 扩展注入（通过 PromptBuild Hook，§20） | 动态 | ✗ |
+| 9 | Extension | 扩展注入（通过 `Registrar::register_prompt_contributor`，§23） | 动态 | ✗ |
 
 稳定段（1-5）排前，易变段（6-9）排后。LLM provider 的 prompt cache 以前缀匹配——稳定段命中缓存，易变段仅追加增量。把 Environment 排在稳定段是因为它"会话内不变"，cache 在单会话内有效；UserRules/ProjectRules 排后是因为它们跨会话变化，cache 命中率低。
 
 **PromptContributor trait**（与 `api.md` §3.13 一致）：
 
 ```rust
-#[trait_variant::make(PromptContributor: Send)]
-pub trait PromptContributor {
+pub trait PromptContributor: Send + Sync {
     /// Contributor 唯一标识（如 "identity"、"project_rules"），用于调试与 OTel span。
     fn name(&self) -> &str;
 
@@ -2366,7 +2372,8 @@ pub trait PromptContributor {
     fn cacheable(&self) -> bool { false }
 
     /// 生成该段内容。ctx 提供会话级信息（workdir、git 状态、工具集等）。
-    async fn build(&self, ctx: &PromptContext) -> Result<PromptSection, PromptError>;
+    /// 异步方法用 BoxFuture 返回类型保证 dyn 兼容。
+    fn build(&self, ctx: &PromptContext) -> BoxFuture<'_, Result<PromptSection, PromptError>>;
 }
 
 /// Section 排序（稳定→易变，与 9 段表格一一对应）。
@@ -2379,7 +2386,7 @@ pub enum PromptSectionOrder {
     UserRules,      // 6
     ProjectRules,   // 7
     ToolSummary,    // 8
-    Extension,      // 9（仅扩展通过 PromptBuild Hook 注入）
+    Extension,      // 9（扩展通过 Registrar 注册的 contributor 注入）
 }
 
 pub struct PromptContext {
@@ -2423,7 +2430,7 @@ impl PromptPipeline {
             sections.push(c.build(ctx).await?);
         }
         // 按 PromptSectionOrder 枚举定义的固定顺序排序（同 order 内按 contributor name 稳定排序）。
-        sections.sort_by_key(|s| (s.order.clone() as u32, s.contributor_name.clone()));
+        sections.sort_by_key(|s| (s.order as u8, s.contributor_name.clone()));
 
         let mut buf = String::new();
         for s in &sections {
@@ -2441,7 +2448,7 @@ impl PromptPipeline {
 
 `sections` 字段保留分段信息，供 OTel span 记录每段 token 数（`prompt.section.{name}.tokens`），便于诊断 prompt 膨胀来源。`sort_by_key` 保证即使 contributor 注册顺序变化，最终拼接顺序仍由 `PromptSectionOrder` 枚举决定；同段内（如多个扩展注入到 `Extension` 段）按 `contributor_name` 稳定排序，避免非确定性。
 
-**扩展通过 PromptBuild Hook 注入**：第 9 段 Extension 不是固定 contributor，而是聚合所有 `PromptBuild` Hook的 `inject_section` 输出。Hook 可注册多个，按 Hook 优先级排序后依次拼入。Hook 注入的段默认 `cacheable = false`（动态内容不应缓存）。这给扩展系统提供了注入 prompt 的统一入口，无需扩展自行实现 `PromptContributor`。
+**扩展通过 Registrar 注入**：第 9 段 Extension 由内置 `ExtensionContributor`（占位，返回空 section）与扩展通过 `Registrar::register_prompt_contributor`注册的 contributor 共同组成。同 order（9）内按 `contributor_name` 稳定排序，避免非确定性。扩展注册的 contributor 默认 `cacheable = false`（动态内容不应缓存）。这给扩展系统提供了注入 prompt 的统一入口——扩展实现 `PromptContributor` trait 并通过 Registrar 注册，无需修改核心 contributor 列表。
 
 ---
 
@@ -2464,43 +2471,44 @@ impl PromptPipeline {
 **ExtensionHost trait**（Runtime 注入，管理扩展生命周期；与 `api.md` §3.12 一致）：
 
 ```rust
-#[trait_variant::make(ExtensionHost: Send)]
-pub trait ExtensionHost {
+pub trait ExtensionHost: Send + Sync {
     /// 加载扩展（读 manifest，初始化，注册能力）。
-    async fn load_extension(&self, manifest: ExtensionManifest) -> Result<ExtensionId, ExtensionError>;
+    fn load_extension(&self, manifest: ExtensionManifest)
+        -> BoxFuture<'_, Result<ExtensionId, ExtensionError>>;
 
     /// 卸载扩展（调用 shutdown，注销所有注册项）。
-    async fn unload_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError>;
+    fn unload_extension(&self, id: &ExtensionId)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 列出已加载扩展。
-    async fn list_extensions(&self) -> Vec<ExtensionInfo>;
+    fn list_extensions(&self) -> BoxFuture<'_, Vec<ExtensionInfo>>;
 
     /// 配置变更通知（热重载）。
-    async fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value)
-        -> Result<(), ExtensionError>;
+    fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 }
 ```
 
-`ExtensionHost` trait 由 `minicoding-core` 定义，实现在 `minicoding-extension-sdk`（进程内 first-party 组合根）或 `minicoding-cli`（disk IPC 子进程加载器）。Runtime 持有 `Arc<dyn ExtensionHost>`，在启动时批量加载 `~/.minicoding/extensions/` 下的扩展。
+`ExtensionHost` trait 由 `minicoding-core` 定义，实现在 `minicoding-extension-sdk`（进程内 first-party 组合根 `BundledExtensionHost`）或 `minicoding-cli`（disk IPC 子进程加载器）。`NoopExtensionHost`（`minicoding-core`）为未启用扩展时的兜底实现。Runtime 持有 `Arc<dyn ExtensionHost>`（通过 `RuntimeBuilder::extension_host` 注入），在启动时批量加载 `~/.minicoding/extensions/` 下的扩展。
 
 **Extension trait**（扩展实现侧；与 `api.md` §3.12 一致）：
 
 ```rust
-#[trait_variant::make(Extension: Send)]
-pub trait Extension {
+pub trait Extension: Send + Sync {
     /// 扩展元信息（供 Runtime 查询，无需扩展自行管理状态）。
     fn manifest(&self) -> &ExtensionManifest;
 
     /// 扩展初始化（注册能力、订阅事件、读配置）。
-    async fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value)
-        -> Result<(), ExtensionError>;
+    fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 扩展卸载（释放资源、取消订阅）。
-    async fn shutdown(&self) -> Result<(), ExtensionError>;
+    fn shutdown(&self) -> BoxFuture<'_, Result<(), ExtensionError>>;
 
     /// 配置变更通知（可选，默认空实现）。
-    async fn on_config_changed(&self, _new_config: serde_json::Value) -> Result<(), ExtensionError> {
-        Ok(())
+    fn on_config_changed(&self, _new_config: serde_json::Value)
+        -> BoxFuture<'_, Result<(), ExtensionError>> {
+        Box::pin(async move { Ok(()) })
     }
 }
 ```
@@ -2673,51 +2681,135 @@ Durable 层是事实源，Process 层是运行时中间态，Transport 层是连
 
 ---
 
-## 25. 事件溯源方向（未来演进）
+## 25. 事件溯源（Event Sourcing，已实现）
 
-§10.3 的 Parent-UUID 链与 §11 的 EventBus 已具备事件溯源雏形，但当前架构本质仍是"消息是事实"——JSONL 存储的是 `Message`（业务状态），而非 `Event`（状态变更）。本节描述未来向"事件是事实"演进的方向，使 fork、压缩边界、子 Agent side-chain 等能力获得统一的事件层基础。
+§10.3 的 Parent-UUID 链与 §11 的 EventBus 已具备事件溯源雏形。本节描述已实现的"事件是事实"架构——将会话状态建模为不可变事件流（`Event` 持久化 + snapshot 重放），替代纯 JSONL 消息追加模型。收益：天然支持时间旅行调试、多客户端状态同步（与 SSE cursor 恢复/E-13 协同）、审计回放（`--replay` 不再依赖消息日志而是事件重放）、跨会话 fork/merge。
 
-> **标注**：本节是未来演进方向，非当前实现。M3 之前不引入 Event 枚举与 EventStore trait，避免过早抽象。
+> **实现状态**：已实现。前置条件 `minicoding-protocol` wire types 稳定（M8）+ `RehydrateRequired`（E-14）信号链路验证通过均已满足。
 
-**当前架构**：`Storage::append(message)` 追加写 `Message` 到 JSONL。`Message` 是业务状态（user/assistant/tool_result），已包含压缩后的最终形态。fork（§10.5）通过复制前缀实现，压缩边界（§10.3）通过 `parent_uuid = None` 标记——这些是消息层的事后标注，非原生事件。
-
-**目标架构**：`EventLog` 是 append-only 事实层，事件不可变、`seq` 单调递增；`Session` 是投影层，从 EventLog 重放得出当前消息序列。
+**架构**：`EventStore` 是 append-only 事实层，事件不可变、`seq` 单调递增；`Session` 是投影层，从 EventStore + snapshot 重放得出当前消息序列。与原 JSONL 消息日志**双写并存**——新会话同时写消息日志与事件流，旧会话无事件流时回退到消息日志路径，平滑过渡。
 
 ```
-EventLog（append-only，不可变）
+EventStore（append-only，不可变，{id}.events.jsonl）
    │
-   │ events: UserMessageSent / AssistantMessageStreamed / ToolCalled /
-   │         ToolResultReturned / CompactionApplied / TaskSpawned / ...
-   │
-   ▼
-Projector（重放事件，构建 Session 视图）
+   │ PersistedEvent: SessionCreated / MessageAppended /
+   │                 PermissionResolved / PermissionModeChanged /
+   │                 TaskUpdated / TurnEnd
    │
    ▼
-Session { messages, tasks, permission_mode, ... }
+replay_session_state（重放事件，构建 Session 视图）
+   │
+   ├── SnapshotStore（{id}.snapshot.json，每 50 条 MessageAppended 落盘一次）
+   │
+   ▼
+Session { messages, permission_mode, audit_trail, ... }
 ```
 
-Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `CompactionApplied { before: [msg_ids], after: Summary }`），Message 记录"当前是什么"。Event 不可变，Session 是 Event 的投影——同一 EventLog 可投影出不同视图（如"忽略压缩事件"得到完整历史，"应用压缩事件"得到当前窗口）。
+Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `PermissionModeChanged { from, to }`），Message 记录"当前是什么"。Event 不可变，Session 是 Event 的投影——同一 EventStore 可投影出不同视图（如"忽略权限事件"得到纯消息流，"仅权限事件"得到审计轨迹）。
 
-**优势**：
+### 25.1 事件流初始化（`Runtime::init_event_stream`）
 
-- **fork = 从 seq 重放**：当前 fork（§10.5）需复制前缀消息到新文件；事件溯源下，fork 仅记录"从 seq=42 分叉"，新会话从 seq=42 重放 EventLog + 后续新事件，零拷贝。
-- **压缩边界 = Compacted 事件**：当前压缩边界靠 `parent_uuid = None` 标记；事件溯源下，`CompactionApplied` 事件显式记录"seq=42 之前已折叠为摘要"，投影器据此跳过旧事件。
-- **side-chain = 子 Agent 事件挂在 `TaskSpawned` 事件下**：当前 side-chain 靠 `parent_uuid` 指向 `task.spawn` 工具调用；事件溯源下，子 Agent 事件的 `parent_event_id` 指向 `TaskSpawned`，天然形成事件树。
-- **多视图**：同一 EventLog 可投影出"完整历史"（忽略 CompactionApplied）/"当前窗口"（应用 CompactionApplied）/"审计视图"（仅 ToolCalled + PermissionResolved），无需多份存储。
+`RuntimeBuilder::build()` 后、首次 `run_turn` 前，CLI/server 调用 `init_event_stream`：
 
-**工具结果持久化**：当工具结果 > 阈值（如 100KB）时，持久化到 `artifacts/{event_id}.bin` 文件，EventLog 中只留引用 `{ artifact_path, size, hash }`。投影器按需读取 artifact，避免 EventLog 膨胀。这与 §4.5 的 `max_output_bytes` 截断互补——截断是"丢弃超长部分"，artifact 是"完整保留但移出主日志"。
+- **新会话**（`EventStore::next_seq == 1` 且无 snapshot）：持久化 `PersistedEvent::SessionCreated`（携带 `workdir`/`config_hash`/`created_at`，供 `replay_session_state` 重建 `Session`），设置 `event_seq = 2`、`durable_seq = 1`；
+- **恢复会话**（`--resume`/`--replay`，`next_seq > 1`）：设置 `event_seq = next_seq`；若存在 snapshot，设置 `durable_seq = snapshot.seq` 并重置 `message_since_snapshot = 0`；
+- **`NoopEventStore`**（SDK 等未注入场景）：`next_seq` 恒返回 1，append 为 no-op，整个方法实际效果为 no-op。
 
-**分阶段迁移路径**：
+幂等：重复调用安全，`init_event_stream` 内部按 `next_seq` 判断新/旧会话。
 
-| 阶段 | 内容 | 与现有架构关系 |
-|------|------|---------------|
-| M3 | 引入 `Event` 枚举与 `EventStore` trait（定义在 core，实现在 storage） | 与现有 `Storage::append_message` 并存，不替换 |
-| M4 | `Storage::append_event` 与 `append_message` 双写——消息仍写 JSONL，同时写 EventLog | 双写保证回退能力，EventLog 仅用于新功能（如多视图） |
-| M5+ | `Session` 改为投影层，从 EventLog 重放；`Storage::append_message` 标记 deprecated | 旧 JSONL 仍可读（兼容），新会话走 EventLog |
+### 25.2 事件持久化（`Runtime::persist_event`）
 
-M3-M4 的双写期是"灰度过渡"——EventLog 与 JSONL 并存，验证 Event 投影的正确性后再切流。这避免大爆炸式重构，每阶段可独立回退。
+`run_turn` 在 `events.emit(event)` 后调用 `persist_event`：
 
-**与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventLog 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventLog seq，`durable_seq` 即 EventLog 的持久化进度。当前架构需额外维护 seq，事件溯源后 seq 是 EventLog 的原生属性。
+1. `try_persist(&event)` 过滤瞬态事件（`Token`/`TurnStreamingStarted`/`ToolCallStarted`/`ToolCallFinished`/`PermissionRequested`/`ConfigChanged`/`SessionCreated`）——瞬态事件或为流式增量（已被 `MessageAppended` 捕获）、或为通知类（无状态变更）；
+2. 分配 seq（`event_seq` mutex 递增）；
+3. 构造 `EventRecord`，调 `EventStore::append`（fsync 后返回，崩溃安全）；
+4. 更新 `durable_seq`（供 SSE cursor 协同）；
+5. `MessageAppended` 时递增 `message_since_snapshot`，达到 `SNAPSHOT_INTERVAL`（50）触发 snapshot 落盘。
+
+**best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程（与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，replay 可从最近 snapshot + 剩余事件重建。
+
+`PermissionModeChanged` 事件由 `PlanControllerHandle::persist_mode_changed` 持久化（`plan.exit`/`/plan`/`--plan` 触发的模式切换），不触发 snapshot。
+
+### 25.3 Snapshot 机制（`SnapshotStore`）
+
+`JsonlSnapshotStore` 每会话一文件 `{id}.snapshot.json`，覆盖写（先写 `.tmp` 再 `rename`，原子）。`Runtime::create_snapshot` 从 `ContextManager::snapshot` 获取当前消息列表，构造 `SessionState` + `SessionSnapshot`，调 `SnapshotStore::save` 落盘。
+
+snapshot 触发条件：每 `SNAPSHOT_INTERVAL`（50）条 `MessageAppended` 事件后。snapshot 失败仅记 `warn` 日志，不中断主流程（best-effort）。
+
+`SessionSnapshot` 字段：`seq`（snapshot 对应的事件 seq）、`schema_version`（与 `SCHEMA_VERSION` 一致）、`session_id`、`state: SessionState`（`id`/`created_at`/`workdir`/`config_hash`/`messages`）。
+
+### 25.4 事件重放（`replay_session_state`）
+
+从 snapshot + 事件流重建 `Session` 状态：
+
+1. 加载最近 `SessionSnapshot`（如有），获得初始 `SessionState`；
+2. 加载 `seq > snapshot.seq` 的事件流（无 snapshot 时加载全部事件，首事件必须为 `SessionCreated`）；
+3. 按事件顺序应用：
+   - `SessionCreated`：初始化 `Session`（仅当无 snapshot 时）；
+   - `MessageAppended`：追加到 `messages`；
+   - `PermissionResolved`/`TaskUpdated`/`TurnEnd`：仅记录审计轨迹，不重建运行时状态；
+   - `PermissionModeChanged`：更新 `final_permission_mode`；
+4. 返回 `ReplayedSession { session, audit_trail, last_seq, final_permission_mode }`。
+
+**seq 连续性检查**：事件 seq 必须连续（`expected = last_seq + 1`），跳跃返回 `ReplayError::SeqGap`（可能事件丢失）。
+
+**schema 版本检查**：事件或 snapshot 的 `schema_version` 高于当前 `SCHEMA_VERSION` 返回 `ReplayError::UnsupportedSchema`（未来版本）。
+
+**旧会话兼容**：`EventStore::load` 返回空且 `SnapshotStore::load` 返回 `None` 时，返回 `MissingSessionCreated`——调用方应捕获此错误并回退到 `Storage::load` 消息列表路径（`session_from_messages`）。
+
+### 25.5 SSE cursor durable recovery
+
+SSE handler 的 `Last-Event-ID` cursor 恢复三级策略（与 E-13/E-14 协同）：
+
+1. **内存 ring buffer 命中**：`EventCursor.replay_after_with_seq(after_seq)` 直接重放 buffer 中 `seq > after_seq` 的事件；
+2. **durable recovery**：`after_seq` 已 evict 但 ≤ `Runtime::durable_seq()`，调 `EventStore::load_after(after_seq)` 从持久化事件流重放。仅持久化事件子集可恢复（瞬态事件如 `Token` 不可恢复，客户端应容忍缺失——`Token` 增量已被 `MessageAppended` 捕获）；
+3. **不可恢复**：`after_seq` > `durable_seq`（或 `EventStore` 为 `NoopEventStore`），发 `RehydrateRequired` 后关闭流（E-14）。
+
+`EventKind::from_persisted` 将 `PersistedEvent` 转为 SSE payload JSON，与内存路径格式统一。
+
+### 25.6 CLI `--replay` 集成
+
+CLI `load_session_by_mode` 对 `Resume`/`Replay` 模式优先走事件重放路径：
+
+1. 加载 `JsonlSnapshotStore::load_sync`（如有 snapshot）；
+2. 加载 `JsonlEventStore::load_events_sync` 全部事件；
+3. 调 `replay_session_state` 重建 `Session`；
+4. 旧会话无事件流（`load_events_sync` 返回空且无 snapshot）→ 回退到 `load_messages` 消息日志路径。
+
+`workdir`/`config_hash` 由 CLI 启动参数提供，覆盖事件流中的值——避免 workdir 跨机器漂移。
+
+`Fork` 模式不走事件重放（fork 创建新会话，新会话有自己的事件流），仅从消息日志复制前缀消息。
+
+### 25.7 schema 版本化
+
+`SCHEMA_VERSION = 1`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
+
+- v0（隐式）：消息日志（无 `EventRecord` 包装），`replay_session_state` 回退到消息列表；
+- v1：当前 schema，`EventRecord` 显式包装 `PersistedEvent`。
+
+未来变更（如新增事件变体、字段语义变更）递增 `SCHEMA_VERSION`，并在 `replay_session_state` 中按版本分支处理。`SessionSnapshot.schema_version` 同步演进。
+
+### 25.8 文件布局
+
+```
+~/.minicoding/sessions/
+├── {id}.jsonl              # 消息日志（原有，双写保留）
+├── {id}.events.jsonl       # 事件流（新增）
+└── {id}.snapshot.json      # snapshot（新增）
+```
+
+三文件同目录，便于备份/清理。`JsonlEventStore`/`JsonlSnapshotStore` 与 `JsonlStorage` 共用 `sessions_dir`。
+
+### 25.9 优势
+
+- **fork = 从 seq 重放**：当前 fork（§10.5）需复制前缀消息到新文件；事件溯源下，fork 仅记录"从 seq=42 分叉"，新会话从 seq=42 重放 EventStore + 后续新事件，零拷贝（未来增强）。
+- **压缩边界 = Compacted 事件**：当前压缩边界靠 `parent_uuid = None` 标记；事件溯源下，`CompactionApplied` 事件显式记录"seq=42 之前已折叠为摘要"，投影器据此跳过旧事件（未来增强）。
+- **side-chain = 子 Agent 事件挂在 `TaskSpawned` 事件下**：当前 side-chain 靠 `parent_uuid` 指向 `task.spawn` 工具调用；事件溯源下，子 Agent 事件的 `parent_event_id` 指向 `TaskSpawned`，天然形成事件树（未来增强）。
+- **多视图**：同一 EventStore 可投影出"完整历史"/"当前窗口"/"审计视图"，无需多份存储。
+- **审计回放**：`--replay` 不再依赖消息日志，而是事件重放——权限决策、模式切换等审计轨迹完整保留。
+
+**与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventStore 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventStore seq，`durable_seq` 即 EventStore 的持久化进度。
 
 ---
 

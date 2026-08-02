@@ -1,0 +1,256 @@
+//! macOS Seatbelt 沙箱驱动。
+//!
+//! 基于 `sandbox_init(3)` (deprecated but functional) FFI 实现 `SandboxDriver` trait。
+//! 文件系统隔离：workdir 可写、其余只读、VCS 目录保护、系统只读路径放行。
+//!
+//! ## apply 时机
+//!
+//! `apply()` 在**父进程**生成 Seatbelt profile 并写入临时文件，然后通过
+//! `Command::pre_exec` 在**子进程** fork 后 exec 前调用 `sandbox_init`。
+//! 父进程不被约束，子进程 exec 后 Seatbelt 约束持久保持（内核级跨 exec）。
+//!
+//! ## 临时文件生命周期
+//!
+//! Profile 写入 `/tmp/minicoding-seatbelt-<pid>-<nanos>.sb`，`pre_exec` 内
+//! `sandbox_init` 成功读取后立即删除（profile 已加载进内核，文件不再需要）。
+//! 若 `sandbox_init` 失败也删除临时文件并返回错误。
+//!
+//! ## 限制
+//!
+//! `sandbox_init` 被 Apple 标记为 deprecated，但仍功能完整，是纯 Rust 中最实际的
+//! Seatbelt 接入方式（`sandbox-exec` 需重写 Command 无法与现有 trait 配合）。
+//! Apple 推荐的 Containerization framework 仅 Swift 可用，不适用于 Rust。
+
+use crate::hardening::vcs_protected_dirs;
+use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
+use std::ffi::CString;
+use std::os::unix::process::CommandExt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// `SANDBOX_NAMED_EXTERNAL`：从文件路径加载 profile（见 `<sandbox.h>`）。
+const SANDBOX_NAMED_EXTERNAL: u64 = 0x2;
+
+extern "C" {
+    /// 初始化沙箱（deprecated but functional，见 `<sandbox.h>`）。
+    fn sandbox_init(
+        profile: *const std::os::raw::c_char,
+        flags: u64,
+        errorbuf: *mut *mut std::os::raw::c_char,
+    ) -> std::os::raw::c_int;
+
+    /// 释放 `sandbox_init` 的 errorbuf。
+    fn sandbox_free_error(errorbuf: *mut std::os::raw::c_char);
+}
+
+/// macOS Seatbelt 沙箱驱动。
+///
+/// 无状态（所有策略通过 `apply` 参数传入），可被 `Runtime` 以 `Arc<dyn SandboxDriver>`
+/// 共享。`is_hardened()` 恒 `true`。
+pub struct SeatbeltDriver;
+
+impl SeatbeltDriver {
+    /// 创建 Seatbelt 驱动。
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SeatbeltDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SandboxDriver for SeatbeltDriver {
+    fn apply(
+        &self,
+        policy: &SandboxPolicy,
+        cmd: &mut std::process::Command,
+    ) -> Result<(), SandboxError> {
+        match policy {
+            SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
+                apply_seatbelt(policy, cmd)
+            }
+            // ExternalSandbox / DangerFullAccess 不应用内核限制（C-22）。
+            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => Ok(()),
+        }
+    }
+
+    fn is_hardened(&self) -> bool {
+        true
+    }
+
+    fn id(&self) -> &'static str {
+        "seatbelt"
+    }
+}
+
+/// 探测 macOS 是否支持 Seatbelt（`sandbox_init` 可用）。
+///
+/// macOS 10.5+ 均内置 Seatbelt，此函数始终返回 `true`。
+#[must_use]
+pub fn seatbelt_available() -> bool {
+    // sandbox_init 在 macOS 10.5+ 均可用，无需运行期探测。
+    true
+}
+
+/// 在子进程 `pre_exec` 内应用 Seatbelt 限制。
+fn apply_seatbelt(
+    policy: &SandboxPolicy,
+    cmd: &mut std::process::Command,
+) -> Result<(), SandboxError> {
+    let profile = build_profile(policy);
+
+    // 写入临时文件（父进程，apply 返回前完成）。
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let tmp_path = format!("/tmp/minicoding-seatbelt-{pid}-{nanos}.sb");
+    std::fs::write(&tmp_path, &profile)?;
+
+    // pre_exec 闭包：子进程内调 sandbox_init，成功后删除临时文件。
+    let profile_path = tmp_path;
+    unsafe {
+        cmd.pre_exec(move || {
+            let path_c = match CString::new(profile_path.as_str()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&profile_path);
+                    return Err(std::io::Error::other(e.to_string()));
+                }
+            };
+            let mut errbuf: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+            // SAFETY: sandbox_init 读取 profile 文件路径，加载 Seatbelt 规则到内核。
+            // errbuf 由 sandbox 分配，失败时需 sandbox_free_error 释放。
+            // pre_exec 在 fork 后单线程上下文，无并发风险。
+            let rc = sandbox_init(path_c.as_ptr(), SANDBOX_NAMED_EXTERNAL, &mut errbuf);
+
+            // 临时文件已读取完毕（无论成功失败），删除。
+            let _ = std::fs::remove_file(&profile_path);
+
+            if rc != 0 {
+                let msg = if errbuf.is_null() {
+                    "unknown sandbox_init error".to_string()
+                } else {
+                    // SAFETY: errbuf 由 sandbox_init 分配，非空时为有效 C 字符串。
+                    let msg = std::ffi::CStr::from_ptr(errbuf)
+                        .to_string_lossy()
+                        .into_owned();
+                    sandbox_free_error(errbuf);
+                    msg
+                };
+                return Err(std::io::Error::other(format!(
+                    "seatbelt sandbox_init failed: {msg}"
+                )));
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+/// 生成 Seatbelt profile（Scheme DSL）。
+///
+/// - `ReadOnly`：全盘只读，仅允许 exec 系统路径；
+/// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录保护。
+fn build_profile(policy: &SandboxPolicy) -> String {
+    let mut p = String::new();
+
+    // 基础：允许读、允许 exec 系统路径、允许必要系统操作。
+    p.push_str("(allow file-read*)\n");
+    p.push_str("(allow process-exec (subpath \"/usr/bin\") (subpath \"/bin\") (subpath \"/usr/sbin\") (subpath \"/sbin\") (subpath \"/usr/libexec\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\"))\n");
+    p.push_str("(allow process-fork)\n");
+    p.push_str("(allow signal)\n");
+    p.push_str("(allow sysctl-read)\n");
+    p.push_str("(allow ipc-posix-sem)\n");
+    p.push_str("(allow ipc-posix-shm)\n");
+    p.push_str("(allow mach-lookup)\n");
+    p.push_str("(allow network*)\n");
+
+    // 写权限：默认拒绝
+    p.push_str("(deny file-write*)\n");
+
+    match policy {
+        SandboxPolicy::ReadOnly => {
+            // ReadOnly：不额外放行任何写路径（workdir 只读）
+        }
+        SandboxPolicy::WorkspaceWrite { workdir, writable } => {
+            // workdir 可写（使用 as_str() 直接引用路径）
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                workdir.as_str()
+            ));
+            // 额外 writable 可写
+            for w in writable {
+                p.push_str(&format!(
+                    "(allow file-write* (subpath \"{}\"))\n",
+                    w.as_str()
+                ));
+            }
+            // VCS 目录写保护（deny 优先级高于 allow，确保 .git 等不可写）
+            let vcs_dirs = vcs_protected_dirs(workdir.as_std_path());
+            for vcs in vcs_dirs {
+                p.push_str(&format!(
+                    "(deny file-write* (subpath \"{}\"))\n",
+                    vcs.to_string_lossy()
+                ));
+            }
+        }
+        SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => {
+            // 不应到达此处（apply 已提前返回 Ok）
+        }
+    }
+
+    p
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+
+    #[test]
+    fn driver_id_and_hardened() {
+        let d = SeatbeltDriver::new();
+        assert_eq!(d.id(), "seatbelt");
+        assert!(d.is_hardened());
+    }
+
+    #[test]
+    fn seatbelt_available_is_true() {
+        assert!(seatbelt_available());
+    }
+
+    #[test]
+    fn external_and_full_access_are_noop() {
+        let d = SeatbeltDriver::new();
+        let mut cmd = std::process::Command::new("true");
+        d.apply(&SandboxPolicy::ExternalSandbox, &mut cmd).unwrap();
+        d.apply(&SandboxPolicy::DangerFullAccess, &mut cmd).unwrap();
+    }
+
+    #[test]
+    fn build_profile_readonly_denies_writes() {
+        let p = build_profile(&SandboxPolicy::ReadOnly);
+        assert!(p.contains("(deny file-write*)"));
+        assert!(p.contains("(allow file-read*)"));
+        // ReadOnly 不应放行任何写路径
+        assert!(!p.contains("(allow file-write*"));
+    }
+
+    #[test]
+    fn build_profile_workspace_write_allows_workdir() {
+        use camino::Utf8PathBuf;
+        let p = build_profile(&SandboxPolicy::WorkspaceWrite {
+            workdir: Utf8PathBuf::from("/tmp/test-workdir"),
+            writable: vec![Utf8PathBuf::from("/tmp/test-extra")],
+        });
+        assert!(p.contains("(deny file-write*)"));
+        assert!(p.contains("(allow file-write* (subpath \"/tmp/test-workdir\"))"));
+        assert!(p.contains("(allow file-write* (subpath \"/tmp/test-extra\"))"));
+    }
+}

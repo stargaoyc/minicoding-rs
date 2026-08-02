@@ -107,7 +107,9 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
 │       └── {summary_id}.md  # 每会话摘要
 ├── sessions/
 │   ├── index.json           # 会话索引（轻量元数据）
-│   └── {session_id}.jsonl   # 会话日志（追加写）
+│   ├── {session_id}.jsonl   # 会话日志（追加写，消息层）
+│   ├── {session_id}.events.jsonl  # 事件流（Event Sourcing，见 design.md §25）
+│   └── {session_id}.snapshot.json # 事件 snapshot（每 50 条 MessageAppended 落盘）
 └── logs/
     └── minicoding.YYYY-MM-DD.log
 ```
@@ -334,7 +336,7 @@ source: user | updated: 2026-07-24 | confidence: 1.0
 | 性质 | 动态记忆（偏好、决策） | 静态指令（约定、规范、禁区） |
 | 存储 | `$MINICODING_HOME/memory/` | `$MINICODING_HOME/`（全局）+ 仓库各目录（项目） |
 | 加载时机 | 每会话首轨注入 | 每会话首轨注入（Explore/Plan 子 Agent 跳过） |
-| token 预算 | ≤10% 上下文（§3.4） | 32 KiB 截断（`project_doc_max_bytes`） |
+| token 预算 | ≤10% 上下文（`design.md` §3.4） | 32 KiB 截断（`project_doc_max_bytes`） |
 
 **加载结果**：`ProjectDocLoader::load`（`api.md` §3.10）返回拼接后的字符串，注入到 `system` 消息段，包裹 `<project_doc>` 边界。截断发生在累计字节超 `project_doc_max_bytes`（默认 32768）时，静默截断并打 `tracing::warn!`。
 

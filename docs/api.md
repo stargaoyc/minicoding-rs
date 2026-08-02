@@ -185,6 +185,20 @@ pub enum SubagentType {
 
 pub enum Thoroughness { Quick, Medium, VeryThorough }
 
+/// 子 Agent 隔离模式（A-15，design.md §7.5）。
+pub enum Isolation {
+    Shared,                      // 共享父会话工作目录（默认）
+    Worktree(WorktreeSpec),      // 独立 git worktree 隔离
+}
+
+pub struct WorktreeSpec {
+    pub branch_prefix: String,   // 如 "subagent/"，生成分支名 subagent/{task_id}
+    pub auto_cleanup: bool,      // true: 完成后删除 worktree + 分支
+    pub merge_back: MergeStrategy,
+}
+
+pub enum MergeStrategy { None, CherryPick, MergeCommit }
+
 pub struct SubagentSpec {
     pub ty: SubagentType,
     pub system_prompt: String,
@@ -196,6 +210,7 @@ pub struct SubagentSpec {
     pub skip_memory: bool,
     pub can_spawn_subagent: bool,
     pub timeout: Duration,
+    pub isolation: Isolation,         // A-15：默认 Shared，Worktree 时创建 git worktree
 }
 
 pub struct SubagentResult {
@@ -214,9 +229,16 @@ pub trait SubagentRunner: Send + Sync {
 
 /// 兜底实现（未注入时 `task.spawn` 直接返回 `RuntimeError::Config`）。
 pub struct NoopSubagentRunner;
+
+/// Worktree 隔离装饰器（A-15，design.md §7.5）。
+/// 包裹内部 runner，spawn 前后处理 git worktree 创建/合并/清理。
+/// 非 git 仓库时降级为 Shared（记 warn，继续委托）。
+pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: Utf8PathBuf */ }
 ```
 
-`SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
+`SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`isolation` 默认 `Shared`。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
+
+`WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。
 
 ```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
@@ -504,6 +526,108 @@ impl JsonlStorage {
 
 `StorageError` 新增 `Locked(String)` 变体，表示会话被跨进程文件锁占用（见 `rules.md` C-22）。
 
+#### 3.5.1 `EventStore` / `SnapshotStore`（Event Sourcing，见 `design.md` §25）
+
+事件溯源层与消息日志层并存：`EventStore` 是 append-only 事实层（不可变、`seq` 单调递增），`SnapshotStore` 周期性落盘 `Session` 全状态加速重放。新会话双写（messages + events），旧会话无事件流时回退到消息日志路径。
+
+```rust
+/// 持久化事件种类（`Event` 的状态变更子集，瞬态事件如 `Token` 不持久化）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PersistedEvent {
+    SessionCreated { id: SessionId, workdir: String, config_hash: u64, created_at: OffsetDateTime },
+    MessageAppended { message: Message },
+    PermissionResolved { id: String, decision: Decision },
+    PermissionModeChanged { from: PermissionMode, to: PermissionMode },
+    TaskUpdated { task: Task },
+    TurnEnd { stop_reason: StopReason },
+}
+
+/// 持久化事件记录（seq + schema 元数据 + 事件种类）。
+pub struct EventRecord {
+    pub seq: u64,                              // 单调递增（每会话独立，从 1 开始）
+    pub session_id: SessionId,
+    pub timestamp: OffsetDateTime,
+    pub schema_version: u32,                   // 当前 SCHEMA_VERSION=1
+    pub event: PersistedEvent,                 // #[serde(flatten)]
+}
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// 事件存储 trait（`dyn` 兼容）。`append` 必须 fsync 后返回（崩溃安全）。
+pub trait EventStore: Send + Sync {
+    fn append(&self, session: &SessionId, record: EventRecord)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+    fn load(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>>;
+    fn load_after(&self, session: &SessionId, after_seq: u64)
+        -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>>;   // SSE cursor 恢复
+    fn next_seq(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<u64, StorageError>>;                // = max_seq + 1
+    fn delete(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+}
+
+pub struct NoopEventStore;   // 兜底：append 空操作，load 返回空，next_seq 返回 1
+
+/// 会话快照（捕获 `Session` 全状态）。
+pub struct SessionSnapshot {
+    pub session_id: SessionId,
+    pub seq: u64,                              // snapshot 包含此 seq 及之前所有事件的状态
+    pub taken_at: OffsetDateTime,
+    pub schema_version: u32,
+    pub state: SessionState,
+}
+
+pub struct SessionState {
+    pub id: SessionId,
+    pub created_at: OffsetDateTime,
+    pub workdir: String,
+    pub config_hash: u64,
+    pub messages: Vec<Message>,
+}
+
+pub trait SnapshotStore: Send + Sync {
+    fn load(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<Option<SessionSnapshot>, StorageError>>;
+    fn save(&self, snapshot: SessionSnapshot)
+        -> BoxFuture<'_, Result<(), StorageError>>;   // 原子写：.tmp + rename
+    fn delete(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+}
+
+pub struct NoopSnapshotStore;
+pub const SNAPSHOT_INTERVAL: usize = 50;   // 每 N 条 MessageAppended 触发 snapshot
+
+/// 事件重放入口（见 `design.md` §25.4）。
+///
+/// 从 snapshot + 事件流重建 `Session` 状态。无 snapshot 时从首事件
+/// （必须为 `SessionCreated`）开始；事件 seq 必须连续，跳跃返回 `SeqGap`；
+/// schema 版本高于当前返回 `UnsupportedSchema`；无事件流且无 snapshot
+/// 返回 `MissingSessionCreated`（调用方应回退到 `Storage::load` 消息列表）。
+pub fn replay_session_state(
+    snapshot: Option<&SessionSnapshot>,
+    events: &[EventRecord],
+) -> Result<ReplayedSession, ReplayError>;
+
+pub struct ReplayedSession {
+    pub session: Session,
+    pub audit_trail: Vec<EventRecord>,        // 权限/任务/TurnEnd 等审计事件
+    pub last_seq: u64,
+    pub final_permission_mode: PermissionMode,
+}
+
+/// 旧会话回退路径：从消息列表构造 `Session`（无事件流时使用）。
+pub fn session_from_messages(
+    id: SessionId,
+    workdir: Utf8PathBuf,
+    config_hash: u64,
+    messages: Vec<Message>,
+) -> Session;
+```
+
+`JsonlEventStore`（`minicoding-storage`）实现 `EventStore`：每会话一文件 `{id}.events.jsonl`，append + fsync。`JsonlSnapshotStore` 实现 `SnapshotStore`：每会话一文件 `{id}.snapshot.json`，`.tmp` + `rename` 原子写。二者与 `JsonlStorage` 共用 `sessions_dir`。
+
 ### 3.6 权限：`PermissionPolicy` + `PermissionPrompter`
 
 > **架构说明（修复 broadcast/oneshot 冲突）**：权限交互是"请求-响应"的点对点语义，而 `EventBus` 是"广播-订阅"语义。二者不能复用同一通道——`broadcast::Sender` 会克隆事件，而 `oneshot::Sender<Decision>` 不可克隆，强行放入 `Event` 既无法编译也语义错误。
@@ -775,32 +899,32 @@ pub struct DiffEntry {
 
 Extension 系统为第三方扩展作者提供稳定 API。下列 trait 定义在 `minicoding-core`，SDK 实现位于 `minicoding-extension-sdk`。扩展通过 `Registrar` 注册工具/Hook/prompt contributor 等能力，扩展注册的工具仍统一走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过）。
 
+异步方法用 `BoxFuture` 返回类型保证 `dyn` 兼容（`async fn in trait` 的 `dyn` 兼容需 boxed future）。
+
 ```rust
 /// 扩展宿主：管理扩展生命周期（Runtime 注入）。
-#[trait_variant::make(ExtensionHost: Send)]
-pub trait ExtensionHost {
+pub trait ExtensionHost: Send + Sync {
     /// 加载扩展（读 manifest，初始化，注册能力）。
-    async fn load_extension(&self, manifest: ExtensionManifest) -> Result<ExtensionId, ExtensionError>;
+    fn load_extension(&self, manifest: ExtensionManifest) -> BoxFuture<'_, Result<ExtensionId, ExtensionError>>;
     /// 卸载扩展（调用 shutdown，注销所有注册项）。
-    async fn unload_extension(&self, id: &ExtensionId) -> Result<(), ExtensionError>;
+    fn unload_extension(&self, id: &ExtensionId) -> BoxFuture<'_, Result<(), ExtensionError>>;
     /// 列出已加载扩展。
-    async fn list_extensions(&self) -> Vec<ExtensionInfo>;
+    fn list_extensions(&self) -> BoxFuture<'_, Vec<ExtensionInfo>>;
     /// 配置变更通知（热重载，按扩展 id 投递）。
-    async fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value) -> Result<(), ExtensionError>;
+    fn on_config_changed(&self, id: &ExtensionId, new_config: serde_json::Value) -> BoxFuture<'_, Result<(), ExtensionError>>;
 }
 
 /// 扩展 trait（扩展作者实现）
-#[trait_variant::make(Extension: Send)]
-pub trait Extension {
+pub trait Extension: Send + Sync {
     /// 扩展元信息（供 Runtime 查询，无需扩展自行管理状态）。
     fn manifest(&self) -> &ExtensionManifest;
     /// 初始化：通过 Registrar 注册能力，config 为扩展配置（JSON）。
-    async fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value) -> Result<(), ExtensionError>;
+    fn init(&self, registrar: &mut dyn Registrar, config: serde_json::Value) -> BoxFuture<'_, Result<(), ExtensionError>>;
     /// 关闭：释放资源
-    async fn shutdown(&self) -> Result<(), ExtensionError>;
+    fn shutdown(&self) -> BoxFuture<'_, Result<(), ExtensionError>>;
     /// 配置变更通知（可选，默认空实现）
-    async fn on_config_changed(&self, _new_config: serde_json::Value) -> Result<(), ExtensionError> {
-        Ok(())
+    fn on_config_changed(&self, _new_config: serde_json::Value) -> BoxFuture<'_, Result<(), ExtensionError>> {
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -838,24 +962,32 @@ pub enum ExtensionCarrier {
 pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Command }
 ```
 
-`Extension` trait 由扩展作者实现，`init` 阶段通过 `Registrar` 把自身能力注册进 Runtime，`manifest()` 让 Runtime 无需维护独立的扩展元信息表。`ExtensionHost` 由 `minicoding-extension-sdk`（进程内 first-party）或 `minicoding-cli`（disk IPC 加载器）实现，负责加载/卸载/列举扩展及配置变更广播。扩展注册的工具仍走 `ToolRegistry::dispatch`，因此权限检查（C-01）与内置黑名单（C-02）对扩展工具同样生效——扩展无法绕过权限审计（见 `design.md` §23 安全约束）。
+**实现**：
+
+- `NoopExtensionHost`（`minicoding-core::extension`）：默认兜底，未启用扩展时使用。`load_extension` 恒返回 `NotFound`，`list_extensions` 返回空列表。`RuntimeBuilder::build` 默认注入此实现。
+- `BundledExtensionHost`（`minicoding-extension-sdk::bundled`）：进程内 first-party 扩展宿主，实际持有 `Arc<dyn Extension>` 并调用 `init`/`shutdown`。`load_extension` 后通过 `take_bundle` 提取 `RegistrationBundle`（tools/hooks/contributors 等），由调用方提交到 Runtime 各注册表。
+- `NoopRegistrar`（`minicoding-core::extension`）：`Registrar` 的 noop 实现，注册项全部丢弃仅做 `Capability` 声明校验，用于测试。
+- `BundleRegistrar`（`minicoding-extension-sdk::registrar`）：`Registrar` 的生产实现，收集注册项到 `RegistrationBundle` 供 `BundledExtensionHost` 提取。
+
+`Extension` trait 由扩展作者实现，`init` 阶段通过 `Registrar` 把自身能力注册进 Runtime，`manifest()` 让 Runtime 无需维护独立的扩展元信息表。扩展注册的工具仍走 `ToolRegistry::dispatch`，因此权限检查（C-01）与内置黑名单（C-02）对扩展工具同样生效——扩展无法绕过权限审计（见 `design.md` §23 安全约束）。
+
+**Runtime 集成**：`RuntimeBuilder::extension_host(Arc<dyn ExtensionHost>)` 注入宿主，`Runtime::extension_host()` 返回 `Arc<dyn ExtensionHost>` 供 frontend 调用。CLI 在 `extensions` feature 启用时注入 `BundledExtensionHost`（见 `crates/minicoding-cli/src/builder.rs`）。
 
 ### 3.13 Prompt 管道（见 `design.md` §22）
 
-Prompt 管道把 system prompt 的组装拆为 9 个 `PromptContributor`，按固定顺序拼接。稳定段（1-5：身份/系统规则/任务指南/通信规范/环境信息）在前，易变段（6-9：用户规则/项目规则/工具摘要/扩展注入）在后，使稳定段命中 prompt cache，降低重复请求的计费。扩展通过 `PromptBuild` Hook（§3.8）注入 `Extension` section（顺序 9）。
+Prompt 管道把 system prompt 的组装拆为 9 个 `PromptContributor`，按固定顺序拼接。稳定段（1-5：身份/系统规则/任务指南/通信规范/环境信息）在前，易变段（6-9：用户规则/项目规则/工具摘要/扩展注入）在后，使稳定段命中 prompt cache，降低重复请求的计费。扩展通过 `Registrar::register_prompt_contributor`（§3.12）注册的 contributor 注入 `Extension` section（顺序 9）。
 
 ```rust
 /// Prompt contributor：为 system prompt 组装贡献一个 section。
-#[trait_variant::make(PromptContributor: Send)]
-pub trait PromptContributor {
-    /// contributor 名称（用于调试与排序）
+pub trait PromptContributor: Send + Sync {
+    /// contributor 名称（用于调试与 OTel span）
     fn name(&self) -> &str;
-    /// 组装 section
-    async fn build(&self, ctx: &PromptContext) -> Result<PromptSection, PromptError>;
-    /// 排序优先级（稳定段在前，利于 prompt cache）
+    /// 拼装顺序（稳定段在前，利于 prompt cache）
     fn order(&self) -> PromptSectionOrder;
     /// 是否可缓存（内容不变的 contributor 返回 true）
     fn cacheable(&self) -> bool { false }
+    /// 组装 section（异步方法用 BoxFuture 保证 dyn 兼容）
+    fn build(&self, ctx: &PromptContext) -> BoxFuture<'_, Result<PromptSection, PromptError>>;
 }
 
 /// Prompt section 数据结构（与 `design.md` §22 一致）
@@ -869,21 +1001,37 @@ pub struct PromptSection {
 
 /// Section 排序（稳定→易变）
 pub enum PromptSectionOrder {
-    Identity,       // 1. 身份
-    System,         // 2. 系统规则
-    TaskGuidelines, // 3. 任务指南
-    Communication,  // 4. 通信规范
-    Environment,    // 5. 工作区/平台/git 信息
-    UserRules,      // 6. 用户规则（long_term memory）
-    ProjectRules,   // 7. 项目规则（AGENTS.md）
-    ToolSummary,    // 8. 工具 schema 摘要
-    Extension,      // 9. 扩展注入
+    Identity = 1,       // 1. 身份（~/.minicoding/IDENTITY.md 覆盖默认身份，P-31）
+    System = 2,         // 2. 系统规则
+    TaskGuidelines = 3, // 3. 任务指南
+    Communication = 4,  // 4. 通信规范
+    Environment = 5,    // 5. 工作区/平台/git 信息
+    UserRules = 6,      // 6. 用户规则（long_term memory）
+    ProjectRules = 7,   // 7. 项目规则（AGENTS.md）
+    ToolSummary = 8,    // 8. 工具 schema 摘要
+    Extension = 9,      // 9. 扩展注入
 }
 ```
 
-9 个 contributor 按 `PromptSectionOrder` 枚举值顺序拼接，稳定段（1-5）内容相对恒定可命中 prompt cache，易变段（6-9）放后。扩展通过 `PromptBuild` Hook 注入顺序 9 的 `Extension` section，无需修改核心 contributor。
+9 个 contributor 按 `PromptSectionOrder` 枚举值顺序拼接，稳定段（1-5）内容相对恒定可命中 prompt cache，易变段（6-9）放后。扩展通过 `Registrar::register_prompt_contributor` 注册的 contributor 注入到 `Extension` 段（顺序 9），与内置 `ExtensionContributor` 共存（同 order 内按 name 排序）。
+
+**实现**：9 个内置 contributor 由 `minicoding_extension_sdk::builtin_contributors(identity_content)` 构造，位于 `minicoding-extension-sdk/src/contributors/`：
+
+| 顺序 | Contributor | cacheable | 内容来源 |
+|:---:|------|:---:|------|
+| 1 | `IdentityContributor` | true | 默认身份或 `~/.minicoding/IDENTITY.md`（P-31） |
+| 2 | `SystemContributor` | true | 内置 `rules.md` §5 软规则 |
+| 3 | `TaskGuidelinesContributor` | true | 多步任务规划、工具使用规范 |
+| 4 | `CommunicationContributor` | true | 输出格式、语言偏好 |
+| 5 | `EnvironmentContributor` | true | 工作区/平台/git 信息 |
+| 6 | `UserRulesContributor` | false | `long_term.md`（包裹 `<long_term_memory>` 边界） |
+| 7 | `ProjectRulesContributor` | false | AGENTS.md 分层加载（包裹 `<project_doc>` 边界） |
+| 8 | `ToolSummaryContributor` | false | `enabled_tools` schema 摘要 |
+| 9 | `ExtensionContributor` | false | 占位（扩展注册的 contributor 注入到此段） |
 
 `PromptContext`（`build()` 的入参）聚合各 contributor 需要的会话级输入（`session_id`/`workdir`/`platform`/`git_info`/`enabled_tools`/`user_rules`/`project_rules`），避免 contributor 各自重新加载文件。完整定义与 `PromptPipeline` 拼装算法见 `design.md` §22。
+
+**Runtime 集成**：`ContextManagerImpl::with_prompt_pipeline(Arc<PromptPipeline>, PromptContext)` 注入管道后，`build_chat_request` 动态构建 system prompt（替代静态 `system_prompt`）。未注入时走静态 `system_prompt`（向后兼容）。管道构建错误通过 `RuntimeError::Prompt(#[from] PromptError)` 变体传播。CLI 在 `extensions` feature 启用时注入管道并加载 `long_term.md`/`AGENTS.md`/`IDENTITY.md` 内容（见 `crates/minicoding-cli/src/builder.rs`）。
 
 ---
 
@@ -973,6 +1121,11 @@ impl RuntimeBuilder {
     /// 设置后 Runtime 使用该会话的 id 与 messages；调用方需另行调用
     /// `Runtime::restore_history` 将消息注入上下文管理器。
     pub fn session(mut self, s: Session) -> Self;
+    /// 配置文件监听器（S-22 热更新，默认 `None` → 不启用）。
+    /// CLI 注入 `ConfigWatcher::start(...)` 结果；`ConfigWatcher` 随 `Runtime`
+    /// 存活，drop 时自动停止监听并结束后台线程。监听失败由 `start` 内部
+    /// best-effort 处理（记 warn，返回空壳）。
+    pub fn with_config_watcher(mut self, w: ConfigWatcher) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
@@ -1012,6 +1165,10 @@ pub enum Event {
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
     /// 文件回滚执行结果（见 design.md §17.4）。
     FileUndone { report: UndoReport },
+    /// 配置文件变更通知（S-22 热更新，`ConfigWatcher` 检测到 `config.toml` 变化时广播）。
+    /// 500ms debounce 后发出；需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）
+    /// 自行订阅 `EventBus` 处理。
+    ConfigChanged,
 }
 ```
 

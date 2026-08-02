@@ -2,7 +2,8 @@
 //!
 //! `detect_driver()` 编译期按 `cfg!(target_os)` 选实现，运行期探测内核支持：
 //! - Linux：探测 Landlock 可用性，可用返回 `LandlockDriver`，否则降级 `NoopDriver` + warn；
-//! - macOS/Windows：M4 降级 `NoopDriver` + warn（平台优先级 M5+/M6+ 补齐）。
+//! - macOS：Seatbelt（10.5+ 全版本支持），返回 `SeatbeltDriver`；
+//! - Windows：Job Object（Vista+），返回 `WindowsJobDriver`。
 
 use minicoding_core::sandbox::{NoopDriver, SandboxDriver};
 
@@ -11,9 +12,9 @@ use minicoding_core::sandbox::{NoopDriver, SandboxDriver};
 pub enum DriverKind {
     /// Linux Landlock LSM（内核 5.13+，硬隔离）。
     Landlock,
-    /// macOS Seatbelt（M5+ 补齐，M4 降级）。
+    /// macOS Seatbelt（10.5+，文件系统隔离）。
     Seatbelt,
-    /// Windows 受限令牌（M6+ 补齐，M4 降级）。
+    /// Windows Job Object（Vista+，进程遏制 + UI 隔离）。
     WindowsToken,
     /// 无操作驱动（兜底，无硬隔离）。
     Noop,
@@ -34,11 +35,13 @@ impl DriverKind {
 
 /// 探测当前平台可用的最佳沙箱驱动。
 ///
-/// 返回 `Box<dyn SandboxDriver>` 供 `RuntimeBuilder` 注入。Linux 内核支持 Landlock
-/// 时返回 `LandlockDriver`（`is_hardened() == true`）；否则降级 `NoopDriver` + warn
-/// （C-22：降级需显式声明，`is_hardened()` 如实返回 `false`）。
+/// 返回 `Box<dyn SandboxDriver>` 供 `RuntimeBuilder` 注入。
 ///
-/// macOS/Windows 在 M4 降级 `NoopDriver`（平台优先级 M5+/M6+）。
+/// - Linux：内核支持 Landlock 时返回 `LandlockDriver`，否则降级 `NoopDriver` + warn；
+/// - macOS：返回 `SeatbeltDriver`（10.5+ 全版本支持）；
+/// - Windows：返回 `WindowsJobDriver`（Vista+ Job Object）。
+///
+/// 降级时 `is_hardened()` 如实返回 `false`（C-22）。
 #[must_use]
 #[allow(clippy::needless_return)] // cfg 门控跨平台分支需显式 return
 pub fn detect_driver() -> Box<dyn SandboxDriver> {
@@ -57,20 +60,27 @@ pub fn detect_driver() -> Box<dyn SandboxDriver> {
 
     #[cfg(target_os = "macos")]
     {
+        if crate::macos::seatbelt_available() {
+            tracing::info!(
+                driver = "seatbelt",
+                "沙箱驱动已就绪（Seatbelt 文件系统隔离）"
+            );
+            return Box::new(crate::macos::SeatbeltDriver::new());
+        }
         tracing::warn!(
             driver = "noop",
-            reason = "macOS Seatbelt 实现推迟到 M5+（平台优先级），M4 降级 NoopDriver"
+            reason = "Seatbelt 不可用（需 macOS 10.5+），降级 NoopDriver"
         );
         return Box::new(NoopDriver);
     }
 
     #[cfg(target_os = "windows")]
     {
-        tracing::warn!(
-            driver = "noop",
-            reason = "Windows 受限令牌实现推迟到 M6+（平台优先级），M4 降级 NoopDriver"
+        tracing::info!(
+            driver = "windows-token",
+            "沙箱驱动已就绪（Job Object 进程遏制）"
         );
-        return Box::new(NoopDriver);
+        return Box::new(crate::windows::WindowsJobDriver::new());
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -96,12 +106,15 @@ pub fn detect_driver_kind() -> DriverKind {
 
     #[cfg(target_os = "macos")]
     {
+        if crate::macos::seatbelt_available() {
+            return DriverKind::Seatbelt;
+        }
         return DriverKind::Noop;
     }
 
     #[cfg(target_os = "windows")]
     {
-        return DriverKind::Noop;
+        return DriverKind::WindowsToken;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

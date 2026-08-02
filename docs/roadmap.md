@@ -339,7 +339,7 @@
 
 以下为 M8 之后探索性方向，不阻塞当前里程碑：
 
-- **Event Sourcing**：将会话状态建模为不可变事件流（`Event` 持久化 + snapshot 重放），替代当前的 JSONL 消息追加 + 内存镜像模型。收益：天然支持时间旅行调试、多客户端状态同步（与 SSE cursor 恢复/E-13 协同）、审计回放（`--replay` 不再依赖消息日志而是事件重放）、跨会话 fork/merge。前置条件：M8 的 `minicoding-protocol` wire types 稳定 + `RehydrateRequired`（E-14）信号链路验证通过。引入时需评估事件 schema 版本化与旧会话兼容性。
+- ~~**Event Sourcing**：将会话状态建模为不可变事件流（`Event` 持久化 + snapshot 重放），替代当前的 JSONL 消息追加 + 内存镜像模型。~~ **已实现（见 `design.md` §25、`features.md` S-23..S-27）**：`EventStore` + `SnapshotStore` 双写并存，支持 SSE durable recovery、`--replay` 事件重放、schema 版本化与旧会话兼容。
 
 ---
 
