@@ -183,6 +183,9 @@ minicoding-core/src/
 │   └── mod.rs
 ├── storage/
 │   ├── trait.rs           # Storage trait + AuditSink trait
+│   ├── event.rs           # EventStore/EventRecord/PersistedEvent trait + NoopEventStore（Event Sourcing，见 design.md §25）
+│   ├── snapshot.rs        # SnapshotStore/SessionSnapshot/SessionState trait + NoopSnapshotStore
+│   ├── replay.rs          # replay_session_state + ReplayError + ReplayedSession + session_from_messages
 │   └── mod.rs
 ├── prompt/
 │   ├── mod.rs             # prelude 再导出
@@ -219,7 +222,12 @@ pub mod prelude {
     pub use crate::memory::ProjectDocLoader;
     pub use crate::journal::{Journal, ChangeEntry, UndoReport};
     pub use crate::mcp::{McpClient, McpServerConfig, McpTransport, McpScope};
-    pub use crate::storage::{Storage, AuditSink};
+    pub use crate::storage::{
+        AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
+        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
+        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
+        replay_session_state, session_from_messages, try_persist,
+    };
     pub use crate::prompt::{PromptContributor, PromptSection, PromptSectionOrder};
     pub use crate::extension::{ExtensionHost, Extension, ExtensionManifest, Registrar};
     pub use crate::event::Event;
@@ -486,7 +494,7 @@ minicoding-mcp/src/
 
 ### 9.1 职责
 
-实现 `Storage`/`AuditSink` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志。
+实现 `Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志、事件流持久化与 snapshot（Event Sourcing，见 `design.md` §25）。
 
 ### 9.2 模块树
 
@@ -494,6 +502,8 @@ minicoding-mcp/src/
 minicoding-storage/src/
 ├── lib.rs                 # 工厂
 ├── jsonl.rs               # JsonlStorage 实现 Storage（追加写、崩溃安全）
+├── event_store.rs         # JsonlEventStore 实现 EventStore（{id}.events.jsonl，fsync 后返回）
+├── snapshot_store.rs      # JsonlSnapshotStore 实现 SnapshotStore（{id}.snapshot.json，原子写）
 ├── index.rs               # 会话索引 index.json（轻量元数据列出）
 ├── lock.rs                # 跨进程文件锁（fs2）
 ├── audit.rs               # AuditSink 实现（audit.log JSONL，0600 权限）
@@ -502,8 +512,9 @@ minicoding-storage/src/
 
 ### 9.3 关键设计点
 
-- **崩溃安全**：每条消息 `append` 后 `fsync`，崩溃时磁盘与内存一致。
+- **崩溃安全**：每条消息 `append` 后 `fsync`，崩溃时磁盘与内存一致。事件流（`{id}.events.jsonl`）同样 append + fsync；snapshot（`{id}.snapshot.json`）走 `.tmp` + `rename` 原子写。
 - **审计完整性**：`audit.log` 文件权限 0600，追加写不可篡改历史（无 update/delete API）。
+- **Event Sourcing 双写并存**：新会话同时写消息日志与事件流，旧会话无事件流时回退到消息日志路径（见 `design.md` §25.6）。`JsonlEventStore`/`JsonlSnapshotStore` 与 `JsonlStorage` 共用 `sessions_dir`。
 - **依赖**：`minicoding-core` + `serde_json` + `fs2`（文件锁）+ `tracing`。
 
 ---

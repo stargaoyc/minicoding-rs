@@ -90,11 +90,51 @@ impl ServerSession {
 
     /// 从 `after_seq` 之后重放事件（SSE 恢复用），返回 `(seq, Value)` 列表。
     ///
-    /// `None` 表示 `after_seq` 已 evict 且不可恢复——SSE handler 应发 `RehydrateRequired`。
+    /// 重放策略（见 `design.md` §25.5）：
+    /// 1. **内存 ring buffer 命中**：`after_seq` 仍在 `EventCursor` buffer 中，
+    ///    直接重放 buffer 中 `seq > after_seq` 的事件；
+    /// 2. **durable recovery**：`after_seq` 已 evict 但 ≤ `Runtime::durable_seq`，
+    ///    调 `EventStore::load_after(after_seq)` 从持久化事件流重放。仅持久化事件
+    ///    子集可恢复（瞬态事件如 `Token` 不可恢复，客户端应容忍缺失）；
+    /// 3. **不可恢复**：`after_seq` > `durable_seq`（或 `EventStore` 为 `NoopEventStore`），
+    ///    返回 `None`——SSE handler 应发 `RehydrateRequired`。
+    ///
+    /// `EventStore::load_after` 返回 `EventRecord`（含 `PersistedEvent`），需转为
+    /// `EventKind` JSON 以与内存路径一致（SSE `data:` payload 格式统一）。
     pub async fn replay_after(&self, after_seq: u64) -> Option<Vec<(u64, serde_json::Value)>> {
-        let cursor = self.cursor.lock().await;
-        let replay = cursor.replay_after_with_seq(after_seq)?;
-        Some(replay.into_iter().map(|(s, v)| (s, v.clone())).collect())
+        // 1. 内存 ring buffer 命中
+        {
+            let cursor = self.cursor.lock().await;
+            if let Some(replay) = cursor.replay_after_with_seq(after_seq) {
+                return Some(replay.into_iter().map(|(s, v)| (s, v.clone())).collect());
+            }
+        }
+
+        // 2. durable recovery：检查 after_seq 是否 ≤ durable_seq
+        let durable_seq = self.runtime.durable_seq().await;
+        if after_seq > durable_seq {
+            return None; // 不可恢复
+        }
+
+        // 从 EventStore 重放持久化事件
+        let event_store = self.runtime.event_store();
+        let records = event_store
+            .load_after(&self.runtime.session().id, after_seq)
+            .await
+            .ok()?;
+        if records.is_empty() {
+            // `NoopEventStore` 或事件文件不存在——回退到 RehydrateRequired
+            return None;
+        }
+
+        // 转为 (seq, EventKind JSON) 格式（与内存路径一致）
+        let mut result = Vec::with_capacity(records.len());
+        for record in records {
+            let kind = minicoding_protocol::event::EventKind::from_persisted(&record.event);
+            let json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+            result.push((record.seq, json));
+        }
+        Some(result)
     }
 }
 
@@ -303,6 +343,16 @@ impl SessionManager {
         // Clone `Arc<Runtime>` 断开 `session.runtime` 的 Arc-deref 借用链。
         let runtime = session.runtime.clone();
         let events = runtime.events().clone();
+
+        // Event Sourcing：首次 turn 前初始化事件流（新会话持久化 SessionCreated，
+        // 恢复会话加载 seq + snapshot，见 `design.md` §25.1）。
+        // 延迟到首次 send_message 而非 create_session 调用，因 create_session 是
+        // 同步函数（HTTP handler 直接返回），init_event_stream 是 async。
+        // 幂等：`init_event_stream` 内部按 `next_seq` 判断新/旧会话，重复调用安全。
+        runtime
+            .init_event_stream()
+            .await
+            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
 
         // 订阅 `EventBus`（在 run_turn 之前订阅，避免错过早期事件）
         let mut rx = events.subscribe();

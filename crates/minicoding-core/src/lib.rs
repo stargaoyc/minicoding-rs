@@ -77,6 +77,11 @@ pub mod prelude {
         SandboxCircuitBreaker, SandboxDriver, SandboxError, SandboxPolicy, hard_trip_summary,
         soft_trip_reminder,
     };
-    pub use crate::storage::{AuditKind, AuditRecord, AuditSink, NoopAudit, Storage};
+    pub use crate::storage::{
+        AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
+        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
+        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
+        replay_session_state, session_from_messages, try_persist,
+    };
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
 }

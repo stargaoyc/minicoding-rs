@@ -252,6 +252,15 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let exit_code = if interactive {
         runtime.block_on(async {
+            // Event Sourcing：初始化事件流（新会话持久化 SessionCreated，
+            // 恢复会话加载 seq 计数器 + snapshot，见 `design.md` §25.1）。
+            // 必须在 `restore_history` 之前调用（`init_event_stream` 设置
+            // `durable_seq`/`event_seq`，`restore_history` 不依赖这些字段，
+            // 但语义上事件流应先于 turn 初始化）。
+            if let Err(e) = rt.init_event_stream().await {
+                eprintln!("初始化事件流失败: {e}");
+                return 1;
+            }
             if has_preloaded_session && let Err(e) = rt.restore_history().await {
                 eprintln!("恢复会话历史失败: {e}");
                 return 1;
@@ -261,6 +270,10 @@ fn main() -> Result<()> {
     } else {
         let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
         runtime.block_on(async {
+            if let Err(e) = rt.init_event_stream().await {
+                eprintln!("初始化事件流失败: {e}");
+                return 1;
+            }
             if has_preloaded_session && let Err(e) = rt.restore_history().await {
                 eprintln!("恢复会话历史失败: {e}");
                 return 1;

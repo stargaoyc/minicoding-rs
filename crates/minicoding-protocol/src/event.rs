@@ -11,6 +11,7 @@
 use minicoding_core::model::{Message, SessionMeta, StopReason, Task, ToolCallId, ToolResult};
 use minicoding_core::policy::{Decision, PermissionMode, Risk};
 use minicoding_core::runtime::Event;
+use minicoding_core::storage::PersistedEvent;
 use serde::{Deserialize, Serialize};
 
 /// 事件 DTO（携带 `seq`，用于 SSE cursor 恢复）。
@@ -127,6 +128,40 @@ impl EventDto {
         Self {
             seq,
             kind: EventKind::from(event),
+        }
+    }
+}
+
+impl EventKind {
+    /// 从 `PersistedEvent` 构造 `EventKind`（SSE durable recovery 用，见
+    /// `design.md` §25.5）。
+    ///
+    /// 与 `From<&Event>` 的区别：`PersistedEvent` 是 `Event` 的持久化子集
+    /// （仅状态变更事件），不含瞬态事件（`Token`/`TurnStreamingStarted` 等）。
+    /// SSE handler 在内存 ring buffer evict 但 `after_seq <= durable_seq` 时，
+    /// 调 `EventStore::load_after` 获取 `PersistedEvent` 列表，用此方法转为
+    /// `EventKind` JSON 推送给客户端。
+    ///
+    /// 客户端应容忍瞬态事件缺失（如 `Token` 增量已被 `MessageAppended` 捕获）。
+    #[must_use]
+    pub fn from_persisted(p: &PersistedEvent) -> Self {
+        match p {
+            PersistedEvent::SessionCreated { id, .. } => Self::SessionCreated { id: id.clone() },
+            PersistedEvent::MessageAppended { message } => Self::MessageAppended {
+                message: message.clone(),
+            },
+            PersistedEvent::PermissionResolved { id, decision } => Self::PermissionResolved {
+                id: id.clone(),
+                decision: decision.clone(),
+            },
+            PersistedEvent::PermissionModeChanged { from, to } => Self::PermissionModeChanged {
+                from: *from,
+                to: *to,
+            },
+            PersistedEvent::TaskUpdated { task } => Self::TaskUpdated { task: task.clone() },
+            PersistedEvent::TurnEnd { stop_reason } => Self::TurnEnd {
+                stop_reason: stop_reason.clone(),
+            },
         }
     }
 }

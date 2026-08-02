@@ -2681,51 +2681,135 @@ Durable 层是事实源，Process 层是运行时中间态，Transport 层是连
 
 ---
 
-## 25. 事件溯源方向（未来演进）
+## 25. 事件溯源（Event Sourcing，已实现）
 
-§10.3 的 Parent-UUID 链与 §11 的 EventBus 已具备事件溯源雏形，但当前架构本质仍是"消息是事实"——JSONL 存储的是 `Message`（业务状态），而非 `Event`（状态变更）。本节描述未来向"事件是事实"演进的方向，使 fork、压缩边界、子 Agent side-chain 等能力获得统一的事件层基础。
+§10.3 的 Parent-UUID 链与 §11 的 EventBus 已具备事件溯源雏形。本节描述已实现的"事件是事实"架构——将会话状态建模为不可变事件流（`Event` 持久化 + snapshot 重放），替代纯 JSONL 消息追加模型。收益：天然支持时间旅行调试、多客户端状态同步（与 SSE cursor 恢复/E-13 协同）、审计回放（`--replay` 不再依赖消息日志而是事件重放）、跨会话 fork/merge。
 
-> **标注**：本节是未来演进方向，非当前实现。M3 之前不引入 Event 枚举与 EventStore trait，避免过早抽象。
+> **实现状态**：已实现。前置条件 `minicoding-protocol` wire types 稳定（M8）+ `RehydrateRequired`（E-14）信号链路验证通过均已满足。
 
-**当前架构**：`Storage::append(message)` 追加写 `Message` 到 JSONL。`Message` 是业务状态（user/assistant/tool_result），已包含压缩后的最终形态。fork（§10.5）通过复制前缀实现，压缩边界（§10.3）通过 `parent_uuid = None` 标记——这些是消息层的事后标注，非原生事件。
-
-**目标架构**：`EventLog` 是 append-only 事实层，事件不可变、`seq` 单调递增；`Session` 是投影层，从 EventLog 重放得出当前消息序列。
+**架构**：`EventStore` 是 append-only 事实层，事件不可变、`seq` 单调递增；`Session` 是投影层，从 EventStore + snapshot 重放得出当前消息序列。与原 JSONL 消息日志**双写并存**——新会话同时写消息日志与事件流，旧会话无事件流时回退到消息日志路径，平滑过渡。
 
 ```
-EventLog（append-only，不可变）
+EventStore（append-only，不可变，{id}.events.jsonl）
    │
-   │ events: UserMessageSent / AssistantMessageStreamed / ToolCalled /
-   │         ToolResultReturned / CompactionApplied / TaskSpawned / ...
-   │
-   ▼
-Projector（重放事件，构建 Session 视图）
+   │ PersistedEvent: SessionCreated / MessageAppended /
+   │                 PermissionResolved / PermissionModeChanged /
+   │                 TaskUpdated / TurnEnd
    │
    ▼
-Session { messages, tasks, permission_mode, ... }
+replay_session_state（重放事件，构建 Session 视图）
+   │
+   ├── SnapshotStore（{id}.snapshot.json，每 50 条 MessageAppended 落盘一次）
+   │
+   ▼
+Session { messages, permission_mode, audit_trail, ... }
 ```
 
-Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `CompactionApplied { before: [msg_ids], after: Summary }`），Message 记录"当前是什么"。Event 不可变，Session 是 Event 的投影——同一 EventLog 可投影出不同视图（如"忽略压缩事件"得到完整历史，"应用压缩事件"得到当前窗口）。
+Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `PermissionModeChanged { from, to }`），Message 记录"当前是什么"。Event 不可变，Session 是 Event 的投影——同一 EventStore 可投影出不同视图（如"忽略权限事件"得到纯消息流，"仅权限事件"得到审计轨迹）。
 
-**优势**：
+### 25.1 事件流初始化（`Runtime::init_event_stream`）
 
-- **fork = 从 seq 重放**：当前 fork（§10.5）需复制前缀消息到新文件；事件溯源下，fork 仅记录"从 seq=42 分叉"，新会话从 seq=42 重放 EventLog + 后续新事件，零拷贝。
-- **压缩边界 = Compacted 事件**：当前压缩边界靠 `parent_uuid = None` 标记；事件溯源下，`CompactionApplied` 事件显式记录"seq=42 之前已折叠为摘要"，投影器据此跳过旧事件。
-- **side-chain = 子 Agent 事件挂在 `TaskSpawned` 事件下**：当前 side-chain 靠 `parent_uuid` 指向 `task.spawn` 工具调用；事件溯源下，子 Agent 事件的 `parent_event_id` 指向 `TaskSpawned`，天然形成事件树。
-- **多视图**：同一 EventLog 可投影出"完整历史"（忽略 CompactionApplied）/"当前窗口"（应用 CompactionApplied）/"审计视图"（仅 ToolCalled + PermissionResolved），无需多份存储。
+`RuntimeBuilder::build()` 后、首次 `run_turn` 前，CLI/server 调用 `init_event_stream`：
 
-**工具结果持久化**：当工具结果 > 阈值（如 100KB）时，持久化到 `artifacts/{event_id}.bin` 文件，EventLog 中只留引用 `{ artifact_path, size, hash }`。投影器按需读取 artifact，避免 EventLog 膨胀。这与 §4.5 的 `max_output_bytes` 截断互补——截断是"丢弃超长部分"，artifact 是"完整保留但移出主日志"。
+- **新会话**（`EventStore::next_seq == 1` 且无 snapshot）：持久化 `PersistedEvent::SessionCreated`（携带 `workdir`/`config_hash`/`created_at`，供 `replay_session_state` 重建 `Session`），设置 `event_seq = 2`、`durable_seq = 1`；
+- **恢复会话**（`--resume`/`--replay`，`next_seq > 1`）：设置 `event_seq = next_seq`；若存在 snapshot，设置 `durable_seq = snapshot.seq` 并重置 `message_since_snapshot = 0`；
+- **`NoopEventStore`**（SDK 等未注入场景）：`next_seq` 恒返回 1，append 为 no-op，整个方法实际效果为 no-op。
 
-**分阶段迁移路径**：
+幂等：重复调用安全，`init_event_stream` 内部按 `next_seq` 判断新/旧会话。
 
-| 阶段 | 内容 | 与现有架构关系 |
-|------|------|---------------|
-| M3 | 引入 `Event` 枚举与 `EventStore` trait（定义在 core，实现在 storage） | 与现有 `Storage::append_message` 并存，不替换 |
-| M4 | `Storage::append_event` 与 `append_message` 双写——消息仍写 JSONL，同时写 EventLog | 双写保证回退能力，EventLog 仅用于新功能（如多视图） |
-| M5+ | `Session` 改为投影层，从 EventLog 重放；`Storage::append_message` 标记 deprecated | 旧 JSONL 仍可读（兼容），新会话走 EventLog |
+### 25.2 事件持久化（`Runtime::persist_event`）
 
-M3-M4 的双写期是"灰度过渡"——EventLog 与 JSONL 并存，验证 Event 投影的正确性后再切流。这避免大爆炸式重构，每阶段可独立回退。
+`run_turn` 在 `events.emit(event)` 后调用 `persist_event`：
 
-**与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventLog 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventLog seq，`durable_seq` 即 EventLog 的持久化进度。当前架构需额外维护 seq，事件溯源后 seq 是 EventLog 的原生属性。
+1. `try_persist(&event)` 过滤瞬态事件（`Token`/`TurnStreamingStarted`/`ToolCallStarted`/`ToolCallFinished`/`PermissionRequested`/`ConfigChanged`/`SessionCreated`）——瞬态事件或为流式增量（已被 `MessageAppended` 捕获）、或为通知类（无状态变更）；
+2. 分配 seq（`event_seq` mutex 递增）；
+3. 构造 `EventRecord`，调 `EventStore::append`（fsync 后返回，崩溃安全）；
+4. 更新 `durable_seq`（供 SSE cursor 协同）；
+5. `MessageAppended` 时递增 `message_since_snapshot`，达到 `SNAPSHOT_INTERVAL`（50）触发 snapshot 落盘。
+
+**best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程（与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，replay 可从最近 snapshot + 剩余事件重建。
+
+`PermissionModeChanged` 事件由 `PlanControllerHandle::persist_mode_changed` 持久化（`plan.exit`/`/plan`/`--plan` 触发的模式切换），不触发 snapshot。
+
+### 25.3 Snapshot 机制（`SnapshotStore`）
+
+`JsonlSnapshotStore` 每会话一文件 `{id}.snapshot.json`，覆盖写（先写 `.tmp` 再 `rename`，原子）。`Runtime::create_snapshot` 从 `ContextManager::snapshot` 获取当前消息列表，构造 `SessionState` + `SessionSnapshot`，调 `SnapshotStore::save` 落盘。
+
+snapshot 触发条件：每 `SNAPSHOT_INTERVAL`（50）条 `MessageAppended` 事件后。snapshot 失败仅记 `warn` 日志，不中断主流程（best-effort）。
+
+`SessionSnapshot` 字段：`seq`（snapshot 对应的事件 seq）、`schema_version`（与 `SCHEMA_VERSION` 一致）、`session_id`、`state: SessionState`（`id`/`created_at`/`workdir`/`config_hash`/`messages`）。
+
+### 25.4 事件重放（`replay_session_state`）
+
+从 snapshot + 事件流重建 `Session` 状态：
+
+1. 加载最近 `SessionSnapshot`（如有），获得初始 `SessionState`；
+2. 加载 `seq > snapshot.seq` 的事件流（无 snapshot 时加载全部事件，首事件必须为 `SessionCreated`）；
+3. 按事件顺序应用：
+   - `SessionCreated`：初始化 `Session`（仅当无 snapshot 时）；
+   - `MessageAppended`：追加到 `messages`；
+   - `PermissionResolved`/`TaskUpdated`/`TurnEnd`：仅记录审计轨迹，不重建运行时状态；
+   - `PermissionModeChanged`：更新 `final_permission_mode`；
+4. 返回 `ReplayedSession { session, audit_trail, last_seq, final_permission_mode }`。
+
+**seq 连续性检查**：事件 seq 必须连续（`expected = last_seq + 1`），跳跃返回 `ReplayError::SeqGap`（可能事件丢失）。
+
+**schema 版本检查**：事件或 snapshot 的 `schema_version` 高于当前 `SCHEMA_VERSION` 返回 `ReplayError::UnsupportedSchema`（未来版本）。
+
+**旧会话兼容**：`EventStore::load` 返回空且 `SnapshotStore::load` 返回 `None` 时，返回 `MissingSessionCreated`——调用方应捕获此错误并回退到 `Storage::load` 消息列表路径（`session_from_messages`）。
+
+### 25.5 SSE cursor durable recovery
+
+SSE handler 的 `Last-Event-ID` cursor 恢复三级策略（与 E-13/E-14 协同）：
+
+1. **内存 ring buffer 命中**：`EventCursor.replay_after_with_seq(after_seq)` 直接重放 buffer 中 `seq > after_seq` 的事件；
+2. **durable recovery**：`after_seq` 已 evict 但 ≤ `Runtime::durable_seq()`，调 `EventStore::load_after(after_seq)` 从持久化事件流重放。仅持久化事件子集可恢复（瞬态事件如 `Token` 不可恢复，客户端应容忍缺失——`Token` 增量已被 `MessageAppended` 捕获）；
+3. **不可恢复**：`after_seq` > `durable_seq`（或 `EventStore` 为 `NoopEventStore`），发 `RehydrateRequired` 后关闭流（E-14）。
+
+`EventKind::from_persisted` 将 `PersistedEvent` 转为 SSE payload JSON，与内存路径格式统一。
+
+### 25.6 CLI `--replay` 集成
+
+CLI `load_session_by_mode` 对 `Resume`/`Replay` 模式优先走事件重放路径：
+
+1. 加载 `JsonlSnapshotStore::load_sync`（如有 snapshot）；
+2. 加载 `JsonlEventStore::load_events_sync` 全部事件；
+3. 调 `replay_session_state` 重建 `Session`；
+4. 旧会话无事件流（`load_events_sync` 返回空且无 snapshot）→ 回退到 `load_messages` 消息日志路径。
+
+`workdir`/`config_hash` 由 CLI 启动参数提供，覆盖事件流中的值——避免 workdir 跨机器漂移。
+
+`Fork` 模式不走事件重放（fork 创建新会话，新会话有自己的事件流），仅从消息日志复制前缀消息。
+
+### 25.7 schema 版本化
+
+`SCHEMA_VERSION = 1`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
+
+- v0（隐式）：消息日志（无 `EventRecord` 包装），`replay_session_state` 回退到消息列表；
+- v1：当前 schema，`EventRecord` 显式包装 `PersistedEvent`。
+
+未来变更（如新增事件变体、字段语义变更）递增 `SCHEMA_VERSION`，并在 `replay_session_state` 中按版本分支处理。`SessionSnapshot.schema_version` 同步演进。
+
+### 25.8 文件布局
+
+```
+~/.minicoding/sessions/
+├── {id}.jsonl              # 消息日志（原有，双写保留）
+├── {id}.events.jsonl       # 事件流（新增）
+└── {id}.snapshot.json      # snapshot（新增）
+```
+
+三文件同目录，便于备份/清理。`JsonlEventStore`/`JsonlSnapshotStore` 与 `JsonlStorage` 共用 `sessions_dir`。
+
+### 25.9 优势
+
+- **fork = 从 seq 重放**：当前 fork（§10.5）需复制前缀消息到新文件；事件溯源下，fork 仅记录"从 seq=42 分叉"，新会话从 seq=42 重放 EventStore + 后续新事件，零拷贝（未来增强）。
+- **压缩边界 = Compacted 事件**：当前压缩边界靠 `parent_uuid = None` 标记；事件溯源下，`CompactionApplied` 事件显式记录"seq=42 之前已折叠为摘要"，投影器据此跳过旧事件（未来增强）。
+- **side-chain = 子 Agent 事件挂在 `TaskSpawned` 事件下**：当前 side-chain 靠 `parent_uuid` 指向 `task.spawn` 工具调用；事件溯源下，子 Agent 事件的 `parent_event_id` 指向 `TaskSpawned`，天然形成事件树（未来增强）。
+- **多视图**：同一 EventStore 可投影出"完整历史"/"当前窗口"/"审计视图"，无需多份存储。
+- **审计回放**：`--replay` 不再依赖消息日志，而是事件重放——权限决策、模式切换等审计轨迹完整保留。
+
+**与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventStore 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventStore seq，`durable_seq` 即 EventStore 的持久化进度。
 
 ---
 

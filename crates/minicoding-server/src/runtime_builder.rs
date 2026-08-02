@@ -124,9 +124,16 @@ pub fn build_runtime(
             }
         };
 
-    // 6. 构造 storage（JsonlStorage，崩溃安全）
+    // 6. 构造 storage（JsonlStorage，崩溃安全）+ EventStore + SnapshotStore（Event Sourcing）
+    //    与 CLI 一致，EventStore/SnapshotStore 与 JsonlStorage 共用 sessions_dir，
+    //    支持 SSE cursor durable recovery（见 `design.md` §25.5）。
     let sessions_dir = minicoding_core::paths::sessions_dir().context("无法确定会话存储目录")?;
-    let storage = Arc::new(JsonlStorage::new(sessions_dir));
+    let storage = Arc::new(JsonlStorage::new(sessions_dir.clone()));
+    let event_store: Arc<dyn minicoding_core::storage::EventStore> = Arc::new(
+        minicoding_storage::JsonlEventStore::new(sessions_dir.clone()),
+    );
+    let snapshot_store: Arc<dyn minicoding_core::storage::SnapshotStore> =
+        Arc::new(minicoding_storage::JsonlSnapshotStore::new(sessions_dir));
 
     // 7. 构造 tool registry（readonly + write + shell + task）
     let event_bus = minicoding_core::runtime::EventBus::new();
@@ -163,7 +170,9 @@ pub fn build_runtime(
         .audit(audit)
         .session_summarizer(summarizer)
         .permission_mode(permission_mode)
-        .events(event_bus);
+        .events(event_bus)
+        .event_store(event_store)
+        .snapshot_store(snapshot_store);
 
     // 12. 注入沙箱驱动（与 CLI 一致，Linux Landlock / 降级 NoopDriver）
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {

@@ -11,11 +11,15 @@
 //!
 //! ```
 //!
-//! cursor 恢复流程：
+//! cursor 恢复流程（见 `design.md` §25.5）：
 //! 1. 客户端连接时携带 `Last-Event-ID: <seq>` header；
-//! 2. Server 从 `EventCursor` 重放 `seq+1..` 的事件；
-//! 3. 重放完毕后订阅 `EventBus` 推送新事件；
-//! 4. 若 `Last-Event-ID` 已从 ring buffer evict，发 `RehydrateRequired` 后关闭流。
+//! 2. **内存 ring buffer 命中**：Server 从 `EventCursor` 重放 `seq+1..` 的事件；
+//! 3. **durable recovery**：若 `seq` 已从 ring buffer evict 但 ≤ `durable_seq`，
+//!    Server 从 `EventStore::load_after(seq)` 重放持久化事件（仅状态变更事件子集，
+//!    瞬态事件如 `Token` 不可恢复，客户端应容忍缺失）；
+//! 4. **不可恢复**：`seq` > `durable_seq`（或 `EventStore` 为 `NoopEventStore`），
+//!    发 `RehydrateRequired` 后关闭流（E-14）；
+//! 5. 重放完毕后订阅 `EventBus` 推送新事件。
 
 use crate::session_mgr::ServerSession;
 use minicoding_protocol::event::EventKind;

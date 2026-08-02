@@ -526,6 +526,108 @@ impl JsonlStorage {
 
 `StorageError` 新增 `Locked(String)` 变体，表示会话被跨进程文件锁占用（见 `rules.md` C-22）。
 
+#### 3.5.1 `EventStore` / `SnapshotStore`（Event Sourcing，见 `design.md` §25）
+
+事件溯源层与消息日志层并存：`EventStore` 是 append-only 事实层（不可变、`seq` 单调递增），`SnapshotStore` 周期性落盘 `Session` 全状态加速重放。新会话双写（messages + events），旧会话无事件流时回退到消息日志路径。
+
+```rust
+/// 持久化事件种类（`Event` 的状态变更子集，瞬态事件如 `Token` 不持久化）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PersistedEvent {
+    SessionCreated { id: SessionId, workdir: String, config_hash: u64, created_at: OffsetDateTime },
+    MessageAppended { message: Message },
+    PermissionResolved { id: String, decision: Decision },
+    PermissionModeChanged { from: PermissionMode, to: PermissionMode },
+    TaskUpdated { task: Task },
+    TurnEnd { stop_reason: StopReason },
+}
+
+/// 持久化事件记录（seq + schema 元数据 + 事件种类）。
+pub struct EventRecord {
+    pub seq: u64,                              // 单调递增（每会话独立，从 1 开始）
+    pub session_id: SessionId,
+    pub timestamp: OffsetDateTime,
+    pub schema_version: u32,                   // 当前 SCHEMA_VERSION=1
+    pub event: PersistedEvent,                 // #[serde(flatten)]
+}
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// 事件存储 trait（`dyn` 兼容）。`append` 必须 fsync 后返回（崩溃安全）。
+pub trait EventStore: Send + Sync {
+    fn append(&self, session: &SessionId, record: EventRecord)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+    fn load(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>>;
+    fn load_after(&self, session: &SessionId, after_seq: u64)
+        -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>>;   // SSE cursor 恢复
+    fn next_seq(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<u64, StorageError>>;                // = max_seq + 1
+    fn delete(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+}
+
+pub struct NoopEventStore;   // 兜底：append 空操作，load 返回空，next_seq 返回 1
+
+/// 会话快照（捕获 `Session` 全状态）。
+pub struct SessionSnapshot {
+    pub session_id: SessionId,
+    pub seq: u64,                              // snapshot 包含此 seq 及之前所有事件的状态
+    pub taken_at: OffsetDateTime,
+    pub schema_version: u32,
+    pub state: SessionState,
+}
+
+pub struct SessionState {
+    pub id: SessionId,
+    pub created_at: OffsetDateTime,
+    pub workdir: String,
+    pub config_hash: u64,
+    pub messages: Vec<Message>,
+}
+
+pub trait SnapshotStore: Send + Sync {
+    fn load(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<Option<SessionSnapshot>, StorageError>>;
+    fn save(&self, snapshot: SessionSnapshot)
+        -> BoxFuture<'_, Result<(), StorageError>>;   // 原子写：.tmp + rename
+    fn delete(&self, session: &SessionId)
+        -> BoxFuture<'_, Result<(), StorageError>>;
+}
+
+pub struct NoopSnapshotStore;
+pub const SNAPSHOT_INTERVAL: usize = 50;   // 每 N 条 MessageAppended 触发 snapshot
+
+/// 事件重放入口（见 `design.md` §25.4）。
+///
+/// 从 snapshot + 事件流重建 `Session` 状态。无 snapshot 时从首事件
+/// （必须为 `SessionCreated`）开始；事件 seq 必须连续，跳跃返回 `SeqGap`；
+/// schema 版本高于当前返回 `UnsupportedSchema`；无事件流且无 snapshot
+/// 返回 `MissingSessionCreated`（调用方应回退到 `Storage::load` 消息列表）。
+pub fn replay_session_state(
+    snapshot: Option<&SessionSnapshot>,
+    events: &[EventRecord],
+) -> Result<ReplayedSession, ReplayError>;
+
+pub struct ReplayedSession {
+    pub session: Session,
+    pub audit_trail: Vec<EventRecord>,        // 权限/任务/TurnEnd 等审计事件
+    pub last_seq: u64,
+    pub final_permission_mode: PermissionMode,
+}
+
+/// 旧会话回退路径：从消息列表构造 `Session`（无事件流时使用）。
+pub fn session_from_messages(
+    id: SessionId,
+    workdir: Utf8PathBuf,
+    config_hash: u64,
+    messages: Vec<Message>,
+) -> Session;
+```
+
+`JsonlEventStore`（`minicoding-storage`）实现 `EventStore`：每会话一文件 `{id}.events.jsonl`，append + fsync。`JsonlSnapshotStore` 实现 `SnapshotStore`：每会话一文件 `{id}.snapshot.json`，`.tmp` + `rename` 原子写。二者与 `JsonlStorage` 共用 `sessions_dir`。
+
 ### 3.6 权限：`PermissionPolicy` + `PermissionPrompter`
 
 > **架构说明（修复 broadcast/oneshot 冲突）**：权限交互是"请求-响应"的点对点语义，而 `EventBus` 是"广播-订阅"语义。二者不能复用同一通道——`broadcast::Sender` 会克隆事件，而 `oneshot::Sender<Decision>` 不可克隆，强行放入 `Event` 既无法编译也语义错误。

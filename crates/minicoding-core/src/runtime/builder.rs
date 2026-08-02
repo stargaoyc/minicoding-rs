@@ -22,11 +22,14 @@ use crate::runtime::Runtime;
 use crate::sandbox::{
     DenialDetector, NoopDriver, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
 };
-use crate::storage::{AuditSink, NoopAudit, Storage};
+use crate::storage::{
+    AuditSink, EventStore, NoopAudit, NoopEventStore, NoopSnapshotStore, SnapshotStore, Storage,
+};
 use crate::tool::ToolRegistry;
 use camino::Utf8PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 /// `Runtime` 构造器。
@@ -70,6 +73,16 @@ pub struct RuntimeBuilder {
     /// CLI 注入 `ConfigWatcher::start(...)` 结果；`ConfigWatcher` 随 `Runtime` 存活，
     /// drop 时自动停止监听并结束后台 task。未注入时不监听配置变更。
     config_watcher: Option<ConfigWatcher>,
+    /// 事件存储（Event Sourcing，默认 `NoopEventStore`）。
+    ///
+    /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
+    /// 支持 `--replay` 事件重放与 SSE cursor durable 恢复（见 `design.md` §25）。
+    event_store: Option<Arc<dyn EventStore>>,
+    /// Snapshot 存储（Event Sourcing，默认 `NoopSnapshotStore`）。
+    ///
+    /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
+    /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -105,6 +118,8 @@ impl RuntimeBuilder {
             subagent_runner: None,
             extension_host: None,
             config_watcher: None,
+            event_store: None,
+            snapshot_store: None,
         }
     }
 
@@ -299,7 +314,35 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置事件存储（Event Sourcing，默认 `NoopEventStore`）。
+    ///
+    /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
+    /// 支持 `--replay` 事件重放与 SSE cursor durable 恢复（见 `design.md` §25）。
+    /// 未注入时退化为 `NoopEventStore`（不持久化），兼容旧会话。
+    #[must_use]
+    pub fn event_store(mut self, s: Arc<dyn EventStore>) -> Self {
+        self.event_store = Some(s);
+        self
+    }
+
+    /// 设置 Snapshot 存储（Event Sourcing，默认 `NoopSnapshotStore`）。
+    ///
+    /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
+    /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
+    /// 未注入时退化为 `NoopSnapshotStore`（不落盘 snapshot）。
+    #[must_use]
+    pub fn snapshot_store(mut self, s: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(s);
+        self
+    }
+
     /// 构造 `Runtime`。
+    ///
+    /// **Event Sourcing 初始化**：`event_seq` 默认初始化为 1（新会话起始 seq），
+    /// `durable_seq` 初始化为 0（无持久化进度）。`--resume`/`--replay` 场景下，
+    /// 调用方需在 `build()` 后调用 [`Runtime::init_event_stream`] 异步加载
+    /// `EventStore::next_seq` 与最近 snapshot 的 seq，并持久化 `SessionCreated`
+    /// 事件（新会话首事件）。
     ///
     /// # Errors
     /// 必填项缺失时返回错误字符串。
@@ -354,6 +397,14 @@ impl RuntimeBuilder {
                 .extension_host
                 .unwrap_or_else(|| Arc::new(NoopExtensionHost::new())),
             config_watcher: self.config_watcher,
+            event_store: self.event_store.unwrap_or_else(|| Arc::new(NoopEventStore)),
+            snapshot_store: self
+                .snapshot_store
+                .unwrap_or_else(|| Arc::new(NoopSnapshotStore)),
+            // 默认值：新会话起始 seq=1；`init_event_stream` 会按 EventStore 实际情况修正。
+            event_seq: Arc::new(TokioMutex::new(1)),
+            message_since_snapshot: AtomicU64::new(0),
+            durable_seq: Arc::new(TokioMutex::new(0)),
         })
     }
 }

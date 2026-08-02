@@ -20,8 +20,8 @@ use crate::hooks::{
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
 use crate::model::{
-    Message, PolicyError, RuntimeError, Session, SideEffect, StopReason, ToolCall, ToolCallId,
-    ToolResult, TurnOutcome, UserInput,
+    Message, PolicyError, RuntimeError, Session, SessionId, SideEffect, StopReason, ToolCall,
+    ToolCallId, ToolResult, TurnOutcome, UserInput,
 };
 use crate::policy::{
     Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompter,
@@ -33,15 +33,19 @@ use crate::runtime::{Event, EventBus};
 use crate::sandbox::{
     BreakerState, DenialDetector, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
 };
-use crate::storage::{AuditKind, AuditRecord, AuditSink, Storage};
+use crate::storage::{
+    AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, PersistedEvent, SNAPSHOT_INTERVAL,
+    SessionSnapshot, SessionState, SnapshotStore, Storage, try_persist,
+};
 use crate::tool::{ToolContext, ToolRegistry};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -114,6 +118,27 @@ pub struct Runtime {
     // 仅持有以控制生命周期（Drop 时停止后台 task），不需要读取字段值
     #[allow(dead_code)]
     pub(crate) config_watcher: Option<ConfigWatcher>,
+    /// 事件存储（Event Sourcing，可选，见 `design.md` §25）。
+    ///
+    /// `Some` 时 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流。
+    /// 未注入时（`NoopEventStore`）退化为 no-op，兼容旧会话。
+    pub(crate) event_store: Arc<dyn EventStore>,
+    /// Snapshot 存储（Event Sourcing，可选，见 `design.md` §25.3）。
+    ///
+    /// `Some` 时 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
+    /// 落盘 snapshot。未注入时（`NoopSnapshotStore`）退化为 no-op。
+    pub(crate) snapshot_store: Arc<dyn SnapshotStore>,
+    /// 当前会话的事件 seq 计数器（单调递增，从 1 开始）。
+    ///
+    /// 由 `EventStore::next_seq` 初始化（Runtime 构造时调用一次），此后由
+    /// `allocate_seq` 原子递增。`TokioMutex` 因 `allocate_seq` 在 async 上下文中调用。
+    pub(crate) event_seq: Arc<TokioMutex<u64>>,
+    /// 自上次 snapshot 后的 `MessageAppended` 事件计数（用于触发周期 snapshot）。
+    pub(crate) message_since_snapshot: AtomicU64,
+    /// 已持久化的最大 seq（`EventStore::append` 成功后更新，供 SSE cursor 协同）。
+    ///
+    /// `Arc<TokioMutex>` 因 `--replay`/SSE handler 需读取此值判断 `durable_seq`。
+    pub(crate) durable_seq: Arc<TokioMutex<u64>>,
 }
 
 impl Runtime {
@@ -169,9 +194,15 @@ impl Runtime {
     #[must_use]
     pub fn plan_controller(&self) -> Arc<dyn PlanModeController> {
         // PlanModeController 由 Runtime 实现；这里返回一个共享 plan_state 的适配器。
+        // Event Sourcing：注入 event_store/event_seq/durable_seq/session_id，
+        // 让 `PermissionModeChanged` 事件持久化（replay 时重建 final_permission_mode）。
         Arc::new(PlanControllerHandle {
             state: self.plan_state.clone(),
             events: self.events.clone(),
+            session_id: self.session.id.clone(),
+            event_store: self.event_store.clone(),
+            event_seq: self.event_seq.clone(),
+            durable_seq: self.durable_seq.clone(),
         })
     }
 
@@ -222,7 +253,7 @@ impl Runtime {
     /// 基于历史上下文继续对话。仅在 `RuntimeBuilder::session` 设置预加载会话后调用
     /// 一次；对新建会话（空消息）调用是 no-op。
     ///
-    /// 消息已在磁盘（首次 `storage.append` 时落盘），此处只回填内存上下文，
+    /// 消息已在磁盘（首次 `storage.append` 时落盘），此处只回填内存上下文,
     /// **不重复落盘**——后续 `run_turn` 的新消息才走 `storage.append`。
     ///
     /// # Errors
@@ -237,6 +268,194 @@ impl Runtime {
             tracing::info!(session = %self.session.id, restored = count, "history restored");
         }
         Ok(())
+    }
+
+    /// 初始化事件流（Event Sourcing，见 `design.md` §25.1）。
+    ///
+    /// **调用时机**：`RuntimeBuilder::build()` 后、首次 `run_turn` 前。CLI/server
+    /// 在构造 Runtime 后调用此方法，按 `EventStore` 实际状态修正 seq 计数器。
+    ///
+    /// ## 行为
+    ///
+    /// - **新会话**（`EventStore::next_seq == 1` 且无 snapshot）：持久化
+    ///   `PersistedEvent::SessionCreated`（携带 `workdir`/`config_hash`/`created_at`，
+    ///   供 `replay_session_state` 重建 `Session`），设置 `event_seq = 2`、
+    ///   `durable_seq = 1`；
+    /// - **恢复会话**（`--resume`/`--replay`，`next_seq > 1`）：设置
+    ///   `event_seq = next_seq`；若存在 snapshot，设置 `durable_seq = snapshot.seq`
+    ///   并重置 `message_since_snapshot = 0`；
+    /// - **`NoopEventStore`**：`next_seq` 恒返回 1，但 append 为 no-op，整个方法
+    ///   实际效果为设置 `event_seq = 2`（无副作用）。
+    ///
+    /// ## 旧会话兼容
+    ///
+    /// 旧会话（仅有 `{id}.jsonl` 消息日志，无事件流）：`EventStore::next_seq` 返回 1
+    /// （事件文件不存在），`SnapshotStore::load` 返回 `None`，方法走"新会话"路径，
+    /// 持久化 `SessionCreated` 事件。后续 `run_turn` 的新消息会双写（消息日志 +
+    /// 事件流）。`--replay` 时若需历史消息，调用方应回退到 `Storage::load` 路径。
+    ///
+    /// # Errors
+    /// `EventStore::next_seq`/`SnapshotStore::load`/`EventStore::append` 失败时
+    /// 返回 `RuntimeError::Storage`。
+    pub async fn init_event_stream(&self) -> Result<(), RuntimeError> {
+        let next_seq = self
+            .event_store
+            .next_seq(&self.session.id)
+            .await
+            .map_err(RuntimeError::Storage)?;
+
+        // 加载最近 snapshot（设置 durable_seq + 重置 message_since_snapshot）
+        let snapshot = self
+            .snapshot_store
+            .load(&self.session.id)
+            .await
+            .map_err(RuntimeError::Storage)?;
+        if let Some(snap) = &snapshot {
+            *self.durable_seq.lock().await = snap.seq;
+            self.message_since_snapshot.store(0, Ordering::SeqCst);
+        }
+
+        if next_seq == 1 && snapshot.is_none() {
+            // 新会话：持久化 SessionCreated 事件（携带完整字段，供 replay 重建）
+            let seq = 1;
+            let persisted = PersistedEvent::SessionCreated {
+                id: self.session.id.clone(),
+                workdir: self.session.workdir.to_string(),
+                config_hash: self.session.config_hash,
+                created_at: self.session.created_at,
+            };
+            let record = EventRecord::new(seq, self.session.id.clone(), persisted);
+            self.event_store
+                .append(&self.session.id, record)
+                .await
+                .map_err(RuntimeError::Storage)?;
+            *self.event_seq.lock().await = seq + 1;
+            *self.durable_seq.lock().await = seq;
+            tracing::info!(
+                session = %self.session.id,
+                seq,
+                "SessionCreated event persisted (event sourcing init)"
+            );
+        } else {
+            *self.event_seq.lock().await = next_seq;
+            tracing::info!(
+                session = %self.session.id,
+                next_seq,
+                snapshot_seq = snapshot.as_ref().map_or(0, |s| s.seq),
+                "event stream initialized (resumed session)"
+            );
+        }
+        Ok(())
+    }
+
+    /// 返回当前已持久化的最大 seq（SSE cursor 协同用，见 `protocol::cursor`）。
+    ///
+    /// SSE handler 在判断 `Last-Event-ID` 是否可从 `EventStore` 重放时读取此值：
+    /// `last_seq <= durable_seq` 时可从 `EventStore` 重放（durable recovery）。
+    #[must_use]
+    pub async fn durable_seq(&self) -> u64 {
+        *self.durable_seq.lock().await
+    }
+
+    /// 返回 `EventStore` 引用（SSE cursor durable recovery 用，见 `design.md` §25.5）。
+    ///
+    /// SSE handler 在 `Last-Event-ID` 已从内存 ring buffer evict 但 ≤ `durable_seq`
+    /// 时，通过此引用调 `EventStore::load_after` 重放持久化事件，避免发
+    /// `RehydrateRequired`（与 E-13/E-14 协同）。
+    ///
+    /// 返回 `Arc<dyn EventStore>`：未注入 event sourcing 时为 `NoopEventStore`，
+    /// `load_after` 返回空 Vec（调用方据此回退到 `RehydrateRequired`）。
+    #[must_use]
+    pub fn event_store(&self) -> Arc<dyn EventStore> {
+        self.event_store.clone()
+    }
+
+    /// 持久化事件到 `EventStore` + 触发周期 snapshot（Event Sourcing 核心）。
+    ///
+    /// 由 `run_turn` 在 `events.emit(event)` 后调用。流程：
+    /// 1. `try_persist(&event)` 过滤瞬态事件（返回 `None` 直接返回）；
+    /// 2. 分配 seq（`event_seq` mutex 递增）；
+    /// 3. 构造 `EventRecord`，调 `EventStore::append`；
+    /// 4. 更新 `durable_seq`；
+    /// 5. `MessageAppended` 时递增 `message_since_snapshot`，达到
+    ///    `SNAPSHOT_INTERVAL` 触发 snapshot 落盘。
+    ///
+    /// **best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程
+    /// （与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，
+    /// replay 可从最近 snapshot + 剩余事件重建。
+    async fn persist_event(&self, event: &Event) {
+        let Some(persisted) = try_persist(event) else {
+            return; // 瞬态事件，跳过
+        };
+
+        // 分配 seq（单调递增）
+        let seq = {
+            let mut guard = self.event_seq.lock().await;
+            let s = *guard;
+            *guard += 1;
+            s
+        };
+
+        let record = EventRecord::new(seq, self.session.id.clone(), persisted);
+
+        // 持久化（fsync 后返回，崩溃安全）
+        if let Err(e) = self.event_store.append(&self.session.id, record).await {
+            tracing::warn!(
+                error = %e,
+                session = %self.session.id,
+                seq,
+                "event persist failed (best-effort, continue)"
+            );
+            return;
+        }
+
+        // 更新 durable_seq（供 SSE cursor 协同）
+        {
+            let mut guard = self.durable_seq.lock().await;
+            if seq > *guard {
+                *guard = seq;
+            }
+        }
+
+        // MessageAppended 时触发周期 snapshot
+        if matches!(event, Event::MessageAppended(_)) {
+            let count = self.message_since_snapshot.fetch_add(1, Ordering::SeqCst) + 1;
+            if count >= SNAPSHOT_INTERVAL as u64 {
+                self.create_snapshot(seq).await;
+                self.message_since_snapshot.store(0, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// 创建并落盘当前会话状态的 snapshot（见 `design.md` §25.3）。
+    ///
+    /// 从 `ContextManager::snapshot` 获取当前消息列表，构造 `SessionState` +
+    /// `SessionSnapshot`，调 `SnapshotStore::save` 原子落盘（先 `.tmp` 再 `rename`）。
+    /// snapshot 失败仅记 `warn` 日志，不中断主流程（best-effort）。
+    async fn create_snapshot(&self, seq: u64) {
+        let ctx_snap = self.ctx.snapshot().await;
+        let state = SessionState {
+            id: self.session.id.clone(),
+            created_at: self.session.created_at,
+            workdir: self.session.workdir.to_string(),
+            config_hash: self.session.config_hash,
+            messages: ctx_snap.messages,
+        };
+        let snapshot = SessionSnapshot::new(seq, state);
+        if let Err(e) = self.snapshot_store.save(snapshot).await {
+            tracing::warn!(
+                error = %e,
+                session = %self.session.id,
+                seq,
+                "snapshot save failed (best-effort, continue)"
+            );
+            return;
+        }
+        tracing::info!(
+            session = %self.session.id,
+            seq,
+            "snapshot persisted (event sourcing checkpoint)"
+        );
     }
 
     /// 生成会话摘要并落盘 `index.json`（T-M3-6）。
@@ -307,6 +526,7 @@ impl Runtime {
     ///
     /// # Errors
     /// LLM 调用失败、工具执行失败、存储失败等返回 `RuntimeError`。
+    #[allow(clippy::too_many_lines)] // Event Sourcing persist 调用扩展了函数体，拆分反而降低可读性
     pub fn run_turn(
         &self,
         user_input: UserInput,
@@ -325,7 +545,9 @@ impl Runtime {
                 .await
                 .map_err(RuntimeError::Storage)?;
             self.ctx.append(user_msg.clone()).await;
-            self.events.emit(Event::MessageAppended(user_msg));
+            let event = Event::MessageAppended(user_msg);
+            self.persist_event(&event).await;
+            self.events.emit(event);
 
             let max_iters = self.config.context.max_tool_iters;
             let turn_timeout = Duration::from_secs(self.config.context.turn_timeout_sec);
@@ -356,14 +578,17 @@ impl Runtime {
                         .await
                         .map_err(RuntimeError::Storage)?;
                     self.ctx.append(assistant_msg.clone()).await;
-                    self.events
-                        .emit(Event::MessageAppended(assistant_msg.clone()));
+                    let event = Event::MessageAppended(assistant_msg.clone());
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
 
                     // 5. 无工具调用 → 终止
                     if assistant_msg.tool_calls.is_empty() {
-                        self.events.emit(Event::TurnEnd {
+                        let event = Event::TurnEnd {
                             stop_reason: StopReason::EndTurn,
-                        });
+                        };
+                        self.persist_event(&event).await;
+                        self.events.emit(event);
                         return Ok(TurnOutcome::Finished(assistant_msg));
                     }
 
@@ -373,9 +598,11 @@ impl Runtime {
                     call_signatures.push(sig);
                     if Self::is_repeating(&call_signatures) {
                         tracing::warn!("turn terminated: repeated tool calls detected");
-                        self.events.emit(Event::TurnEnd {
+                        let event = Event::TurnEnd {
                             stop_reason: StopReason::Stopped,
-                        });
+                        };
+                        self.persist_event(&event).await;
+                        self.events.emit(event);
                         return Ok(TurnOutcome::Finished(Message::assistant_text(
                             "[检测到重复工具调用，已终止以避免死循环]".to_string(),
                         )));
@@ -395,15 +622,19 @@ impl Runtime {
                             .await
                             .map_err(RuntimeError::Storage)?;
                         self.ctx.append(msg.clone()).await;
-                        self.events.emit(Event::MessageAppended(msg));
+                        let event = Event::MessageAppended(msg);
+                        self.persist_event(&event).await;
+                        self.events.emit(event);
                     }
                 }
 
                 // 达到 max_iters 上限
                 tracing::warn!(max_iters, "turn exceeded max tool iterations");
-                self.events.emit(Event::TurnEnd {
+                let event = Event::TurnEnd {
                     stop_reason: StopReason::Stopped,
-                });
+                };
+                self.persist_event(&event).await;
+                self.events.emit(event);
                 Ok(TurnOutcome::Finished(Message::assistant_text(
                     "[达到最大工具调用轮次上限]".to_string(),
                 )))
@@ -415,9 +646,11 @@ impl Runtime {
             tokio::select! {
                 () = self.cancel_token.cancelled() => {
                     tracing::info!("turn cancelled by user");
-                    self.events.emit(Event::TurnEnd {
+                    let event = Event::TurnEnd {
                         stop_reason: StopReason::Interrupted,
-                    });
+                    };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
                     Ok(TurnOutcome::Interrupted(Message::assistant_text(
                         "[已取消]".to_string(),
                     )))
@@ -427,9 +660,11 @@ impl Runtime {
                         timeout_sec = self.config.context.turn_timeout_sec,
                         "turn timed out"
                     );
-                    self.events.emit(Event::TurnEnd {
+                    let event = Event::TurnEnd {
                         stop_reason: StopReason::Stopped,
-                    });
+                    };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
                     Ok(TurnOutcome::Finished(Message::assistant_text(
                         "[turn 超时终止]".to_string(),
                     )))
@@ -825,10 +1060,12 @@ impl Runtime {
                             risk: prompt.risk,
                         });
                         let d = self.prompter.prompt(prompt.clone()).await;
-                        self.events.emit(Event::PermissionResolved {
+                        let event = Event::PermissionResolved {
                             id: prompt_id.clone(),
                             decision: d.clone(),
-                        });
+                        };
+                        self.persist_event(&event).await;
+                        self.events.emit(event);
                         Ok((d, Some(prompt_id)))
                     }
                 }
@@ -1097,9 +1334,52 @@ impl std::fmt::Debug for Runtime {
 /// 由 `Runtime::plan_controller` 构造，注入到 `plan.exit` 工具。`plan.exit` 通过
 /// 它读写会话级 Plan 状态。设计为独立结构而非 `Runtime impl PlanModeController`，
 /// 避免给 Runtime 增加无关方法（`Arc<dyn PlanModeController>` 更显式）。
+///
+/// Event Sourcing：持有 `event_store`/`event_seq`/`durable_seq`/`session_id`，
+/// `exit_plan`/`set_mode` 触发 `PermissionModeChanged` 时同步持久化到事件流
+/// （replay 时重建 `final_permission_mode`，见 `replay_session_state`）。
 struct PlanControllerHandle {
     state: Arc<RwLock<PlanModeSnapshot>>,
     events: EventBus,
+    /// Event Sourcing 持久化字段（与 Runtime 共享 Arc）。
+    session_id: SessionId,
+    event_store: Arc<dyn EventStore>,
+    event_seq: Arc<TokioMutex<u64>>,
+    durable_seq: Arc<TokioMutex<u64>>,
+}
+
+impl PlanControllerHandle {
+    /// 持久化 `PermissionModeChanged` 事件到 EventStore（best-effort，无 snapshot 触发）。
+    ///
+    /// 与 `Runtime::persist_event` 区别：不触发 snapshot（`PermissionModeChanged`
+    /// 非 `MessageAppended`，不计入 `message_since_snapshot`）；不调用
+    /// `try_persist`（调用方已知是持久化事件）。
+    async fn persist_mode_changed(&self, from: PermissionMode, to: PermissionMode) {
+        let seq = {
+            let mut guard = self.event_seq.lock().await;
+            let s = *guard;
+            *guard += 1;
+            s
+        };
+        let record = EventRecord::new(
+            seq,
+            self.session_id.clone(),
+            PersistedEvent::PermissionModeChanged { from, to },
+        );
+        if let Err(e) = self.event_store.append(&self.session_id, record).await {
+            tracing::warn!(
+                error = %e,
+                session = %self.session_id,
+                seq,
+                "PermissionModeChanged persist failed (best-effort, continue)"
+            );
+            return;
+        }
+        let mut guard = self.durable_seq.lock().await;
+        if seq > *guard {
+            *guard = seq;
+        }
+    }
 }
 
 impl PlanModeController for PlanControllerHandle {
@@ -1115,6 +1395,10 @@ impl PlanModeController for PlanControllerHandle {
     ) -> BoxFuture<'_, Result<(), PolicyError>> {
         let state = self.state.clone();
         let events = self.events.clone();
+        let persister_session = self.session_id.clone();
+        let persister_store = self.event_store.clone();
+        let persister_seq = self.event_seq.clone();
+        let persister_durable = self.durable_seq.clone();
         Box::pin(async move {
             let mut snap = state.write().await;
             if snap.mode != PermissionMode::Plan {
@@ -1127,6 +1411,16 @@ impl PlanModeController for PlanControllerHandle {
             snap.mode = target_mode;
             snap.allowed_prompts = allowed_prompts;
             drop(snap);
+            // Event Sourcing：持久化 PermissionModeChanged（best-effort）
+            let handle = PlanControllerHandle {
+                state,
+                events: events.clone(),
+                session_id: persister_session,
+                event_store: persister_store,
+                event_seq: persister_seq,
+                durable_seq: persister_durable,
+            };
+            handle.persist_mode_changed(from, target_mode).await;
             events.emit(Event::PermissionModeChanged {
                 from,
                 to: target_mode,
@@ -1139,12 +1433,26 @@ impl PlanModeController for PlanControllerHandle {
     fn set_mode(&self, mode: PermissionMode) -> BoxFuture<'_, ()> {
         let state = self.state.clone();
         let events = self.events.clone();
+        let persister_session = self.session_id.clone();
+        let persister_store = self.event_store.clone();
+        let persister_seq = self.event_seq.clone();
+        let persister_durable = self.durable_seq.clone();
         Box::pin(async move {
             let mut snap = state.write().await;
             let from = snap.mode;
             snap.mode = mode;
             // set_mode 是 CLI 显式切换，不重置 allowed_prompts（保留先前 plan.exit 缓存）
             drop(snap);
+            // Event Sourcing：持久化 PermissionModeChanged（best-effort）
+            let handle = PlanControllerHandle {
+                state,
+                events: events.clone(),
+                session_id: persister_session,
+                event_store: persister_store,
+                event_seq: persister_seq,
+                durable_seq: persister_durable,
+            };
+            handle.persist_mode_changed(from, mode).await;
             events.emit(Event::PermissionModeChanged { from, to: mode });
             tracing::info!(from = ?from, to = ?mode, "PermissionMode switched by CLI");
         })

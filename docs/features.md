@@ -186,6 +186,11 @@
 | S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 已实现 |
 | S-21 | env: 环境变量语法 | 统一使用 `env:VAR_NAME` 语法引用环境变量，支持 `env:VAR:-fallback` 回退（见 `tech-stack.md` §12） | M1 | 已实现 |
 | S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更（见 `design.md` §11、`modules.md` §1.2） | M6+ | 已实现 |
+| S-23 | Event Sourcing 事件流 | `EventStore`（`{id}.events.jsonl`）持久化状态变更事件，`seq` 单调递增，支持事件重放重建 `Session`（见 `design.md` §25） | M8+ | 已实现 |
+| S-24 | Snapshot 重放 | `SnapshotStore`（`{id}.snapshot.json`）每 50 条 `MessageAppended` 落盘 snapshot，加速 replay（见 `design.md` §25.3） | M8+ | 已实现 |
+| S-25 | SSE durable recovery | `Last-Event-ID` cursor 三级回退：内存 ring buffer → `EventStore::load_after` → `RehydrateRequired`（见 `design.md` §25.5） | M8+ | 已实现 |
+| S-26 | `--replay` 事件重放 | `--replay`/`--resume` 优先走 snapshot + 事件流重放，旧会话回退到消息日志（见 `design.md` §25.6） | M8+ | 已实现 |
+| S-27 | 事件 schema 版本化 | `SCHEMA_VERSION` + `EventRecord.schema_version`，旧版会话 migration 适配（见 `design.md` §25.7） | M8+ | 已实现 |
 
 ## 11. 前端
 
@@ -278,14 +283,14 @@
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
-| 持久化与存储 | 10 |
+| 持久化与存储 | 15 |
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 10 |
-| **合计** | **177** |
+| **合计** | **182** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-10）10 项低优先级可选。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-10）是参考 CC/Codex 后的核心增强。
 

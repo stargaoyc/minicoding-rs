@@ -107,7 +107,9 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
 │       └── {summary_id}.md  # 每会话摘要
 ├── sessions/
 │   ├── index.json           # 会话索引（轻量元数据）
-│   └── {session_id}.jsonl   # 会话日志（追加写）
+│   ├── {session_id}.jsonl   # 会话日志（追加写，消息层）
+│   ├── {session_id}.events.jsonl  # 事件流（Event Sourcing，见 design.md §25）
+│   └── {session_id}.snapshot.json # 事件 snapshot（每 50 条 MessageAppended 落盘）
 └── logs/
     └── minicoding.YYYY-MM-DD.log
 ```

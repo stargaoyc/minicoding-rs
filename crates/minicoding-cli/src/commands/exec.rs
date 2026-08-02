@@ -112,7 +112,14 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
     .context("构建 Runtime 失败")?;
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let exit_code = runtime.block_on(run_single_turn(&rt, cmd.prompt.clone()));
+    let exit_code = runtime.block_on(async {
+        // Event Sourcing：初始化事件流（exec 始终新建会话，持久化 SessionCreated）。
+        if let Err(e) = rt.init_event_stream().await {
+            eprintln!("初始化事件流失败: {e}");
+            return 1;
+        }
+        run_single_turn(&rt, cmd.prompt.clone()).await
+    });
     Ok(exit_code)
 }
 
