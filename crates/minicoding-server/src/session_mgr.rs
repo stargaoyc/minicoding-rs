@@ -158,8 +158,41 @@ impl SessionManager {
         let prompter: Arc<dyn minicoding_core::policy::PermissionPrompter> = Arc::new(
             ServerPrompter::new(pending.clone(), self.permission_timeout),
         );
+        self.insert_session(&params, prompter, pending)
+    }
 
-        let runtime = build_runtime(&params, prompter)
+    /// 创建新会话并注入自定义 `PermissionPrompter`（T-M8-9，LSP 端用 `LspPrompter`）。
+    ///
+    /// 与 `create_session` 的区别：prompter 由调用方提供（如 `LspPrompter`，通过
+    /// `window/showMessageRequest` 完成权限交互），不使用 `ServerPrompter`。
+    /// `pending_permissions` 仍创建（空 map，LSP 端不经 HTTP resolve 路径），
+    /// 保持 `ServerSession` 结构一致。
+    ///
+    /// # Errors
+    /// Runtime 构造失败时返回 `SessionManagerError::BuildFailed`。
+    ///
+    /// # Panics
+    /// 内部 `sessions` Mutex poisoned 时 panic。
+    pub fn create_session_with_prompter(
+        &self,
+        params_override: Option<ServerRuntimeParams>,
+        prompter: Arc<dyn minicoding_core::policy::PermissionPrompter>,
+    ) -> Result<Arc<ServerSession>, SessionManagerError> {
+        let params = params_override.unwrap_or_else(|| self.default_params.clone());
+        // LSP 端 `pending_permissions` 不使用（权限交互走 showMessageRequest，
+        // 不经 HTTP `resolve_permission` 路径），但 `ServerSession` 结构需要此字段。
+        let pending: PendingPermissions = Arc::new(TokioMutex::new(HashMap::new()));
+        self.insert_session(&params, prompter, pending)
+    }
+
+    /// 内部：构造 Runtime + `ServerSession` 并注册到 sessions map。
+    fn insert_session(
+        &self,
+        params: &ServerRuntimeParams,
+        prompter: Arc<dyn minicoding_core::policy::PermissionPrompter>,
+        pending: PendingPermissions,
+    ) -> Result<Arc<ServerSession>, SessionManagerError> {
+        let runtime = build_runtime(params, prompter)
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
         let runtime = Arc::new(runtime);
         let session = Arc::new(ServerSession::new(runtime, pending));

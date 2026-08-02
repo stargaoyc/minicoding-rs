@@ -2,8 +2,13 @@
 //!
 //! 前端通过 SSE 订阅事件流，记录最后接收的 `seq`，断线重连时用 `seq` 恢复。
 //! `EventDto` 是 `core::Event` 的序列化友好表示，所有变体共享 `seq` 字段。
+//!
+//! NDJSON 协议（T-M8-4）扩展：除 `core::Event` 映射的变体外，新增
+//! `SessionsListed`/`SessionRetrieved`/`CommandError` 三个 NDJSON 专用变体——
+//! 这些变体不对应 `core::Event`，由 NDJSON 适配器在响应非流式命令时直接构造，
+//! 不经过 `From<&Event>` 转换。
 
-use minicoding_core::model::{Message, StopReason, Task, ToolCallId, ToolResult};
+use minicoding_core::model::{Message, SessionMeta, StopReason, Task, ToolCallId, ToolResult};
 use minicoding_core::policy::{Decision, PermissionMode, Risk};
 use minicoding_core::runtime::Event;
 use serde::{Deserialize, Serialize};
@@ -55,6 +60,17 @@ pub enum EventKind {
     },
     /// 任务更新。
     TaskUpdated { task: Task },
+    /// NDJSON 专用：`ListSessions` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    SessionsListed { sessions: Vec<SessionMeta> },
+    /// NDJSON 专用：`GetSession` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    SessionRetrieved {
+        session_id: String,
+        messages: Vec<Message>,
+    },
+    /// NDJSON 专用：命令错误响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    ///
+    /// 用于：JSON 解析失败、会话不存在、命令不支持等。`seq` 字段为 0（非流式事件）。
+    CommandError { message: String },
 }
 
 impl From<&Event> for EventKind {

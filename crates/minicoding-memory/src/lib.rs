@@ -20,6 +20,7 @@ pub mod inject;
 pub mod long_term;
 pub mod project_doc;
 pub mod session_sum;
+pub mod vector;
 
 pub use auto::{AutoCategory, AutoMemory, is_instructional};
 pub use inject::{inject_auto_memory, inject_memory};
@@ -29,3 +30,4 @@ pub use project_doc::{
     ProjectDocLoaderImpl, find_repo_root, inject_project_doc, inject_project_doc_sync,
 };
 pub use session_sum::SessionSummarizerImpl;
+pub use vector::{MemoryIndex, SearchResult};

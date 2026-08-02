@@ -37,8 +37,9 @@ minicoding-policy = { workspace = true }
 # minicoding-mcp = { workspace = true, optional = true }
 # minicoding-storage = { workspace = true }
 
-# reqwest 仅 web.fetch/search 工具需要（M3+）
-# reqwest = { workspace = true, optional = true }
+# reqwest 仅 web.fetch/search 工具需要（T-M8-5，feature gate `web`）
+reqwest = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -51,6 +52,6 @@ default = []
 # file-undo = ["dep:minicoding-journal"]
 # sandbox = ["dep:minicoding-sandbox"]
 # mcp = ["dep:minicoding-mcp"]
-# web = ["dep:reqwest"]
+web = ["dep:reqwest", "dep:url"]
 # full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "web"]
 

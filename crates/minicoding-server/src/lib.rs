@@ -1,10 +1,11 @@
 //! # minicoding-server
 //!
-//! HTTP/SSE server + ACP/LSP 适配器（多前端接入层，T-M8-2）。
+//! HTTP/SSE server + NDJSON/ACP/LSP stdio 适配器（多前端接入层，T-M8-2/T-M8-4/T-M8-7/T-M8-8）。
 //!
-//! 提供 JSON-RPC 2.0 over HTTP/SSE 接口，支持多客户端并发会话；ACP stdio 适配器
-//! 可被支持 ACP 的客户端（如 Zed）嵌入；LSP stdio 适配器可被任何支持 LSP 的编辑器
-//! （VS Code/Neovim/Emacs/Helix 等）嵌入。复用 `minicoding-protocol` 的 wire types。
+//! 提供 JSON-RPC 2.0 over HTTP/SSE 接口，支持多客户端并发会话；NDJSON stdio 适配器
+//! 供编辑器插件嵌入（T-M8-4）；ACP stdio 适配器可被支持 ACP 的客户端（如 Zed）嵌入
+//! （T-M8-7）；LSP stdio 适配器可被任何支持 LSP 的编辑器（VS Code/Neovim/Emacs/Helix
+//! 等）嵌入（T-M8-8）。复用 `minicoding-protocol` 的 wire types。
 //!
 //! ## 设计要点
 //!
@@ -14,6 +15,7 @@
 //! - **多会话并发**：HTTP path 带 `session_id`，`SessionManager` 管理多 `Runtime`；
 //! - **`ServerPrompter`**：HTTP 端权限交互——`PermissionRequested` 事件推送到 SSE，
 //!   客户端通过 `POST /sessions/{id}/permissions/{pid}` 回传决策；
+//! - **NDJSON stdio**：作为 `minicoding serve --ndjson` 子模式（T-M8-4）；
 //! - **ACP stdio**：作为 `minicoding serve --acp` 子模式（T-M8-7）；
 //! - **LSP stdio**：作为 `minicoding serve --lsp` 子模式（T-M8-8，feature gate `lsp`）。
 //!
@@ -34,13 +36,25 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+pub mod acp;
 pub mod http;
+#[cfg(feature = "lsp")]
+pub mod lsp;
+#[cfg(feature = "lsp")]
+pub mod lsp_prompter;
+pub mod ndjson;
 pub mod prompter;
 pub mod runtime_builder;
 pub mod session_mgr;
 pub mod sse;
 
+pub use acp::{AcpError, serve_acp};
 pub use http::{ServerConfig, serve};
+#[cfg(feature = "lsp")]
+pub use lsp::{LspError, serve_lsp};
+#[cfg(feature = "lsp")]
+pub use lsp_prompter::LspPrompter;
+pub use ndjson::{NdjsonError, serve_ndjson};
 pub use prompter::ServerPrompter;
-pub use runtime_builder::build_runtime;
+pub use runtime_builder::{ServerRuntimeParams, build_runtime};
 pub use session_mgr::{ServerSession, SessionManager, SessionManagerError};

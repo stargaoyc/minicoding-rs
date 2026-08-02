@@ -1984,6 +1984,7 @@ dependencies = [
  "minicoding-tools",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "time",
  "tokio",
@@ -2025,6 +2026,7 @@ dependencies = [
  "minicoding-core",
  "minicoding-policy",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
@@ -2035,6 +2037,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+ "url",
 ]
 
 [[package]]

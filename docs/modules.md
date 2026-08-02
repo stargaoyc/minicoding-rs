@@ -316,6 +316,7 @@ minicoding-memory/src/
 │   ├── mod.rs
 │   ├── loader.rs          # AGENTS.md 分层加载算法（见 design.md §8.6）
 │   └── fallback.rs        # fallback 文件名与 override 解析（CLAUDE.md/.cursorrules）
+├── vector.rs              # `@memory` BM25 语义检索（CJK 逐字分词，零外部依赖）
 └── inject.rs              # 记忆注入 system 段（包裹 <long_term_memory>/<auto_memory> 边界）
 ```
 
@@ -444,7 +445,7 @@ minicoding-mcp/src/
 └── naming.rs              # mcp__<server>__<tool> 命名 + 解析 + 权限通配匹配
 ```
 
-> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+；`tool_search.rs`（BM25 检索）规划在 M7+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。
+> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。T-M8-5（`server/tool_search.rs`）已交付：BM25 工具检索索引，工具数多时按自然语言查询返回 top-k 相关 schema。
 
 ### 8.3 库选型（不自研）
 
@@ -563,8 +564,9 @@ minicoding-tools/src/
 │   ├── output.rs          # 读取后台命令累积输出
 │   └── kill.rs            # 终止后台命令
 ├── web/
-│   ├── fetch.rs           # reqwest + html→markdown
-│   └── search.rs          # M7+
+│   ├── fetch.rs           # reqwest + html→markdown + SSRF 防护
+│   ├── search.rs          # DuckDuckGo HTML 端点（无需 API key）
+│   └── ssrf.rs            # URL/IP 校验：拒绝私有/loopback/link-local IP
 ├── git/
 │   ├── diff.rs
 │   └── apply.rs
@@ -752,10 +754,10 @@ minicoding-server/src/
 ├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
-├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，规划）
-├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，规划）
-├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest，规划）
-└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot，规划）
+├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
+├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，feature gate `lsp`）
+├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest 点对点权限交互）
+└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
 
 ### 16.3 关键设计点
 
@@ -922,13 +924,13 @@ Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M
 | context (压缩/熔断) | 基础 | ✅ 完整 | 增强 | 稳定 | - |
 | policy (双 trait/黑名单/预设) | ✅ | 增强（risk 解释） | 稳定 | 稳定 | - |
 | providers (openai/anthropic) | ✅ | ollama | router | 多模态 | - |
-| tools (fs/shell/task/plan) | ✅ | web/git/multiedit | mcp 包装 | 稳定 | - |
+| tools (fs/shell/task/plan) | ✅ | multiedit | mcp 包装 | ✅ web/git/shell.background | - |
 | storage (jsonl/audit) | ✅ | index/lock | export | 稳定 | - |
 | sandbox (应用层路径) | ✅ | - | ✅ OS 级（sandbox-run） | Windows 强化 | - |
-| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | 向量检索 | - |
+| memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | ✅ 向量检索（BM25） | - |
 | hooks | - | - | ✅ 10 事件+asyncRewake | 稳定 | - |
 | journal | - | - | ✅ /undo | 稳定 | - |
-| mcp (rmcp client) | - | - | ✅ | server 暴露+检索 | - |
+| mcp (rmcp client) | - | - | ✅ | ✅ server 暴露+检索 | - |
 | cli (单次+会话+exec+doctor) | ✅ | resume | mcp 子命令 | 稳定 | - |
 | tui | - | - | - | ✅ | - |
 | sdk | - | - | - | ✅ | - |

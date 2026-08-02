@@ -52,13 +52,13 @@
 | T-06b | `fs.multiedit` | 同文件多次顺序替换（原子性，参考 CC） | FileWrite | M2 | 规划中 |
 | T-07 | `fs.delete` | 删除文件 + Journal 记录 | FileWrite | M2 | 规划中 |
 | T-08 | `shell.run` | 执行命令（超时+截断+SandboxDriver） | Command | M2 | 规划中 |
-| T-08b | `shell.background` | 启动后台命令，返回 shell_id（参考 CC） | Command | M4+ | 规划中 |
-| T-08c | `shell.output` | 读取后台命令累积输出（非阻塞） | None | M4+ | 规划中 |
-| T-08d | `shell.kill` | 终止后台命令 | Command | M4+ | 规划中 |
-| T-09 | `web.fetch` | URL→Markdown | Network | M4+ | 规划中 |
-| T-10 | `web.search` | 网页搜索 | Network | M7+ | 规划中 |
-| T-11 | `git.diff` | 查看 diff | None | M6 | 规划中 |
-| T-12 | `git.apply` | 应用 patch | FileWrite | M6 | 规划中 |
+| T-08b | `shell.background` | 启动后台命令，返回 shell_id（参考 CC） | Command | M8 | 已实现 |
+| T-08c | `shell.output` | 读取后台命令累积输出（非阻塞） | None | M8 | 已实现 |
+| T-08d | `shell.kill` | 终止后台命令 | Command | M8 | 已实现 |
+| T-09 | `web.fetch` | URL→Markdown，SSRF 防护（拒绝私有/loopback IP） | Network | M8 | 已实现 |
+| T-10 | `web.search` | 网页搜索（DuckDuckGo HTML，无需 API key） | Network | M8 | 已实现 |
+| T-11 | `git.diff` | 查看 diff（只读，路径沙箱） | None | M8 | 已实现 |
+| T-12 | `git.apply` | 应用 patch（路径沙箱 + 权限审批） | FileWrite | M8 | 已实现 |
 | T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现 |
 | T-14 | `task.create`/`update`/`list` | 增量任务管理 + 依赖 + 持久化（替代 todo.write） | None | M3 | 规划中 |
 | T-15 | `plan.exit` | 退出 Plan 模式并提交计划 | None | M5 | 已实现 |
@@ -91,7 +91,7 @@
 | M-05 | 隐式摘要 + 失败降级链 | 主→备用→启发式兜底 | M3 | 规划中 |
 | M-06 | 显式 `memory.write` | 用户"记住 X" | M3 | 规划中 |
 | M-07 | AGENTS.md 项目记忆 | 分层加载 + override + fallback | M3 | 规划中 |
-| M-08 | 向量检索（`@memory`） | 语义检索增强 | M8+ | 规划中 |
+| M-08 | 向量检索（`@memory`） | BM25 语义检索（零外部依赖，CJK 逐字分词） | M8 | 已实现 |
 
 ## 6. 权限与安全
 
@@ -152,7 +152,7 @@
 | X-06 | 三作用域配置 | local/project/user（mcp.json） | M4 | 已实现 |
 | X-07 | project 作用域首次批准 | mcp_choices.toml，防恶意仓库植入 | M4 | 已实现 |
 | X-08 | required 语义 | required=true 启动失败则拒启动 | M4 | 已实现 |
-| X-09 | 工具检索（Tool Search） | BM25 按需检索（工具多时） | M7+ | 规划中 |
+| X-09 | 工具检索（Tool Search） | BM25 按需检索（工具多时） | M8 | 已实现 |
 | X-10 | MCP server 暴露 | `serve --as-mcp-server` 被其他 Agent 调用 | M8 | 已实现 |
 | X-11 | `mcp` 子命令 | list/approve/reset-project-choices | M4 | 已实现 |
 | X-12 | MCP 进程池 | MCP server 连接跨 turn 复用，不每 turn 重启（见 `design.md` §19.5、`modules.md` §8.4） | M4 | 已实现 |
@@ -208,16 +208,16 @@
 | E-02 | CallbackPrompter | SDK 用户闭包 | M4 | 已实现 |
 | E-03 | HTTP/JSON-RPC server | `minicoding serve` | M8 | 已实现 |
 | E-04 | MCP server | 被其他 Agent 调用（即 X-10） | M8 | 已实现 |
-| E-05 | stdin/stdout NDJSON | 编辑器插件协议 | M8 | 规划中 |
-| E-10 | JSON-RPC 协议 | JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`），见 `modules.md` §15 | M6 | 规划中 |
+| E-05 | stdin/stdout NDJSON | 编辑器插件协议 | M8 | 已实现 |
+| E-10 | JSON-RPC 协议 | JSON-RPC 2.0 wire types 独立 crate（`minicoding-protocol`），见 `modules.md` §15 | M6 | 已实现 |
 | E-11 | HTTP/SSE server | HTTP/SSE JSON-RPC 接口，多客户端并发会话（`minicoding-server`），见 `modules.md` §16 | M8 | 已实现 |
-| E-12 | ACP 适配器 | ACP stdio 适配器，可被 Zed 等客户端嵌入 | M8 | 规划中 |
-| E-13 | SSE cursor 恢复 | 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复 | M8 | 规划中 |
-| E-14 | RehydrateRequired 信号 | broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot | M8 | 规划中 |
-| E-15 | LSP server | `minicoding serve --lsp`，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等编辑器嵌入（见 `design.md` §24、`modules.md` §16） | M8 | 规划中 |
-| E-16 | LSP 语义映射 | `workspace/executeCommand`→prompt、`$/progress`→流式 token/工具进度、`minicoding/event`→事件广播（见 `design.md` §24 映射表） | M8 | 规划中 |
-| E-17 | LspPrompter | 实现 `PermissionPrompter`，`window/showMessageRequest` 点对点权限交互，与 `TuiPrompter` 同构 | M8 | 规划中 |
-| E-18 | LSP codeAction | `textDocument/codeAction` 提供 AI 快速操作（解释/重构/修复选中代码） | M8 | 规划中 |
+| E-12 | ACP 适配器 | ACP stdio 适配器，可被 Zed 等客户端嵌入 | M8 | 已实现 |
+| E-13 | SSE cursor 恢复 | 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复 | M8 | 已实现 |
+| E-14 | RehydrateRequired 信号 | broadcast 溢出时发 RehydrateRequired，客户端重拉 snapshot | M8 | 已实现 |
+| E-15 | LSP server | `minicoding serve --lsp`，基于 `tower-lsp`，可被 VS Code/Neovim/Emacs/Helix 等编辑器嵌入（见 `design.md` §24、`modules.md` §16） | M8 | 已实现 |
+| E-16 | LSP 语义映射 | `workspace/executeCommand`→prompt、`$/progress`→流式 token/工具进度、`minicoding/event`→事件广播（见 `design.md` §24 映射表） | M8 | 已实现 |
+| E-17 | LspPrompter | 实现 `PermissionPrompter`，`window/showMessageRequest` 点对点权限交互，与 `TuiPrompter` 同构 | M8 | 已实现 |
+| E-18 | LSP codeAction | `textDocument/codeAction` 提供 AI 快速操作（解释/重构/修复选中代码） | M8 | 已实现 |
 
 ## 12.5 Web 与桌面应用（M9，低优先级）
 

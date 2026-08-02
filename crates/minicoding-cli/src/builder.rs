@@ -264,6 +264,11 @@ pub fn build_runtime(
     register_readonly_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
+    // T-M8-5：git 工具组（git.diff 只读 / git.apply 写入）
+    minicoding_tools::register_git_tools(&mut tools);
+    // T-M8-5：web 工具组（web.fetch/search，需 `web` feature）
+    #[cfg(feature = "web")]
+    minicoding_tools::register_web_tools(&mut tools);
     // T-M3-8：任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
     // T-M7-4：注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
     register_task_tools(&mut tools, Some(event_bus.clone()));

@@ -22,5 +22,7 @@
 //! 详见 `docs/design.md` §19.1（双向定位）、`docs/modules.md` §8.5。
 
 pub mod expose;
+pub mod tool_search;
 
 pub use expose::{ToolExposer, serve_as_mcp_server};
+pub use tool_search::{ToolSearchIndex, ToolSearchResult};
