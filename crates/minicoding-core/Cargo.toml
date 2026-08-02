@@ -29,7 +29,18 @@ semver = { workspace = true }
 # notify 是跨平台文件系统通知库；core 通过其监听 config.toml 变更广播 Event::ConfigChanged。
 notify = { workspace = true }
 
+# TypeScript 类型生成（M9，feature gate `ts`，见 AGENTS.md §8.4）
+# 仅 `cargo test --features ts` 时生效，正常构建不引入。
+ts-rs = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+
+[features]
+default = []
+# 启用 ts-rs 类型导出（M9 前端 DTO 契约，见 AGENTS.md §8.4）
+# `cargo test --features ts -p minicoding-core` 生成 `core` 的 TS 类型到
+# `crates/minicoding-web/src/api/generated/`，供前端导入。
+ts = ["dep:ts-rs"]

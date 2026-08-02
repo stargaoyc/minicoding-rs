@@ -10,7 +10,7 @@
 
 ### 0.1 Crate 列表
 
-> **当前 Cargo workspace 含 17 个 crate（M0–M8 范围）**。M9（低优先级，规划中）将新增 `minicoding-web`（独立 npm 项目，不入 workspace）与 `minicoding-desktop`（Tauri 壳，加入 workspace），见 §18/§19。下表列出全部 19 个 crate（含 M9 规划项）。
+> **当前 Cargo workspace 含 18 个 crate**（M0–M8 的 17 个 + M9 新增 `minicoding-desktop`）。M9 另含 `minicoding-web`（独立 npm 项目，不入 Cargo workspace，见 §18）。下表列出全部 19 个 crate。
 
 ```
 minicoding-rs (workspace)
@@ -27,13 +27,13 @@ minicoding-rs (workspace)
 │   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）+ 小 LLM 配置
 │   ├── minicoding-tools         # 内置 Tool 实现（fs/shell/web/git/task/plan/mcp 包装）
 │   ├── minicoding-protocol      # JSON-RPC 2.0 wire types + Event/Command DTO（前后端协议契约）
-│   ├── minicoding-server        # HTTP/SSE server + ACP/LSP 适配器（多前端接入层）
+│   ├── minicoding-server        # HTTP/SSE server + ACP/LSP 适配器（多前端接入层）+ M9 --web 静态托管
 │   ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar + Manifest）
 │   ├── minicoding-cli           # CLI frontend
 │   ├── minicoding-tui           # TUI frontend（M7）
 │   ├── minicoding-sdk           # 嵌入 SDK（M8）
-│   ├── minicoding-web           # Web 前端（React 19.2 + TS 7.0 + Vite 8.1，M9 规划，独立 package.json 不入 workspace）
-│   └── minicoding-desktop       # Tauri 2.x 桌面壳（M9 规划，sidecar 启动 minicoding-server）
+│   ├── minicoding-web           # Web 前端（React 19 + TS + Vite 6 + Tailwind v4，M9，独立 package.json 不入 workspace）
+│   └── minicoding-desktop       # Tauri 2.x 桌面壳（M9，sidecar 启动 minicoding-server，feature gate `desktop`）
 ```
 
 ### 0.2 依赖方向
@@ -889,14 +889,16 @@ minicoding-extension-sdk/src/
 
 ### 19.2 关键设计
 
-- **sidecar 管理**：Tauri 启动 sidecar，读取 stdout 获取实际监听端口，注入前端；
+- **sidecar 管理**：Tauri 启动 sidecar，读取 stdout 获取实际监听端口，注入前端（`sidecar.rs`）；
 - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信走 HTTP/SSE（同源，无 CORS 问题）；
+- **系统托盘**（W-07）：右键菜单"显示窗口/退出"，关闭窗口时隐藏到托盘而非退出（`tray.rs`）；
+- **全局快捷键**（W-07）：`Cmd/Ctrl+Shift+M` 切换窗口显示/隐藏（`tauri-plugin-global-shortcut`）；
 - **自动更新**：Tauri updater 配置签名公钥，更新包需签名校验通过才安装；
 - **安全**：Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格（`script-src 'self'`）。
 
 ### 19.3 依赖
 
-- Tauri 2.x + `tauri-plugin-shell`（sidecar）+ `tauri-plugin-updater`（自动更新）+ `tauri-plugin-global-shortcut` + `tauri-plugin-notification`；
+- Tauri 2.x + `tauri-plugin-shell`（sidecar）+ `tauri-plugin-updater`（自动更新）+ `tauri-plugin-global-shortcut`（全局快捷键，W-07）；
 - `minicoding-server`（作为 sidecar 二进制，构建时通过 `tauri.conf.json` 的 `externalBin` 打包）；
 - 不直接依赖 `minicoding-core`（sidecar 是独立进程，通过 HTTP/SSE 通信）。
 

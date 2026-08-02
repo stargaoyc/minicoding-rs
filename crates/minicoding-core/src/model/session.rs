@@ -10,10 +10,17 @@ pub type SessionId = String;
 
 /// 会话元数据（轻量列出，不加载消息）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct SessionMeta {
     pub id: SessionId,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: OffsetDateTime,
     pub message_count: usize,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub last_message_at: OffsetDateTime,
     /// 任务列表（跨压缩保留，见 `design.md` §18.5、C-31）。
     ///
@@ -25,9 +32,16 @@ pub struct SessionMeta {
 
 /// 会话（运行时镜像，与 storage 一致）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct Session {
     pub id: SessionId,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub created_at: OffsetDateTime,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub workdir: Utf8PathBuf,
     /// 配置 hash，用于 resume 时校验一致性。
     pub config_hash: u64,
@@ -50,6 +64,11 @@ impl Session {
 
 /// LLM 停止原因。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     EndTurn,
@@ -72,6 +91,11 @@ pub enum TurnOutcome {
 
 /// 用户输入提示类型（影响上下文构建）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextHint {
     /// 普通提问。
@@ -85,9 +109,14 @@ pub enum ContextHint {
 
 /// 附件（文件或图片）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Attachment {
-    File(Utf8PathBuf),
+    File(#[cfg_attr(feature = "ts", ts(type = "string"))] Utf8PathBuf),
     Image { data: Vec<u8>, mime: String },
 }
 

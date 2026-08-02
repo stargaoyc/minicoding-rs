@@ -16,16 +16,30 @@ use serde::{Deserialize, Serialize};
 
 /// 事件 DTO（携带 `seq`，用于 SSE cursor 恢复）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct EventDto {
     /// 单调递增序列号（每会话独立计数）。
+    ///
+    /// TS 端用 `number`（实际值远小于 2^53，无需 `bigint`）。
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub seq: u64,
     /// 事件种类。
+    #[cfg_attr(feature = "ts", ts(flatten))]
     #[serde(flatten)]
     pub kind: EventKind,
 }
 
 /// 事件种类（与 `core::Event` 一一映射，但序列化为 tagged enum）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
     /// 流式 token 增量。

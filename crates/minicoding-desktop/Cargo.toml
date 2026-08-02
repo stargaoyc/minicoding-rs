@@ -1,0 +1,45 @@
+[package]
+name = "minicoding-desktop"
+description = "Tauri 2.x 桌面壳（M9，sidecar 启动 minicoding-server）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "minicoding_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minicoding-desktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[dependencies]
+minicoding-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+camino = { workspace = true }
+tokio = { workspace = true }
+
+# Tauri 重依赖（feature gate `desktop`，需系统 webview 运行时）
+# 直接声明而非 workspace.dependencies，避免未启用 feature 时 Cargo 解析整个 tauri 依赖树
+tauri = { version = "2", optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
+# W-07：系统托盘 + 全局快捷键（Tauri 2.x 内置 tray，global-shortcut 通过 plugin）
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+
+[features]
+default = []
+# 启用 Tauri 桌面壳（需 webkit2gtk Linux / WebKit macOS / WebView2 Windows）
+desktop = [
+    "dep:tauri",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-global-shortcut",
+]

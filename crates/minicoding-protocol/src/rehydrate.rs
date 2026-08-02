@@ -8,10 +8,16 @@ use serde::{Deserialize, Serialize};
 
 /// Rehydrate 信号（作为特殊事件推送给客户端）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct RehydrateRequired {
     /// 会话 ID。
     pub session_id: String,
     /// 最后可确认的 seq（客户端重连时不应使用此 seq 之后的本地状态）。
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub last_known_seq: u64,
     /// 原因说明。
     pub reason: String,

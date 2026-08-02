@@ -228,16 +228,16 @@
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| W-01 | Web 前端 | React 19.2 + TS 7.0 + Vite 8.1 + React Compiler，对话/工具/权限 UI | M9 | 规划中 |
-| W-02 | 流式 SSE 渲染 | `Event::Token`/`ToolCall`/`PermissionRequest` 实时渲染，TanStack Query 增量更新 | M9 | 规划中 |
-| W-03 | 权限确认弹窗 | shadcn/ui Dialog 接收 `PermissionPrompt` → JSON-RPC `permission.resolve` 回传 | M9 | 规划中 |
-| W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Router 类型安全路由 | M9 | 规划中 |
-| W-05 | 暗色/亮色主题 | Tailwind v4 + shadcn/ui theme provider | M9 | 规划中 |
-| W-06 | Tauri 桌面壳 | Tauri 2.x + Rust sidecar（`minicoding-server`），三平台打包 `.dmg`/`.msi`/`.AppImage` | M9 | 规划中 |
-| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 规划中 |
-| W-08 | 静态资源托管 | `minicoding serve --web ./dist` 单二进制部署 + CORS 配置 | M9 | 规划中 |
-| W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 规划中 |
-| W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 规划中 |
+| W-01 | Web 前端 | React 19 + TS + Vite 6 + Tailwind v4，对话/工具/权限 UI（`crates/minicoding-web`） | M9 | 已实现（现代暗色主题 + glassmorphism + 渐变 accent） |
+| W-02 | 流式 SSE 渲染 | `Event::Token`/`ToolCall`/`PermissionRequest` 实时渲染，TanStack Query 增量更新 + 流式光标 | M9 | 已实现 |
+| W-03 | 权限确认弹窗 | shadcn/ui Dialog 接收 `PermissionPrompt` → JSON-RPC `permission.resolve` 回传，含风险等级可视化 | M9 | 已实现（low/medium/high 三色徽章 + 4 种决策按钮） |
+| W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Query 缓存管理 | M9 | 已实现（可折叠侧栏 + 会话元数据展示） |
+| W-05 | 暗色/亮色主题 | Tailwind v4 + shadcn/ui theme provider | M9 | 已实现（双主题 CSS 变量 + Zustand 持久化 + 系统偏好跟随 + FOUC 预防） |
+| W-06 | Tauri 桌面壳 | Tauri 2.x + Rust sidecar（`minicoding-server`），三平台打包 `.dmg`/`.msi`/`.AppImage` | M9 | 已实现（`crates/minicoding-desktop`，feature gate `desktop`） |
+| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 已实现（系统托盘 + `Cmd/Ctrl+Shift+M` 全局快捷键 + 关闭隐藏到托盘 + Tauri updater） |
+| W-08 | 静态资源托管 | `minicoding serve --web ./dist` 单二进制部署 + CORS 配置 | M9 | 已实现（`tower-http::ServeDir` + SPA fallback + `--cors-origin`） |
+| W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 已实现（禁用 `dangerouslySetInnerHTML`、Markdown 经 React 转义、权限后端强制 C-01） |
+| W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 已实现（package.json 内置 `lint`/`format` 脚本） |
 
 ## 13. 工程与质量
 
@@ -250,8 +250,8 @@
 | Q-05 | 属性测试（proptest） | `Message` JSON roundtrip + path sandbox 不变量 | M3 | 已实现 |
 | Q-06 | 性能基准（criterion） | 压缩管道 100/500/1000 消息基准 | M2+ | 已实现 |
 | Q-07 | 沙箱平台 CI matrix | Linux/macOS/Windows 拒绝语义 | M4+ | 已实现（三平台 CI matrix：Linux Landlock + macOS Seatbelt + Windows Job Object 编译/单测全覆盖） |
-| Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M10 | 规划中（推迟到 M10） |
-| Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M10 | 规划中（推迟到 M10） |
+| Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M10 | 已实现（`cargo-dist.toml` 配置 5 个 target + shell/powershell/homebrew/scoop 安装器） |
+| Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M10 | 已实现（cargo-dist `tap`/`scoop`/`publish-jobs` 覆盖三渠道） |
 
 ## 14. Extension 扩展
 

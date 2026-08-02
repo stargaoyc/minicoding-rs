@@ -26,6 +26,11 @@ pub enum Verdict {
 
 /// 交互后的最终决策（不再含 Ask）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
@@ -44,6 +49,11 @@ pub enum Decision {
 /// - `Auto`：分类器自动批准（含降级保护，阶段 6+，当前未启用）；
 /// - `BypassPermissions`：全放行（仅隔离容器内，对齐 CC `bypassPermissions`）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     #[default]
@@ -59,6 +69,11 @@ pub enum PermissionMode {
 /// `tool` 与 `prompt` 同时匹配时直接 `Allow`。`prompt` 为子串匹配（如
 /// `"cargo build"` 匹配 `"cargo build --release"`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct PreApprovedPrompt {
     /// 工具名（如 `"shell.run"`）。
     pub tool: String,
@@ -91,6 +106,11 @@ pub struct PermissionContext {
 
 /// 权限请求提示（点对点交互）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct PermissionPrompt {
     pub id: String,
     pub tool: String,
@@ -101,6 +121,11 @@ pub struct PermissionPrompt {
 
 /// 风险等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {
     Low,
@@ -110,6 +135,11 @@ pub enum Risk {
 
 /// 交互选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptOption {
     AllowOnce,

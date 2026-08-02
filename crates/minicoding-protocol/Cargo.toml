@@ -14,3 +14,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+# TypeScript 类型生成（M9，feature gate `ts`，见 AGENTS.md §8.4）
+# 启用 `ts` 时连带启用 `minicoding-core/ts`，保证引用的 core 类型也导出。
+ts-rs = { workspace = true, optional = true }
+
+[features]
+default = []
+# 启用 ts-rs 类型导出（M9 前端 DTO 契约，见 AGENTS.md §8.4）
+# `cargo test --features ts -p minicoding-protocol` 生成 protocol + core 的 TS
+# 类型到 `crates/minicoding-web/src/api/generated/`。
+ts = ["dep:ts-rs", "minicoding-core/ts"]

@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/*
+ * Tailwind v4 主题（Oxide 引擎，CSS-first config）
+ * 双主题：暗色（默认）+ 亮色，通过 `html.light` 切换
+ * 见 AGENTS.md §8.2、design.md §26.2、features.md W-05
+ */
+@theme {
+  --color-risk-low: #22c55e;
+  --color-risk-medium: #f59e0b;
+  --color-risk-high: #ef4444;
+
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+/* 暗色主题（默认）：深底 + indigo/violet 渐变 accent + glassmorphism */
+:root,
+html.dark {
+  --color-bg: #0a0a0f;
+  --color-surface: #12121a;
+  --color-surface-2: #1a1a25;
+  --color-border: #252533;
+  --color-text: #e4e4e7;
+  --color-text-muted: #71717a;
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-accent-grad-from: #6366f1;
+  --color-accent-grad-to: #a855f7;
+  color-scheme: dark;
+}
+
+/* 亮色主题：浅底 + indigo accent，保持视觉一致性 */
+html.light {
+  --color-bg: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-2: #f4f4f5;
+  --color-border: #e4e4e7;
+  --color-text: #18181b;
+  --color-text-muted: #71717a;
+  --color-accent: #6366f1;
+  --color-accent-hover: #4f46e5;
+  --color-accent-grad-from: #6366f1;
+  --color-accent-grad-to: #8b5cf6;
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* 流式光标动画 */
+@keyframes blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+.streaming-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.1em;
+  background: var(--color-accent-hover);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: blink 1s infinite;
+}
+
+/* glassmorphism 面板 */
+.glass {
+  background: color-mix(in srgb, var(--color-surface) 70%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+}
+
+/* 渐变 accent */
+.gradient-accent {
+  background: linear-gradient(
+    135deg,
+    var(--color-accent-grad-from),
+    var(--color-accent-grad-to)
+  );
+}
+.gradient-text {
+  background: linear-gradient(
+    135deg,
+    var(--color-accent-grad-from),
+    var(--color-accent-grad-to)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}

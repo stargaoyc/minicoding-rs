@@ -86,6 +86,21 @@ pub struct ServeCommand {
     #[arg(long, default_value_t = 300)]
     permission_timeout_sec: u64,
 
+    /// 静态资源目录（M9 `--web`，托管前端 SPA，见 `design.md` §26.7）。
+    ///
+    /// 设为前端构建产物目录（如 `crates/minicoding-web/dist`）时，HTTP server
+    /// 用 `ServeDir` 托管静态文件，`GET /` 返回 `index.html`，支持 SPA history
+    /// 路由。仅 HTTP 模式生效（`--ndjson`/`--acp`/`--lsp`/`--as-mcp-server` 忽略）。
+    #[arg(long)]
+    web: Option<String>,
+
+    /// CORS 允许的来源（M9 `--cors-origin`，可多次指定，见 `design.md` §26.6）。
+    ///
+    /// 默认（不指定）允许任意来源（`*`，开发用）；指定后仅允许列出的来源精确
+    /// 匹配（生产部署）。桌面模式同源无需配置。仅 HTTP 模式生效。
+    #[arg(long = "cors-origin")]
+    cors_origins: Vec<String>,
+
     /// 切换为 MCP stdio server 模式（T-M8-3）：把内置工具通过 MCP 协议暴露给
     /// 外部 MCP client（如 Claude Desktop），不启动 HTTP server。
     ///
@@ -207,6 +222,8 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_timeout_sec: cmd.permission_timeout_sec,
+        web_dir: cmd.web.as_ref().map(|s| Utf8PathBuf::from(s)),
+        cors_origins: cmd.cors_origins.clone(),
     };
 
     minicoding_server::serve(cfg)
