@@ -263,11 +263,11 @@ command = "cargo test --quiet"    # 一轮结束跑测试
 
 | 子系统 | 集成 |
 |--------|------|
-| 权限（§9） | `PermissionRequest` Hook 可短路 `Prompter`；`PreToolUse` 可 `Ask→Allow` |
-| 上下文压缩（§3） | `PreCompact` 在 4 级管道启动前触发，可注入"必须保留"指令影响权重 |
-| 记忆（§8） | `SessionStart` 注入长期记忆之外的动态信息（git status） |
-| 事件总线（§11） | Hook 触发同步发 `Event::HookRun { name, event, decision, elapsed }` 供观测 |
-| OTel（§15） | Hook 执行打 `hook.run` span，属性 `hook.name`/`hook.event`/`hook.decision` |
+| 权限（`design.md` §9） | `PermissionRequest` Hook 可短路 `Prompter`；`PreToolUse` 可 `Ask→Allow` |
+| 上下文压缩（`design.md` §3） | `PreCompact` 在 4 级管道启动前触发，可注入"必须保留"指令影响权重 |
+| 记忆（`design.md` §8） | `SessionStart` 注入长期记忆之外的动态信息（git status） |
+| 事件总线（`design.md` §11） | Hook 触发同步发 `Event::HookRun { name, event, decision, elapsed }` 供观测 |
+| OTel（`design.md` §15） | Hook 执行打 `hook.run` span，属性 `hook.name`/`hook.event`/`hook.decision` |
 | 子 Agent | `SubagentStop` Hook 可校验产出，决定是否要求父 Agent 重试 |
 
 ---

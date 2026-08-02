@@ -57,7 +57,7 @@ Prompt 注入的危险性来自三要素叠加（"致命三角"）：
 
 | 角 | 缓解 |
 |----|------|
-| 私有数据访问 | 凭证不下传子进程（§6.2）、`fs.read` 脱敏（§9.3）、路径沙箱（§3） |
+| 私有数据访问 | 凭证不下传子进程（§6.2）、`fs.read` 脱敏（§13.3）、路径沙箱（§3） |
 | 不可信内容暴露 | 工具输出包裹 `<tool_output>` 边界（§2.5）、MCP server schema 校验（C-25） |
 | 外泄通道 | OS 沙箱默认禁网络（§8）、域名 allowlist（§5.2）、`ExternalSandbox`/`DangerFullAccess` 需显式确认（C-22） |
 
@@ -465,7 +465,7 @@ shell.run / fs.write 执行
    └─ ≥ 5 次  → 强制 TurnEnd，回灌错误总结给 LLM 与用户
 ```
 
-熔断阈值可配（`[sandbox] denial_threshold = 3`，`hard_threshold = 5`）。熔断事件打 OTel span event（`circuit_breaker.tripped`），便于事后分析 Agent 行为模式。该机制与 §2.4 的 `max_tool_iters` 互补：后者防"工具调用死循环"，前者防"沙箱拒绝死循环"。
+熔断阈值可配（`[sandbox] denial_threshold = 3`，`hard_threshold = 5`）。熔断事件打 OTel span event（`circuit_breaker.tripped`），便于事后分析 Agent 行为模式。该机制与 `design.md` §2.4 的 `max_tool_iters` 互补：后者防"工具调用死循环"，前者防"沙箱拒绝死循环"。
 
 ### 8.9 Auto-Review 子代理（参考 Codex Guardian）
 

@@ -650,7 +650,7 @@ pub struct ShellKillInput {
 - `shell.background` 副作用 `SideEffect::Command`，走串行桶与完整权限流程（同 `shell.run`）；
 - `shell.output` 副作用 `None`（只读快照），可并行；
 - `shell.kill` 副作用 `Command`，串行；
-- 后台命令同样受 `SandboxDriver` 约束（§security.md §8）、`shell_environment_policy`（§security.md §10）、危险命令黑名单（§security.md §4.2）；
+- 后台命令同样受 `SandboxDriver` 约束（`security.md` §8）、`shell_environment_policy`（`security.md` §10）、危险命令黑名单（`security.md` §4.2）；
 - 后台命令的 `shell_id` 在 session 内有效，跨 session 不可访问（防混淆）。
 
 **与 `shell.run` 的选择引导**（系统提示）：短时命令（<30s）用 `shell.run` 直接拿结果；长时命令或需中途检查输出的用 `shell.background` + `shell.output` 轮询。
@@ -740,7 +740,7 @@ pub struct StaticRouter {
 `StaticRouter` 保留作为配置未指定路由策略时的默认值。M7+ 可实现 `TaskBasedRouter`
 （按 `Task::kind`）、`CostAwareRouter`（按 token 预算）等。
 
-**C-13 防死循环**：`Router::pick` 是无状态纯选择，不涉及重试逻辑；重试由
+**防死循环**：`Router::pick` 是无状态纯选择，不涉及重试逻辑；重试由
 `RetryProvider` 装饰器负责（bounded `max_retries`，见 `providers::common::retry`）。
 
 ---

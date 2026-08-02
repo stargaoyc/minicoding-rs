@@ -461,7 +461,105 @@ windows = { version = "...", features = ["..."] }
 
 ---
 
-## §8 快速参考（检查清单）
+## §8 前端开发规范（M9，`minicoding-web` / `minicoding-desktop`）
+
+> **范围说明**：本节约束 M9 Web/桌面前端开发。M9 为低优先级可选里程碑，前端代码独立于 Cargo workspace（`crates/minicoding-web/` 用 npm/pnpm 管理，`crates/minicoding-desktop/` 的 Rust 部分加入 workspace）。技术选型见 `docs/tech-stack.md` §4.1，模块职责见 `docs/modules.md` §18–§19，架构设计见 `docs/design.md` §26。
+
+### 8.1 范围与定位
+
+- 前端**只做 UI 展示与交互**，不含任何业务逻辑（Agent 循环、权限决策、上下文压缩、工具执行等均在 Rust 后端）；
+- 前端**不嵌入 Rust 进程**：Web 模式通过 HTTP/SSE JSON-RPC 连接 `minicoding-server`；桌面模式（Tauri）通过 sidecar 进程通信（见 `docs/design.md` §26）；
+- 前端代码与 Rust 后端的唯一契约是 `minicoding-protocol` 的 wire types（JSON-RPC 2.0 DTO），**不直接调用 Rust API**。
+
+### 8.2 技术栈锁定（与 `docs/tech-stack.md` §4.1 一致）
+
+| 用途 | 选型 | 版本 |
+|------|------|:---:|
+| 框架 | React + React Compiler | 19.2 |
+| 语言 | TypeScript | 7.0 |
+| 构建 | Vite (Rolldown) | 8.1 |
+| 路由 | TanStack Router | 1.170 |
+| 数据获取 | TanStack Query | 5.101 |
+| 客户端状态 | Zustand | 5.0 |
+| Schema 校验 | Zod | 4.4 |
+| 组件库 | shadcn/ui（基于 Radix UI） | latest |
+| 样式 | Tailwind CSS（Oxide 引擎） | v4 |
+| 动画 | Framer Motion | latest |
+| Lint | oxlint | latest |
+| 格式化 | oxfmt | latest |
+| 桌面壳 | Tauri | 2.x |
+
+- **不引入未锁定依赖**：新增依赖必须经评审，优先选 Rust 实现的工具链（oxlint/oxfmt/Vite Rolldown/Tailwind v4）保持"全 Rust 工具链"一致性；
+- **不引入 Electron**：桌面壳统一用 Tauri 2.x（体积/内存/安全均优，与本项目 Rust 一等公民理念一致）。
+
+### 8.3 目录结构与分层
+
+`crates/minicoding-web/` 标准分层（详见 `docs/design.md` §26.2）：
+
+```
+minicoding-web/src/
+├── api/          # JSON-RPC 客户端 + SSE 订阅 + Zod schema（DTO 自动生成，见 §8.4）
+├── hooks/        # TanStack Query + Zustand 封装（业务 hook）
+├── components/   # shadcn/ui 组件 + 业务组件
+├── routes/       # TanStack Router 页面（类型安全路由）
+├── stores/       # Zustand 全局状态（UI 主题、面板开关等）
+└── main.tsx      # 入口
+```
+
+- **严格分层**：`api/` 不依赖 `hooks/`/`components/`；`hooks/` 依赖 `api/`；`components/` 依赖 `hooks/`/`stores/`；`routes/` 依赖 `components/`；
+- **不跨层调用**：组件不直接调 `api/`，必须经 `hooks/` 封装（便于缓存/重试/失效统一管理）。
+
+### 8.4 类型契约（DTO 自动生成）
+
+- `minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 自动生成 TypeScript 类型 + Zod schema，**不手写双份**；
+- 生成产物放 `minicoding-web/src/api/generated/`，**不手动编辑**（文件头标注 `// AUTO-GENERATED, DO NOT EDIT`）；
+- 后端 DTO 变更后，前端 `npm run gen-types` 重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）；
+- 运行时校验：JSON-RPC 响应必须经 Zod parse 后才进入业务层，防止后端 schema 漂移导致运行时错误。
+
+### 8.5 状态管理（职责正交）
+
+| 状态类型 | 工具 | 示例 |
+|---------|------|------|
+| 服务端状态（会话、消息、任务） | TanStack Query | `useSession()`/`useMessages()` |
+| 客户端 UI 状态（主题、面板开关） | Zustand | `useThemeStore()`/`usePanelStore()` |
+| 流式状态（token 增量、工具进度） | TanStack Query + `queryClient.setQueryData` | SSE 事件增量更新缓存 |
+
+- **不混用**：服务端状态不进 Zustand（避免双写不一致）；客户端 UI 状态不进 TanStack Query（避免无谓网络请求）；
+- **流式更新**：SSE 事件用 `queryClient.setQueryData` 增量更新对应 query，不触发 refetch（`Token` 事件追加到消息末尾，`MessageAppended` 事件替换整条消息）。
+
+### 8.6 与后端通信
+
+- **协议**：HTTP/SSE JSON-RPC 2.0（见 `docs/design.md` §24），前端不引入新协议；
+- **端点**：`POST /sessions/{id}/messages` 发消息，`GET /sessions/{id}/events` 订阅 SSE 事件流，`POST /sessions/{id}/permissions/{pid}` 回传权限决策；
+- **权限交互**：`PermissionPrompt` 经 SSE 推到前端，弹出 shadcn/ui Dialog，用户决策经 JSON-RPC 回传（见 `docs/design.md` §9.1）；
+- **CORS**：Web 模式需 `minicoding serve --cors-origin` 配置允许的前端来源（默认仅 `http://localhost:*`）；
+- **错误处理**：JSON-RPC 错误码统一映射为 TanStack Query 的 `error` 状态，UI 用 toast/alert 展示，不吞错。
+
+### 8.7 构建与工具链
+
+- **全 Rust 工具链**：oxlint（Lint）/ oxfmt（格式化）/ Vite Rolldown（构建）/ Tailwind v4 Oxide（CSS）均为 Rust 实现，与后端工具链一致；
+- **CI 校验**：前端 CI 跑 `oxlint && oxfmt --check && tsc --noEmit && vite build`，与 Rust 侧 `cargo fmt --check && clippy && test` 对齐；
+- **不引入 ESLint/Prettier**：已被 oxlint/oxfmt 替代，混用会导致规则冲突与性能浪费；
+- **依赖锁定**：`package-lock.json`（或 `pnpm-lock.yaml`）提交到仓库，与 `Cargo.lock` 同等对待。
+
+### 8.8 测试
+
+- **单元测试**：Vitest（与 Vite 原生集成）测试 hooks/工具函数；
+- **组件测试**：Vitest + Testing Library 测试组件渲染与交互；
+- **E2E 测试**：Playwright 测试关键路径（创建会话→发消息→流式渲染→权限确认）；
+- **不连真实后端**：测试用 MSW（Mock Service Worker）拦截 HTTP/SSE，模拟 JSON-RPC 响应，与 Rust 侧 `wiremock` 不连真实 OpenAI 原则一致（见 §5.4）。
+
+### 8.9 安全
+
+- **凭证**：API key 等凭证**不存前端**——Web 模式由 `minicoding-server` 持有，桌面模式复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04）；
+- **XSS 防护**：流式 token 渲染必须用 React 的 `{text}` 转义，**禁用** `dangerouslySetInnerHTML`（除非经 DOMPurify 清洗，仅用于 Markdown 渲染）；
+- **CSP**：Tauri 桌面模式默认禁用远程内容，CSP 严格（仅允许 `self` + sidecar origin）；Web 模式由部署侧配置 CSP header；
+- **权限决策不前端绕过**：前端 UI 的"允许/拒绝"按钮仅回传 `Decision` 到后端，**不前端短路**权限检查（C-01 在后端强制）；
+- **不存敏感会话日志**：前端不持久化消息内容到 `localStorage`/`IndexedDB`（会话日志由后端 `~/.minicoding/sessions/` 管理，C-04）。
+
+---
+
+## §9 快速参考（检查清单）
 
 开发前快速自检（打勾确认）：
 
