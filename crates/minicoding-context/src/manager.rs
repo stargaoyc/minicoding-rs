@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use minicoding_core::config::RuntimeConfig;
 use minicoding_core::context::{ContextManager, ContextSnapshot};
+use minicoding_core::metrics;
 use minicoding_core::model::{Message, RuntimeError};
+use minicoding_core::otel::span_name;
 use minicoding_core::prompt::{PromptContext, PromptPipeline};
 use minicoding_core::provider::{BoxFuture, ChatRequest, GenerationParams, LlmProvider, Tokenizer};
 use minicoding_core::tool::ToolRegistry;
@@ -22,9 +24,25 @@ use tokio::sync::Mutex;
 
 use crate::budget::TokenBudget;
 use crate::compress::{
-    CircuitBreaker, PostCompactConfig, PredictiveTracker, StateKeep, compress_pipeline,
-    extract_read_files, inject_post_compact, should_predict_compact,
+    CircuitBreaker, CompressResult, PostCompactConfig, PredictiveTracker, StateKeep,
+    compress_pipeline, extract_read_files, inject_post_compact, should_predict_compact,
 };
+
+/// 根据压缩结果计算压缩级别（0-4，用于 metrics 维度）。
+///
+/// 级别语义：`0`=无操作；`1`=L1 裁剪；`2`=L2 摘要；`3`=L3 滚动；`4`=L4 硬截断。
+/// 取最高级别（多级同时触发时反映"最激进"的压缩手段）。
+fn compress_level(result: &CompressResult) -> u8 {
+    if result.truncated_count > 0 {
+        4
+    } else if result.dropped_count > 0 {
+        3
+    } else if result.summarized_count > 0 {
+        2
+    } else {
+        u8::from(result.clipped_count > 0)
+    }
+}
 
 /// 完整上下文管理器（M3 T-M3-1）。
 ///
@@ -162,13 +180,22 @@ impl ContextManagerImpl {
     /// # Errors
     /// - 熔断触发（`should_trip`/`should_force_end`/`is_thrashing`）→ `BudgetExceeded`
     /// - 压缩管道失败（降级链终端也失败，理论不可达）→ 原始 `RuntimeError`
+    #[tracing::instrument(
+        skip(self),
+        fields(
+            otel.name = span_name::COMPRESS,
+            compress.tokens_before = tracing::field::Empty,
+            compress.tokens_after = tracing::field::Empty,
+        )
+    )]
     pub async fn compress(&self, backup_before_compress: bool) -> Result<(), RuntimeError> {
         let state_keep = StateKeep::snapshot(&self.system_prompt);
         let provider_ref = self.provider.as_deref();
 
         // 持写锁运行压缩管道，释放后再获取熔断器锁（避免锁序倒置：messages → breaker）。
-        let (outcome, new_tokens) = {
+        let (outcome, new_tokens, tokens_before) = {
             let mut guard = self.messages.write().await;
+            let tokens_before = self.tokenizer.count_messages(&guard);
             let outcome = compress_pipeline(
                 &mut guard,
                 self.tokenizer.as_ref(),
@@ -181,45 +208,42 @@ impl ContextManagerImpl {
             let tokens = self.tokenizer.count_messages(&guard);
             self.token_cache.store(tokens, Ordering::SeqCst);
             self.count.store(guard.len(), Ordering::SeqCst);
-            (outcome, tokens)
+            (outcome, tokens, tokens_before)
         }; // 写锁释放
+
+        // Span 属性：动态记录压缩前后 token 数
+        let span = tracing::Span::current();
+        span.record("compress.tokens_before", tokens_before);
+        span.record("compress.tokens_after", new_tokens);
+
+        // Metrics：压缩前后 token 分布（histogram）
+        metrics::record_context_tokens("before_compress", tokens_before as u64);
+        metrics::record_context_tokens("after_compress", new_tokens as u64);
 
         let threshold = self.budget.compact_threshold();
         let mut breaker = self.circuit_breaker.lock().await;
 
         match outcome {
-            Ok(_) => {
+            Ok(result) => {
+                let level = compress_level(&result);
                 if new_tokens > threshold {
-                    // 压缩后仍超阈值（Thrash 前兆）
-                    breaker.record_oversize();
-                    if breaker.is_thrashing() {
-                        tracing::warn!(
-                            fail_count = breaker.fail_count(),
-                            consecutive_oversize = breaker.consecutive_oversize(),
-                            "压缩熔断：Thrash 检测触发（连续超阈值），中止本轮"
-                        );
-                        return Err(RuntimeError::BudgetExceeded {
-                            used: new_tokens,
-                            budget: threshold,
-                        });
-                    }
-                    tracing::warn!(
-                        tokens = new_tokens,
-                        threshold,
-                        consecutive_oversize = breaker.consecutive_oversize(),
-                        "压缩后仍超阈值（未 Thrash，继续发送）"
-                    );
+                    Self::handle_oversize(&mut breaker, level, new_tokens, threshold)?;
                 } else {
                     breaker.record_success();
+                    metrics::record_compress(level, "ok");
+                    metrics::set_circuit_breaker("compress", "normal");
                 }
             }
             Err(e) => {
                 breaker.record_failure();
+                metrics::record_error("context");
                 if breaker.should_force_end() {
                     tracing::warn!(
                         fail_count = breaker.fail_count(),
                         "压缩熔断：失败计数 ≥ 5，强制 TurnEnd"
                     );
+                    metrics::record_compress(0, "err");
+                    metrics::set_circuit_breaker("compress", "force_end");
                     return Err(RuntimeError::BudgetExceeded {
                         used: new_tokens,
                         budget: threshold,
@@ -230,6 +254,8 @@ impl ContextManagerImpl {
                         fail_count = breaker.fail_count(),
                         "压缩熔断：失败计数 ≥ 3，中止本轮"
                     );
+                    metrics::record_compress(0, "err");
+                    metrics::set_circuit_breaker("compress", "fused");
                     return Err(RuntimeError::BudgetExceeded {
                         used: new_tokens,
                         budget: threshold,
@@ -240,11 +266,48 @@ impl ContextManagerImpl {
                     fail_count = breaker.fail_count(),
                     "压缩失败但未达熔断阈值，传播错误"
                 );
+                metrics::record_compress(0, "err");
                 return Err(e);
             }
         }
 
         state_keep.assert_unchanged(&self.system_prompt);
+        Ok(())
+    }
+
+    /// 处理"压缩成功但 token 仍超阈值"分支（Thrash 检测）。
+    ///
+    /// 返回 `Err(BudgetExceeded)` 表示 Thrash 熔断触发（中止本轮）；
+    /// 返回 `Ok(())` 表示未熔断（继续发送，调用方在外层完成 breaker 锁释放后继续）。
+    fn handle_oversize(
+        breaker: &mut CircuitBreaker,
+        level: u8,
+        new_tokens: usize,
+        threshold: usize,
+    ) -> Result<(), RuntimeError> {
+        breaker.record_oversize();
+        if breaker.is_thrashing() {
+            tracing::warn!(
+                fail_count = breaker.fail_count(),
+                consecutive_oversize = breaker.consecutive_oversize(),
+                "压缩熔断：Thrash 检测触发（连续超阈值），中止本轮"
+            );
+            metrics::record_compress(level, "err");
+            metrics::set_circuit_breaker("compress", "fused");
+            metrics::record_error("context");
+            return Err(RuntimeError::BudgetExceeded {
+                used: new_tokens,
+                budget: threshold,
+            });
+        }
+        tracing::warn!(
+            tokens = new_tokens,
+            threshold,
+            consecutive_oversize = breaker.consecutive_oversize(),
+            "压缩后仍超阈值（未 Thrash，继续发送）"
+        );
+        metrics::record_compress(level, "oversize");
+        metrics::set_circuit_breaker("compress", "warning");
         Ok(())
     }
 }
@@ -273,6 +336,7 @@ impl ContextManager for ContextManagerImpl {
         })
     }
 
+    #[tracing::instrument(skip(self, tools, config), fields(otel.name = span_name::CONTEXT_BUILD))]
     fn build_chat_request(
         &self,
         tools: &ToolRegistry,
@@ -295,6 +359,9 @@ impl ContextManager for ContextManagerImpl {
             let threshold = self.budget.compact_threshold();
             let current_tokens = self.token_count();
 
+            // Metrics：请求阶段 token 分布
+            metrics::record_context_tokens("request", current_tokens as u64);
+
             // C-08：预测性压缩——当前未超阈值但预测下一 turn 会超时提前压缩
             let need_predictive = predictive_enabled && current_tokens <= threshold && {
                 let tracker = self.predictive_tracker.lock().await;
@@ -315,6 +382,8 @@ impl ContextManager for ContextManagerImpl {
                                 consecutive_oversize = breaker.consecutive_oversize(),
                                 "压缩熔断已触发，拒绝 build_chat_request"
                             );
+                            metrics::record_error("context");
+                            metrics::record_compress(0, "skipped");
                             return Err(RuntimeError::BudgetExceeded {
                                 used: current_tokens,
                                 budget: threshold,

@@ -12,6 +12,7 @@
 
 use crate::prompter::{PendingPermissions, ServerPrompter};
 use crate::runtime_builder::{ServerRuntimeParams, build_runtime};
+use minicoding_core::metrics;
 use minicoding_core::model::{Message, SessionId, SessionMeta, TurnOutcome, UserInput};
 use minicoding_core::policy::Decision;
 use minicoding_core::runtime::{Event, Runtime};
@@ -240,6 +241,8 @@ impl SessionManager {
         let session_id = session.session_id().clone();
         let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
         guard.insert(session_id, session.clone());
+        // Metrics：活跃会话数 gauge
+        metrics::set_active_sessions(guard.len() as u64);
         Ok(session)
     }
 
@@ -286,7 +289,12 @@ impl SessionManager {
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn delete(&self, session_id: &str) -> bool {
         let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
-        guard.remove(session_id).is_some()
+        let removed = guard.remove(session_id).is_some();
+        if removed {
+            // Metrics：活跃会话数 gauge
+            metrics::set_active_sessions(guard.len() as u64);
+        }
+        removed
     }
 
     /// 解析权限请求（HTTP `POST /permissions/{pid}` 调用）。

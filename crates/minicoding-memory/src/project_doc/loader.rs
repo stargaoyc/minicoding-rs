@@ -16,6 +16,7 @@ use crate::project_doc::fallback::find_project_doc;
 use camino::{Utf8Path, Utf8PathBuf};
 use minicoding_core::memory::ProjectDocLoader;
 use minicoding_core::model::MemoryError;
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use tokio::fs;
 
@@ -157,6 +158,7 @@ impl ProjectDocLoaderImpl {
 }
 
 impl ProjectDocLoader for ProjectDocLoaderImpl {
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_LOAD, memory.type = "project_doc"))]
     fn load(&self) -> BoxFuture<'_, Result<String, MemoryError>> {
         Box::pin(async move {
             if self.skip {

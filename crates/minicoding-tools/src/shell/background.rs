@@ -9,7 +9,9 @@
 //! 默认实现 [`InMemoryBackgroundShellStore`] 持有 `tokio::sync::Mutex<HashMap>`；
 //! Runtime 可注入自定义实现（如跨会话持久化）。
 
+use minicoding_core::metrics;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::Tool;
 use std::collections::HashMap;
@@ -84,6 +86,7 @@ impl InMemoryBackgroundShellStore {
 }
 
 impl BackgroundShellStore for InMemoryBackgroundShellStore {
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::SHELL_BG_SPAWN))]
     fn spawn(
         &self,
         command: String,
@@ -151,12 +154,16 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                 stderr: stderr_buf,
                 exit_code,
             };
-            self.shells.lock().await.insert(shell_id.clone(), entry);
+            let mut shells = self.shells.lock().await;
+            shells.insert(shell_id.clone(), entry);
+            // Metrics：后台 shell 数 gauge
+            metrics::set_background_shells(shells.len() as u64);
 
             Ok(shell_id)
         })
     }
 
+    #[tracing::instrument(skip(self), fields(otel.name = "shell.bg_output"))]
     fn output(&self, shell_id: String) -> BoxFuture<'_, Result<BackgroundShellStatus, ToolError>> {
         Box::pin(async move {
             let stdout;

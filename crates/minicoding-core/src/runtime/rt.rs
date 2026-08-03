@@ -19,10 +19,12 @@ use crate::hooks::{
 };
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
+use crate::metrics;
 use crate::model::{
     Message, PolicyError, RuntimeError, Session, SessionId, SideEffect, StopReason, ToolCall,
     ToolCallId, ToolResult, TurnOutcome, UserInput,
 };
+use crate::otel::span_name;
 use crate::policy::{
     Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompter,
     PlanModeController, PlanModeSnapshot, PreApprovedPrompt, Verdict,
@@ -537,13 +539,14 @@ impl Runtime {
         async move {
             // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
             self.sandbox_breaker.reset();
+            metrics::set_circuit_breaker("sandbox", "closed");
 
             // 1. 构造用户消息并入库
             let user_msg = Message::user_text(user_input.text);
-            self.storage
-                .append(&self.session.id, &user_msg)
-                .await
-                .map_err(RuntimeError::Storage)?;
+            if let Err(e) = self.storage.append(&self.session.id, &user_msg).await {
+                metrics::record_error("storage");
+                return Err(RuntimeError::Storage(e));
+            }
             self.ctx.append(user_msg.clone()).await;
             let event = Event::MessageAppended(user_msg);
             self.persist_event(&event).await;
@@ -561,22 +564,28 @@ impl Runtime {
 
                 for _iter in 0..max_iters {
                     // 2. 构建请求（system + tools + 压缩后的历史）
-                    let req = self
-                        .ctx
-                        .build_chat_request(&self.tools, &self.config)
-                        .await?;
+                    let req = match self.ctx.build_chat_request(&self.tools, &self.config).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            metrics::record_error("context");
+                            return Err(e);
+                        }
+                    };
 
                     // 3. 流式调用 LLM
                     let assistant_msg = match self.stream_llm(req).await {
                         Ok(msg) => msg,
-                        Err(e) => return Ok(TurnOutcome::Failed(e.into())),
+                        Err(e) => {
+                            metrics::record_error("llm");
+                            return Ok(TurnOutcome::Failed(e.into()));
+                        }
                     };
 
                     // 4. 落盘 assistant 消息
-                    self.storage
-                        .append(&self.session.id, &assistant_msg)
-                        .await
-                        .map_err(RuntimeError::Storage)?;
+                    if let Err(e) = self.storage.append(&self.session.id, &assistant_msg).await {
+                        metrics::record_error("storage");
+                        return Err(RuntimeError::Storage(e));
+                    }
                     self.ctx.append(assistant_msg.clone()).await;
                     let event = Event::MessageAppended(assistant_msg.clone());
                     self.persist_event(&event).await;
@@ -611,16 +620,19 @@ impl Runtime {
                     // 6. 执行工具调用
                     let results = match self.execute_tool_calls(&assistant_msg.tool_calls).await {
                         Ok(r) => r,
-                        Err(e) => return Ok(TurnOutcome::Failed(e)),
+                        Err(e) => {
+                            metrics::record_error("tool");
+                            return Ok(TurnOutcome::Failed(e));
+                        }
                     };
 
                     // 7. 落盘 tool_result 并入上下文
                     for (id, result) in &results {
                         let msg = Self::tool_result_message(id.clone(), result.clone());
-                        self.storage
-                            .append(&self.session.id, &msg)
-                            .await
-                            .map_err(RuntimeError::Storage)?;
+                        if let Err(e) = self.storage.append(&self.session.id, &msg).await {
+                            metrics::record_error("storage");
+                            return Err(RuntimeError::Storage(e));
+                        }
                         self.ctx.append(msg.clone()).await;
                         let event = Event::MessageAppended(msg);
                         self.persist_event(&event).await;
@@ -725,11 +737,16 @@ impl Runtime {
     /// `OTel`：`llm_call` span 包裹整次 provider 调用（design.md §15.1），字段不含
     /// 凭证（C-04：仅记 model 与消息数，不记 input 原文）。
     async fn stream_llm(&self, req: ChatRequest) -> Result<Message, crate::model::LlmError> {
+        let timer = metrics::start_timer();
+        let model_name = req.params.model.clone();
+        let provider_id = self.provider.id();
         let span = tracing::info_span!(
             "llm_call",
-            model = %req.params.model,
+            session.id = %self.session.id,
+            llm.provider = %provider_id,
+            llm.model = %model_name,
             message_count = req.messages.len(),
-            otel.name = "llm_call",
+            otel.name = span_name::LLM_CHAT_STREAM,
         );
         let _enter = span.enter();
 
@@ -745,6 +762,16 @@ impl Runtime {
             acc.push(delta);
         }
 
+        // Metrics: 记录 LLM token 消耗
+        if let Some(usage) = acc.usage() {
+            metrics::record_llm_tokens(&model_name, "input", usage.input_tokens as u64);
+            metrics::record_llm_tokens(&model_name, "output", usage.output_tokens as u64);
+            if let Some(cached) = usage.cache_read {
+                metrics::record_llm_tokens(&model_name, "cached", cached as u64);
+            }
+        }
+        // Metrics: 记录 LLM 调用延迟
+        metrics::record_elapsed("llm_call_duration_ms", "model", &model_name, timer);
         Ok(acc.finalize())
     }
 
@@ -796,21 +823,35 @@ impl Runtime {
                 let call: ToolCall = (**call).clone();
                 let fut: ToolFuture = Box::pin(async move {
                     // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立 span。
+                    let tool_timer = metrics::start_timer();
                     let span = tracing::debug_span!(
                         "tool_call",
-                        tool = %tool_name,
+                        session.id = %ctx.session_id,
+                        tool.name = %tool_name,
+                        tool.side_effect = "none",
+                        tool.parallel = true,
                         call_id = %call_id,
+                        otel.name = span_name::TOOL_CALL,
                     );
                     let _enter = span.enter();
                     events.emit(Event::ToolCallStarted {
                         call_id: call_id.clone(),
-                        tool: tool_name,
+                        tool: tool_name.clone(),
                     });
                     let result = tools.dispatch(&call, &ctx).await?;
                     events.emit(Event::ToolCallFinished {
                         call_id: call_id.clone(),
                         result: result.clone(),
                     });
+                    // Metrics: 记录工具调用
+                    let result_str = if result.is_error { "err" } else { "ok" };
+                    metrics::record_tool_call(&tool_name, "none", result_str);
+                    metrics::record_elapsed(
+                        "tool_call_duration_ms",
+                        "tool",
+                        &tool_name,
+                        tool_timer,
+                    );
                     Ok::<_, RuntimeError>((call.id.clone(), result))
                 });
                 fut
@@ -823,11 +864,20 @@ impl Runtime {
 
         // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
         for call in &side_effect {
+            // 查找工具的 side_effect 类型用于 span 属性
+            let call_side_effect = self
+                .tools
+                .get(&call.name)
+                .map_or(SideEffect::None, |t| t.side_effect());
             // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
             let span = tracing::debug_span!(
                 "tool_call",
-                tool = %call.name,
+                session.id = %ctx.session_id,
+                tool.name = %call.name,
+                tool.side_effect = ?call_side_effect,
+                tool.parallel = false,
                 call_id = %call.id,
+                otel.name = span_name::TOOL_CALL,
             );
             let _enter = span.enter();
             results.push(self.execute_side_effect_call(call, &ctx).await?);
@@ -864,11 +914,14 @@ impl Runtime {
 
         // `permission` span（design.md §15.1）：包裹权限决策流程（策略判定 →
         // Hook → prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
+        // `permission.verdict` 在决策确定后通过 `Span::current().record()` 填充。
         let span = tracing::info_span!(
             "permission",
-            tool = %call.name,
-            side_effect = ?side_effect,
-            otel.name = "permission",
+            session.id = %self.session.id,
+            tool.name = %call.name,
+            tool.side_effect = ?side_effect,
+            permission.verdict = tracing::field::Empty,
+            otel.name = span_name::PERMISSION_CHECK,
         );
         let _enter = span.enter();
 
@@ -926,8 +979,25 @@ impl Runtime {
         self.record_permission_audit(&call.name, &decision, prompt_id)
             .await;
 
+        // Metrics: 记录权限决策
+        let verdict_str = match &decision {
+            Decision::Allow => "allow",
+            Decision::Deny(_) => "deny",
+        };
+        metrics::record_permission(verdict_str);
+
+        // Span 属性：动态记录最终 verdict（决策在 span 创建后才确定）
+        tracing::Span::current().record("permission.verdict", verdict_str);
+
         // 6. 按决策执行或拒绝
-        match decision {
+        let side_effect_str = match side_effect {
+            SideEffect::None => "none",
+            SideEffect::FileWrite => "file_write",
+            SideEffect::Command => "command",
+            SideEffect::Network => "network",
+        };
+        let tool_timer = metrics::start_timer();
+        let result = match decision {
             Decision::Deny(msg) => Ok((
                 call.id.clone(),
                 ToolResult::err_text(format!("permission denied: {msg}")),
@@ -936,7 +1006,19 @@ impl Runtime {
                 self.execute_allowed_call(call, &effective_call, side_effect, ctx)
                     .await
             }
+        };
+        // Metrics: 记录副作用工具调用
+        let result_str = match &result {
+            Ok((_, r)) if r.is_error => "err",
+            Ok(_) => "ok",
+            Err(_) => "err",
+        };
+        metrics::record_tool_call(&call.name, side_effect_str, result_str);
+        metrics::record_elapsed("tool_call_duration_ms", "tool", &call.name, tool_timer);
+        if result.is_err() {
+            metrics::record_error("tool");
         }
+        result
     }
 
     /// 构建 Hook 分发配置（来自 `HooksConfig` + 当前 `Verdict`）。
@@ -1234,6 +1316,8 @@ impl Runtime {
                     count = self.sandbox_breaker.count(),
                     "sandbox circuit breaker hard-tripped"
                 );
+                metrics::set_circuit_breaker("sandbox", "hard_tripped");
+                metrics::record_error("sandbox");
                 ToolResult {
                     content: crate::model::ToolContent::Text(format!(
                         "{summary}\n原始错误：{error_text}"
@@ -1248,6 +1332,8 @@ impl Runtime {
                     count = self.sandbox_breaker.count(),
                     "sandbox circuit breaker soft-tripped"
                 );
+                metrics::set_circuit_breaker("sandbox", "soft_tripped");
+                metrics::record_error("sandbox");
                 ToolResult {
                     content: crate::model::ToolContent::Text(format!(
                         "沙箱拒绝（{reason}）：{error_text}\n\n{reminder}",
@@ -1257,11 +1343,14 @@ impl Runtime {
                     metadata: crate::model::ToolResultMeta::default(),
                 }
             }
-            BreakerState::Closed => ToolResult::err_text(format!(
-                "sandbox denied ({reason}): {error_text}\n\
-                 提示：可切换更宽松的沙箱预设（如 --sandbox workspace-write）重试",
-                reason = m.signature.reason
-            )),
+            BreakerState::Closed => {
+                metrics::record_error("sandbox");
+                ToolResult::err_text(format!(
+                    "sandbox denied ({reason}): {error_text}\n\
+                     提示：可切换更宽松的沙箱预设（如 --sandbox workspace-write）重试",
+                    reason = m.signature.reason
+                ))
+            }
         };
         Some((call_id.clone(), result))
     }

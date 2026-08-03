@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use minicoding_core::model::LlmError;
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer,
 };
@@ -93,6 +94,7 @@ impl RetryProvider {
     }
 
     /// 单次尝试 + 超时包裹。返回 `Ok(stream)` / `Err(llm_error)`。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::PROVIDER_RETRY))]
     async fn attempt(
         &self,
         req: ChatRequest,

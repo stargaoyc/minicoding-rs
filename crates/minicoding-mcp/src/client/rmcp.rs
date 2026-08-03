@@ -31,7 +31,9 @@ use std::time::Duration;
 use futures::future::{FutureExt, Shared};
 use http::{HeaderName, HeaderValue};
 use minicoding_core::mcp::{McpClient, McpError, McpServerConfig, McpTransport};
+use minicoding_core::metrics;
 use minicoding_core::model::{ToolContent, ToolResult, ToolResultMeta, ToolSchema};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use rmcp::model::{CallToolRequestParams, ClientInfo, ContentBlock};
 use rmcp::service::{RunningService, ServiceExt};
@@ -242,6 +244,7 @@ impl RmcpClient {
     }
 
     /// 启动单个 server：按传输类型 dispatch → 握手 → `list_tools` → 缓存。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MCP_CONNECT))]
     async fn start_one(&self, cfg: &McpServerConfig) -> Result<Vec<ToolSchema>, McpError> {
         let startup_timeout = Duration::from_secs(cfg.startup_timeout_sec);
         let tool_timeout = Duration::from_secs(cfg.tool_timeout_sec);
@@ -321,10 +324,10 @@ impl RmcpClient {
             tools: tools.clone(),
             tool_timeout,
         };
-        self.connections
-            .write()
-            .await
-            .insert(cfg.name.clone(), conn);
+        let mut connections = self.connections.write().await;
+        connections.insert(cfg.name.clone(), conn);
+        // Metrics：MCP 连接数 gauge
+        metrics::set_mcp_connections(&cfg.name, 1);
 
         tracing::info!(
             server = %cfg.name,
@@ -364,6 +367,7 @@ impl McpClient for RmcpClient {
                 match self.start_one(&cfg).await {
                     Ok(_) => {}
                     Err(e) => {
+                        metrics::record_error("mcp");
                         if cfg.required {
                             tracing::error!(
                                 server = %cfg.name,
@@ -399,6 +403,7 @@ impl McpClient for RmcpClient {
         })
     }
 
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MCP_CALL))]
     fn call(
         &self,
         server: &str,
@@ -508,6 +513,17 @@ impl McpClient for RmcpClient {
             {
                 let mut inflight_guard = inflight.write().await;
                 inflight_guard.remove(&key);
+            }
+
+            // Metrics：MCP 工具调用计数 + 错误计数
+            let result_str = match &result {
+                Ok(r) if r.is_error => "err",
+                Ok(_) => "ok",
+                Err(_) => "err",
+            };
+            metrics::record_mcp_tool_call(&server, &tool, result_str);
+            if result.is_err() {
+                metrics::record_error("mcp");
             }
 
             result.map_err(|e| McpError::CallFailed {

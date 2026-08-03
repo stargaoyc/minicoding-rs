@@ -1,6 +1,7 @@
 //! 审计日志 sink：`JSONL` 追加写，Unix 下 0600 权限（AGENTS.md §5.5、C-04）。
 
 use camino::{Utf8Path, Utf8PathBuf};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::storage::{AuditRecord, AuditSink, StorageError};
 
@@ -21,6 +22,7 @@ impl FileAuditSink {
 }
 
 impl AuditSink for FileAuditSink {
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::AUDIT_RECORD))]
     fn record(&self, rec: AuditRecord) -> BoxFuture<'_, Result<(), StorageError>> {
         let path = self.path.clone();
         Box::pin(async move {

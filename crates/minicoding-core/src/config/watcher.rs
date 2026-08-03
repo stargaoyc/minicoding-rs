@@ -50,6 +50,7 @@ impl ConfigWatcher {
     ///
     /// 监听失败（路径无父目录、watcher 构造或注册失败）不返回错误，仅记 warn 日志
     /// （best-effort，不阻塞 Runtime 启动），返回空壳 `ConfigWatcher`。
+    #[tracing::instrument(skip(event_bus), fields(otel.name = crate::otel::span_name::CONFIG_RELOAD))]
     #[must_use]
     pub fn start(config_path: &Utf8Path, event_bus: EventBus) -> Self {
         // 监听父目录（监听文件本身在某些平台不稳定，见 notify `Watcher::watch` 文档）。

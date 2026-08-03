@@ -5,6 +5,7 @@
 //! 未注入时退化为无 OS 隔离（兼容 M1-M3 测试）。
 
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
 use serde::Deserialize;
@@ -130,6 +131,12 @@ impl Tool for ShellRun {
             let has_sandbox = sandbox_driver.is_some() && sandbox_policy.is_some();
             if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref())
             {
+                let span = tracing::debug_span!(
+                    "sandbox.apply",
+                    otel.name = span_name::SANDBOX_APPLY,
+                    driver = driver.id(),
+                );
+                let _enter = span.enter();
                 driver.apply(policy, command.as_std_mut()).map_err(|e| {
                     // 沙箱 apply 失败（如 landlock ruleset 构建失败）视为执行错误，
                     // 由 Runtime 的 denial detector 进一步识别是否为 denial。

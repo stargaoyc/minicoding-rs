@@ -9,6 +9,7 @@ use crate::export::{ExportFormat, export_session_jsonl, export_session_md};
 use crate::index::{SessionIndex, SessionIndexEntry};
 use camino::Utf8PathBuf;
 use minicoding_core::model::{Message, Role, SessionId};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::storage::{SessionMeta, Storage, StorageError};
 use std::sync::Mutex;
@@ -55,6 +56,7 @@ impl JsonlStorage {
     /// # Errors
     /// - `StorageError::Io`：读取失败（除 `NotFound`）；
     /// - `StorageError::Corrupted`：消息行 JSON 解析失败。
+    #[tracing::instrument(skip(self), fields(otel.name = "storage.load"))]
     pub fn load_messages_sync(&self, session: &SessionId) -> Result<Vec<Message>, StorageError> {
         let path = self.session_path(session);
         let content = match std::fs::read_to_string(path.as_std_path()) {
@@ -419,6 +421,7 @@ fn find_first_user_summary(lines: &[&str]) -> Option<String> {
 }
 
 impl Storage for JsonlStorage {
+    #[tracing::instrument(skip(self, session, msg), fields(otel.name = span_name::STORAGE_APPEND))]
     fn append(
         &self,
         session: &SessionId,

@@ -15,7 +15,7 @@
 /// `service.name` 资源属性值。
 pub const SERVICE_NAME: &str = "minicoding";
 
-/// Span 名约定（见 `design.md` §15.1）。
+/// Span 名约定（见 `design.md` §15.1、`docs/observability.md` §4.1）。
 pub mod span_name {
     /// 会话级 span（会话开始到结束）。
     pub const SESSION: &str = "session";
@@ -29,6 +29,35 @@ pub mod span_name {
     pub const PERMISSION_CHECK: &str = "permission.check";
     /// 压缩 span。
     pub const COMPRESS: &str = "compress";
+    // === 以下为可观测性补充（见 docs/observability.md §4.1） ===
+    /// 记忆加载 span。
+    pub const MEMORY_LOAD: &str = "memory.load";
+    /// 记忆保存 span。
+    pub const MEMORY_SAVE: &str = "memory.save";
+    /// Journal 记录 span。
+    pub const JOURNAL_RECORD: &str = "journal.record";
+    /// Journal 回滚 span。
+    pub const JOURNAL_UNDO: &str = "journal.undo";
+    /// 存储追加 span。
+    pub const STORAGE_APPEND: &str = "storage.append";
+    /// 审计记录 span。
+    pub const AUDIT_RECORD: &str = "audit.record";
+    /// 沙箱注入 span。
+    pub const SANDBOX_APPLY: &str = "sandbox.apply";
+    /// MCP 工具调用 span。
+    pub const MCP_CALL: &str = "mcp.call";
+    /// MCP 连接 span。
+    pub const MCP_CONNECT: &str = "mcp.connect";
+    /// 上下文构建 span。
+    pub const CONTEXT_BUILD: &str = "context.build";
+    /// Provider 重试 span。
+    pub const PROVIDER_RETRY: &str = "provider.retry";
+    /// 配置热重载 span。
+    pub const CONFIG_RELOAD: &str = "config.reload";
+    /// 事件广播 span。
+    pub const EVENT_PUBLISH: &str = "event.publish";
+    /// 后台 Shell spawn span。
+    pub const SHELL_BG_SPAWN: &str = "shell.bg_spawn";
 }
 
 /// Span 属性键约定（见 `design.md` §15.2）。
@@ -55,6 +84,23 @@ pub mod attr {
     pub const COMPRESS_LEVEL: &str = "compress.level";
     pub const COMPRESS_TOKENS_BEFORE: &str = "compress.tokens_before";
     pub const COMPRESS_TOKENS_AFTER: &str = "compress.tokens_after";
+    // === 以下为可观测性补充（见 docs/observability.md §4.2） ===
+    /// 记忆类型（`long_term`/`auto`/`session`/`project_doc`）。
+    pub const MEMORY_TYPE: &str = "memory.type";
+    /// Journal 操作类型（`record`/`undo`/`diff`）。
+    pub const JOURNAL_OP: &str = "journal.op";
+    /// MCP server 名。
+    pub const MCP_SERVER: &str = "mcp.server";
+    /// MCP 工具名。
+    pub const MCP_TOOL: &str = "mcp.tool";
+    /// 重试当前次数。
+    pub const RETRY_ATTEMPT: &str = "retry.attempt";
+    /// 重试最大次数。
+    pub const RETRY_MAX: &str = "retry.max";
+    /// 错误类别。
+    pub const ERROR_CATEGORY: &str = "error.category";
+    /// 错误码。
+    pub const ERROR_CODE: &str = "error.code";
 }
 
 /// `OTel` 采样策略（见 `design.md` §15.3）。
@@ -185,6 +231,21 @@ mod tests {
         assert_eq!(span_name::TOOL_CALL, "tool.call");
         assert_eq!(span_name::PERMISSION_CHECK, "permission.check");
         assert_eq!(span_name::COMPRESS, "compress");
+        // 可观测性补充（docs/observability.md §4.1）
+        assert_eq!(span_name::MEMORY_LOAD, "memory.load");
+        assert_eq!(span_name::MEMORY_SAVE, "memory.save");
+        assert_eq!(span_name::JOURNAL_RECORD, "journal.record");
+        assert_eq!(span_name::JOURNAL_UNDO, "journal.undo");
+        assert_eq!(span_name::STORAGE_APPEND, "storage.append");
+        assert_eq!(span_name::AUDIT_RECORD, "audit.record");
+        assert_eq!(span_name::SANDBOX_APPLY, "sandbox.apply");
+        assert_eq!(span_name::MCP_CALL, "mcp.call");
+        assert_eq!(span_name::MCP_CONNECT, "mcp.connect");
+        assert_eq!(span_name::CONTEXT_BUILD, "context.build");
+        assert_eq!(span_name::PROVIDER_RETRY, "provider.retry");
+        assert_eq!(span_name::CONFIG_RELOAD, "config.reload");
+        assert_eq!(span_name::EVENT_PUBLISH, "event.publish");
+        assert_eq!(span_name::SHELL_BG_SPAWN, "shell.bg_spawn");
     }
 
     #[test]

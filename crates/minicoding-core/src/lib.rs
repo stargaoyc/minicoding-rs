@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod journal;
 pub mod mcp;
 pub mod memory;
+pub mod metrics;
 pub mod model;
 pub mod otel;
 pub mod paths;
@@ -50,6 +51,7 @@ pub mod prelude {
     pub use crate::journal::{ChangeEntry, DiffEntry, FileChange, Journal, UndoReport};
     pub use crate::mcp::{McpClient, McpScope, McpServerConfig, McpTransport, ToolHint};
     pub use crate::memory::{MemoryStore, ProjectDocLoader};
+    pub use crate::metrics;
     pub use crate::model::{
         Attachment, ContentBlock, ContextHint, ExtensionError, Isolation, JournalError, LlmError,
         McpError, MemoryError, MergeStrategy, Message, MessageMeta, MessageSource, PolicyError,
