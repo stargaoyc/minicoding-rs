@@ -77,6 +77,7 @@ impl EventBus {
     }
 
     /// 发布事件（无订阅者时静默丢弃）。
+    #[tracing::instrument(skip(self), fields(otel.name = crate::otel::span_name::EVENT_PUBLISH))]
     pub fn emit(&self, event: Event) {
         // send 失败仅因无订阅者，不视为错误
         let _ = self.tx.send(event);

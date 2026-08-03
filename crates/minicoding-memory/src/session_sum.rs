@@ -16,6 +16,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use minicoding_core::memory::SessionSummarizer as SessionSummarizerTrait;
 use minicoding_core::model::{LlmError, MemoryError, Message, Role};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::{BoxFuture, ChatRequest, Delta, GenerationParams, LlmProvider};
 use minicoding_storage::SessionIndex;
 
@@ -64,6 +65,7 @@ impl SessionSummarizerImpl {
     /// # Errors
     /// 启发式兜底恒成功，故实际不返回 `Err`。保留 `Result` 类型以与管道 `?` 兼容，
     /// 并为未来扩展预留。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::LLM_CHAT_STREAM, memory.type = "session_summary"))]
     pub async fn summarize(&self, messages: &[Message]) -> Result<String, MemoryError> {
         // 渲染待摘要消息为 LLM 输入文本
         let input = messages

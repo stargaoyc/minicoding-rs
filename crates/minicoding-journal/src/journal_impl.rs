@@ -8,6 +8,7 @@
 
 use crate::JournalError;
 use minicoding_core::journal::{ChangeEntry, DiffEntry, FileChange, Journal, UndoReport};
+use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use std::sync::Mutex;
 use tokio::fs;
@@ -57,6 +58,7 @@ impl Default for FileChangeJournal {
 }
 
 impl Journal for FileChangeJournal {
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::JOURNAL_RECORD, journal.op = "record"))]
     fn record(&self, entry: ChangeEntry) -> BoxFuture<'_, Result<(), JournalError>> {
         Box::pin(async move {
             let mut guard = self
@@ -68,6 +70,7 @@ impl Journal for FileChangeJournal {
         })
     }
 
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::JOURNAL_UNDO, journal.op = "undo"))]
     fn undo(&self, steps: usize) -> BoxFuture<'_, Result<UndoReport, JournalError>> {
         Box::pin(async move {
             // steps = 0 视为 1（撤销最近一次，符合 /undo 默认语义）

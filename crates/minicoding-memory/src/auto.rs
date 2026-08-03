@@ -16,6 +16,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use minicoding_core::model::MemoryError;
+use minicoding_core::otel::span_name;
 use minicoding_core::paths;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -115,6 +116,7 @@ impl AutoMemory {
     /// 加载全部条目（命中 mtime 缓存时零 IO/解析）。
     ///
     /// 文件不存在时返回空 `Vec`。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_LOAD, memory.type = "auto"))]
     async fn load_entries(&self) -> Result<Vec<AutoEntry>, MemoryError> {
         let current = self.current_mtime().await?;
 
@@ -159,6 +161,7 @@ impl AutoMemory {
     ///
     /// # Errors
     /// IO 或序列化失败时返回 `MemoryError`。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_SAVE, memory.type = "auto"))]
     pub async fn add_entry(
         &self,
         topic: String,

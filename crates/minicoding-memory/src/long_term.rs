@@ -16,6 +16,7 @@
 use crate::MemoryStore;
 use camino::{Utf8Path, Utf8PathBuf};
 use minicoding_core::model::MemoryError;
+use minicoding_core::otel::span_name;
 use minicoding_core::paths;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -94,6 +95,7 @@ impl Default for LongTermMemory {
 }
 
 impl MemoryStore for LongTermMemory {
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_LOAD, memory.type = "long_term"))]
     fn load(&self) -> minicoding_core::provider::BoxFuture<'_, Result<String, MemoryError>> {
         Box::pin(async move {
             let current = self.current_mtime().await?;
@@ -148,6 +150,7 @@ impl MemoryStore for LongTermMemory {
         })
     }
 
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_SAVE, memory.type = "long_term"))]
     fn save(
         &self,
         content: &str,

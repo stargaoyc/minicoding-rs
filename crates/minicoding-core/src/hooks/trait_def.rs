@@ -1,5 +1,6 @@
 //! `Hook` trait + `HookRegistry` trait + 事件/输入输出 DTO。
 
+use crate::metrics;
 use crate::model::{SideEffect, ToolCall};
 use crate::provider::BoxFuture;
 use camino::Utf8PathBuf;
@@ -514,6 +515,7 @@ pub trait HookRegistry: Send + Sync {
 
             for hook in hooks {
                 let hook_name = hook.name().to_string();
+                let event_str = event.as_str();
                 let span = tracing::debug_span!(
                     "hook.run",
                     hook = %hook_name,
@@ -521,9 +523,17 @@ pub trait HookRegistry: Send + Sync {
                     otel.name = "hook.run",
                 );
                 let _enter = span.enter();
+                let hook_timer = metrics::start_timer();
 
                 match run_hook_once(hook.as_ref(), &input, &config).await {
                     Ok(output) => {
+                        let result_str = if matches!(output.decision, HookDecision::Deny) {
+                            "deny"
+                        } else {
+                            "ok"
+                        };
+                        metrics::record_hook(&hook_name, event_str, result_str);
+                        metrics::record_elapsed("hook_duration_ms", "hook", &hook_name, hook_timer);
                         merge_decision(&mut result, output.decision, output.reason, &config);
                         if let Some(new_input) = output.modify_input {
                             if let Some(ref mut tool) = input.tool {
@@ -554,10 +564,14 @@ pub trait HookRegistry: Send + Sync {
                     Err(action) => match action {
                         HookErrorAction::Continue(e) => {
                             tracing::warn!(hook = %hook_name, error = %e, "hook error, continuing");
+                            metrics::record_hook(&hook_name, event_str, "err");
+                            metrics::record_error("hook");
                             result.errors.push((hook_name, e));
                         }
                         HookErrorAction::Deny(reason, e) => {
                             tracing::warn!(hook = %hook_name, error = %e, "hook error -> deny");
+                            metrics::record_hook(&hook_name, event_str, "deny");
+                            metrics::record_error("hook");
                             result.decision = HookDecision::Deny;
                             result.reason = Some(reason);
                             result.errors.push((hook_name, e));
@@ -565,6 +579,8 @@ pub trait HookRegistry: Send + Sync {
                         }
                         HookErrorAction::Fatal(e) => {
                             tracing::error!(hook = %hook_name, error = %e, "hook error -> fail");
+                            metrics::record_hook(&hook_name, event_str, "fatal");
+                            metrics::record_error("hook");
                             result.fatal_error = Some(e);
                             return result;
                         }
