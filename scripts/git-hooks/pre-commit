@@ -16,7 +16,7 @@ cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-featur
 echo "[pre-commit] cargo deny check ..."
 # 离线模式（无网络时设置 MINICODING_OFFLINE=1）：跳过 advisory-db fetch，使用本地缓存
 if [ "${MINICODING_OFFLINE:-0}" = "1" ]; then
-  cargo deny check --offline advisories licenses bans sources
+  cargo deny --offline check advisories licenses bans sources
 else
   cargo deny check advisories licenses bans sources
 fi
