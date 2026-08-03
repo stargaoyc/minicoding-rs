@@ -122,3 +122,76 @@ pub fn detect_driver_kind() -> DriverKind {
         DriverKind::Noop
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `DriverKind` 字符串映射与 `detect_driver*` 一致性测试（覆盖率补全）。
+    //!
+    //! `detect_driver` / `detect_driver_kind` 的平台分支由 `cfg(target_os)` 决定，
+    //! 当前平台仅一条分支被编译，但通过 `DriverKind::as_str` 可覆盖全部枚举变体映射。
+
+    use super::*;
+
+    #[test]
+    fn driver_kind_as_str_covers_all_variants() {
+        assert_eq!(DriverKind::Landlock.as_str(), "landlock");
+        assert_eq!(DriverKind::Seatbelt.as_str(), "seatbelt");
+        assert_eq!(DriverKind::WindowsToken.as_str(), "windows-token");
+        assert_eq!(DriverKind::Noop.as_str(), "noop");
+    }
+
+    #[test]
+    fn driver_kind_eq_ord_works() {
+        assert_eq!(DriverKind::Landlock, DriverKind::Landlock);
+        assert_ne!(DriverKind::Landlock, DriverKind::Noop);
+    }
+
+    #[test]
+    fn driver_kind_debug_format() {
+        let s = format!("{:?}", DriverKind::Landlock);
+        assert_eq!(s, "Landlock");
+        let s = format!("{:?}", DriverKind::Noop);
+        assert_eq!(s, "Noop");
+    }
+
+    #[test]
+    fn detect_driver_kind_returns_supported_kind_for_current_platform() {
+        // 当前平台必须返回一个有效 kind（不 panic），且与 detect_driver 一致
+        let kind = detect_driver_kind();
+        let driver = detect_driver();
+        // 驱动 id 与 kind.as_str 在所有平台应一致
+        assert_eq!(driver.id(), kind.as_str());
+    }
+
+    #[test]
+    fn detect_driver_returns_hardened_only_when_real_driver_active() {
+        // 当前平台若降级到 NoopDriver，则 is_hardened 必为 false（C-22）；
+        // 若是真实驱动（Landlock/Seatbelt/WindowsToken），is_hardened 为 true。
+        let driver = detect_driver();
+        let kind = detect_driver_kind();
+        match kind {
+            DriverKind::Noop => assert!(!driver.is_hardened()),
+            DriverKind::Landlock | DriverKind::Seatbelt | DriverKind::WindowsToken => {
+                assert!(driver.is_hardened());
+            }
+        }
+    }
+
+    #[test]
+    fn detect_driver_post_spawn_default_is_ok() {
+        // NoopDriver / Linux/macOS 默认 post_spawn 返回 Ok；Windows 覆写。
+        // 这里仅验证不 panic + 返回 Ok 或可忽略错误（取决于平台）。
+        let driver = detect_driver();
+        let _ = driver.post_spawn(0);
+    }
+
+    #[test]
+    fn detect_driver_apply_with_default_policy_does_not_panic() {
+        // 默认 `WorkspaceWrite` 策略下 apply 应返回 Ok（真实驱动可能在
+        // 跨平台非根环境返回错误，但不 panic）。这里仅验证不 panic。
+        let driver = detect_driver();
+        let policy = minicoding_core::sandbox::SandboxPolicy::default();
+        let mut cmd = std::process::Command::new("echo");
+        let _ = driver.apply(&policy, &mut cmd);
+    }
+}

@@ -14,7 +14,12 @@ echo "[pre-commit] cargo clippy (deny warnings) ..."
 cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
 
 echo "[pre-commit] cargo deny check ..."
-cargo deny check advisories licenses bans sources
+# 离线模式（无网络时设置 MINICODING_OFFLINE=1）：跳过 advisory-db fetch，使用本地缓存
+if [ "${MINICODING_OFFLINE:-0}" = "1" ]; then
+  cargo deny check --offline advisories licenses bans sources
+else
+  cargo deny check advisories licenses bans sources
+fi
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0

@@ -238,3 +238,133 @@ impl PermissionPrompter for NoopPrompter {
         Box::pin(async move { Decision::Allow })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! trait 默认实现与 noop 兜底测试（覆盖率补全）。
+
+    use super::*;
+    use crate::model::SideEffect;
+
+    #[test]
+    fn permission_mode_default_is_default() {
+        assert_eq!(PermissionMode::default(), PermissionMode::Default);
+    }
+
+    #[test]
+    fn plan_mode_snapshot_default_is_default_with_empty_prompts() {
+        let snap = PlanModeSnapshot::default();
+        assert_eq!(snap.mode, PermissionMode::Default);
+        assert!(snap.allowed_prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn noop_policy_always_allows() {
+        let policy = NoopPolicy;
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir: camino::Utf8PathBuf::from("/tmp"),
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy
+            .check("any_tool", &serde_json::Value::Null, &ctx)
+            .await
+            .expect("noop policy never errors");
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[tokio::test]
+    async fn noop_prompter_always_allows() {
+        let prompter = NoopPrompter;
+        let req = PermissionPrompt {
+            id: "p1".to_string(),
+            tool: "shell.run".to_string(),
+            summary: "echo hi".to_string(),
+            risk: Risk::Low,
+            options: vec![PromptOption::AllowOnce, PromptOption::DenyOnce],
+        };
+        let decision = prompter.prompt(req).await;
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn decision_serde_roundtrip() {
+        let allow = Decision::Allow;
+        let json = serde_json::to_string(&allow).expect("serialize Allow");
+        assert_eq!(json, "\"allow\"");
+        let deny = Decision::Deny("reason".to_string());
+        let json = serde_json::to_string(&deny).expect("serialize Deny");
+        assert!(json.contains("deny"));
+        assert!(json.contains("reason"));
+    }
+
+    #[test]
+    fn permission_mode_serde_snake_case() {
+        let json = serde_json::to_string(&PermissionMode::AcceptEdits).expect("serialize");
+        assert_eq!(json, "\"accept_edits\"");
+        let json = serde_json::to_string(&PermissionMode::BypassPermissions).expect("serialize");
+        assert_eq!(json, "\"bypass_permissions\"");
+        let json = serde_json::to_string(&PermissionMode::Plan).expect("serialize");
+        assert_eq!(json, "\"plan\"");
+    }
+
+    #[test]
+    fn pre_approved_prompt_serde_roundtrip() {
+        let p = PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "cargo build".to_string(),
+        };
+        let json = serde_json::to_string(&p).expect("serialize");
+        let decoded: PreApprovedPrompt = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.tool, p.tool);
+        assert_eq!(decoded.prompt, p.prompt);
+    }
+
+    #[test]
+    fn risk_serde_snake_case() {
+        assert_eq!(serde_json::to_string(&Risk::Low).unwrap(), "\"low\"");
+        assert_eq!(serde_json::to_string(&Risk::Medium).unwrap(), "\"medium\"");
+        assert_eq!(serde_json::to_string(&Risk::High).unwrap(), "\"high\"");
+    }
+
+    #[test]
+    fn prompt_option_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PromptOption::AllowOnce).unwrap(),
+            "\"allow_once\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PromptOption::AllowAlways).unwrap(),
+            "\"allow_always\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PromptOption::DenyOnce).unwrap(),
+            "\"deny_once\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PromptOption::DenyAlways).unwrap(),
+            "\"deny_always\""
+        );
+    }
+
+    #[test]
+    fn verdict_variants_construct() {
+        // Verdict 未派生 PartialEq，用 matches! 校验。
+        let allow = Verdict::Allow;
+        assert!(matches!(allow, Verdict::Allow));
+        let deny = Verdict::Deny("nope".to_string());
+        assert!(matches!(deny, Verdict::Deny(_)));
+        let ask = Verdict::Ask(PermissionPrompt {
+            id: "p1".to_string(),
+            tool: "shell.run".to_string(),
+            summary: "echo hi".to_string(),
+            risk: Risk::Medium,
+            options: vec![PromptOption::AllowOnce],
+        });
+        assert!(matches!(ask, Verdict::Ask(_)));
+    }
+}

@@ -1048,4 +1048,248 @@ mod tests {
             "Debug 不应泄漏完整 api_key: {s}"
         );
     }
+
+    // --- chat_stream 补充 ---
+
+    #[tokio::test]
+    async fn chat_stream_500_returns_server_error() {
+        // 场景：HTTP 500 服务端错误 → LlmError::Server
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let provider =
+            OpenAiProvider::new(server.uri(), "sk-test", "gpt-4").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("500 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::Server { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "internal error");
+            }
+            other => panic!("期望 Server 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_invalid_json_returns_parse_error() {
+        // 场景：SSE data 为非法 JSON → 流中返回 LlmError::Parse
+        let server = MockServer::start().await;
+        let sse_body = "data: not valid json\n\ndata: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider =
+            OpenAiProvider::new(server.uri(), "sk-test", "gpt-4").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let mut s = stream;
+        let mut found_parse_error = false;
+        while let Some(item) = s.next().await {
+            if let Err(LlmError::Parse(_)) = item {
+                found_parse_error = true;
+                break;
+            }
+        }
+        assert!(found_parse_error, "流中应包含 Parse 错误");
+    }
+
+    #[tokio::test]
+    async fn chat_stream_multiple_tool_calls_in_single_chunk() {
+        // 场景：单个 SSE chunk 的 delta.tool_calls 含多个 tool_call → 展开为多个 Delta::ToolCall
+        let server = MockServer::start().await;
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "fs.read", "arguments": "{}"}},
+            {"index": 1, "id": "call_2", "function": {"name": "fs.write", "arguments": "{}"}}
+        ]}}]});
+        let sse_body = format!("{}data: [DONE]\n\n", sse_event(&chunk));
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider =
+            OpenAiProvider::new(server.uri(), "sk-test", "gpt-4").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 2);
+        match &deltas[0] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 0);
+                assert_eq!(tc.id.as_deref(), Some("call_1"));
+                assert_eq!(tc.name.as_deref(), Some("fs.read"));
+            }
+            other => panic!("期望 ToolCall[0]，得到 {other:?}"),
+        }
+        match &deltas[1] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 1);
+                assert_eq!(tc.id.as_deref(), Some("call_2"));
+                assert_eq!(tc.name.as_deref(), Some("fs.write"));
+            }
+            other => panic!("期望 ToolCall[1]，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_trailing_slash_in_api_base_normalized() {
+        // 场景：api_base 含尾部 / → URL 拼接时 trim_end_matches('/') 去重
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: [DONE]\n\n")
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let base = format!("{}/", server.uri());
+        let provider = OpenAiProvider::new(base, "sk-test", "gpt-4").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert!(deltas.is_empty());
+    }
+
+    // --- auth_headers 补充 ---
+
+    #[test]
+    fn auth_headers_invalid_api_key_returns_network_error() {
+        // 包含换行符的 api_key 无法构造 HeaderValue → LlmError::Network
+        let provider = OpenAiProvider::new("https://api.openai.com/v1", "sk-bad\nkey", "gpt-4")
+            .expect("构造 provider");
+        let result = provider.auth_headers();
+        let Err(err) = result else {
+            panic!("非法 api_key 应返回错误");
+        };
+        assert!(
+            matches!(err, LlmError::Network(_)),
+            "期望 Network 错误，得到 {err:?}"
+        );
+    }
+
+    // --- parse_chunk 补充 ---
+
+    #[test]
+    fn parse_chunk_combined_content_tool_calls_finish_and_usage() {
+        // 单个 chunk 同时含 content + tool_calls + finish_reason + usage
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "content": "thinking",
+                    "tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "noop"}}]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3}
+        });
+        let deltas = parse_chunk(&chunk);
+        // 1 text + 1 tool_call + 1 stop + 1 usage = 4
+        assert_eq!(deltas.len(), 4);
+        assert!(matches!(&deltas[0], Delta::Text(t) if t == "thinking"));
+        assert!(matches!(&deltas[1], Delta::ToolCall(tc) if tc.index == 0));
+        assert!(matches!(&deltas[2], Delta::Stop(StopReason::ToolUse)));
+        assert!(matches!(&deltas[3], Delta::Usage(_)));
+    }
+
+    // --- parse_usage 补充 ---
+
+    #[test]
+    fn parse_usage_with_cached_tokens() {
+        let u = parse_usage(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 30}
+        }));
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_read, Some(30));
+        assert!(u.cache_write.is_none(), "OpenAI 不返回 cache_write");
+    }
+
+    // --- extract_text / tool_content_to_string ---
+
+    #[test]
+    fn extract_text_with_tool_result() {
+        let blocks = vec![ContentBlock::ToolResult {
+            call_id: "call_1".to_string(),
+            content: ToolContent::Text("result text".to_string()),
+            is_error: false,
+        }];
+        assert_eq!(extract_text(&blocks), "result text");
+    }
+
+    #[test]
+    fn extract_text_joins_multiple_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "line1".into(),
+            },
+            ContentBlock::Text {
+                text: "line2".into(),
+            },
+        ];
+        assert_eq!(extract_text(&blocks), "line1\nline2");
+    }
+
+    #[test]
+    fn tool_content_to_string_json_variant() {
+        let s = tool_content_to_string(&ToolContent::Json(json!({"key": "val"})));
+        assert!(s.contains("\"key\""));
+        assert!(s.contains("val"));
+    }
+
+    #[test]
+    fn tool_content_to_string_image_returns_empty() {
+        let s = tool_content_to_string(&ToolContent::Image {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3],
+        });
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn tool_content_to_string_mixed_joins_parts() {
+        let s = tool_content_to_string(&ToolContent::Mixed(vec![
+            ToolContent::Text("part1".to_string()),
+            ToolContent::Text("part2".to_string()),
+        ]));
+        assert_eq!(s, "part1\npart2");
+    }
+
+    // --- role_str ---
+
+    #[test]
+    fn role_str_all_variants() {
+        assert_eq!(role_str(&Role::System), "system");
+        assert_eq!(role_str(&Role::User), "user");
+        assert_eq!(role_str(&Role::Assistant), "assistant");
+        assert_eq!(role_str(&Role::Tool), "tool");
+    }
 }

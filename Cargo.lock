@@ -3026,6 +3026,7 @@ dependencies = [
 name = "minicoding-context"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "criterion",
  "futures",
  "minicoding-core",
@@ -3191,6 +3192,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "time",
  "tracing",
  "ts-rs",
 ]
@@ -3324,6 +3326,7 @@ dependencies = [
  "tracing",
  "ulid",
  "url",
+ "wiremock",
 ]
 
 [[package]]

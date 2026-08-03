@@ -55,7 +55,7 @@ fn setup_tray(app: &AppHandle) -> Result<()> {
 
 /// 注册全局快捷键 `Cmd/Ctrl+Shift+M` 切换窗口显示/隐藏。
 fn setup_global_shortcut(app: &AppHandle) -> Result<()> {
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
     let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyM);
 

@@ -23,3 +23,88 @@ use std::sync::Arc;
 pub fn register_plan_tools(registry: &mut ToolRegistry, controller: Arc<dyn PlanModeController>) {
     registry.register(Arc::new(PlanExit::new(controller)));
 }
+
+#[cfg(test)]
+mod tests {
+    //! `register_plan_tools` 注册测试（覆盖率补全）。
+
+    use super::*;
+    use minicoding_core::model::PolicyError;
+    use minicoding_core::policy::{PermissionMode, PlanModeSnapshot, PreApprovedPrompt};
+    use minicoding_core::provider::BoxFuture;
+    use tokio::sync::RwLock;
+
+    /// 测试用 PlanModeController，直接持有 `RwLock<PlanModeSnapshot>`。
+    struct StubController {
+        state: Arc<RwLock<PlanModeSnapshot>>,
+    }
+
+    impl PlanModeController for StubController {
+        fn snapshot(&self) -> BoxFuture<'_, PlanModeSnapshot> {
+            let state = self.state.clone();
+            Box::pin(async move { state.read().await.clone() })
+        }
+
+        fn exit_plan(
+            &self,
+            _allowed_prompts: Vec<PreApprovedPrompt>,
+            _target_mode: PermissionMode,
+        ) -> BoxFuture<'_, Result<(), PolicyError>> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn set_mode(&self, _mode: PermissionMode) -> BoxFuture<'_, ()> {
+            Box::pin(async move {})
+        }
+    }
+
+    fn make_controller() -> Arc<StubController> {
+        Arc::new(StubController {
+            state: Arc::new(RwLock::new(PlanModeSnapshot::default())),
+        })
+    }
+
+    #[test]
+    fn register_plan_tools_registers_single_tool() {
+        let mut registry = ToolRegistry::new();
+        register_plan_tools(&mut registry, make_controller());
+        assert!(registry.get("plan.exit").is_some());
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn register_plan_tools_tool_is_read_only_with_no_side_effect() {
+        let mut registry = ToolRegistry::new();
+        register_plan_tools(&mut registry, make_controller());
+        let tool = registry
+            .get("plan.exit")
+            .expect("plan.exit should be registered");
+        assert_eq!(tool.name(), "plan.exit");
+        assert_eq!(tool.side_effect(), minicoding_core::model::SideEffect::None);
+        assert!(tool.is_read_only());
+    }
+
+    // ---- StubController 方法调用覆盖 ----
+
+    #[tokio::test]
+    async fn stub_controller_snapshot_returns_default() {
+        let ctrl = make_controller();
+        let snap = ctrl.snapshot().await;
+        assert_eq!(snap.mode, PermissionMode::Default);
+        assert!(snap.allowed_prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stub_controller_exit_plan_succeeds() {
+        let ctrl = make_controller();
+        let result = ctrl.exit_plan(vec![], PermissionMode::Default).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stub_controller_set_mode_is_noop() {
+        let ctrl = make_controller();
+        // set_mode 是 no-op，不应 panic
+        ctrl.set_mode(PermissionMode::AcceptEdits).await;
+    }
+}

@@ -28,7 +28,7 @@ tokio = { workspace = true }
 
 # Tauri 重依赖（feature gate `desktop`，需系统 webview 运行时）
 # 直接声明而非 workspace.dependencies，避免未启用 feature 时 Cargo 解析整个 tauri 依赖树
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 # W-07：系统托盘 + 全局快捷键（Tauri 2.x 内置 tray，global-shortcut 通过 plugin）

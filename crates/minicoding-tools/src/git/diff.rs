@@ -98,3 +98,140 @@ impl Tool for GitDiff {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minicoding_core::model::ToolContent;
+    use minicoding_core::tool::ToolContext;
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    fn make_ctx(workdir: &str) -> ToolContext {
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            env.insert("HOME".to_string(), home);
+        }
+        ToolContext {
+            workdir: workdir.into(),
+            session_id: "test".to_string(),
+            env,
+            ..ToolContext::new(workdir.into(), "test".to_string())
+        }
+    }
+
+    fn init_git_repo(dir: &std::path::Path) {
+        Command::new("git")
+            .arg("init")
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .expect("git config name");
+    }
+
+    #[tokio::test]
+    async fn diff_returns_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+
+        // 创建初始文件并提交
+        std::fs::write(dir.path().join("a.txt"), "original\n").expect("write");
+        Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git commit");
+
+        // 修改文件（unstaged change）
+        std::fs::write(dir.path().join("a.txt"), "modified\n").expect("write modified");
+
+        let tool = GitDiff::new();
+        let ctx = make_ctx(dir.path().to_str().unwrap());
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_ok(), "diff should succeed: {result:?}");
+        let ToolContent::Text(text) = result.unwrap().content else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("modified"), "diff should contain changes");
+    }
+
+    #[tokio::test]
+    async fn diff_with_path_filter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+
+        std::fs::write(dir.path().join("a.txt"), "original\n").expect("write a");
+        std::fs::write(dir.path().join("b.txt"), "original\n").expect("write b");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git commit");
+
+        std::fs::write(dir.path().join("a.txt"), "modified_a\n").expect("write a mod");
+        std::fs::write(dir.path().join("b.txt"), "modified_b\n").expect("write b mod");
+
+        let tool = GitDiff::new();
+        let ctx = make_ctx(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(serde_json::json!({"path": "a.txt"}), &ctx)
+            .await;
+        assert!(result.is_ok(), "diff with path should succeed: {result:?}");
+        let ToolContent::Text(text) = result.unwrap().content else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("modified_a"), "should contain a.txt changes");
+        assert!(
+            !text.contains("modified_b"),
+            "should not contain b.txt changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_path_escape_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+
+        let tool = GitDiff::new();
+        let ctx = make_ctx(dir.path().to_str().unwrap());
+        // 路径越界（../）应被 sandbox_path 拒绝
+        let result = tool
+            .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
+            .await;
+        assert!(result.is_err(), "path escape should be rejected");
+    }
+
+    #[test]
+    fn diff_side_effect_is_none() {
+        let tool = GitDiff::new();
+        assert_eq!(tool.side_effect(), SideEffect::None);
+    }
+
+    #[test]
+    fn diff_schema_has_correct_name() {
+        let tool = GitDiff::new();
+        assert_eq!(tool.name(), "git.diff");
+    }
+}

@@ -72,3 +72,87 @@ impl Tool for ShellOutput {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::{InMemoryBackgroundShellStore, ShellBackground};
+    use minicoding_core::model::ToolContent;
+    use minicoding_core::tool::ToolContext;
+
+    fn make_store() -> Arc<dyn BackgroundShellStore> {
+        Arc::new(InMemoryBackgroundShellStore::new())
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn output_missing_shell_id_returns_invalid_input() {
+        let tool = ShellOutput::new(make_store());
+        let result = tool.execute(serde_json::json!({}), &make_ctx()).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn output_nonexistent_returns_not_found() {
+        let tool = ShellOutput::new(make_store());
+        let result = tool
+            .execute(serde_json::json!({"shell_id": "nonexistent"}), &make_ctx())
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn output_returns_json_with_status() {
+        let store = make_store();
+        // 先用 background 工具 spawn 一个命令
+        let bg_tool = ShellBackground::new(Arc::clone(&store));
+        let ctx = make_ctx();
+        let bg_result = bg_tool
+            .execute(serde_json::json!({"command": "echo test"}), &ctx)
+            .await
+            .expect("spawn");
+
+        let ToolContent::Text(bg_text) = bg_result.content else {
+            panic!("expected text");
+        };
+        // 提取 shell_id（格式："... shell_id=XXX ..."）
+        let shell_id = bg_text
+            .split("shell_id=")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("extract shell_id");
+
+        // 等待命令完成
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // 读取输出
+        let output_tool = ShellOutput::new(store);
+        let result = output_tool
+            .execute(serde_json::json!({"shell_id": shell_id}), &make_ctx())
+            .await
+            .expect("output");
+
+        let ToolContent::Json(value) = result.content else {
+            panic!("expected json content");
+        };
+        assert!(value["stdout"].as_str().unwrap().contains("test"));
+        assert!(value["exited"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn output_side_effect_is_none() {
+        let tool = ShellOutput::new(make_store());
+        assert_eq!(tool.side_effect(), SideEffect::None);
+    }
+
+    #[test]
+    fn output_schema_has_correct_name() {
+        let tool = ShellOutput::new(make_store());
+        assert_eq!(tool.name(), "shell.output");
+    }
+}

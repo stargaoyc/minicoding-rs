@@ -277,3 +277,131 @@ impl Tool for ShellBackground {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn store_spawn_and_output_basic() {
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        let shell_id = store
+            .spawn("echo hello".to_string(), "/tmp".to_string(), env)
+            .await
+            .expect("spawn");
+
+        // 等待命令完成
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let status = store.output(shell_id).await.expect("output");
+        assert!(
+            status.stdout.contains("hello"),
+            "stdout should contain hello"
+        );
+        assert!(status.exited, "should be exited");
+        assert_eq!(status.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn store_output_nonexistent_returns_not_found() {
+        let store = InMemoryBackgroundShellStore::new();
+        let result = store.output("nonexistent".to_string()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn store_kill_nonexistent_returns_not_found() {
+        let store = InMemoryBackgroundShellStore::new();
+        let result = store.kill("nonexistent".to_string()).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn store_kill_exited_is_idempotent() {
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        let shell_id = store
+            .spawn("true".to_string(), "/tmp".to_string(), env)
+            .await
+            .expect("spawn");
+
+        // 等待命令完成
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        // kill 已退出的 shell 应成功（幂等）
+        let result = store.kill(shell_id).await;
+        assert!(result.is_ok(), "kill exited shell should be idempotent");
+    }
+
+    #[tokio::test]
+    async fn store_spawn_accumulates_stderr() {
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        let shell_id = store
+            .spawn("echo err >&2".to_string(), "/tmp".to_string(), env)
+            .await
+            .expect("spawn");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let status = store.output(shell_id).await.expect("output");
+        assert!(status.stderr.contains("err"), "stderr should contain err");
+    }
+
+    #[tokio::test]
+    async fn tool_missing_command_returns_invalid_input() {
+        let store: Arc<dyn BackgroundShellStore> = Arc::new(InMemoryBackgroundShellStore::new());
+        let tool = ShellBackground::new(store);
+        let ctx = minicoding_core::tool::ToolContext::new("/tmp".into(), "test".to_string());
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn tool_spawn_returns_shell_id() {
+        let store: Arc<dyn BackgroundShellStore> = Arc::new(InMemoryBackgroundShellStore::new());
+        let tool = ShellBackground::new(Arc::clone(&store));
+        let ctx = minicoding_core::tool::ToolContext::new("/tmp".into(), "test".to_string());
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hi"}), &ctx)
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        let minicoding_core::model::ToolContent::Text(text) = result.content else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("shell_id"), "should contain shell_id: {text}");
+    }
+
+    #[test]
+    fn tool_side_effect_is_command() {
+        let store: Arc<dyn BackgroundShellStore> = Arc::new(InMemoryBackgroundShellStore::new());
+        let tool = ShellBackground::new(store);
+        assert_eq!(tool.side_effect(), SideEffect::Command);
+    }
+
+    #[test]
+    fn tool_schema_has_correct_name() {
+        let store: Arc<dyn BackgroundShellStore> = Arc::new(InMemoryBackgroundShellStore::new());
+        let tool = ShellBackground::new(store);
+        assert_eq!(tool.name(), "shell.background");
+    }
+}

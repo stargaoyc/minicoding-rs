@@ -19,3 +19,17 @@ pub fn register_git_tools(registry: &mut ToolRegistry) {
     registry.register(std::sync::Arc::new(GitDiff::new()));
     registry.register(std::sync::Arc::new(GitApply::new()));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_git_tools_registers_both_tools() {
+        let mut registry = ToolRegistry::new();
+        register_git_tools(&mut registry);
+        assert!(registry.get("git.diff").is_some());
+        assert!(registry.get("git.apply").is_some());
+        assert_eq!(registry.len(), 2);
+    }
+}

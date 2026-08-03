@@ -800,4 +800,321 @@ mod tests {
         let backup_content = std::fs::read_to_string(&backup_path).expect("read backup");
         assert_eq!(backup_content, "test content");
     }
+
+    // ---- FmtOnWrite ----
+
+    #[tokio::test]
+    async fn fmt_on_write_matcher_matches_post_tool_use_fs_write_edit() {
+        let hook = FmtOnWrite::new();
+        assert!(
+            hook.matcher()
+                .matches(HookEvent::PostToolUse, Some("fs.write"))
+        );
+        assert!(
+            hook.matcher()
+                .matches(HookEvent::PostToolUse, Some("fs.edit"))
+        );
+        assert!(
+            !hook
+                .matcher()
+                .matches(HookEvent::PreToolUse, Some("fs.write"))
+        );
+        assert!(
+            !hook
+                .matcher()
+                .matches(HookEvent::PostToolUse, Some("shell.run"))
+        );
+    }
+
+    #[tokio::test]
+    async fn fmt_on_write_no_tool_returns_continue() {
+        let hook = FmtOnWrite::new();
+        let input = HookInput::new(HookEvent::PostToolUse, "s", 1, Utf8PathBuf::from("."));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn fmt_on_write_no_path_returns_continue() {
+        let hook = FmtOnWrite::new();
+        let input = make_tool_input("fs.write", json!({"content": "x"}));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn fmt_on_write_unsupported_extension_returns_continue() {
+        let hook = FmtOnWrite::new();
+        let input = make_tool_input("fs.write", json!({"path": "README.md", "content": "# Hi"}));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn fmt_on_write_rs_file_returns_continue_or_internal_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}\n").expect("write");
+        let hook = FmtOnWrite::new();
+        let mut input = HookInput::new(
+            HookEvent::PostToolUse,
+            "s",
+            1,
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8"),
+        );
+        input.tool = Some(ToolCall {
+            id: "c1".to_string(),
+            name: "fs.write".to_string(),
+            input: json!({"path": "main.rs"}),
+        });
+        let result = hook.run(input).await;
+        match result {
+            Ok(output) => assert_eq!(output.decision, HookDecision::Continue),
+            Err(HookError::Internal(msg)) => assert!(
+                msg.contains("rustfmt"),
+                "期望错误信息含 rustfmt，实际: {msg}"
+            ),
+            Err(e) => panic!("意外错误: {e:?}"),
+        }
+    }
+
+    // ---- AutoApproveTests 补充 ----
+
+    #[tokio::test]
+    async fn auto_approve_matcher_only_matches_shell_run_permission_request() {
+        let hook = AutoApproveTests::new();
+        assert!(
+            hook.matcher()
+                .matches(HookEvent::PermissionRequest, Some("shell.run"))
+        );
+        assert!(
+            !hook
+                .matcher()
+                .matches(HookEvent::PermissionRequest, Some("fs.write"))
+        );
+        assert!(
+            !hook
+                .matcher()
+                .matches(HookEvent::PreToolUse, Some("shell.run"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approve_no_tool_returns_continue() {
+        let hook = AutoApproveTests::new();
+        let input = HookInput::new(HookEvent::PermissionRequest, "s", 1, Utf8PathBuf::from("."));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn auto_approve_no_command_returns_continue() {
+        let hook = AutoApproveTests::new();
+        let input = make_tool_input("shell.run", json!({"path": "x"}));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn auto_approve_pnpm_yarn_pytest_prefixes() {
+        let hook = AutoApproveTests::new();
+        for cmd in ["pnpm test", "yarn test", "pytest test_foo.py"] {
+            let input = make_tool_input("shell.run", json!({"command": cmd}));
+            let output = hook.run(input).await.expect("should succeed");
+            assert_eq!(output.decision, HookDecision::Allow, "cmd: {cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_approve_trimmed_command_matches() {
+        let hook = AutoApproveTests::new();
+        // 命令含前导空白也应匹配（is_test_command 内部 trim_start）
+        let input = make_tool_input("shell.run", json!({"command": "  cargo test"}));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- BlockSecrets 补充 ----
+
+    #[tokio::test]
+    async fn block_secrets_no_tool_returns_continue() {
+        let hook = BlockSecrets::new();
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("."));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn block_secrets_no_content_returns_continue() {
+        let hook = BlockSecrets::new();
+        let input = make_tool_input("fs.write", json!({"path": "x.rs"}));
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    #[tokio::test]
+    async fn block_secrets_detects_various_patterns() {
+        let hook = BlockSecrets::new();
+        let cases = [
+            ("apikey=xxx", "apikey="),
+            ("apikey: xxx", "apikey:"),
+            ("passwd=xxx", "passwd="),
+            ("passwd: xxx", "passwd:"),
+            ("secret=xxx", "secret="),
+            ("secret: xxx", "secret:"),
+            ("access_token=xxx", "access_token="),
+            ("access_token: xxx", "access_token:"),
+            ("private_key=xxx", "private_key="),
+            ("private_key: xxx", "private_key:"),
+            ("aws_secret_access_key=xxx", "aws_secret_access_key="),
+        ];
+        for (content, pattern) in cases {
+            let input = make_tool_input("fs.write", json!({"path": "cfg", "content": content}));
+            let output = hook.run(input).await.expect("should succeed");
+            assert_eq!(output.decision, HookDecision::Deny, "content: {content}");
+            assert!(
+                output.reason.as_deref().unwrap_or("").contains(pattern),
+                "期望 reason 含 {pattern}，content: {content}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn block_secrets_case_insensitive() {
+        let hook = BlockSecrets::new();
+        let input = make_tool_input(
+            "fs.write",
+            json!({"path": "cfg", "content": "API_KEY=topsecret"}),
+        );
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Deny);
+    }
+
+    // ---- GitStatusInject ----
+
+    #[tokio::test]
+    async fn git_status_inject_matcher_only_matches_session_start() {
+        let hook = GitStatusInject::new();
+        assert!(hook.matcher().matches(HookEvent::SessionStart, None));
+        assert!(!hook.matcher().matches(HookEvent::Stop, None));
+        assert!(
+            !hook
+                .matcher()
+                .matches(HookEvent::PreToolUse, Some("fs.write"))
+        );
+    }
+
+    #[tokio::test]
+    async fn git_status_inject_non_git_dir_returns_continue_no_inject() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hook = GitStatusInject::new();
+        let input = HookInput::new(
+            HookEvent::SessionStart,
+            "s",
+            1,
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8"),
+        );
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+        assert!(output.inject_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn git_status_inject_in_git_repo_injects_context() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // git init 创建仓库；不可用时跳过（不连真实服务原则的本地工具例外）
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(tmp.path())
+            .output();
+        let init_ok = matches!(init, Ok(o) if o.status.success());
+        if !init_ok {
+            eprintln!("skipping: git not available or init failed");
+            return;
+        }
+        // 创建 untracked 文件使 git status --short 有输出
+        std::fs::write(tmp.path().join("untracked.txt"), "test").expect("write");
+        let hook = GitStatusInject::new();
+        let input = HookInput::new(
+            HookEvent::SessionStart,
+            "s",
+            1,
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8"),
+        );
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+        let ctx = output.inject_context.as_deref().expect("应有注入上下文");
+        assert!(ctx.contains("git status"));
+    }
+
+    // ---- BackupBeforeCompact matcher ----
+
+    #[tokio::test]
+    async fn backup_before_compact_matcher_only_matches_pre_compact() {
+        let hook = BackupBeforeCompact::new();
+        assert!(hook.matcher().matches(HookEvent::PreCompact, None));
+        assert!(!hook.matcher().matches(HookEvent::PostCompact, None));
+        assert!(!hook.matcher().matches(HookEvent::SessionStart, None));
+    }
+
+    // ---- TestOnStop ----
+
+    #[tokio::test]
+    async fn test_on_stop_matcher_only_matches_stop() {
+        let hook = TestOnStop::new();
+        assert!(hook.matcher().matches(HookEvent::Stop, None));
+        assert!(!hook.matcher().matches(HookEvent::SessionStart, None));
+        assert!(!hook.matcher().matches(HookEvent::SubagentStop, None));
+    }
+
+    #[tokio::test]
+    async fn test_on_stop_no_project_returns_continue() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hook = TestOnStop::new();
+        let input = HookInput::new(
+            HookEvent::Stop,
+            "s",
+            1,
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8"),
+        );
+        let output = hook.run(input).await.expect("should succeed");
+        assert_eq!(output.decision, HookDecision::Continue);
+    }
+
+    // ---- detect_secret_pattern 补充 ===
+
+    #[test]
+    fn detect_secret_all_patterns() {
+        assert_eq!(detect_secret_pattern("apikey=xxx"), Some("apikey="));
+        assert_eq!(detect_secret_pattern("apikey: xxx"), Some("apikey:"));
+        assert_eq!(detect_secret_pattern("passwd=xxx"), Some("passwd="));
+        assert_eq!(detect_secret_pattern("passwd: xxx"), Some("passwd:"));
+        assert_eq!(detect_secret_pattern("secret=xxx"), Some("secret="));
+        assert_eq!(detect_secret_pattern("secret: xxx"), Some("secret:"));
+        assert_eq!(
+            detect_secret_pattern("access_token=xxx"),
+            Some("access_token=")
+        );
+        assert_eq!(
+            detect_secret_pattern("access_token: xxx"),
+            Some("access_token:")
+        );
+        assert_eq!(
+            detect_secret_pattern("private_key=xxx"),
+            Some("private_key=")
+        );
+        assert_eq!(
+            detect_secret_pattern("private_key: xxx"),
+            Some("private_key:")
+        );
+    }
+
+    #[test]
+    fn detect_secret_case_insensitive() {
+        assert_eq!(detect_secret_pattern("API_KEY=topsecret"), Some("api_key="));
+        assert_eq!(
+            detect_secret_pattern("PASSWORD=mypassword"),
+            Some("password=")
+        );
+        assert_eq!(detect_secret_pattern("Secret=xxx"), Some("secret="));
+    }
 }

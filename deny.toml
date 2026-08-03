@@ -5,18 +5,18 @@
 # 来源限制：仅 crates.io
 
 [graph]
+# 排除 minicoding-desktop：desktop feature 依赖 Tauri（引入大量 GUI 传递依赖，
+# 部分许可证不在白名单中；desktop 为可选 feature，不影响核心 crate 依赖治理）
+exclude = ["minicoding-desktop"]
 all-features = true
 
 [advisories]
 # 漏洞数据库（默认 rustsec/advisory-db）
 # 忽略的 advisory ID（需附 reason）
-ignore = [
-    # number_prefix 0.4.0 是 indicatif 的传递依赖（minicoding-cli 用 indicatif 显示进度条）。
-    # crate 已 unmaintained（RUSTSEC-2025-0119），但无安全漏洞，indicatif 尚未切换替代。
-    { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained but has no vulnerability; transitive dep of indicatif (minicoding-cli)" },
-]
+# RUSTSEC-2025-0119（number_prefix unmaintained）已移除：
+# number_prefix 不再出现在依赖树中（indicatif 已切换替代或移除该传递依赖）
+ignore = []
 # unmaintained 检查范围：workspace（仅检查 workspace 成员，不检查传递依赖）
-# number_prefix 0.4.0 是 indicatif 的传递依赖，已在 ignore 列表中豁免 RUSTSEC-2025-0119
 unmaintained = "workspace"
 # yanked crate 告警级别
 yanked = "deny"

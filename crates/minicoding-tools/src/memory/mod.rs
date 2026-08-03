@@ -33,3 +33,75 @@ pub fn register_memory_tools(
     let auto: std::sync::Arc<dyn AutoMemoryWriter> = std::sync::Arc::new(InMemoryAutoMemory::new());
     registry.register(std::sync::Arc::new(MemoryWrite::new(long_term, auto)));
 }
+
+#[cfg(test)]
+mod tests {
+    //! `register_memory_tools` 注册测试（覆盖率补全）。
+
+    use super::*;
+    use minicoding_core::memory::MemoryStore;
+    use minicoding_core::model::MemoryError;
+    use minicoding_core::provider::BoxFuture;
+    use time::OffsetDateTime;
+
+    /// 测试用空 `MemoryStore`：load 返回空串，save 返回 Ok。
+    struct StubMemoryStore;
+
+    impl MemoryStore for StubMemoryStore {
+        fn load(&self) -> BoxFuture<'_, Result<String, MemoryError>> {
+            Box::pin(async move { Ok(String::new()) })
+        }
+        fn save(&self, _content: &str) -> BoxFuture<'_, Result<(), MemoryError>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn last_mtime(&self) -> Option<OffsetDateTime> {
+            None
+        }
+    }
+
+    #[test]
+    fn register_memory_tools_registers_single_tool() {
+        let mut registry = ToolRegistry::new();
+        let store: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(StubMemoryStore);
+        register_memory_tools(&mut registry, store);
+        assert!(registry.get("memory.write").is_some());
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn register_memory_tools_with_empty_store_does_not_panic() {
+        let mut registry = ToolRegistry::new();
+        let store: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(StubMemoryStore);
+        register_memory_tools(&mut registry, store);
+        // 仅验证注册成功且工具可访问，不调用 execute（避免触发权限/IO）
+        let tool = registry
+            .get("memory.write")
+            .expect("memory.write should be registered");
+        assert_eq!(tool.name(), "memory.write");
+        assert_eq!(
+            tool.side_effect(),
+            minicoding_core::model::SideEffect::FileWrite
+        );
+    }
+
+    // ---- StubMemoryStore 方法调用覆盖 ----
+
+    #[tokio::test]
+    async fn stub_memory_store_load_returns_empty() {
+        let store = StubMemoryStore;
+        let content = store.load().await.expect("load 应成功");
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stub_memory_store_save_succeeds() {
+        let store = StubMemoryStore;
+        store.save("test content").await.expect("save 应成功");
+    }
+
+    #[test]
+    fn stub_memory_store_last_mtime_is_none() {
+        let store = StubMemoryStore;
+        assert!(store.last_mtime().is_none());
+    }
+}

@@ -97,6 +97,7 @@ pub fn fallback_session_info() -> Result<SessionInfo, String> {
 /// `tauri.conf.json` 的 `externalBin` 打包。
 #[cfg(feature = "desktop")]
 pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
+    use tauri_plugin_shell::ShellExt;
     use tauri_plugin_shell::process::CommandEvent;
 
     let sidecar = app

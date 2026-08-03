@@ -25,3 +25,17 @@ pub fn register_web_tools(registry: &mut ToolRegistry) {
     registry.register(std::sync::Arc::new(WebFetch::new()));
     registry.register(std::sync::Arc::new(WebSearch::new()));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_web_tools_registers_both_tools() {
+        let mut registry = ToolRegistry::new();
+        register_web_tools(&mut registry);
+        assert!(registry.get("web.fetch").is_some());
+        assert!(registry.get("web.search").is_some());
+        assert_eq!(registry.len(), 2);
+    }
+}

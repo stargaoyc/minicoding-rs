@@ -64,3 +64,48 @@ impl Tool for ShellKill {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::InMemoryBackgroundShellStore;
+    use minicoding_core::tool::ToolContext;
+
+    fn make_store() -> Arc<dyn BackgroundShellStore> {
+        Arc::new(InMemoryBackgroundShellStore::new())
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn kill_missing_shell_id_returns_invalid_input() {
+        let tool = ShellKill::new(make_store());
+        let result = tool.execute(serde_json::json!({}), &make_ctx()).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn kill_nonexistent_returns_not_found() {
+        let tool = ShellKill::new(make_store());
+        let result = tool
+            .execute(serde_json::json!({"shell_id": "nonexistent"}), &make_ctx())
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[test]
+    fn kill_side_effect_is_command() {
+        let tool = ShellKill::new(make_store());
+        assert_eq!(tool.side_effect(), SideEffect::Command);
+    }
+
+    #[test]
+    fn kill_schema_has_correct_name() {
+        let tool = ShellKill::new(make_store());
+        assert_eq!(tool.name(), "shell.kill");
+    }
+}

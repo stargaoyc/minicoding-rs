@@ -104,3 +104,111 @@ impl Tool for GitApply {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minicoding_core::tool::ToolContext;
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    fn make_ctx(workdir: &str) -> ToolContext {
+        let mut env = HashMap::new();
+        // git 需要 PATH 来找到二进制
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            env.insert("HOME".to_string(), home);
+        }
+        ToolContext {
+            workdir: workdir.into(),
+            session_id: "test".to_string(),
+            env,
+            ..ToolContext::new(workdir.into(), "test".to_string())
+        }
+    }
+
+    fn init_git_repo(dir: &std::path::Path) {
+        Command::new("git")
+            .arg("init")
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .expect("git config name");
+    }
+
+    #[tokio::test]
+    async fn apply_missing_patch_returns_invalid_input() {
+        let tool = GitApply::new();
+        let result = tool.execute(serde_json::json!({}), &make_ctx("/tmp")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn apply_valid_patch_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        init_git_repo(dir.path());
+
+        // 创建初始文件并提交
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello\n").expect("write");
+        Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git commit");
+
+        // 修改文件后生成 patch
+        std::fs::write(&file_path, "hello world\n").expect("write modified");
+        let diff_output = Command::new("git")
+            .args(["diff"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git diff");
+        let patch = String::from_utf8_lossy(&diff_output.stdout).to_string();
+
+        // 重置文件到原始状态
+        std::fs::write(&file_path, "hello\n").expect("write reset");
+
+        // 应用 patch
+        let tool = GitApply::new();
+        let ctx = make_ctx(dir.path().to_str().unwrap());
+        let result = tool
+            .execute(serde_json::json!({"patch": patch}), &ctx)
+            .await;
+        assert!(result.is_ok(), "apply should succeed: {result:?}");
+
+        // 验证文件已修改
+        let content = std::fs::read_to_string(&file_path).expect("read");
+        assert_eq!(content, "hello world\n");
+    }
+
+    #[test]
+    fn apply_side_effect_is_file_write() {
+        let tool = GitApply::new();
+        assert_eq!(tool.side_effect(), SideEffect::FileWrite);
+    }
+
+    #[test]
+    fn apply_schema_has_correct_name() {
+        let tool = GitApply::new();
+        assert_eq!(tool.name(), "git.apply");
+    }
+}

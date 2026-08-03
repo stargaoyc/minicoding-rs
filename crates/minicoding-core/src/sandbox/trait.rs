@@ -93,3 +93,102 @@ impl SandboxDriver for NoopDriver {
         "noop"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `SandboxPolicy` 默认值、`NoopDriver` 与 `SandboxError` 测试（覆盖率补全）。
+
+    use super::*;
+
+    #[test]
+    fn sandbox_policy_default_is_workspace_write_dot() {
+        let p = SandboxPolicy::default();
+        match p {
+            SandboxPolicy::WorkspaceWrite { workdir, writable } => {
+                assert_eq!(workdir, camino::Utf8PathBuf::from("."));
+                assert!(writable.is_empty());
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_policy_serde_roundtrip() {
+        let p = SandboxPolicy::ReadOnly;
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(json.contains("\"kind\":\"read_only\""));
+        let decoded: SandboxPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(decoded, SandboxPolicy::ReadOnly));
+
+        let p = SandboxPolicy::WorkspaceWrite {
+            workdir: camino::Utf8PathBuf::from("/tmp/proj"),
+            writable: vec![camino::Utf8PathBuf::from("/tmp")],
+        };
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(json.contains("\"kind\":\"workspace_write\""));
+        let decoded: SandboxPolicy = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SandboxPolicy::WorkspaceWrite { workdir, writable } => {
+                assert_eq!(workdir, camino::Utf8PathBuf::from("/tmp/proj"));
+                assert_eq!(writable.len(), 1);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_policy_serde_external_sandbox_and_danger() {
+        let p = SandboxPolicy::ExternalSandbox;
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(json.contains("\"kind\":\"external_sandbox\""));
+
+        let p = SandboxPolicy::DangerFullAccess;
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(json.contains("\"kind\":\"danger_full_access\""));
+    }
+
+    #[test]
+    fn noop_driver_apply_returns_ok() {
+        let driver = NoopDriver;
+        let mut cmd = std::process::Command::new("echo");
+        let policy = SandboxPolicy::default();
+        let result = driver.apply(&policy, &mut cmd);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn noop_driver_is_not_hardened_and_has_id_noop() {
+        let driver = NoopDriver;
+        assert!(!driver.is_hardened());
+        assert_eq!(driver.id(), "noop");
+    }
+
+    #[test]
+    fn noop_driver_post_spawn_default_is_ok() {
+        let driver = NoopDriver;
+        // 默认实现的 `post_spawn` 应返回 Ok
+        let result = driver.post_spawn(12345);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sandbox_error_display_sandbox() {
+        let e = SandboxError::Sandbox("kernel not supported".to_string());
+        assert_eq!(e.to_string(), "sandbox: kernel not supported");
+    }
+
+    #[test]
+    fn sandbox_error_display_io() {
+        let e = SandboxError::Io(std::io::Error::other("disk full"));
+        let s = e.to_string();
+        assert!(s.starts_with("io:"));
+        assert!(s.contains("disk full"));
+    }
+
+    #[test]
+    fn sandbox_error_from_io() {
+        let io_err = std::io::Error::other("test");
+        let sandbox_err: SandboxError = io_err.into();
+        assert!(matches!(sandbox_err, SandboxError::Io(_)));
+    }
+}

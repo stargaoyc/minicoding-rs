@@ -634,4 +634,324 @@ mod tests {
         assert!(rendered.contains("use 4 spaces"));
         assert!(rendered.contains("confidence: 0.90"));
     }
+
+    // === AutoCategory::as_str 各变体标签 ===
+
+    #[test]
+    fn auto_category_as_str_returns_correct_label() {
+        assert_eq!(AutoCategory::Correction.as_str(), "correction");
+        assert_eq!(AutoCategory::Pitfall.as_str(), "pitfall");
+        assert_eq!(AutoCategory::Pref.as_str(), "pref");
+        assert_eq!(AutoCategory::Decision.as_str(), "decision");
+    }
+
+    // === 多次不同 topic 累计 ===
+
+    #[tokio::test]
+    async fn add_entry_multiple_topics_accumulates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "topic-a".to_string(),
+            "content-a".to_string(),
+            AutoCategory::Pref,
+            0.5,
+        )
+        .await
+        .unwrap();
+        mem.add_entry(
+            "topic-b".to_string(),
+            "content-b".to_string(),
+            AutoCategory::Decision,
+            0.8,
+        )
+        .await
+        .unwrap();
+        mem.add_entry(
+            "topic-c".to_string(),
+            "content-c".to_string(),
+            AutoCategory::Pitfall,
+            0.3,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 3);
+        let topics: Vec<&str> = entries.iter().map(|e| e.topic.as_str()).collect();
+        assert!(topics.contains(&"topic-a"));
+        assert!(topics.contains(&"topic-b"));
+        assert!(topics.contains(&"topic-c"));
+    }
+
+    // === confidence > 1.0 钳位到 1.0 ===
+
+    #[tokio::test]
+    async fn add_entry_clamps_confidence_above_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "high".to_string(),
+            "content".to_string(),
+            AutoCategory::Pref,
+            1.5,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            (entries[0].confidence - 1.0).abs() < 1e-9,
+            "confidence 应钳位到 1.0"
+        );
+    }
+
+    // === confidence < 0.0 钳位到 0.0 ===
+
+    #[tokio::test]
+    async fn add_entry_clamps_confidence_below_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "low".to_string(),
+            "content".to_string(),
+            AutoCategory::Pref,
+            -0.5,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            (entries[0].confidence - 0.0).abs() < 1e-9,
+            "confidence 应钳位到 0.0"
+        );
+    }
+
+    // === 多次确认 confidence 上限 1.0 ===
+
+    #[tokio::test]
+    async fn add_entry_repeated_confidence_caps_at_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        // 初始 0.95
+        mem.add_entry(
+            "topic".to_string(),
+            "v1".to_string(),
+            AutoCategory::Pref,
+            0.95,
+        )
+        .await
+        .unwrap();
+        // 多次更新，confidence 每次递增 0.1
+        for i in 0..5u32 {
+            mem.add_entry(
+                "topic".to_string(),
+                format!("v{i}"),
+                AutoCategory::Pref,
+                0.5,
+            )
+            .await
+            .unwrap();
+        }
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        // 0.95 + 0.1 = 1.05 → min(1.05, 1.0) = 1.0
+        assert!(
+            (entries[0].confidence - 1.0).abs() < 1e-9,
+            "confidence 应上限 1.0"
+        );
+    }
+
+    // === add_entry 更新时 category 也被更新 ===
+
+    #[tokio::test]
+    async fn add_entry_updates_category_on_dedup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "topic".to_string(),
+            "v1".to_string(),
+            AutoCategory::Pref,
+            0.5,
+        )
+        .await
+        .unwrap();
+        mem.add_entry(
+            "topic".to_string(),
+            "v2".to_string(),
+            AutoCategory::Decision,
+            0.5,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].category,
+            AutoCategory::Decision,
+            "category 应被更新"
+        );
+        assert_eq!(entries[0].content, "v2", "content 应被更新");
+    }
+
+    // === 多条 entry 多 category 渲染 ===
+
+    #[tokio::test]
+    async fn load_rendered_multiple_entries_contains_all_categories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "correction-1".to_string(),
+            "fix this".to_string(),
+            AutoCategory::Correction,
+            0.7,
+        )
+        .await
+        .unwrap();
+        mem.add_entry(
+            "pitfall-1".to_string(),
+            "avoid that".to_string(),
+            AutoCategory::Pitfall,
+            0.6,
+        )
+        .await
+        .unwrap();
+        mem.add_entry(
+            "decision-1".to_string(),
+            "use rust".to_string(),
+            AutoCategory::Decision,
+            0.9,
+        )
+        .await
+        .unwrap();
+        let rendered = mem.load_rendered().await.unwrap();
+        assert!(rendered.contains("[correction] correction-1"));
+        assert!(rendered.contains("[pitfall] pitfall-1"));
+        assert!(rendered.contains("[decision] decision-1"));
+    }
+
+    // === clear 后再 add 正常 ===
+
+    #[tokio::test]
+    async fn clear_then_add_entry_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "before".to_string(),
+            "content".to_string(),
+            AutoCategory::Pref,
+            0.5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(mem.load_entries().await.unwrap().len(), 1);
+
+        mem.clear().await.unwrap();
+        assert!(mem.load_entries().await.unwrap().is_empty());
+
+        // clear 后再 add
+        mem.add_entry(
+            "after".to_string(),
+            "new content".to_string(),
+            AutoCategory::Decision,
+            0.8,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].topic, "after");
+        assert_eq!(entries[0].content, "new content");
+    }
+
+    // === 重复 load_rendered 命中 mtime 缓存 ===
+
+    #[tokio::test]
+    async fn load_rendered_caches_on_repeated_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        mem.add_entry(
+            "topic".to_string(),
+            "content".to_string(),
+            AutoCategory::Pref,
+            0.5,
+        )
+        .await
+        .unwrap();
+        let r1 = mem.load_rendered().await.unwrap();
+        let r2 = mem.load_rendered().await.unwrap();
+        // 第二次应命中 mtime 缓存，返回相同结果
+        assert_eq!(r1, r2);
+    }
+
+    // === 空列表淘汰不 panic ===
+
+    #[test]
+    fn evict_until_fit_empty_no_panic() {
+        let mut entries: Vec<AutoEntry> = Vec::new();
+        evict_until_fit(&mut entries);
+        assert!(entries.is_empty());
+    }
+
+    // === 指令性检测：英文全大写也命中 ===
+
+    #[test]
+    fn is_instructional_case_insensitive_english() {
+        assert!(is_instructional("ALWAYS USE cargo fmt"));
+        assert!(is_instructional("NEVER commit secrets"));
+        assert!(is_instructional("MUST run tests"));
+        assert!(is_instructional("DO NOT use unwrap"));
+        assert!(is_instructional("DON'T panic"));
+        assert!(is_instructional("SHOULD handle errors"));
+    }
+
+    // === 指令性检测：纯空白行不误判 ===
+
+    #[test]
+    fn is_instructional_skips_blank_lines() {
+        assert!(!is_instructional("\n\n  \n"));
+        assert!(!is_instructional("   "));
+        assert!(!is_instructional("\n\t\n"));
+    }
+
+    // === 指令性检测：中文祈使词行首带标点 ===
+
+    #[test]
+    fn is_instructional_detects_chinese_with_colon() {
+        assert!(is_instructional("必须：完成所有测试"));
+        assert!(is_instructional("禁止：硬编码凭证"));
+        assert!(is_instructional("不得：使用 unwrap"));
+    }
+
+    // === 渲染多条 entry 包含所有 topic ===
+
+    #[test]
+    fn render_multiple_entries_includes_all_topics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        let now = OffsetDateTime::now_utc();
+        let entries = vec![
+            AutoEntry {
+                topic: "first".to_string(),
+                content: "content-1".to_string(),
+                confidence: 0.5,
+                updated: now,
+                category: AutoCategory::Pref,
+            },
+            AutoEntry {
+                topic: "second".to_string(),
+                content: "content-2".to_string(),
+                confidence: 0.9,
+                updated: now,
+                category: AutoCategory::Decision,
+            },
+        ];
+        let rendered = mem.render(&entries);
+        assert!(rendered.contains("first"));
+        assert!(rendered.contains("second"));
+        assert!(rendered.contains("content-1"));
+        assert!(rendered.contains("content-2"));
+        assert!(rendered.contains("[pref]"));
+        assert!(rendered.contains("[decision]"));
+    }
 }

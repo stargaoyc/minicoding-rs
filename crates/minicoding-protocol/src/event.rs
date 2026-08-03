@@ -184,6 +184,9 @@ impl EventKind {
 mod tests {
     #![allow(clippy::pedantic)]
     use super::*;
+    use minicoding_core::model::{Message, Task, ToolResult};
+    use minicoding_core::storage::PersistedEvent;
+    use time::OffsetDateTime;
 
     #[test]
     fn token_event_roundtrip() {
@@ -208,5 +211,437 @@ mod tests {
             EventKind::Token { text } => assert_eq!(text, "world"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    // ---- From<&Event> 全变体覆盖 ----
+
+    #[test]
+    fn from_event_message_appended() {
+        let msg = Message::user_text("hi");
+        let dto = EventDto::from_event(1, &Event::MessageAppended(msg));
+        match dto.kind {
+            EventKind::MessageAppended { message } => {
+                assert!(!message.content.is_empty());
+            }
+            _ => panic!("expected MessageAppended"),
+        }
+    }
+
+    #[test]
+    fn from_event_turn_streaming_started() {
+        let dto = EventDto::from_event(2, &Event::TurnStreamingStarted);
+        assert!(matches!(dto.kind, EventKind::TurnStreamingStarted));
+    }
+
+    #[test]
+    fn from_event_turn_end() {
+        let dto = EventDto::from_event(
+            3,
+            &Event::TurnEnd {
+                stop_reason: StopReason::MaxTokens,
+            },
+        );
+        match dto.kind {
+            EventKind::TurnEnd { stop_reason } => {
+                assert_eq!(stop_reason, StopReason::MaxTokens);
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+    }
+
+    #[test]
+    fn from_event_tool_call_started() {
+        let dto = EventDto::from_event(
+            4,
+            &Event::ToolCallStarted {
+                call_id: "call-1".to_string(),
+                tool: "fs.read".to_string(),
+            },
+        );
+        match dto.kind {
+            EventKind::ToolCallStarted { call_id, tool } => {
+                assert_eq!(call_id, "call-1");
+                assert_eq!(tool, "fs.read");
+            }
+            _ => panic!("expected ToolCallStarted"),
+        }
+    }
+
+    #[test]
+    fn from_event_tool_call_finished() {
+        let result = ToolResult::ok_text("done");
+        let dto = EventDto::from_event(
+            5,
+            &Event::ToolCallFinished {
+                call_id: "call-2".to_string(),
+                result: result.clone(),
+            },
+        );
+        match dto.kind {
+            EventKind::ToolCallFinished { call_id, result: r } => {
+                assert_eq!(call_id, "call-2");
+                assert!(!r.is_error);
+            }
+            _ => panic!("expected ToolCallFinished"),
+        }
+    }
+
+    #[test]
+    fn from_event_session_created() {
+        let dto = EventDto::from_event(
+            6,
+            &Event::SessionCreated {
+                id: "sess-abc".to_string(),
+            },
+        );
+        match dto.kind {
+            EventKind::SessionCreated { id } => assert_eq!(id, "sess-abc"),
+            _ => panic!("expected SessionCreated"),
+        }
+    }
+
+    #[test]
+    fn from_event_permission_requested() {
+        let dto = EventDto::from_event(
+            7,
+            &Event::PermissionRequested {
+                id: "perm-1".to_string(),
+                tool: "fs.write".to_string(),
+                summary: "write file".to_string(),
+                risk: Risk::High,
+            },
+        );
+        match dto.kind {
+            EventKind::PermissionRequested {
+                id,
+                tool,
+                summary,
+                risk,
+            } => {
+                assert_eq!(id, "perm-1");
+                assert_eq!(tool, "fs.write");
+                assert_eq!(summary, "write file");
+                assert_eq!(risk, Risk::High);
+            }
+            _ => panic!("expected PermissionRequested"),
+        }
+    }
+
+    #[test]
+    fn from_event_permission_resolved() {
+        let dto = EventDto::from_event(
+            8,
+            &Event::PermissionResolved {
+                id: "perm-1".to_string(),
+                decision: Decision::Deny("nope".to_string()),
+            },
+        );
+        match dto.kind {
+            EventKind::PermissionResolved { id, decision } => {
+                assert_eq!(id, "perm-1");
+                assert!(matches!(decision, Decision::Deny(_)));
+            }
+            _ => panic!("expected PermissionResolved"),
+        }
+    }
+
+    #[test]
+    fn from_event_permission_mode_changed() {
+        let dto = EventDto::from_event(
+            9,
+            &Event::PermissionModeChanged {
+                from: PermissionMode::Default,
+                to: PermissionMode::AcceptEdits,
+            },
+        );
+        match dto.kind {
+            EventKind::PermissionModeChanged { from, to } => {
+                assert_eq!(from, PermissionMode::Default);
+                assert_eq!(to, PermissionMode::AcceptEdits);
+            }
+            _ => panic!("expected PermissionModeChanged"),
+        }
+    }
+
+    #[test]
+    fn from_event_task_updated() {
+        let task = Task::new("do something".to_string());
+        let dto = EventDto::from_event(10, &Event::TaskUpdated { task: task.clone() });
+        match dto.kind {
+            EventKind::TaskUpdated { task: t } => {
+                assert_eq!(t.content, task.content);
+            }
+            _ => panic!("expected TaskUpdated"),
+        }
+    }
+
+    #[test]
+    fn from_event_config_changed() {
+        let dto = EventDto::from_event(11, &Event::ConfigChanged);
+        assert!(matches!(dto.kind, EventKind::ConfigChanged));
+    }
+
+    // ---- EventKind::from_persisted 全变体覆盖 ----
+
+    #[test]
+    fn from_persisted_session_created() {
+        let p = PersistedEvent::SessionCreated {
+            id: "s1".to_string(),
+            workdir: "/tmp".to_string(),
+            config_hash: 42,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        let kind = EventKind::from_persisted(&p);
+        match kind {
+            EventKind::SessionCreated { id } => assert_eq!(id, "s1"),
+            _ => panic!("expected SessionCreated"),
+        }
+    }
+
+    #[test]
+    fn from_persisted_message_appended() {
+        let p = PersistedEvent::MessageAppended {
+            message: Message::user_text("hello"),
+        };
+        let kind = EventKind::from_persisted(&p);
+        assert!(matches!(kind, EventKind::MessageAppended { .. }));
+    }
+
+    #[test]
+    fn from_persisted_permission_resolved() {
+        let p = PersistedEvent::PermissionResolved {
+            id: "p1".to_string(),
+            decision: Decision::Allow,
+        };
+        let kind = EventKind::from_persisted(&p);
+        match kind {
+            EventKind::PermissionResolved { id, decision } => {
+                assert_eq!(id, "p1");
+                assert!(matches!(decision, Decision::Allow));
+            }
+            _ => panic!("expected PermissionResolved"),
+        }
+    }
+
+    #[test]
+    fn from_persisted_permission_mode_changed() {
+        let p = PersistedEvent::PermissionModeChanged {
+            from: PermissionMode::Plan,
+            to: PermissionMode::Default,
+        };
+        let kind = EventKind::from_persisted(&p);
+        match kind {
+            EventKind::PermissionModeChanged { from, to } => {
+                assert_eq!(from, PermissionMode::Plan);
+                assert_eq!(to, PermissionMode::Default);
+            }
+            _ => panic!("expected PermissionModeChanged"),
+        }
+    }
+
+    #[test]
+    fn from_persisted_task_updated() {
+        let p = PersistedEvent::TaskUpdated {
+            task: Task::new("task".to_string()),
+        };
+        let kind = EventKind::from_persisted(&p);
+        assert!(matches!(kind, EventKind::TaskUpdated { .. }));
+    }
+
+    #[test]
+    fn from_persisted_turn_end() {
+        let p = PersistedEvent::TurnEnd {
+            stop_reason: StopReason::Stopped,
+        };
+        let kind = EventKind::from_persisted(&p);
+        match kind {
+            EventKind::TurnEnd { stop_reason } => {
+                assert_eq!(stop_reason, StopReason::Stopped);
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+    }
+
+    // ---- 序列化 roundtrip（各变体）----
+
+    #[test]
+    fn turn_streaming_started_roundtrip() {
+        let dto = EventDto {
+            seq: 1,
+            kind: EventKind::TurnStreamingStarted,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"turn_streaming_started\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.kind, EventKind::TurnStreamingStarted));
+    }
+
+    #[test]
+    fn turn_end_roundtrip() {
+        let dto = EventDto {
+            seq: 2,
+            kind: EventKind::TurnEnd {
+                stop_reason: StopReason::Interrupted,
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"turn_end\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::TurnEnd { stop_reason } => {
+                assert_eq!(stop_reason, StopReason::Interrupted);
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+    }
+
+    #[test]
+    fn session_created_roundtrip() {
+        let dto = EventDto {
+            seq: 3,
+            kind: EventKind::SessionCreated {
+                id: "sess-xyz".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"session_created\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::SessionCreated { id } => assert_eq!(id, "sess-xyz"),
+            _ => panic!("expected SessionCreated"),
+        }
+    }
+
+    #[test]
+    fn permission_requested_roundtrip() {
+        let dto = EventDto {
+            seq: 4,
+            kind: EventKind::PermissionRequested {
+                id: "p1".to_string(),
+                tool: "shell.run".to_string(),
+                summary: "rm -rf".to_string(),
+                risk: Risk::High,
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"permission_requested\""));
+        assert!(json.contains("\"risk\":\"high\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::PermissionRequested { risk, .. } => assert_eq!(risk, Risk::High),
+            _ => panic!("expected PermissionRequested"),
+        }
+    }
+
+    #[test]
+    fn permission_resolved_roundtrip() {
+        let dto = EventDto {
+            seq: 5,
+            kind: EventKind::PermissionResolved {
+                id: "p1".to_string(),
+                decision: Decision::Allow,
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"permission_resolved\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::PermissionResolved { decision, .. } => {
+                assert!(matches!(decision, Decision::Allow));
+            }
+            _ => panic!("expected PermissionResolved"),
+        }
+    }
+
+    #[test]
+    fn permission_mode_changed_roundtrip() {
+        let dto = EventDto {
+            seq: 6,
+            kind: EventKind::PermissionModeChanged {
+                from: PermissionMode::Default,
+                to: PermissionMode::Plan,
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"permission_mode_changed\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::PermissionModeChanged { from, to } => {
+                assert_eq!(from, PermissionMode::Default);
+                assert_eq!(to, PermissionMode::Plan);
+            }
+            _ => panic!("expected PermissionModeChanged"),
+        }
+    }
+
+    #[test]
+    fn config_changed_roundtrip() {
+        let dto = EventDto {
+            seq: 7,
+            kind: EventKind::ConfigChanged,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"config_changed\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.kind, EventKind::ConfigChanged));
+    }
+
+    #[test]
+    fn sessions_listed_roundtrip() {
+        let dto = EventDto {
+            seq: 8,
+            kind: EventKind::SessionsListed {
+                sessions: Vec::new(),
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"sessions_listed\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.kind, EventKind::SessionsListed { .. }));
+    }
+
+    #[test]
+    fn session_retrieved_roundtrip() {
+        let dto = EventDto {
+            seq: 9,
+            kind: EventKind::SessionRetrieved {
+                session_id: "s1".to_string(),
+                messages: Vec::new(),
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"session_retrieved\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::SessionRetrieved { session_id, .. } => {
+                assert_eq!(session_id, "s1");
+            }
+            _ => panic!("expected SessionRetrieved"),
+        }
+    }
+
+    #[test]
+    fn command_error_roundtrip() {
+        let dto = EventDto {
+            seq: 0,
+            kind: EventKind::CommandError {
+                message: "bad request".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"type\":\"command_error\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::CommandError { message } => assert_eq!(message, "bad request"),
+            _ => panic!("expected CommandError"),
+        }
+    }
+
+    #[test]
+    fn from_event_seq_is_preserved() {
+        // 验证 from_event 将 seq 正确填入 DTO。
+        let event = Event::ConfigChanged;
+        let dto = EventDto::from_event(999, &event);
+        assert_eq!(dto.seq, 999);
     }
 }

@@ -180,3 +180,94 @@ fn strip_tags(html: &str) -> String {
     );
     text.trim().replace("&amp;", "&").replace("&lt;", "<")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minicoding_core::tool::ToolContext;
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new("/tmp/proj".into(), "test".to_string())
+    }
+
+    #[tokio::test]
+    async fn search_missing_query_returns_invalid_input() {
+        let tool = WebSearch::new();
+        let result = tool.execute(serde_json::json!({}), &make_ctx()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn search_side_effect_is_network() {
+        let tool = WebSearch::new();
+        assert_eq!(tool.side_effect(), SideEffect::Network);
+    }
+
+    #[test]
+    fn search_schema_has_correct_name() {
+        let tool = WebSearch::new();
+        assert_eq!(tool.name(), "web.search");
+    }
+
+    #[test]
+    fn parse_ddg_results_extracts_title_url_snippet() {
+        let html = r#"
+        <div class="result">
+            <a class="result__a" href="https://example.com/page1">Example Title</a>
+            <a class="result__snippet">Some snippet text</a>
+        </div>
+        "#;
+        let results = parse_ddg_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Title");
+        assert_eq!(results[0].url, "https://example.com/page1");
+        assert_eq!(results[0].snippet, "Some snippet text");
+    }
+
+    #[test]
+    fn parse_ddg_results_respects_max_limit() {
+        let html = r#"
+        <a class="result__a" href="https://a.com">A</a>
+        <a class="result__snippet">sa</a>
+        <a class="result__a" href="https://b.com">B</a>
+        <a class="result__snippet">sb</a>
+        <a class="result__a" href="https://c.com">C</a>
+        <a class="result__snippet">sc</a>
+        "#;
+        let results = parse_ddg_results(html, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn parse_ddg_results_empty_html_returns_empty() {
+        let results = parse_ddg_results("", 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_ddg_results_missing_snippet_uses_empty() {
+        let html = r#"<a class="result__a" href="https://x.com">X</a>"#;
+        let results = parse_ddg_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "");
+    }
+
+    #[test]
+    fn strip_tags_removes_html_tags() {
+        assert_eq!(strip_tags("<b>hello</b>"), "hello");
+        assert_eq!(strip_tags("<a href='x'>link</a>"), "link");
+    }
+
+    #[test]
+    fn strip_tags_unescapes_entities() {
+        assert_eq!(strip_tags("a &amp; b"), "a & b");
+        assert_eq!(strip_tags("x &lt; y"), "x < y");
+    }
+
+    #[test]
+    fn strip_tags_no_tags_returns_trimmed() {
+        assert_eq!(strip_tags("  plain text  "), "plain text");
+    }
+}

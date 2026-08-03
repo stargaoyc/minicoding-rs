@@ -1137,4 +1137,846 @@ mod tests {
         let result2 = reg2.dispatch(input2, DispatchConfig::default()).await;
         assert!(result2.async_rewake.is_none());
     }
+
+    // ===== HookEvent 完整变体覆盖 =====
+
+    #[test]
+    fn event_as_str_all_variants() {
+        assert_eq!(HookEvent::SessionStart.as_str(), "session_start");
+        assert_eq!(HookEvent::UserPromptSubmit.as_str(), "user_prompt_submit");
+        assert_eq!(HookEvent::PreToolUse.as_str(), "pre_tool_use");
+        assert_eq!(HookEvent::PostToolUse.as_str(), "post_tool_use");
+        assert_eq!(
+            HookEvent::PostToolUseFailure.as_str(),
+            "post_tool_use_failure"
+        );
+        assert_eq!(HookEvent::PreCompact.as_str(), "pre_compact");
+        assert_eq!(HookEvent::PostCompact.as_str(), "post_compact");
+        assert_eq!(HookEvent::Stop.as_str(), "stop");
+        assert_eq!(HookEvent::SubagentStop.as_str(), "subagent_stop");
+        assert_eq!(HookEvent::PermissionRequest.as_str(), "permission_request");
+    }
+
+    #[test]
+    fn event_is_tool_event_all_variants() {
+        assert!(HookEvent::PreToolUse.is_tool_event());
+        assert!(HookEvent::PostToolUse.is_tool_event());
+        assert!(HookEvent::PostToolUseFailure.is_tool_event());
+        assert!(HookEvent::PermissionRequest.is_tool_event());
+        assert!(!HookEvent::SessionStart.is_tool_event());
+        assert!(!HookEvent::UserPromptSubmit.is_tool_event());
+        assert!(!HookEvent::PreCompact.is_tool_event());
+        assert!(!HookEvent::PostCompact.is_tool_event());
+        assert!(!HookEvent::Stop.is_tool_event());
+        assert!(!HookEvent::SubagentStop.is_tool_event());
+    }
+
+    #[test]
+    fn event_can_block_all_variants() {
+        assert!(HookEvent::UserPromptSubmit.can_block());
+        assert!(HookEvent::PreToolUse.can_block());
+        assert!(HookEvent::Stop.can_block());
+        assert!(HookEvent::PermissionRequest.can_block());
+        assert!(!HookEvent::SessionStart.can_block());
+        assert!(!HookEvent::PostToolUse.can_block());
+        assert!(!HookEvent::PostToolUseFailure.can_block());
+        assert!(!HookEvent::PreCompact.can_block());
+        assert!(!HookEvent::PostCompact.can_block());
+        assert!(!HookEvent::SubagentStop.can_block());
+    }
+
+    #[test]
+    fn event_can_modify_all_variants() {
+        assert!(HookEvent::PreToolUse.can_modify());
+        assert!(HookEvent::PostToolUse.can_modify());
+        assert!(HookEvent::PostToolUseFailure.can_modify());
+        assert!(!HookEvent::SessionStart.can_modify());
+        assert!(!HookEvent::UserPromptSubmit.can_modify());
+        assert!(!HookEvent::PreCompact.can_modify());
+        assert!(!HookEvent::PostCompact.can_modify());
+        assert!(!HookEvent::Stop.can_modify());
+        assert!(!HookEvent::SubagentStop.can_modify());
+        assert!(!HookEvent::PermissionRequest.can_modify());
+    }
+
+    #[test]
+    fn event_supports_async_rewake_all_variants() {
+        assert!(HookEvent::PostToolUse.supports_async_rewake());
+        assert!(HookEvent::PostToolUseFailure.supports_async_rewake());
+        assert!(HookEvent::Stop.supports_async_rewake());
+        assert!(!HookEvent::SessionStart.supports_async_rewake());
+        assert!(!HookEvent::UserPromptSubmit.supports_async_rewake());
+        assert!(!HookEvent::PreToolUse.supports_async_rewake());
+        assert!(!HookEvent::PreCompact.supports_async_rewake());
+        assert!(!HookEvent::PostCompact.supports_async_rewake());
+        assert!(!HookEvent::SubagentStop.supports_async_rewake());
+        assert!(!HookEvent::PermissionRequest.supports_async_rewake());
+    }
+
+    #[test]
+    fn hook_event_serde_pascal_case() {
+        let json = serde_json::to_string(&HookEvent::SessionStart).expect("ser");
+        assert_eq!(json, "\"SessionStart\"");
+        let json = serde_json::to_string(&HookEvent::PostToolUseFailure).expect("ser");
+        assert_eq!(json, "\"PostToolUseFailure\"");
+        let json = serde_json::to_string(&HookEvent::PermissionRequest).expect("ser");
+        assert_eq!(json, "\"PermissionRequest\"");
+        // round-trip
+        let event: HookEvent = serde_json::from_str("\"PreToolUse\"").expect("de");
+        assert_eq!(event, HookEvent::PreToolUse);
+        let event: HookEvent = serde_json::from_str("\"SubagentStop\"").expect("de");
+        assert_eq!(event, HookEvent::SubagentStop);
+    }
+
+    // ===== VerdictSerde 序列化 =====
+
+    #[test]
+    fn verdict_serde_allow() {
+        let v = VerdictSerde::Allow;
+        let json = serde_json::to_string(&v).expect("ser");
+        assert_eq!(json, "{\"kind\":\"allow\"}");
+        let back: VerdictSerde = serde_json::from_str(&json).expect("de");
+        assert!(matches!(back, VerdictSerde::Allow));
+    }
+
+    #[test]
+    fn verdict_serde_deny() {
+        let v = VerdictSerde::Deny {
+            reason: "blocked".to_string(),
+        };
+        let json = serde_json::to_string(&v).expect("ser");
+        assert_eq!(json, "{\"kind\":\"deny\",\"reason\":\"blocked\"}");
+    }
+
+    #[test]
+    fn verdict_serde_ask() {
+        let v = VerdictSerde::Ask {
+            tool: "fs.write".to_string(),
+            summary: "writing file".to_string(),
+        };
+        let json = serde_json::to_string(&v).expect("ser");
+        assert!(json.contains("\"kind\":\"ask\""));
+        assert!(json.contains("\"tool\":\"fs.write\""));
+        assert!(json.contains("\"summary\":\"writing file\""));
+    }
+
+    // ===== HookError Display =====
+
+    #[test]
+    fn hook_error_display_timeout() {
+        let e = HookError::Timeout {
+            name: "h1".to_string(),
+            timeout_sec: 5,
+        };
+        assert_eq!(e.to_string(), "hook `h1` 超时（5s）");
+    }
+
+    #[test]
+    fn hook_error_display_exit_code() {
+        let e = HookError::ExitCode {
+            name: "h2".to_string(),
+            code: 1,
+            stderr: "fail".to_string(),
+        };
+        assert_eq!(e.to_string(), "hook `h2` 退出码 1: fail");
+    }
+
+    #[test]
+    fn hook_error_display_invalid_output() {
+        let e = HookError::InvalidOutput {
+            name: "h3".to_string(),
+            reason: "bad json".to_string(),
+        };
+        assert_eq!(e.to_string(), "hook `h3` 输出解析失败: bad json");
+    }
+
+    #[test]
+    fn hook_error_display_internal() {
+        let e = HookError::Internal("boom".to_string());
+        assert_eq!(e.to_string(), "hook 内部错误: boom");
+    }
+
+    // ===== Default impls =====
+
+    #[test]
+    fn on_hook_error_default_is_continue() {
+        assert_eq!(OnHookError::default(), OnHookError::Continue);
+    }
+
+    #[test]
+    fn hook_decision_default_is_continue() {
+        assert_eq!(HookDecision::default(), HookDecision::Continue);
+    }
+
+    #[test]
+    fn dispatch_config_default_values() {
+        let cfg = DispatchConfig::default();
+        assert_eq!(cfg.on_error, OnHookError::Continue);
+        assert_eq!(cfg.timeout, std::time::Duration::from_secs(30));
+        assert!(cfg.builtin_deny.is_none());
+    }
+
+    #[test]
+    fn dispatch_result_default_is_empty() {
+        let r = DispatchResult::default();
+        assert_eq!(r.decision, HookDecision::Continue);
+        assert!(r.reason.is_none());
+        assert!(r.modify_input.is_none());
+        assert!(r.inject_contexts.is_empty());
+        assert!(r.exit_messages.is_empty());
+        assert!(r.async_rewake.is_none());
+        assert!(r.errors.is_empty());
+        assert!(r.fatal_error.is_none());
+    }
+
+    #[test]
+    fn hook_output_default_is_continue() {
+        let out = HookOutput::default();
+        assert_eq!(out.decision, HookDecision::Continue);
+        assert!(out.reason.is_none());
+    }
+
+    // ===== Serde 覆盖 =====
+
+    #[test]
+    fn on_hook_error_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&OnHookError::Continue).expect("ser"),
+            "\"continue\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OnHookError::Deny).expect("ser"),
+            "\"deny\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OnHookError::Fail).expect("ser"),
+            "\"fail\""
+        );
+    }
+
+    #[test]
+    fn hook_decision_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&HookDecision::Allow).expect("ser"),
+            "\"allow\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HookDecision::Deny).expect("ser"),
+            "\"deny\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HookDecision::Ask).expect("ser"),
+            "\"ask\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HookDecision::Continue).expect("ser"),
+            "\"continue\""
+        );
+    }
+
+    #[test]
+    fn async_rewake_spec_serde_round_trip() {
+        let spec = AsyncRewakeSpec {
+            estimated_duration_sec: 30,
+            description: "cargo audit".to_string(),
+        };
+        let json = serde_json::to_string(&spec).expect("ser");
+        let back: AsyncRewakeSpec = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.estimated_duration_sec, 30);
+        assert_eq!(back.description, "cargo audit");
+    }
+
+    #[test]
+    fn hook_input_serde_round_trip_minimal() {
+        let input = HookInput::new(
+            HookEvent::SessionStart,
+            "sess-1",
+            1,
+            Utf8PathBuf::from("/tmp"),
+        );
+        let json = serde_json::to_string(&input).expect("ser");
+        let back: HookInput = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.event, HookEvent::SessionStart);
+        assert_eq!(back.session_id, "sess-1");
+        assert_eq!(back.turn, 1);
+        assert!(back.tool.is_none());
+        assert!(back.side_effect.is_none());
+        assert!(back.verdict.is_none());
+    }
+
+    #[test]
+    fn hook_input_serde_round_trip_full() {
+        let mut input = HookInput::new(
+            HookEvent::PreToolUse,
+            "sess-1",
+            1,
+            Utf8PathBuf::from("/tmp"),
+        );
+        input.tool = Some(ToolCall {
+            id: "c1".to_string(),
+            name: "fs.write".to_string(),
+            input: serde_json::json!({"path": "main.rs"}),
+        });
+        input.side_effect = Some(SideEffect::FileWrite);
+        input.verdict = Some(VerdictSerde::Ask {
+            tool: "fs.write".to_string(),
+            summary: "writing main.rs".to_string(),
+        });
+        input.extras = serde_json::json!({"tokens_before": 100});
+        let json = serde_json::to_string(&input).expect("ser");
+        let back: HookInput = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.event, HookEvent::PreToolUse);
+        assert!(back.tool.is_some());
+        assert_eq!(back.side_effect, Some(SideEffect::FileWrite));
+        assert!(back.verdict.is_some());
+        assert_eq!(back.extras["tokens_before"], 100);
+    }
+
+    #[test]
+    fn hook_output_serde_round_trip_full() {
+        let out = HookOutput {
+            decision: HookDecision::Deny,
+            reason: Some("blocked".to_string()),
+            modify_input: Some(serde_json::json!({"path": "alt.rs"})),
+            inject_context: Some("ctx".to_string()),
+            exit_message: Some("bye".to_string()),
+            async_rewake: Some(AsyncRewakeSpec {
+                estimated_duration_sec: 5,
+                description: "task".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&out).expect("ser");
+        let back: HookOutput = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.decision, HookDecision::Deny);
+        assert_eq!(back.reason.as_deref(), Some("blocked"));
+        assert!(back.modify_input.is_some());
+        assert_eq!(back.inject_context.as_deref(), Some("ctx"));
+        assert_eq!(back.exit_message.as_deref(), Some("bye"));
+        assert!(back.async_rewake.is_some());
+    }
+
+    #[test]
+    fn hook_output_skip_serializing_none_fields() {
+        let out = HookOutput::continue_();
+        let json = serde_json::to_string(&out).expect("ser");
+        assert!(!json.contains("reason"));
+        assert!(!json.contains("modify_input"));
+        assert!(!json.contains("inject_context"));
+        assert!(!json.contains("exit_message"));
+        assert!(!json.contains("async_rewake"));
+    }
+
+    #[test]
+    fn hook_output_deserialize_missing_decision_uses_default() {
+        // 空对象反序列化时，decision 用 default_decision() = Continue
+        let json = r#"{}"#;
+        let out: HookOutput = serde_json::from_str(json).expect("de");
+        assert_eq!(out.decision, HookDecision::Continue);
+    }
+
+    // ===== NoopHookRegistry register =====
+
+    #[test]
+    fn noop_registry_register_is_noop() {
+        let reg = NoopHookRegistry;
+        let hook: Arc<dyn Hook> = Arc::new(StaticHook {
+            name: "test".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::continue_(),
+        });
+        reg.register(hook);
+        assert_eq!(reg.count(), 0);
+        assert!(reg.for_event(HookEvent::PreToolUse).is_empty());
+    }
+
+    // ===== for_event_with_tool 默认实现 =====
+
+    #[test]
+    fn for_event_with_tool_filters_by_matcher() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "fs-hook".to_string(),
+            matcher: HookMatcher::for_tools(
+                vec![HookEvent::PreToolUse],
+                vec!["fs.write".to_string()],
+            ),
+            output: HookOutput::continue_(),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "all-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::continue_(),
+        }));
+        // for_event 返回所有订阅该事件的 hook
+        assert_eq!(reg.for_event(HookEvent::PreToolUse).len(), 2);
+        // tool_name=None：matcher 对工具事件 None 时放行
+        let with_none = reg.for_event_with_tool(HookEvent::PreToolUse, None);
+        assert_eq!(with_none.len(), 2);
+        // fs.write 匹配两个 hook（fs-hook 显式匹配，all-hook 匹配所有）
+        let with_fs = reg.for_event_with_tool(HookEvent::PreToolUse, Some("fs.write"));
+        assert_eq!(with_fs.len(), 2);
+        // shell.run 仅匹配 all-hook（fs-hook 不匹配）
+        let with_shell = reg.for_event_with_tool(HookEvent::PreToolUse, Some("shell.run"));
+        assert_eq!(with_shell.len(), 1);
+        assert_eq!(with_shell[0].name(), "all-hook");
+    }
+
+    // ===== glob_match 边界 =====
+
+    #[test]
+    fn glob_match_single_star_only() {
+        // "*" 匹配任意字符串（含空串）
+        assert!(single_glob_match("*", "anything"));
+        assert!(single_glob_match("*", ""));
+    }
+
+    #[test]
+    fn glob_match_multiple_stars() {
+        assert!(single_glob_match("a*c*e", "abcde"));
+        assert!(single_glob_match("a*c*e", "abbbcccde"));
+        assert!(!single_glob_match("a*c*e", "abcd"));
+        assert!(single_glob_match("a*b*c", "axxbyyyc"));
+    }
+
+    #[test]
+    fn glob_match_pipe_with_whitespace() {
+        // | 分隔含空白：trim 后匹配
+        assert!(glob_match("fs.write | fs.edit", "fs.write"));
+        assert!(glob_match("fs.write | fs.edit", "fs.edit"));
+        assert!(!glob_match("fs.write | fs.edit", "fs.read"));
+    }
+
+    // ===== matcher 构造器与边界 =====
+
+    #[test]
+    fn matcher_for_tools_constructor() {
+        let m = HookMatcher::for_tools(vec![HookEvent::PostToolUse], vec!["shell.run".to_string()]);
+        assert_eq!(m.events.len(), 1);
+        assert!(m.tools.is_some());
+        assert_eq!(m.tools.as_ref().expect("tools").len(), 1);
+    }
+
+    #[test]
+    fn matcher_matches_unsubscribed_event() {
+        let m = HookMatcher::for_events(vec![HookEvent::PreToolUse]);
+        // 未订阅 PostToolUse → 不匹配
+        assert!(!m.matches(HookEvent::PostToolUse, Some("fs.write")));
+    }
+
+    // ===== dispatch 决策聚合（补充分支）=====
+
+    #[tokio::test]
+    async fn dispatch_deny_does_not_downgrade_to_allow() {
+        // 先 Deny，再 Allow → 最终 Deny（Allow 不能降级 Deny）
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "deny-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::deny("blocked"),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "allow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::allow("try override"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Deny);
+        // 第一个 Deny 的 reason 被保留
+        assert_eq!(result.reason.as_deref(), Some("blocked"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ask_upgrades_continue() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "ask-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                decision: HookDecision::Ask,
+                reason: Some("need user input".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Ask);
+        assert_eq!(result.reason.as_deref(), Some("need user input"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ask_does_not_downgrade_allow() {
+        // 先 Allow，再 Ask → 最终 Allow（Ask 不能降级 Allow）
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "allow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::allow("approved"),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "ask-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                decision: HookDecision::Ask,
+                reason: Some("ask".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        assert_eq!(result.reason.as_deref(), Some("approved"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_allow_upgrades_ask() {
+        // 先 Ask，再 Allow → 最终 Allow（Allow 升级 Ask）
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "ask-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                decision: HookDecision::Ask,
+                reason: Some("ask".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "allow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::allow("approved"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        assert_eq!(result.reason.as_deref(), Some("approved"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_deny_without_reason_keeps_existing() {
+        // 第一个 Deny 有 reason，第二个 Deny 无 reason → 保留第一个 reason
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "deny-1".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                decision: HookDecision::Deny,
+                reason: Some("first reason".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "deny-2".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                decision: HookDecision::Deny,
+                reason: None,
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Deny);
+        assert_eq!(result.reason.as_deref(), Some("first reason"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_deny_with_reason_replaces_existing() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "deny-1".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::deny("first reason"),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "deny-2".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::deny("second reason"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Deny);
+        assert_eq!(result.reason.as_deref(), Some("second reason"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_continue_keeps_existing_decision() {
+        // 第一个 Allow，第二个 Continue → 最终 Allow（Continue 不干预）
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "allow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::allow("approved"),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "noop-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::continue_(),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    // ===== dispatch on_error=Fail =====
+
+    #[tokio::test]
+    async fn dispatch_on_error_fail_returns_fatal() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(ErrorHook {
+            name: "fail-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            error: HookError::Internal("boom".to_string()),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let config = DispatchConfig {
+            on_error: OnHookError::Fail,
+            ..DispatchConfig::default()
+        };
+        let result = reg.dispatch(input, config).await;
+        assert!(result.fatal_error.is_some());
+        let err = result.fatal_error.as_ref().expect("fatal");
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_on_error_fail_skips_subsequent_hooks() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(ErrorHook {
+            name: "fail-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            error: HookError::Internal("boom".to_string()),
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "after-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput::allow("after"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let config = DispatchConfig {
+            on_error: OnHookError::Fail,
+            ..DispatchConfig::default()
+        };
+        let result = reg.dispatch(input, config).await;
+        // Fail 短路：第二个 hook 不执行
+        assert!(result.fatal_error.is_some());
+        assert!(result.errors.is_empty());
+        assert_eq!(result.decision, HookDecision::Continue);
+    }
+
+    // ===== dispatch 超时（run_hook_once 超时分支）=====
+
+    /// 测试用 Hook：模拟慢速 Hook（用于超时测试）。
+    struct SlowHook {
+        name: String,
+        matcher: HookMatcher,
+        delay: std::time::Duration,
+        output: HookOutput,
+    }
+
+    impl Hook for SlowHook {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn matcher(&self) -> &HookMatcher {
+            &self.matcher
+        }
+        fn run(&self, _input: HookInput) -> BoxFuture<'_, Result<HookOutput, HookError>> {
+            let out = self.output.clone();
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                Ok(out)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_timeout_on_error_continue() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(SlowHook {
+            name: "slow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            delay: std::time::Duration::from_millis(200),
+            output: HookOutput::allow("slow ok"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let config = DispatchConfig {
+            timeout: std::time::Duration::from_millis(50),
+            ..DispatchConfig::default()
+        };
+        let result = reg.dispatch(input, config).await;
+        // 超时按 Continue 收集错误
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.decision, HookDecision::Continue);
+        let (name, err) = &result.errors[0];
+        assert_eq!(name, "slow-hook");
+        assert!(matches!(err, HookError::Timeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_timeout_on_error_deny() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(SlowHook {
+            name: "slow-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            delay: std::time::Duration::from_millis(200),
+            output: HookOutput::allow("slow ok"),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let config = DispatchConfig {
+            timeout: std::time::Duration::from_millis(50),
+            on_error: OnHookError::Deny,
+            ..DispatchConfig::default()
+        };
+        let result = reg.dispatch(input, config).await;
+        assert_eq!(result.decision, HookDecision::Deny);
+        assert_eq!(result.errors.len(), 1);
+    }
+
+    // ===== dispatch exit_messages / async_rewake / modify_input 边界 =====
+
+    #[tokio::test]
+    async fn dispatch_exit_messages_collected() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "exit-1".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::Stop]),
+            output: HookOutput {
+                exit_message: Some("exiting 1".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "exit-2".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::Stop]),
+            output: HookOutput {
+                exit_message: Some("exiting 2".to_string()),
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::Stop, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.exit_messages.len(), 2);
+        assert_eq!(result.exit_messages[0], "exiting 1");
+        assert_eq!(result.exit_messages[1], "exiting 2");
+    }
+
+    #[tokio::test]
+    async fn dispatch_async_rewake_first_wins() {
+        // 两个 Hook 都产生 async_rewake → 第一个胜出
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "rewake-1".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PostToolUse]),
+            output: HookOutput {
+                async_rewake: Some(AsyncRewakeSpec {
+                    estimated_duration_sec: 10,
+                    description: "first".to_string(),
+                }),
+                ..HookOutput::default()
+            },
+        }));
+        reg.register(Arc::new(StaticHook {
+            name: "rewake-2".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PostToolUse]),
+            output: HookOutput {
+                async_rewake: Some(AsyncRewakeSpec {
+                    estimated_duration_sec: 20,
+                    description: "second".to_string(),
+                }),
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::PostToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        let spec = result.async_rewake.expect("async_rewake");
+        assert_eq!(spec.description, "first");
+        assert_eq!(spec.estimated_duration_sec, 10);
+    }
+
+    #[tokio::test]
+    async fn dispatch_modify_input_without_tool_in_input() {
+        // input.tool = None：modify_input 仍写入 result，但不更新 input.tool
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "modify-hook".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            output: HookOutput {
+                modify_input: Some(serde_json::json!({"path": "alt.rs"})),
+                ..HookOutput::default()
+            },
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert!(result.modify_input.is_some());
+        assert_eq!(result.modify_input.expect("input")["path"], "alt.rs");
+    }
+
+    #[tokio::test]
+    async fn dispatch_filters_by_tool_name_via_matcher() {
+        let reg = TestRegistry::new();
+        reg.register(Arc::new(StaticHook {
+            name: "fs-hook".to_string(),
+            matcher: HookMatcher::for_tools(
+                vec![HookEvent::PreToolUse],
+                vec!["fs.write".to_string()],
+            ),
+            output: HookOutput::allow("fs ok"),
+        }));
+        // input 带 fs.write → 匹配
+        let mut input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        input.tool = Some(ToolCall {
+            id: "c1".to_string(),
+            name: "fs.write".to_string(),
+            input: serde_json::json!({}),
+        });
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+
+        // input 带 shell.run → 不匹配
+        let mut input2 = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        input2.tool = Some(ToolCall {
+            id: "c2".to_string(),
+            name: "shell.run".to_string(),
+            input: serde_json::json!({}),
+        });
+        let result2 = reg.dispatch(input2, DispatchConfig::default()).await;
+        assert_eq!(result2.decision, HookDecision::Continue);
+    }
+
+    // ===== HookErrorAction::from_error =====
+
+    #[test]
+    fn hook_error_action_from_error_continue() {
+        let config = DispatchConfig::default();
+        let e = HookError::Internal("x".to_string());
+        let action = HookErrorAction::from_error(e, "h", &config);
+        assert!(matches!(action, HookErrorAction::Continue(_)));
+    }
+
+    #[test]
+    fn hook_error_action_from_error_deny() {
+        let config = DispatchConfig {
+            on_error: OnHookError::Deny,
+            ..DispatchConfig::default()
+        };
+        let e = HookError::Internal("x".to_string());
+        let action = HookErrorAction::from_error(e, "h", &config);
+        let HookErrorAction::Deny(reason, _) = action else {
+            panic!("expected Deny action");
+        };
+        assert!(reason.contains("h"));
+    }
+
+    #[test]
+    fn hook_error_action_from_error_fail() {
+        let config = DispatchConfig {
+            on_error: OnHookError::Fail,
+            ..DispatchConfig::default()
+        };
+        let e = HookError::Internal("x".to_string());
+        let action = HookErrorAction::from_error(e, "h", &config);
+        assert!(matches!(action, HookErrorAction::Fatal(_)));
+    }
 }

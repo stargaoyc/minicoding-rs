@@ -417,13 +417,20 @@ impl ContextManager for ContextManagerImpl {
 mod tests {
     use super::*;
     use minicoding_core::config::RuntimeConfig;
-    use minicoding_core::context::ContextManager;
-    use minicoding_core::model::{Message, SideEffect, ToolError, ToolResult, ToolSchema};
+    use minicoding_core::context::{ContextManager, ContextSnapshot};
+    use minicoding_core::model::{
+        Message, RuntimeError, SideEffect, ToolError, ToolResult, ToolSchema,
+    };
     use minicoding_core::provider::Tokenizer;
     use minicoding_core::tool::{Tool, ToolContext, ToolRegistry};
     use std::sync::Arc;
 
     use crate::budget::TokenBudget;
+    use camino::Utf8PathBuf;
+    use minicoding_core::model::PromptError;
+    use minicoding_core::prompt::{
+        PromptContext, PromptContributor, PromptPipeline, PromptSection, PromptSectionOrder,
+    };
 
     /// 固定 10 token/消息 的分词器（用于简单计数测试）。
     struct TenTokensTokenizer;
@@ -683,6 +690,267 @@ mod tests {
         assert!(
             tokens_after < tokens_before,
             "压缩后 token 应减少: before={tokens_before}, after={tokens_after}"
+        );
+    }
+
+    // === 场景 10：with_prompt_pipeline 注入后 build_chat_request 使用动态 system prompt ===
+
+    /// 静态 contributor：返回固定 section（prompt pipeline 测试用）。
+    struct StaticContributor {
+        content: &'static str,
+    }
+
+    impl PromptContributor for StaticContributor {
+        fn name(&self) -> &'static str {
+            "test-identity"
+        }
+        fn order(&self) -> PromptSectionOrder {
+            PromptSectionOrder::Identity
+        }
+        fn cacheable(&self) -> bool {
+            true
+        }
+        fn build(&self, _ctx: &PromptContext) -> BoxFuture<'_, Result<PromptSection, PromptError>> {
+            let content = self.content;
+            Box::pin(async move {
+                Ok(PromptSection {
+                    contributor_name: "test-identity".into(),
+                    content: content.into(),
+                    order: PromptSectionOrder::Identity,
+                    cacheable: true,
+                    boundary: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn with_prompt_pipeline_overrides_static_system() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mut pipeline = PromptPipeline::new();
+        pipeline.register(Arc::new(StaticContributor {
+            content: "dynamic system prompt from pipeline",
+        }));
+        let ctx = PromptContext::new("session-1".to_string(), Utf8PathBuf::from("/tmp"));
+        let mgr = ContextManagerImpl::new("static fallback".into(), tokenizer, 10_000, None)
+            .with_prompt_pipeline(Arc::new(pipeline), ctx);
+
+        mgr.append(Message::user_text("hello")).await;
+        let tools = ToolRegistry::new();
+        let config = RuntimeConfig::default();
+        let req = mgr
+            .build_chat_request(&tools, &config)
+            .await
+            .expect("build_chat_request 应成功");
+        assert!(
+            req.system.contains("dynamic system prompt from pipeline"),
+            "system 应来自 pipeline: {}",
+            req.system
+        );
+        assert!(
+            !req.system.contains("static fallback"),
+            "不应回退到静态 system_prompt: {}",
+            req.system
+        );
+    }
+
+    // === 场景 11：system 消息无法被压缩丢弃，连续 compress 触发 thrash 熔断 ===
+
+    #[tokio::test]
+    async fn compress_throws_budget_exceeded_on_thrash() {
+        // context_window=6000 → usable=880 → threshold=748
+        // append 一条 1000 字符的 system 消息（> 748，且无法被 L3/L4 丢弃）
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        mgr.append(Message::system_text("x".repeat(1_000))).await;
+        let threshold = TokenBudget::new(6_000).compact_threshold();
+        assert!(
+            mgr.token_count() > threshold,
+            "压缩前应超阈值: {} > {}",
+            mgr.token_count(),
+            threshold
+        );
+
+        // 第一次 compress：consecutive_oversize=1，is_thrashing=false，不熔断
+        mgr.compress(false).await.expect("第一次 compress 不应熔断");
+
+        // 第二次 compress：consecutive_oversize=2，is_thrashing=true，熔断
+        let res = mgr.compress(false).await;
+        assert!(
+            matches!(res, Err(RuntimeError::BudgetExceeded { .. })),
+            "第二次 compress 应触发 thrash 熔断: {res:?}"
+        );
+    }
+
+    // === 场景 12：thrash 状态下 build_chat_request 拒绝并返回 BudgetExceeded ===
+
+    #[tokio::test]
+    async fn build_chat_request_rejects_when_thrashing() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        mgr.append(Message::system_text("x".repeat(1_000))).await;
+
+        // 触发 thrash：连续两次 compress（第二次返回 Err）
+        let _ = mgr.compress(false).await;
+        let _ = mgr.compress(false).await;
+
+        let tools = ToolRegistry::new();
+        let config = RuntimeConfig::default();
+        let res = mgr.build_chat_request(&tools, &config).await;
+        assert!(
+            matches!(res, Err(RuntimeError::BudgetExceeded { .. })),
+            "thrash 后 build_chat_request 应返回 BudgetExceeded"
+        );
+    }
+
+    // === 场景 13：restore 空快照后消息与计数归零 ===
+
+    #[tokio::test]
+    async fn restore_empty_snapshot_clears_messages() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(TenTokensTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 10_000, None);
+        for i in 0..5u32 {
+            mgr.append(Message::user_text(format!("msg {i}"))).await;
+        }
+        assert_eq!(mgr.message_count(), 5);
+        assert_eq!(mgr.token_count(), 50);
+
+        let empty_snap = ContextSnapshot::default();
+        mgr.restore(empty_snap).await;
+        assert_eq!(mgr.message_count(), 0);
+        assert_eq!(mgr.token_count(), 0);
+    }
+
+    // === 场景 14：snapshot 同步更新 token_cache ===
+
+    #[tokio::test]
+    async fn snapshot_updates_token_cache() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(TenTokensTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 10_000, None);
+        mgr.append(Message::user_text("hello")).await;
+        mgr.append(Message::user_text("world")).await;
+        assert_eq!(mgr.token_count(), 20);
+
+        // snapshot 内部会重算 token 并同步到 token_cache
+        let snap = mgr.snapshot().await;
+        assert_eq!(snap.token_count, 20);
+        assert_eq!(mgr.token_count(), 20);
+    }
+
+    // === 场景 15：compress=false 时 build_chat_request 跳过压缩 ===
+
+    #[tokio::test]
+    async fn build_chat_request_skips_compression_when_disabled() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        // 100 条 × 10 字符 = 1000 tokens > 748 threshold
+        for _ in 0..100 {
+            mgr.append(Message::user_text("0123456789")).await;
+        }
+        let tokens_before = mgr.token_count();
+        let threshold = TokenBudget::new(6_000).compact_threshold();
+        assert!(tokens_before > threshold);
+
+        let tools = ToolRegistry::new();
+        let mut config = RuntimeConfig::default();
+        config.context.compress = false;
+        let req = mgr
+            .build_chat_request(&tools, &config)
+            .await
+            .expect("compress=false 时应成功");
+        // 未压缩：消息数不变，token 不变
+        assert_eq!(req.messages.len(), 100, "compress=false 时不应裁剪消息");
+        assert_eq!(
+            mgr.token_count(),
+            tokens_before,
+            "compress=false 时 token 不应变化"
+        );
+    }
+
+    // === 场景 16：build_chat_request 含多条 tool schema ===
+
+    #[tokio::test]
+    async fn build_chat_request_returns_multiple_tools() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(TenTokensTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 10_000, None);
+        mgr.append(Message::user_text("hi")).await;
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(MockTool::new("tool_a", "first tool")));
+        tools.register(Arc::new(MockTool::new("tool_b", "second tool")));
+        tools.register(Arc::new(MockTool::new("tool_c", "third tool")));
+
+        let config = RuntimeConfig::default();
+        let req = mgr
+            .build_chat_request(&tools, &config)
+            .await
+            .expect("build_chat_request 应成功");
+        assert_eq!(req.tools.len(), 3);
+        let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"tool_a"));
+        assert!(names.contains(&"tool_b"));
+        assert!(names.contains(&"tool_c"));
+    }
+
+    // === 场景 17：Debug 实现展示预算与计数 ===
+
+    #[test]
+    fn debug_format_shows_budget_and_counts() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(TenTokensTokenizer);
+        let mgr = ContextManagerImpl::new("my system".into(), tokenizer, 10_000, None);
+        let debug_str = format!("{mgr:?}");
+        assert!(debug_str.contains("ContextManagerImpl"));
+        assert!(debug_str.contains("my system"));
+        assert!(debug_str.contains("message_count: 0"));
+        assert!(debug_str.contains("token_cache: 0"));
+    }
+
+    // === 场景 18：append 后 restore 再 append 计数正确 ===
+
+    #[tokio::test]
+    async fn append_restore_append_maintains_correct_counts() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(TenTokensTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 10_000, None);
+        mgr.append(Message::user_text("first")).await;
+        mgr.append(Message::user_text("second")).await;
+        let snap = mgr.snapshot().await;
+
+        // 追加更多
+        mgr.append(Message::user_text("third")).await;
+        mgr.append(Message::user_text("fourth")).await;
+        assert_eq!(mgr.message_count(), 4);
+        assert_eq!(mgr.token_count(), 40);
+
+        // restore 到 2 条
+        mgr.restore(snap).await;
+        assert_eq!(mgr.message_count(), 2);
+        assert_eq!(mgr.token_count(), 20);
+
+        // 再追加
+        mgr.append(Message::user_text("fifth")).await;
+        assert_eq!(mgr.message_count(), 3);
+        assert_eq!(mgr.token_count(), 30);
+    }
+
+    // === 场景 19：compress with backup_before_compress=true 不影响 token_count ===
+
+    #[tokio::test]
+    async fn compress_with_backup_preserves_token_count() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        for _ in 0..50 {
+            mgr.append(Message::user_text("012345678901234567890123456789"))
+                .await;
+        }
+        let tokens_before = mgr.token_count();
+
+        // backup=true 不影响压缩行为，仅保留备份供调试
+        mgr.compress(true).await.expect("compress 应成功");
+
+        let tokens_after = mgr.token_count();
+        assert!(
+            tokens_after < tokens_before,
+            "backup 不应影响压缩: before={tokens_before}, after={tokens_after}"
         );
     }
 }

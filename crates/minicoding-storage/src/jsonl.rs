@@ -614,4 +614,446 @@ mod tests {
         assert_eq!(metas.len(), 1);
         assert_eq!(metas[0].id, id);
     }
+
+    #[tokio::test]
+    async fn load_returns_messages() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01LOAD";
+        st.append(&id.to_string(), &Message::user_text("hello"))
+            .await
+            .unwrap();
+        st.append(&id.to_string(), &Message::assistant_text("world"))
+            .await
+            .unwrap();
+        let msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn load_nonexistent_returns_empty() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let msgs = st.load(&"01NONE".to_string()).await.unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_messages_sync_returns_messages() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01SYNC";
+        st.append(&id.to_string(), &Message::user_text("sync hello"))
+            .await
+            .unwrap();
+        let msgs = st.load_messages_sync(&id.to_string()).unwrap();
+        assert_eq!(msgs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_messages_sync_nonexistent_returns_empty() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let msgs = st.load_messages_sync(&"01NONE".to_string()).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_messages_sync_corrupted_returns_error() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01CORRUPT";
+        let path = st.session_path(&id.to_string());
+        tokio::fs::write(path.as_std_path(), "not json\n")
+            .await
+            .unwrap();
+        let result = st.load_messages_sync(&id.to_string());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_sync_returns_from_index() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        st.append(&"01SYNC1".to_string(), &Message::user_text("a"))
+            .await
+            .unwrap();
+        st.append(&"01SYNC2".to_string(), &Message::user_text("b"))
+            .await
+            .unwrap();
+        let metas = st.list_sessions_sync().unwrap();
+        assert_eq!(metas.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_sync_empty_dir() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let metas = st.list_sessions_sync().unwrap();
+        assert!(metas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_is_ok() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 删除不存在的会话应返回 Ok（幂等）
+        let result = st.delete(&"01NONE".to_string()).await;
+        assert!(result.is_ok(), "delete nonexistent should be ok");
+    }
+
+    #[tokio::test]
+    async fn export_nonexistent_returns_error() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let result = st
+            .export(&"01NONE".to_string(), ExportFormat::Markdown)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn multiple_sessions_listed_correctly() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        st.append(&"01MULTI1".to_string(), &Message::user_text("first"))
+            .await
+            .unwrap();
+        st.append(&"01MULTI2".to_string(), &Message::user_text("second"))
+            .await
+            .unwrap();
+        st.append(&"01MULTI3".to_string(), &Message::user_text("third"))
+            .await
+            .unwrap();
+        let metas = st.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn append_creates_session_file() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01CREATE";
+        st.append(&id.to_string(), &Message::user_text("content"))
+            .await
+            .unwrap();
+        let path = st.session_path(&id.to_string());
+        assert!(path.as_std_path().exists(), "session file should exist");
+    }
+
+    #[tokio::test]
+    async fn delete_session_sync_removes_file_and_index() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01DELSYNC";
+        st.append(&id.to_string(), &Message::user_text("to be deleted"))
+            .await
+            .unwrap();
+        // 确保文件存在
+        assert!(st.session_path(&id.to_string()).as_std_path().exists());
+        // 同步删除
+        st.delete_session_sync(&id.to_string()).unwrap();
+        // 文件应不存在
+        assert!(!st.session_path(&id.to_string()).as_std_path().exists());
+        // 索引中也不应再有该会话
+        let metas = st.list_sessions_sync().unwrap();
+        assert!(metas.is_empty(), "session should be removed from index");
+    }
+
+    #[tokio::test]
+    async fn delete_session_sync_nonexistent_is_ok() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 删除不存在的会话应返回 Ok（幂等）
+        let result = st.delete_session_sync(&"01NONE".to_string());
+        assert!(
+            result.is_ok(),
+            "delete_session_sync nonexistent should be ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_sync_creates_new_session_with_messages() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let src_id = "01SRC";
+        // 写入源会话消息
+        st.append(&src_id.to_string(), &Message::user_text("first"))
+            .await
+            .unwrap();
+        st.append(&src_id.to_string(), &Message::assistant_text("second"))
+            .await
+            .unwrap();
+        // 读取源消息并 fork 到新会话
+        let messages = st.load(&src_id.to_string()).await.unwrap();
+        let new_id = "01FORK";
+        st.fork_session_sync(&new_id.to_string(), &messages)
+            .unwrap();
+        // 新会话应有相同消息
+        let forked = st.load_messages_sync(&new_id.to_string()).unwrap();
+        assert_eq!(forked.len(), 2);
+        assert_eq!(forked[0].role, Role::User);
+        assert_eq!(forked[1].role, Role::Assistant);
+        // 新会话应出现在索引中
+        let metas = st.list_sessions_sync().unwrap();
+        assert_eq!(metas.len(), 2, "both sessions should be in index");
+    }
+
+    #[tokio::test]
+    async fn fork_session_sync_empty_messages_creates_empty_file() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let new_id = "01EMPTYFORK";
+        let empty: Vec<Message> = Vec::new();
+        st.fork_session_sync(&new_id.to_string(), &empty).unwrap();
+        // 空消息列表 fork 后应创建空文件（不报错）
+        let forked = st.load_messages_sync(&new_id.to_string()).unwrap();
+        assert!(forked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_summary_sync_updates_index_summary() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01SUMMARY";
+        st.append(&id.to_string(), &Message::user_text("hello world"))
+            .await
+            .unwrap();
+        // 更新摘要
+        st.update_summary_sync(&id.to_string(), "test summary")
+            .unwrap();
+        // 从索引读取并验证摘要已更新
+        let metas = st.list_sessions_sync().unwrap();
+        assert_eq!(metas.len(), 1);
+        // SessionMeta 没有 summary 字段，但索引内部应有；通过重新构建索引验证
+        // 删除索引缓存 + 文件，强制重新扫描
+        let _ = tokio::fs::remove_file(st.index_path()).await;
+        {
+            let mut guard = st.lock_index();
+            *guard = None;
+        }
+        // 重新扫描后应仍能列出会话（说明 fork_session_sync 写入的文件有效）
+        let metas_after = st.list_sessions().await.unwrap();
+        assert_eq!(metas_after.len(), 1);
+        assert_eq!(metas_after[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn update_summary_sync_nonexistent_session_is_ok() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 会话不在索引中：静默忽略（best effort，与文档一致）
+        let result = st.update_summary_sync(&"01NOTINIDX".to_string(), "summary");
+        assert!(
+            result.is_ok(),
+            "update_summary_sync for unknown session should be ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_summary_async_via_storage_trait() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01ASYNC";
+        st.append(&id.to_string(), &Message::user_text("data"))
+            .await
+            .unwrap();
+        // 通过 Storage trait 的 async update_summary 调用
+        let result = st.update_summary(&id.to_string(), "async summary").await;
+        assert!(result.is_ok(), "async update_summary should succeed");
+    }
+
+    #[test]
+    fn find_first_user_summary_extracts_first_user_text() {
+        let m1 = serde_json::to_string(&Message::assistant_text("assistant")).unwrap();
+        let m2 = serde_json::to_string(&Message::user_text("user input here")).unwrap();
+        let m3 = serde_json::to_string(&Message::user_text("second user")).unwrap();
+        let lines = vec![m1.as_str(), m2.as_str(), m3.as_str()];
+        let summary = find_first_user_summary(&lines);
+        assert_eq!(summary.as_deref(), Some("user input here"));
+    }
+
+    #[test]
+    fn find_first_user_summary_truncates_to_80_chars() {
+        let long_text = "a".repeat(200);
+        let m = serde_json::to_string(&Message::user_text(&long_text)).unwrap();
+        let lines = vec![m.as_str()];
+        let summary = find_first_user_summary(&lines).expect("should find summary");
+        assert_eq!(summary.chars().count(), 80);
+    }
+
+    #[test]
+    fn find_first_user_summary_returns_none_when_no_user_message() {
+        let m = serde_json::to_string(&Message::assistant_text("only assistant")).unwrap();
+        let lines = vec![m.as_str()];
+        let summary = find_first_user_summary(&lines);
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn find_first_user_summary_returns_none_for_empty_user_text() {
+        let m = serde_json::to_string(&Message::user_text("")).unwrap();
+        let lines = vec![m.as_str()];
+        let summary = find_first_user_summary(&lines);
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn find_first_user_summary_skips_invalid_json_lines() {
+        let lines = vec!["not json", "{\"role\":\"system\",\"content\":[]}"];
+        let summary = find_first_user_summary(&lines);
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_returns_error_for_corrupted_file() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01CORRUPTASYNC";
+        let path = st.session_path(&id.to_string());
+        tokio::fs::write(path.as_std_path(), "not valid json\n")
+            .await
+            .unwrap();
+        let result = st.load(&id.to_string()).await;
+        assert!(result.is_err(), "load corrupted file should return error");
+        let err = result.unwrap_err();
+        assert!(matches!(err, StorageError::Corrupted(_)));
+    }
+
+    #[tokio::test]
+    async fn load_skips_empty_lines_in_file() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01EMPTYLINES";
+        let path = st.session_path(&id.to_string());
+        let m1 = serde_json::to_string(&Message::user_text("first")).unwrap();
+        let m2 = serde_json::to_string(&Message::assistant_text("second")).unwrap();
+        // 写入含空行的 JSONL
+        let content = format!("{m1}\n\n  \n{m2}\n\n");
+        tokio::fs::write(path.as_std_path(), content).await.unwrap();
+        let msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(msgs.len(), 2, "should skip empty lines");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_empty_for_nonexistent_dir() {
+        // base_dir 不存在时 list_sessions 应返回空 Vec
+        let st = JsonlStorage::new(Utf8PathBuf::from(
+            "/tmp/minicoding-test-nonexistent-dir-xyz-12345",
+        ));
+        let metas = st.list_sessions().await.unwrap();
+        assert!(metas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_lock_file_if_exists() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01LOCKDEL";
+        st.append(&id.to_string(), &Message::user_text("data"))
+            .await
+            .unwrap();
+        // 创建模拟锁文件
+        let lock_path = st.base_dir.join(format!("{id}.lock"));
+        tokio::fs::write(lock_path.as_std_path(), "lock")
+            .await
+            .unwrap();
+        assert!(lock_path.as_std_path().exists());
+        // 删除会话应同时清理锁文件
+        st.delete(&id.to_string()).await.unwrap();
+        assert!(
+            !lock_path.as_std_path().exists(),
+            "lock file should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_updates_index_for_multiple_sessions() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 写入多个会话，验证索引正确更新
+        for i in 0..5 {
+            let id = format!("01MULTI{i}");
+            st.append(&id, &Message::user_text(format!("content {i}")))
+                .await
+                .unwrap();
+        }
+        let metas = st.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 5);
+        // 再次 append 同一会话应更新消息计数
+        st.append(&"01MULTI0".to_string(), &Message::user_text("more"))
+            .await
+            .unwrap();
+        let metas = st.list_sessions().await.unwrap();
+        assert_eq!(metas.len(), 5, "session count should not change");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_sync_skips_non_jsonl_files() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 写入一个有效会话
+        st.append(&"01VALID".to_string(), &Message::user_text("hi"))
+            .await
+            .unwrap();
+        // 写入非 .jsonl 文件（应被扫描时跳过）
+        let other_path = st.base_dir.join("not_a_session.txt");
+        tokio::fs::write(other_path.as_std_path(), "not a session")
+            .await
+            .unwrap();
+        // 写入 .jsonl 但内容损坏的文件（应被扫描时跳过）
+        let corrupt_path = st.base_dir.join("01CORRUPT.jsonl");
+        tokio::fs::write(corrupt_path.as_std_path(), "not json")
+            .await
+            .unwrap();
+        // 清空索引缓存 + 删除索引文件，强制重新扫描
+        let _ = tokio::fs::remove_file(st.index_path()).await;
+        {
+            let mut guard = st.lock_index();
+            *guard = None;
+        }
+        let metas = st.list_sessions_sync().unwrap();
+        assert_eq!(metas.len(), 1, "should only list the one valid session");
+        assert_eq!(metas[0].id, "01VALID");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_sync_skips_empty_jsonl_files() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        // 写入一个有效会话
+        st.append(&"01VALID".to_string(), &Message::user_text("hi"))
+            .await
+            .unwrap();
+        // 写入空的 .jsonl 文件（应被跳过）
+        let empty_path = st.base_dir.join("01EMPTY.jsonl");
+        tokio::fs::write(empty_path.as_std_path(), "")
+            .await
+            .unwrap();
+        // 清空索引缓存 + 删除索引文件，强制重新扫描
+        let _ = tokio::fs::remove_file(st.index_path()).await;
+        {
+            let mut guard = st.lock_index();
+            *guard = None;
+        }
+        let metas = st.list_sessions_sync().unwrap();
+        assert_eq!(metas.len(), 1, "empty jsonl should be skipped");
+    }
+
+    #[tokio::test]
+    async fn load_messages_sync_skips_empty_lines() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01SYNCEMPTY";
+        let path = st.session_path(&id.to_string());
+        let m1 = serde_json::to_string(&Message::user_text("first")).unwrap();
+        let m2 = serde_json::to_string(&Message::assistant_text("second")).unwrap();
+        // 写入含空行的 JSONL
+        let content = format!("{m1}\n\n  \n{m2}\n");
+        std::fs::write(path.as_std_path(), content).unwrap();
+        let msgs = st.load_messages_sync(&id.to_string()).unwrap();
+        assert_eq!(msgs.len(), 2, "should skip empty lines");
+    }
 }

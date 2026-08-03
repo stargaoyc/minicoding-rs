@@ -640,4 +640,554 @@ mod tests {
             .unwrap();
         assert!(matches!(verdict, Verdict::Ask(_)));
     }
+
+    // === SideEffect 分支补充测试（Default 模式下 None/Command/Network）===
+
+    #[tokio::test]
+    async fn side_effect_none_returns_allow_in_default_mode() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let verdict = policy
+            .check(
+                "fs.read",
+                &input,
+                &ctx_with_mode(SideEffect::None, PermissionMode::Default),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[tokio::test]
+    async fn side_effect_command_returns_ask_high_risk_with_full_options() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"command": "ls -la"});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_mode(SideEffect::Command, PermissionMode::Default),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => {
+                assert_eq!(prompt.risk, Risk::High);
+                assert!(prompt.summary.contains("ls -la"));
+                assert!(prompt.options.contains(&PromptOption::AllowAlways));
+                assert!(prompt.options.contains(&PromptOption::DenyAlways));
+            }
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn side_effect_command_without_command_field_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({});
+        let verdict = policy
+            .check(
+                "shell.run",
+                &input,
+                &ctx_with_mode(SideEffect::Command, PermissionMode::Default),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => assert_eq!(prompt.summary, "执行命令"),
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn side_effect_network_returns_ask_high_risk() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"url": "https://example.com"});
+        let verdict = policy
+            .check(
+                "web.fetch",
+                &input,
+                &ctx_with_mode(SideEffect::Network, PermissionMode::Default),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => {
+                assert_eq!(prompt.risk, Risk::High);
+                assert!(prompt.summary.contains("https://example.com"));
+            }
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn side_effect_network_without_url_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({});
+        let verdict = policy
+            .check(
+                "web.fetch",
+                &input,
+                &ctx_with_mode(SideEffect::Network, PermissionMode::Default),
+            )
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => assert_eq!(prompt.summary, "访问网络"),
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    // === check_file_write 分支测试 ===
+
+    #[tokio::test]
+    async fn file_write_no_path_returns_ask_with_full_options() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"content": "x"});
+        let verdict = policy
+            .check("fs.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => {
+                assert_eq!(prompt.summary, "写入文件");
+                assert_eq!(prompt.risk, Risk::Medium);
+                assert!(prompt.options.contains(&PromptOption::AllowAlways));
+            }
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_write_agents_md_returns_ask_without_allow_always() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "AGENTS.md", "content": "x"});
+        let verdict = policy
+            .check("fs.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => {
+                assert!(prompt.summary.contains("AGENTS.md"));
+                assert!(!prompt.options.contains(&PromptOption::AllowAlways));
+                assert_eq!(prompt.options.len(), 3);
+            }
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_write_claude_md_returns_ask_without_allow_always() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "CLAUDE.md", "content": "x"});
+        let verdict = policy
+            .check("fs.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => assert!(!prompt.options.contains(&PromptOption::AllowAlways)),
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_write_in_workdir_returns_ask() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.write", &input, &ctx).await.unwrap();
+        match verdict {
+            Verdict::Ask(prompt) => {
+                assert!(prompt.summary.contains("src/main.rs"));
+                assert!(prompt.options.contains(&PromptOption::AllowAlways));
+            }
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_write_path_escape_returns_deny() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        // 越界路径：相对 ../../ 穿出到 workdir 之外（C-03）
+        let escape_path = if cfg!(unix) {
+            "../../etc/passwd"
+        } else {
+            "../../Windows/System32/drivers/etc/hosts"
+        };
+        let input = serde_json::json!({"path": escape_path, "content": "x"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.write", &input, &ctx).await.unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("path not allowed")),
+            other => panic!("期望 Deny，实际 {other:?}"),
+        }
+    }
+
+    // === 黑名单（is_blacklisted）补充测试 ===
+
+    #[tokio::test]
+    async fn blacklist_denies_delete_claude_md() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "CLAUDE.md"});
+        let verdict = policy
+            .check("fs.delete", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("blacklisted")),
+            other => panic!("期望黑名单 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn blacklist_does_not_match_fs_write_on_agents_md() {
+        // fs.write AGENTS.md 不触发黑名单（仅 fs.delete 触发），走 check_file_write → Ask
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "AGENTS.md", "content": "x"});
+        let verdict = policy
+            .check("fs.write", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn blacklist_delete_other_file_in_workdir_returns_ask() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.delete", &input, &ctx).await.unwrap();
+        // fs.delete 非 AGENTS.md/CLAUDE.md → 不触发黑名单 → 走 check_file_write → Ask
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[tokio::test]
+    async fn blacklist_delete_without_path_returns_ask() {
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({});
+        let verdict = policy
+            .check("fs.delete", &input, &ctx_file_write())
+            .await
+            .unwrap();
+        // 无 path → is_blacklisted 返回 false → 走 check_file_write → Ask（"写入文件"）
+        match verdict {
+            Verdict::Ask(prompt) => assert_eq!(prompt.summary, "写入文件"),
+            other => panic!("期望 Ask，实际 {other:?}"),
+        }
+    }
+
+    // === targets_project_doc 单元测试 ===
+
+    #[test]
+    fn targets_project_doc_matches_agents_md_variants() {
+        assert!(targets_project_doc("AGENTS.md"));
+        assert!(targets_project_doc("subdir/AGENTS.md"));
+        assert!(targets_project_doc("./AGENTS.md"));
+        assert!(targets_project_doc("/abs/path/AGENTS.md"));
+    }
+
+    #[test]
+    fn targets_project_doc_matches_claude_md_variants() {
+        assert!(targets_project_doc("CLAUDE.md"));
+        assert!(targets_project_doc("docs/CLAUDE.md"));
+    }
+
+    #[test]
+    fn targets_project_doc_rejects_other_files() {
+        assert!(!targets_project_doc("README.md"));
+        assert!(!targets_project_doc("agents.md")); // 大小写敏感
+        assert!(!targets_project_doc("AGENTS.txt"));
+        assert!(!targets_project_doc("src/main.rs"));
+    }
+
+    #[test]
+    fn targets_project_doc_rejects_no_filename() {
+        assert!(!targets_project_doc(""));
+        assert!(!targets_project_doc("/"));
+        assert!(!targets_project_doc("."));
+    }
+
+    // === extract_path / extract_command_text ===
+
+    #[test]
+    fn extract_path_returns_string_for_path_field() {
+        assert_eq!(
+            extract_path(&serde_json::json!({"path": "foo/bar"})),
+            Some("foo/bar")
+        );
+    }
+
+    #[test]
+    fn extract_path_returns_none_when_absent_or_non_string() {
+        assert_eq!(extract_path(&serde_json::json!({"content": "x"})), None);
+        assert_eq!(extract_path(&serde_json::json!({})), None);
+        assert_eq!(extract_path(&serde_json::json!({"path": 123})), None);
+    }
+
+    #[test]
+    fn extract_command_text_prefers_command_field() {
+        assert_eq!(
+            extract_command_text(&serde_json::json!({"command": "cargo build"})),
+            Some("cargo build".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_command_text_falls_back_to_cmd_field() {
+        assert_eq!(
+            extract_command_text(&serde_json::json!({"cmd": "ls"})),
+            Some("ls".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_command_text_returns_none_when_absent() {
+        assert_eq!(
+            extract_command_text(&serde_json::json!({"path": "x"})),
+            None
+        );
+        assert_eq!(extract_command_text(&serde_json::json!({})), None);
+    }
+
+    // === command_summary / network_summary ===
+
+    #[test]
+    fn command_summary_with_command_or_cmd() {
+        assert_eq!(
+            command_summary(&serde_json::json!({"command": "ls"})),
+            "执行命令 ls"
+        );
+        assert_eq!(
+            command_summary(&serde_json::json!({"cmd": "pwd"})),
+            "执行命令 pwd"
+        );
+    }
+
+    #[test]
+    fn command_summary_without_command_field() {
+        assert_eq!(command_summary(&serde_json::json!({})), "执行命令");
+    }
+
+    #[test]
+    fn network_summary_with_or_without_url() {
+        assert_eq!(
+            network_summary(&serde_json::json!({"url": "https://example.com"})),
+            "访问网络 https://example.com"
+        );
+        assert_eq!(network_summary(&serde_json::json!({})), "访问网络");
+    }
+
+    // === matches_pre_approved 补充 ===
+
+    #[test]
+    fn matches_pre_approved_empty_list_returns_false() {
+        assert!(!matches_pre_approved(
+            "shell.run",
+            &serde_json::json!({"command": "x"}),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn matches_pre_approved_cmd_field_also_works() {
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "ls".to_string(),
+        }];
+        assert!(matches_pre_approved(
+            "shell.run",
+            &serde_json::json!({"cmd": "ls -la"}),
+            &allowed,
+        ));
+    }
+
+    #[test]
+    fn matches_pre_approved_no_command_text_returns_false() {
+        let allowed = vec![PreApprovedPrompt {
+            tool: "fs.write".to_string(),
+            prompt: "x".to_string(),
+        }];
+        // fs.write 无 command/cmd 字段 → command_text 为 None → 不匹配
+        assert!(!matches_pre_approved(
+            "fs.write",
+            &serde_json::json!({"path": "x"}),
+            &allowed,
+        ));
+    }
+
+    // === is_instructional_content 全分支正向测试 ===
+
+    #[test]
+    fn is_instructional_content_english_positive_all_branches() {
+        assert!(is_instructional_content("Always use cargo fmt"));
+        assert!(is_instructional_content("never commit secrets"));
+        assert!(is_instructional_content("must run tests"));
+        assert!(is_instructional_content("do not push to main"));
+        assert!(is_instructional_content("don't use unwrap"));
+        assert!(is_instructional_content("should be tested"));
+        assert!(is_instructional_content("## Rules"));
+        assert!(is_instructional_content("## Constraints"));
+    }
+
+    #[test]
+    fn is_instructional_content_chinese_positive_all_branches() {
+        assert!(is_instructional_content("总是使用 cargo fmt"));
+        assert!(is_instructional_content("永远不要提交密钥"));
+        assert!(is_instructional_content("禁止使用 unwrap"));
+        assert!(is_instructional_content("必须运行测试"));
+        assert!(is_instructional_content("不要直接修改"));
+        assert!(is_instructional_content("不得绕过权限"));
+        assert!(is_instructional_content("应当遵循规范"));
+        assert!(is_instructional_content("应保持简洁"));
+        assert!(is_instructional_content("## 规则"));
+        assert!(is_instructional_content("## 约束"));
+    }
+
+    #[test]
+    fn is_instructional_content_case_insensitive_english() {
+        assert!(is_instructional_content("NEVER commit secrets"));
+        assert!(is_instructional_content("MUST RUN TESTS"));
+        assert!(is_instructional_content("## RULES"));
+    }
+
+    #[test]
+    fn is_instructional_content_multiline_with_one_matching_line() {
+        let content = "project uses rust 2024\n\nmust run tests before commit\n";
+        assert!(is_instructional_content(content));
+    }
+
+    #[test]
+    fn is_instructional_content_only_empty_lines_returns_false() {
+        assert!(!is_instructional_content("\n\n\n"));
+    }
+
+    // === full_options / project_doc_options ===
+
+    #[test]
+    fn full_options_contains_all_four_options() {
+        let opts = full_options();
+        assert_eq!(opts.len(), 4);
+        assert!(opts.contains(&PromptOption::AllowOnce));
+        assert!(opts.contains(&PromptOption::AllowAlways));
+        assert!(opts.contains(&PromptOption::DenyOnce));
+        assert!(opts.contains(&PromptOption::DenyAlways));
+    }
+
+    #[test]
+    fn project_doc_options_excludes_allow_always() {
+        let opts = project_doc_options();
+        assert_eq!(opts.len(), 3);
+        assert!(opts.contains(&PromptOption::AllowOnce));
+        assert!(!opts.contains(&PromptOption::AllowAlways));
+        assert!(opts.contains(&PromptOption::DenyOnce));
+        assert!(opts.contains(&PromptOption::DenyAlways));
+    }
+
+    // === next_prompt_id / make_prompt ===
+
+    #[test]
+    fn next_prompt_id_is_unique_and_prefixed() {
+        let id1 = next_prompt_id();
+        let id2 = next_prompt_id();
+        assert!(id1.starts_with("prompt-"));
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn make_prompt_populates_all_fields() {
+        let prompt = make_prompt(
+            "fs.write",
+            "写入文件".to_string(),
+            Risk::Medium,
+            full_options(),
+        );
+        assert_eq!(prompt.tool, "fs.write");
+        assert_eq!(prompt.summary, "写入文件");
+        assert_eq!(prompt.risk, Risk::Medium);
+        assert_eq!(prompt.options.len(), 4);
+        assert!(prompt.id.starts_with("prompt-"));
+    }
+
+    // === compute_verdict 直接测试（覆盖各分支）===
+
+    #[test]
+    fn compute_verdict_none_side_effect_returns_allow() {
+        let ctx = ctx_with_mode(SideEffect::None, PermissionMode::Default);
+        let verdict = compute_verdict("fs.read", &serde_json::json!({"path": "x"}), &ctx);
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    #[test]
+    fn compute_verdict_command_returns_ask() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        let verdict = compute_verdict("shell.run", &serde_json::json!({"command": "ls"}), &ctx);
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[test]
+    fn compute_verdict_network_returns_ask() {
+        let ctx = ctx_with_mode(SideEffect::Network, PermissionMode::Default);
+        let verdict = compute_verdict("web.fetch", &serde_json::json!({"url": "https://x"}), &ctx);
+        assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    #[test]
+    fn compute_verdict_blacklist_highest_priority() {
+        let ctx = ctx_file_write();
+        let verdict = compute_verdict("fs.delete", &serde_json::json!({"path": "AGENTS.md"}), &ctx);
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("blacklisted")),
+            other => panic!("期望黑名单 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_verdict_pre_approved_overrides_ask() {
+        let ctx = ctx_with_allowed(
+            SideEffect::Command,
+            vec![PreApprovedPrompt {
+                tool: "shell.run".to_string(),
+                prompt: "cargo build".to_string(),
+            }],
+        );
+        let verdict = compute_verdict(
+            "shell.run",
+            &serde_json::json!({"command": "cargo build --release"}),
+            &ctx,
+        );
+        assert!(matches!(verdict, Verdict::Allow));
+    }
 }
