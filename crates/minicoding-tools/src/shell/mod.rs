@@ -34,3 +34,19 @@ pub fn register_shell_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(ShellOutput::new(store.clone())));
     registry.register(Arc::new(ShellKill::new(store)));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_shell_tools_registers_all_four() {
+        let mut registry = ToolRegistry::new();
+        register_shell_tools(&mut registry);
+        assert!(registry.get("shell.run").is_some());
+        assert!(registry.get("shell.background").is_some());
+        assert!(registry.get("shell.output").is_some());
+        assert!(registry.get("shell.kill").is_some());
+        assert_eq!(registry.len(), 4);
+    }
+}

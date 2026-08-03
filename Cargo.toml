@@ -27,6 +27,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "AGPL-3.0-only"
 repository = "https://github.com/minicoding/minicoding-rs"
+homepage = "https://github.com/minicoding/minicoding-rs"
 version = "0.1.0"
 authors = ["stargaoyc"]
 
@@ -163,3 +164,8 @@ strip = true
 
 [profile.dev]
 debug = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -82,3 +82,91 @@ impl AuditSink for NoopAudit {
         Box::pin(async move { Ok(()) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `SessionMeta` / `AuditRecord` / `AuditKind` / `NoopAudit` 测试（覆盖率补全）。
+
+    use super::*;
+    use crate::model::SessionId;
+
+    fn sample_meta() -> SessionMeta {
+        SessionMeta {
+            id: SessionId::from("01TEST"),
+            created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            message_count: 5,
+            last_message_at: OffsetDateTime::from_unix_timestamp(1_700_000_100).unwrap(),
+        }
+    }
+
+    #[test]
+    fn session_meta_serde_roundtrip() {
+        let meta = sample_meta();
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let decoded: SessionMeta = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.id, meta.id);
+        assert_eq!(decoded.message_count, meta.message_count);
+    }
+
+    #[test]
+    fn audit_kind_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AuditKind::PermissionRequested).unwrap(),
+            "\"permission_requested\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditKind::PermissionResolved).unwrap(),
+            "\"permission_resolved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditKind::ToolCall).unwrap(),
+            "\"tool_call\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditKind::ToolResult).unwrap(),
+            "\"tool_result\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditKind::HookRun).unwrap(),
+            "\"hook_run\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuditKind::FileUndone).unwrap(),
+            "\"file_undone\""
+        );
+    }
+
+    #[test]
+    fn audit_record_serde_roundtrip() {
+        let rec = AuditRecord {
+            ts: OffsetDateTime::from_unix_timestamp(1_700_000_050).unwrap(),
+            session: SessionId::from("01AUDIT"),
+            kind: AuditKind::ToolCall,
+            tool: Some("shell.run".to_string()),
+            decision: None,
+            detail: "executed echo".to_string(),
+        };
+        let json = serde_json::to_string(&rec).expect("serialize");
+        let decoded: AuditRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.session, rec.session);
+        assert!(matches!(decoded.kind, AuditKind::ToolCall));
+        assert_eq!(decoded.tool.as_deref(), Some("shell.run"));
+        assert!(decoded.decision.is_none());
+        assert_eq!(decoded.detail, "executed echo");
+    }
+
+    #[tokio::test]
+    async fn noop_audit_record_returns_ok() {
+        let sink = NoopAudit;
+        let rec = AuditRecord {
+            ts: OffsetDateTime::now_utc(),
+            session: SessionId::from("01NOOP"),
+            kind: AuditKind::PermissionResolved,
+            tool: None,
+            decision: Some("allow".to_string()),
+            detail: "noop test".to_string(),
+        };
+        let result = sink.record(rec).await;
+        assert!(result.is_ok());
+    }
+}

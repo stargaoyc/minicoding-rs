@@ -19,6 +19,10 @@ thiserror = { workspace = true }
 # 启用 `ts` 时连带启用 `minicoding-core/ts`，保证引用的 core 类型也导出。
 ts-rs = { workspace = true, optional = true }
 
+[dev-dependencies]
+# PersistedEvent::SessionCreated 测试需要 OffsetDateTime 构造（见 event.rs 测试）
+time = { workspace = true }
+
 [features]
 default = []
 # 启用 ts-rs 类型导出（M9 前端 DTO 契约，见 AGENTS.md §8.4）

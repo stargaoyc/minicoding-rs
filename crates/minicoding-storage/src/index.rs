@@ -385,4 +385,379 @@ mod tests {
         assert!(out.contains("01EE"));
         assert!(out.contains("01FF"));
     }
+
+    // ---- 辅助：解析 RFC3339 时间戳，减少测试中的重复 ----
+    fn ts(s: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(s, &Rfc3339).expect("valid rfc3339 in test fixture")
+    }
+
+    // ---- SessionIndexEntry::new ----
+
+    #[test]
+    fn entry_new_sets_all_fields() {
+        let now = ts("2026-03-01T00:00:00Z");
+        let e = SessionIndexEntry::new("01XYZ", Some("hello".to_string()), now);
+        assert_eq!(e.session_id, "01XYZ");
+        assert_eq!(e.summary.as_deref(), Some("hello"));
+        assert_eq!(e.message_count, 1);
+        assert_eq!(e.created_at, now);
+        assert_eq!(e.updated_at, now);
+        assert!(e.parent_uuid.is_none());
+    }
+
+    #[test]
+    fn entry_new_accepts_none_summary() {
+        let now = ts("2026-03-01T00:00:00Z");
+        let e = SessionIndexEntry::new("01ABC", None, now);
+        assert!(e.summary.is_none());
+        assert_eq!(e.message_count, 1);
+    }
+
+    #[test]
+    fn entry_new_accepts_string_ref_for_id() {
+        // impl Into<String> 应接受 &str 与 String
+        let id = String::from("01STR");
+        let e = SessionIndexEntry::new(id, None, OffsetDateTime::UNIX_EPOCH);
+        assert_eq!(e.session_id, "01STR");
+    }
+
+    // ---- SessionIndexEntry::to_meta ----
+
+    #[test]
+    fn entry_to_meta_maps_fields_directly() {
+        let e = entry("01META", 42);
+        let meta = e.to_meta();
+        assert_eq!(meta.id, "01META");
+        assert_eq!(meta.message_count, 42);
+        assert_eq!(meta.created_at, e.created_at);
+        assert_eq!(meta.last_message_at, e.updated_at);
+    }
+
+    // ---- SessionIndexEntry serde ----
+
+    #[test]
+    fn entry_serde_roundtrip_with_parent_uuid() {
+        let e = SessionIndexEntry {
+            session_id: "01SRT".to_string(),
+            summary: Some("a summary".to_string()),
+            message_count: 7,
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-02-01T00:00:00Z"),
+            parent_uuid: Some("01PARENT".to_string()),
+        };
+        let json = serde_json::to_string(&e).expect("serialize");
+        let back: SessionIndexEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.session_id, e.session_id);
+        assert_eq!(back.summary, e.summary);
+        assert_eq!(back.message_count, e.message_count);
+        assert_eq!(back.created_at, e.created_at);
+        assert_eq!(back.updated_at, e.updated_at);
+        assert_eq!(back.parent_uuid, e.parent_uuid);
+    }
+
+    #[test]
+    fn entry_serde_roundtrip_none_fields() {
+        let e = SessionIndexEntry {
+            session_id: "01N".to_string(),
+            summary: None,
+            message_count: 0,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            parent_uuid: None,
+        };
+        let json = serde_json::to_string(&e).expect("serialize");
+        let back: SessionIndexEntry = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.summary.is_none());
+        assert!(back.parent_uuid.is_none());
+        assert_eq!(back.message_count, 0);
+        assert_eq!(back.created_at, OffsetDateTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn entry_serde_uses_rfc3339_format() {
+        // 验证时间字段经 rfc3339 序列化为可读字符串（非数字时间戳）
+        let e = SessionIndexEntry {
+            session_id: "01FMT".to_string(),
+            summary: None,
+            message_count: 1,
+            created_at: ts("2026-06-15T12:30:45Z"),
+            updated_at: ts("2026-06-15T12:30:45Z"),
+            parent_uuid: None,
+        };
+        let json = serde_json::to_string(&e).expect("serialize");
+        assert!(json.contains("2026-06-15T12:30:45Z"), "json was: {json}");
+    }
+
+    // ---- SessionIndex serde / Default ----
+
+    #[test]
+    fn index_serde_roundtrip_preserves_entries() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01R1", 3));
+        idx.add(entry("01R2", 5));
+        let json = serde_json::to_string(&idx).expect("serialize");
+        let back: SessionIndex = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.get("01R1").unwrap().message_count, 3);
+        assert_eq!(back.get("01R2").unwrap().message_count, 5);
+    }
+
+    #[test]
+    fn index_default_is_empty() {
+        let idx = SessionIndex::default();
+        assert!(idx.is_empty());
+        assert_eq!(idx.len(), 0);
+        assert!(idx.list().is_empty());
+        assert!(idx.to_metas().is_empty());
+    }
+
+    #[test]
+    fn index_clone_is_independent() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01CL", 1));
+        let mut cloned = idx.clone();
+        cloned.add(entry("01CL2", 2));
+        cloned.remove("01CL");
+        // 原索引不受 clone 侧修改影响
+        assert_eq!(idx.len(), 1);
+        assert!(idx.get("01CL").is_some());
+        assert!(idx.get("01CL2").is_none());
+        assert_eq!(cloned.len(), 1);
+        assert!(cloned.get("01CL").is_none());
+        assert!(cloned.get("01CL2").is_some());
+    }
+
+    // ---- load 边界 ----
+
+    #[test]
+    fn index_load_empty_file_returns_empty() {
+        let dir = tempdir().unwrap();
+        let path: Utf8PathBuf = dir.path().join("empty.json").try_into().unwrap();
+        std::fs::write(path.as_std_path(), "   \n  ").unwrap();
+        let loaded = SessionIndex::load(&path).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn index_load_corrupted_returns_corrupted_error() {
+        let dir = tempdir().unwrap();
+        let path: Utf8PathBuf = dir.path().join("bad.json").try_into().unwrap();
+        std::fs::write(path.as_std_path(), "{ not valid json").unwrap();
+        let err = SessionIndex::load(&path).unwrap_err();
+        assert!(
+            matches!(err, StorageError::Corrupted(_)),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    // ---- add：created_at 保留语义 ----
+
+    #[test]
+    fn index_add_update_preserves_original_created_at() {
+        let mut idx = SessionIndex::new();
+        idx.add(SessionIndexEntry {
+            session_id: "01P".to_string(),
+            summary: Some("orig".to_string()),
+            message_count: 1,
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-02T00:00:00Z"),
+            parent_uuid: None,
+        });
+        // 用更晚的 created_at 覆盖 —— 原始 created_at 应被保留
+        idx.add(SessionIndexEntry {
+            session_id: "01P".to_string(),
+            summary: Some("new".to_string()),
+            message_count: 10,
+            created_at: ts("2099-12-31T00:00:00Z"),
+            updated_at: ts("2026-06-01T00:00:00Z"),
+            parent_uuid: None,
+        });
+        assert_eq!(idx.len(), 1);
+        let got = idx.get("01P").unwrap();
+        assert_eq!(got.created_at, ts("2026-01-01T00:00:00Z"));
+        assert_eq!(got.updated_at, ts("2026-06-01T00:00:00Z"));
+        assert_eq!(got.message_count, 10);
+        assert_eq!(got.summary.as_deref(), Some("new"));
+    }
+
+    // ---- update_summary ----
+
+    #[test]
+    fn update_summary_sets_summary_on_existing_entry() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01U", 1));
+        idx.update_summary("01U", "new summary".to_string());
+        assert_eq!(
+            idx.get("01U").unwrap().summary.as_deref(),
+            Some("new summary")
+        );
+    }
+
+    #[test]
+    fn update_summary_overwrites_existing_summary() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01UO", 1)); // summary = Some("summary-01UO")
+        idx.update_summary("01UO", "replaced".to_string());
+        assert_eq!(
+            idx.get("01UO").unwrap().summary.as_deref(),
+            Some("replaced")
+        );
+    }
+
+    #[test]
+    fn update_summary_nonexistent_is_noop() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01UN", 1));
+        idx.update_summary("MISSING", "x".to_string());
+        assert_eq!(idx.len(), 1);
+        assert!(idx.get("MISSING").is_none());
+        assert_eq!(
+            idx.get("01UN").unwrap().summary.as_deref(),
+            Some("summary-01UN"),
+        );
+    }
+
+    // ---- upsert_on_append ----
+
+    #[test]
+    fn upsert_on_append_creates_new_entry_when_absent() {
+        let mut idx = SessionIndex::new();
+        let now = ts("2026-05-01T00:00:00Z");
+        idx.upsert_on_append("01NEW", Some("first".to_string()), now);
+        assert_eq!(idx.len(), 1);
+        let e = idx.get("01NEW").unwrap();
+        assert_eq!(e.message_count, 1);
+        assert_eq!(e.summary.as_deref(), Some("first"));
+        assert_eq!(e.created_at, now);
+        assert_eq!(e.updated_at, now);
+        assert!(e.parent_uuid.is_none());
+    }
+
+    #[test]
+    fn upsert_on_append_existing_increments_count_and_updates_time() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01UP", 5)); // message_count=5, updated_at=2026-01-02
+        let now = ts("2026-07-01T00:00:00Z");
+        idx.upsert_on_append("01UP", Some("ignored".to_string()), now);
+        let e = idx.get("01UP").unwrap();
+        assert_eq!(e.message_count, 6);
+        assert_eq!(e.updated_at, now);
+        // summary 已为 Some，不应被覆盖
+        assert_eq!(e.summary.as_deref(), Some("summary-01UP"));
+        // created_at 不变
+        assert_eq!(e.created_at, ts("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn upsert_on_append_fills_none_summary() {
+        let mut idx = SessionIndex::new();
+        idx.add(SessionIndexEntry {
+            session_id: "01NS".to_string(),
+            summary: None,
+            message_count: 1,
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-01T00:00:00Z"),
+            parent_uuid: None,
+        });
+        let now = ts("2026-08-01T00:00:00Z");
+        idx.upsert_on_append("01NS", Some("filled".to_string()), now);
+        let got = idx.get("01NS").unwrap();
+        assert_eq!(got.message_count, 2);
+        assert_eq!(got.summary.as_deref(), Some("filled"));
+        assert_eq!(got.updated_at, now);
+    }
+
+    #[test]
+    fn upsert_on_append_none_summary_stays_none() {
+        let mut idx = SessionIndex::new();
+        idx.add(SessionIndexEntry {
+            session_id: "01NS2".to_string(),
+            summary: None,
+            message_count: 1,
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-01T00:00:00Z"),
+            parent_uuid: None,
+        });
+        let now = ts("2026-09-01T00:00:00Z");
+        idx.upsert_on_append("01NS2", None, now);
+        let got = idx.get("01NS2").unwrap();
+        assert_eq!(got.message_count, 2);
+        assert!(got.summary.is_none());
+        assert_eq!(got.updated_at, now);
+    }
+
+    // ---- list_windowed 边界 ----
+
+    #[test]
+    fn list_windowed_empty_returns_empty_string() {
+        let idx = SessionIndex::new();
+        assert_eq!(idx.list_windowed(), "");
+    }
+
+    #[test]
+    fn list_windowed_single_entry_no_truncation() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01SINGLE", 1));
+        let out = idx.list_windowed();
+        assert!(out.contains("01SINGLE"));
+        assert!(!out.contains(MORE_MARKER));
+    }
+
+    #[test]
+    fn list_windowed_uses_placeholder_for_none_summary() {
+        let mut idx = SessionIndex::new();
+        idx.add(SessionIndexEntry {
+            session_id: "01NSUM".to_string(),
+            summary: None,
+            message_count: 1,
+            created_at: ts("2026-01-01T00:00:00Z"),
+            updated_at: ts("2026-01-02T00:00:00Z"),
+            parent_uuid: None,
+        });
+        let out = idx.list_windowed();
+        assert!(out.contains("(no summary)"), "out was: {out}");
+        assert!(out.contains("01NSUM"));
+    }
+
+    // ---- save 边界 ----
+
+    #[test]
+    fn index_save_overwrites_existing_file() {
+        let dir = tempdir().unwrap();
+        let path: Utf8PathBuf = dir.path().join("overwrite.json").try_into().unwrap();
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01OW1", 1));
+        idx.save(&path).unwrap();
+        // 用更少条目覆盖写
+        let mut idx2 = SessionIndex::new();
+        idx2.add(entry("01OW2", 2));
+        idx2.save(&path).unwrap();
+        let loaded = SessionIndex::load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.get("01OW1").is_none());
+        assert!(loaded.get("01OW2").is_some());
+        // .tmp 仍不应残留
+        let tmp: Utf8PathBuf = path.with_extension("json.tmp");
+        assert!(!tmp.exists());
+    }
+
+    // ---- remove 边界 ----
+
+    #[test]
+    fn index_remove_all_entries_yields_empty() {
+        let mut idx = SessionIndex::new();
+        idx.add(entry("01RA1", 1));
+        idx.add(entry("01RA2", 2));
+        idx.remove("01RA1");
+        idx.remove("01RA2");
+        assert!(idx.is_empty());
+        assert_eq!(idx.len(), 0);
+        assert_eq!(idx.list_windowed(), "");
+    }
+
+    #[test]
+    fn index_get_on_empty_returns_none() {
+        let idx = SessionIndex::new();
+        assert!(idx.get("anything").is_none());
+    }
 }

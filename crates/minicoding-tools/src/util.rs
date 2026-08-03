@@ -118,11 +118,21 @@ mod tests {
         assert_eq!(resolved, workdir.join("inside.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_absolute_path_outside_workdir_rejected() {
         let (_tmp, workdir) = make_workdir();
-        // /etc/passwd 是越界的绝对路径
+        // /etc/passwd 是 Unix 下越界的绝对路径
         let err = resolve_path(&workdir, "/etc/passwd").unwrap_err();
+        assert!(matches!(err, ToolError::PathEscaped(_)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_absolute_path_outside_workdir_rejected() {
+        let (_tmp, workdir) = make_workdir();
+        // C:\Windows\System32 是 Windows 下越界的绝对路径
+        let err = resolve_path(&workdir, "C:\\Windows\\System32").unwrap_err();
         assert!(matches!(err, ToolError::PathEscaped(_)));
     }
 

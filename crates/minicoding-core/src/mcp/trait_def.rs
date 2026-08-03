@@ -180,3 +180,184 @@ impl McpClient for NoopMcpClient {
         Box::pin(async move { Ok(()) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! MCP 配置数据结构与 `NoopMcpClient` 兜底测试（覆盖率补全）。
+
+    use super::*;
+
+    #[test]
+    fn mcp_scope_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&McpScope::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&McpScope::Project).unwrap(),
+            "\"project\""
+        );
+        assert_eq!(serde_json::to_string(&McpScope::User).unwrap(), "\"user\"");
+    }
+
+    #[test]
+    fn mcp_transport_stdio_serde_roundtrip() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let t = McpTransport::Stdio {
+            command: "node".to_string(),
+            args: vec!["server.js".to_string()],
+            env,
+            cwd: Some(camino::Utf8PathBuf::from("/tmp")),
+        };
+        let json = serde_json::to_string(&t).expect("serialize");
+        assert!(json.contains("\"transport\":\"stdio\""));
+        assert!(json.contains("\"command\":\"node\""));
+        let decoded: McpTransport = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                assert_eq!(command, "node");
+                assert_eq!(args.len(), 1);
+                assert_eq!(env.len(), 1);
+                assert_eq!(cwd.as_deref(), Some(camino::Utf8Path::new("/tmp")));
+            }
+            McpTransport::Http { .. } => panic!("expected Stdio, got Http"),
+        }
+    }
+
+    #[test]
+    fn mcp_transport_http_serde_roundtrip() {
+        let t = McpTransport::Http {
+            url: "https://example.com/mcp".to_string(),
+            bearer_token_env_var: Some("MCP_TOKEN".to_string()),
+            http_headers: HashMap::new(),
+        };
+        let json = serde_json::to_string(&t).expect("serialize");
+        assert!(json.contains("\"transport\":\"http\""));
+        assert!(json.contains("\"url\":\"https://example.com/mcp\""));
+        let decoded: McpTransport = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            McpTransport::Http {
+                url,
+                bearer_token_env_var,
+                http_headers,
+            } => {
+                assert_eq!(url, "https://example.com/mcp");
+                assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
+                assert!(http_headers.is_empty());
+            }
+            McpTransport::Stdio { .. } => panic!("expected Http, got Stdio"),
+        }
+    }
+
+    #[test]
+    fn tool_hint_default_is_unknown() {
+        assert_eq!(ToolHint::default(), ToolHint::Unknown);
+    }
+
+    #[test]
+    fn tool_hint_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ToolHint::ReadOnly).unwrap(),
+            "\"read_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolHint::Destructive).unwrap(),
+            "\"destructive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolHint::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn mcp_server_config_serde_uses_defaults() {
+        let json = r#"{
+            "name": "test-server",
+            "transport": {"transport": "stdio", "command": "node", "args": [], "env": {}},
+            "scope": "local"
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cfg.name, "test-server");
+        assert_eq!(cfg.scope, McpScope::Local);
+        assert_eq!(cfg.startup_timeout_sec, 20);
+        assert_eq!(cfg.tool_timeout_sec, 60);
+        assert!(cfg.enabled);
+        assert!(!cfg.required);
+        assert!(cfg.enabled_tools.is_none());
+    }
+
+    #[test]
+    fn mcp_server_config_serde_overrides_defaults() {
+        let json = r#"{
+            "name": "x",
+            "transport": {"transport": "stdio", "command": "x", "args": [], "env": {}},
+            "scope": "user",
+            "startup_timeout_sec": 5,
+            "tool_timeout_sec": 10,
+            "enabled": false,
+            "required": true,
+            "enabled_tools": ["t1", "t2"]
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cfg.startup_timeout_sec, 5);
+        assert_eq!(cfg.tool_timeout_sec, 10);
+        assert!(!cfg.enabled);
+        assert!(cfg.required);
+        let tools = cfg.enabled_tools.expect("enabled_tools should be set");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0], "t1");
+        assert_eq!(tools[1], "t2");
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_start_returns_ok() {
+        let client = NoopMcpClient;
+        let result = client.start(&[]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_list_tools_returns_empty() {
+        let client = NoopMcpClient;
+        let tools = client.list_tools().await;
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_call_returns_not_ready() {
+        let client = NoopMcpClient;
+        let result = client.call("any", "tool", serde_json::Value::Null).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, McpError::NotReady(_)));
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_health_check_returns_true() {
+        let client = NoopMcpClient;
+        let result = client.health_check().await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_warm_up_returns_ok() {
+        let client = NoopMcpClient;
+        let result = client.warm_up().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn noop_mcp_client_shutdown_returns_ok() {
+        let client = NoopMcpClient;
+        let result = client.shutdown().await;
+        assert!(result.is_ok());
+    }
+}

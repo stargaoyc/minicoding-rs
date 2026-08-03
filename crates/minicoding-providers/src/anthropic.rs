@@ -477,8 +477,49 @@ impl Tokenizer for ApproxTokenizer {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_pass_by_value)]
 
     use super::*;
+    use futures::stream::StreamExt;
+    use minicoding_core::model::ToolSchema;
+    use minicoding_core::provider::GenerationParams;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 构造最小 `ChatRequest`（无 system、无 tools、无生成参数）。
+    fn basic_req() -> ChatRequest {
+        ChatRequest {
+            system: String::new(),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::<ToolSchema>::new(),
+            params: GenerationParams {
+                model: "claude-3-5-sonnet".to_string(),
+                temperature: None,
+                top_p: None,
+                max_output_tokens: None,
+                stop: vec![],
+                seed: None,
+            },
+        }
+    }
+
+    /// 把单个 JSON 值包装为 SSE `data:` 事件行。
+    fn sse_event(json: &Value) -> String {
+        format!("data: {json}\n\n")
+    }
+
+    /// 收集 `BoxStream` 所有 Ok delta（遇 Err 则 panic，便于定位）。
+    async fn collect_deltas(stream: BoxStream<'static, Result<Delta, LlmError>>) -> Vec<Delta> {
+        let mut out = Vec::new();
+        let mut s = stream;
+        while let Some(item) = s.next().await {
+            match item {
+                Ok(d) => out.push(d),
+                Err(e) => panic!("未预期的 delta 错误: {e:?}"),
+            }
+        }
+        out
+    }
 
     #[test]
     fn parse_message_start_emits_usage() {
@@ -653,5 +694,670 @@ mod tests {
         assert_eq!(tok.count("abcdefgh"), 2); // 8 字符 / 4 = 2
         assert_eq!(tok.count("abc"), 1); // 3 字符 div_ceil 4 = 1
         assert_eq!(tok.id(), "anthropic-approx");
+    }
+
+    // --- chat_stream HTTP mock 测试 ---
+
+    #[tokio::test]
+    async fn chat_stream_parses_text_delta() {
+        // 场景：mock 返回 SSE 流含 content_block_delta(text_delta) → Delta::Text
+        let server = MockServer::start().await;
+        let event = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+        let sse_body = sse_event(&event);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], Delta::Text(t) if t == "hello"));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_parses_tool_use_and_input_json_delta() {
+        // 场景：content_block_start(tool_use) + content_block_delta(input_json_delta)
+        let server = MockServer::start().await;
+        let start = json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_01", "name": "fs.read", "input": {}}
+        });
+        let delta = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"/tmp\"}"}
+        });
+        let sse_body = format!("{}{}", sse_event(&start), sse_event(&delta));
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 2);
+        match &deltas[0] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 0);
+                assert_eq!(tc.id.as_deref(), Some("toolu_01"));
+                assert_eq!(tc.name.as_deref(), Some("fs.read"));
+            }
+            other => panic!("期望 ToolCall，得到 {other:?}"),
+        }
+        match &deltas[1] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.args_chunk.as_deref(), Some("{\"path\":\"/tmp\"}"));
+            }
+            other => panic!("期望 ToolCall(args)，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_emits_stop_and_usage() {
+        // 场景：message_delta 含 stop_reason + output_tokens → Delta::Stop + Delta::Usage
+        let server = MockServer::start().await;
+        let text_chunk = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "ok"}
+        });
+        let stop_chunk = json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 5}
+        });
+        let sse_body = format!("{}{}", sse_event(&text_chunk), sse_event(&stop_chunk));
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 3);
+        assert!(matches!(&deltas[0], Delta::Text(t) if t == "ok"));
+        assert!(matches!(&deltas[1], Delta::Stop(StopReason::EndTurn)));
+        assert!(matches!(&deltas[2], Delta::Usage(_)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_message_stop_terminates_cleanly() {
+        // 场景：message_stop 事件不产出 delta，流正常终止
+        let server = MockServer::start().await;
+        let sse_body = sse_event(&json!({"type": "message_stop"}));
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert!(deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_stream_401_returns_client_error() {
+        // 场景：HTTP 401 鉴权失败 → LlmError::Client
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("401 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::Client { status, body } => {
+                assert_eq!(status, 401);
+                assert_eq!(body, "unauthorized");
+            }
+            other => panic!("期望 Client 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_429_returns_rate_limited_with_retry_after() {
+        // 场景：HTTP 429 限流 + Retry-After → LlmError::RateLimited（携带毫秒）
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_string("slow down")
+                    .insert_header("retry-after", "3"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("429 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::RateLimited { retry_after_ms } => {
+                assert_eq!(retry_after_ms, Some(3000));
+            }
+            other => panic!("期望 RateLimited 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_500_returns_server_error() {
+        // 场景：HTTP 500 服务端错误 → LlmError::Server
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("500 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::Server { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "internal error");
+            }
+            other => panic!("期望 Server 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_connection_refused_returns_network_error() {
+        // 场景：网络错误（连接被拒绝）→ LlmError::Network
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let base = format!("http://{addr}");
+        let provider =
+            AnthropicProvider::new(base, "sk-test", "claude-3-5-sonnet").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("连接拒绝应返回错误，但 chat_stream 成功");
+        };
+        assert!(
+            matches!(err, LlmError::Network(_)),
+            "期望 Network 错误，得到 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_invalid_json_returns_parse_error() {
+        // 场景：SSE data 为非法 JSON → 流中返回 LlmError::Parse
+        let server = MockServer::start().await;
+        let sse_body = "data: not valid json\n\n";
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let mut s = stream;
+        let mut found_parse_error = false;
+        while let Some(item) = s.next().await {
+            if let Err(LlmError::Parse(_)) = item {
+                found_parse_error = true;
+                break;
+            }
+        }
+        assert!(found_parse_error, "流中应包含 Parse 错误");
+    }
+
+    #[tokio::test]
+    async fn chat_stream_sends_x_api_key_and_anthropic_version() {
+        // 场景：验证请求含 x-api-key、anthropic-version 头与 model 字段
+        let server = MockServer::start().await;
+        let expected_body = json!({"model": "claude-3-5-sonnet"});
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "sk-test"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .and(body_partial_json(expected_body))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: {\"type\":\"message_stop\"}\n\n")
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(server.uri(), "sk-test", "claude-3-5-sonnet")
+            .expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let _ = collect_deltas(stream).await;
+    }
+
+    // --- build_request_body 补充 ---
+
+    #[test]
+    fn build_request_body_with_tools_and_params() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let req = ChatRequest {
+            system: "rules".to_string(),
+            messages: vec![Message::user_text("hi")],
+            tools: vec![ToolSchema {
+                name: "fs.read".to_string(),
+                description: "read a file".to_string(),
+                input_schema: json!({"type": "object"}),
+            }],
+            params: GenerationParams {
+                model: "claude-3-5-sonnet".to_string(),
+                temperature: Some(0.7),
+                top_p: Some(0.9),
+                max_output_tokens: Some(512),
+                stop: vec!["END".to_string()],
+                seed: None,
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["model"], "claude-3-5-sonnet");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 512);
+        assert_eq!(body["system"], "rules");
+        assert_eq!(body["tools"][0]["name"], "fs.read");
+        assert_eq!(body["tools"][0]["description"], "read a file");
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(body["temperature"], json!(0.7_f32));
+        assert_eq!(body["top_p"], json!(0.9_f32));
+        assert_eq!(body["stop_sequences"], json!(["END"]));
+        // Anthropic 不支持 seed 参数
+        assert!(body.get("seed").is_none());
+    }
+
+    #[test]
+    fn build_request_body_default_max_tokens_when_absent() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let body = provider.build_request_body(&basic_req());
+        // max_output_tokens 缺省 4096
+        assert_eq!(body["max_tokens"], 4_096);
+    }
+
+    #[test]
+    fn build_request_body_no_system_no_tools_minimal() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let body = provider.build_request_body(&basic_req());
+        assert_eq!(body["model"], "claude-3-5-sonnet");
+        assert_eq!(body["stream"], true);
+        // 无 system 时不出现 system 字段
+        assert!(body.get("system").is_none());
+        // 无 tools 时不出现 tools 字段
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+    }
+
+    // --- auth_headers ---
+
+    #[test]
+    fn auth_headers_includes_x_api_key_and_version() {
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "sk-test-key",
+            "claude-3-5-sonnet",
+        )
+        .expect("构造");
+        let headers = provider.auth_headers().expect("构造 headers");
+        assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+        assert_eq!(headers.get("x-api-key").unwrap(), "sk-test-key");
+        assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
+    }
+
+    #[test]
+    fn auth_headers_invalid_api_key_returns_network_error() {
+        // 包含换行符的 api_key 无法构造 HeaderValue → LlmError::Network
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "sk-bad\nkey",
+            "claude-3-5-sonnet",
+        )
+        .expect("构造");
+        let result = provider.auth_headers();
+        let Err(err) = result else {
+            panic!("非法 api_key 应返回错误");
+        };
+        assert!(
+            matches!(err, LlmError::Network(_)),
+            "期望 Network 错误，得到 {err:?}"
+        );
+    }
+
+    // --- parse_usage ---
+
+    #[test]
+    fn parse_usage_with_cache_fields() {
+        let u = parse_usage(&json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 10
+        }));
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_read, Some(30));
+        assert_eq!(u.cache_write, Some(10));
+    }
+
+    #[test]
+    fn parse_usage_missing_fields_default_zero() {
+        let u = parse_usage(&json!({}));
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert!(u.cache_read.is_none());
+        assert!(u.cache_write.is_none());
+    }
+
+    // --- parse_event 边界 ---
+
+    #[test]
+    fn parse_content_block_start_non_tool_use_skipped() {
+        // content_block 类型为 text（非 tool_use）→ 不产出 delta
+        let ev = json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        });
+        assert!(parse_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn parse_text_delta_missing_text_skipped() {
+        let ev = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta"}
+        });
+        assert!(parse_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn parse_message_delta_empty_stop_reason_skipped() {
+        // stop_reason 为空字符串 → 不产出 Stop delta（仅可能有 Usage）
+        let ev = json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": ""},
+            "usage": {"output_tokens": 3}
+        });
+        let deltas = parse_event(&ev);
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], Delta::Usage(_)));
+    }
+
+    #[test]
+    fn parse_unknown_event_type_skipped() {
+        let ev = json!({"type": "some_unknown_type", "data": "irrelevant"});
+        assert!(parse_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn parse_event_missing_type_skipped() {
+        // 无 type 字段 → unwrap_or("") → 走默认分支
+        let ev = json!({"data": "irrelevant"});
+        assert!(parse_event(&ev).is_empty());
+    }
+
+    // --- content_to_blocks ---
+
+    #[test]
+    fn content_to_blocks_empty_returns_default_text() {
+        let blocks = content_to_blocks(&[]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "");
+    }
+
+    #[test]
+    fn content_to_blocks_text_and_image() {
+        let blocks = content_to_blocks(&[
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "base64data".into(),
+            },
+        ]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "hello");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "base64data");
+    }
+
+    #[test]
+    fn content_to_blocks_ignores_tool_use_and_fills_default() {
+        let blocks =
+            content_to_blocks(&[ContentBlock::ToolUse(minicoding_core::model::ToolCall {
+                id: "call_1".into(),
+                name: "noop".into(),
+                input: json!({}),
+            })]);
+        // ToolUse 被忽略，但空 blocks 会填充默认 text
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+    }
+
+    // --- extract_text / tool_content_to_string ---
+
+    #[test]
+    fn extract_text_with_tool_result() {
+        let blocks = vec![ContentBlock::ToolResult {
+            call_id: "call_1".to_string(),
+            content: ToolContent::Text("result text".to_string()),
+            is_error: false,
+        }];
+        assert_eq!(extract_text(&blocks), "result text");
+    }
+
+    #[test]
+    fn extract_text_joins_multiple_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "line1".into(),
+            },
+            ContentBlock::Text {
+                text: "line2".into(),
+            },
+        ];
+        assert_eq!(extract_text(&blocks), "line1\nline2");
+    }
+
+    #[test]
+    fn tool_content_to_string_json_variant() {
+        let s = tool_content_to_string(&ToolContent::Json(json!({"key": "val"})));
+        assert!(s.contains("\"key\""));
+        assert!(s.contains("val"));
+    }
+
+    #[test]
+    fn tool_content_to_string_image_returns_empty() {
+        let s = tool_content_to_string(&ToolContent::Image {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3],
+        });
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn tool_content_to_string_mixed_joins_parts() {
+        let s = tool_content_to_string(&ToolContent::Mixed(vec![
+            ToolContent::Text("part1".to_string()),
+            ToolContent::Text("part2".to_string()),
+        ]));
+        assert_eq!(s, "part1\npart2");
+    }
+
+    // --- retry_after_ms ---
+
+    #[test]
+    fn retry_after_ms_parses_seconds_to_millis() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("2"));
+        assert_eq!(retry_after_ms(&headers), Some(2000));
+    }
+
+    #[test]
+    fn retry_after_ms_missing_returns_none() {
+        assert_eq!(retry_after_ms(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn retry_after_ms_invalid_returns_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("abc"));
+        assert_eq!(retry_after_ms(&headers), None);
+    }
+
+    // --- map_status_error ---
+
+    #[test]
+    fn map_status_error_categories() {
+        assert!(matches!(
+            map_status_error(401, "unauth".into(), None),
+            LlmError::Client { status: 401, .. }
+        ));
+        assert!(matches!(
+            map_status_error(429, String::new(), Some(500)),
+            LlmError::RateLimited {
+                retry_after_ms: Some(500)
+            }
+        ));
+        assert!(matches!(
+            map_status_error(500, "err".into(), None),
+            LlmError::Server { status: 500, .. }
+        ));
+        assert!(matches!(
+            map_status_error(404, "nf".into(), None),
+            LlmError::Client { status: 404, .. }
+        ));
+    }
+
+    // --- ApproxTokenizer ---
+
+    #[test]
+    fn approx_tokenizer_count_messages_includes_overhead() {
+        let tok = ApproxTokenizer;
+        let n = tok.count_messages(&[Message::user_text("abcdefgh")]);
+        // 8 字符 / 4 = 2 token + 4 overhead = 6
+        assert_eq!(n, 6);
+    }
+
+    // --- provider 基本方法 ---
+
+    #[test]
+    fn provider_id_and_capabilities() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造 provider");
+        assert_eq!(provider.id(), PROVIDER_ID);
+        let caps = provider.capabilities();
+        assert!(caps.supports_tool_call);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_vision);
+        assert!(!caps.supports_json_mode);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_delegates_to_tokenizer() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造 provider");
+        let n = provider
+            .count_tokens(&[Message::user_text("hello world")])
+            .await;
+        assert!(n > 0, "count_tokens 应返回正数: {n}");
+    }
+
+    #[test]
+    fn debug_does_not_leak_api_key() {
+        // C-04：Debug 输出脱敏 api_key（前 4 字符 + ***）
+        let provider = AnthropicProvider::new(
+            "https://api.anthropic.com",
+            "sk-secret-12345",
+            "claude-3-5-sonnet",
+        )
+        .expect("构造 provider");
+        let s = format!("{provider:?}");
+        assert!(s.contains("sk-s***"), "Debug 应脱敏 api_key: {s}");
+        assert!(
+            !s.contains("secret-12345"),
+            "Debug 不应泄漏完整 api_key: {s}"
+        );
     }
 }

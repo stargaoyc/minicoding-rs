@@ -4,7 +4,7 @@ import type { JsonValue } from "../../../../minicoding-protocol/bindings/serde_j
 /**
  * 工具调用请求（LLM 产出）。
  */
-export type ToolCall = { id: string, name: string,
+export type ToolCall = { id: string, name: string, 
 /**
  * 工具输入参数（JSON）。
  */

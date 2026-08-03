@@ -257,9 +257,16 @@ mod tests {
         let entries = parse_entries(&result);
         // 递归：a.txt, sub, sub/b.txt
         assert_eq!(entries.len(), 3);
+        // 规范化路径分隔符：Windows 下 strip_prefix 返回反斜杠，统一为正斜杠以跨平台断言
         let names: Vec<String> = entries
             .iter()
-            .map(|e| e["name"].as_str().unwrap_or("").to_string())
+            .map(|e| {
+                e["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .replace('\\', "/")
+                    .to_string()
+            })
             .collect();
         assert!(names.contains(&"a.txt".to_string()));
         assert!(names.contains(&"sub".to_string()));

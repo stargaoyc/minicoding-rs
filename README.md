@@ -109,6 +109,8 @@ minicoding-rs/
 
 ## 5. 文档导航
 
+### 核心设计文档
+
 | 文档 | 内容 |
 |------|------|
 | [详细设计](docs/design.md) | Agent 循环、上下文管理、工具调度、Plan/Undo/Task/MCP/Hooks/Event Sourcing/Web/桌面等核心机制 |
@@ -118,13 +120,36 @@ minicoding-rs/
 | [安全与权限](docs/security.md) | 权限策略、审计、OS 沙箱（sandbox-run）、审批模式与预设 |
 | [Hooks 设计](docs/hooks.md) | 10 类生命周期 Hook、协议、asyncRewake、安全约束 |
 | [技术选型](docs/tech-stack.md) | 依赖库选择与理由（沙箱 sandbox-run/MCP rmcp 2.2/Tauri 2.x） |
+| [架构文档](docs/architecture.md) | 分层架构、组件协作、数据流 |
+
+### 开发与规划文档
+
+| 文档 | 内容 |
+|------|------|
 | [开发路线图](docs/roadmap.md) | 里程碑与交付计划（M0–M10） |
 | [开发计划](docs/dev-plan.md) | 任务级开发计划（含验收标准与依赖） |
 | [功能清单](docs/features.md) | 全功能总账（按领域分组，182 项） |
 | [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束（C-01..C-35） |
-| [M9 设计](docs/m9-design.md) | Web 前端 + Tauri 桌面壳详细设计 |
-| [上手指南](docs/getting-started.md) | 从 Claude Code / Codex 迁移指南 |
+| [开发过程文档](docs/development-process.md) | 项目开发全过程记录、关键设计决策、里程碑演进 |
 | [AI 编码约束](AGENTS.md) | AI 助手开发本项目时的编码/架构/文档/安全/前端规范 |
+
+### 用户与学习文档
+
+| 文档 | 内容 |
+|------|------|
+| [产品手册](docs/product-manual.md) | 面向最终用户的详细使用手册（安装/配置/四形态/工具/权限/FAQ） |
+| [上手指南](docs/getting-started.md) | 从零到运行 + 从 Claude Code / Codex 迁移指南 |
+| [项目学习文档](docs/learning-guide.md) | 面向新开发者的学习路径、代码导读、核心概念、术语表 |
+| [构建指南](docs/build-guide.md) | 详细的构建说明（环境/依赖/跨平台/发布/CI/排查） |
+| [问题排查](docs/troubleshooting.md) | 常见问题与解决方案（构建/CI/运行时/测试/权限/前端） |
+
+### 专题文档
+
+| 文档 | 内容 |
+|------|------|
+| [M9 设计](docs/m9-design.md) | Web 前端 + Tauri 桌面壳详细设计 |
+| [创新文档](docs/innovation.md) | 技术创新点分析、与同类产品对比、设计亮点 |
+| [审查报告](docs/review-report.md) | 项目审查记录与改进建议 |
 
 ## 6. 四形态前端
 

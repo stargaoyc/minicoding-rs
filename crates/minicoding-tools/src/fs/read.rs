@@ -213,4 +213,191 @@ mod tests {
         assert!(!is_sensitive_path(Utf8Path::new("Cargo.toml")));
         assert!(!is_sensitive_path(Utf8Path::new("config.yaml")));
     }
+
+    // `fs.read` execute 路径测试（覆盖率补全）。
+    use minicoding_core::model::ToolContent;
+    use minicoding_core::tool::ToolContext;
+    use tempfile::tempdir;
+
+    fn make_ctx(workdir: &camino::Utf8Path) -> ToolContext {
+        ToolContext::new(workdir.to_owned(), "test-session".to_string())
+    }
+
+    /// 提取 `ToolResult` 文本内容（测试辅助）。
+    fn result_text(result: &ToolResult) -> &str {
+        match &result.content {
+            ToolContent::Text(t) => t,
+            _ => "",
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reads_file_content() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("test.txt");
+        tokio::fs::write(file_path.as_std_path(), "line1\nline2\nline3\n")
+            .await
+            .unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": "test.txt"});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        assert!(!result.is_error);
+        let text = result_text(&result);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+    }
+
+    #[tokio::test]
+    async fn execute_reads_absolute_path() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("abs.txt");
+        tokio::fs::write(file_path.as_std_path(), "absolute path content")
+            .await
+            .unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": file_path.as_str()});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        assert!(result_text(&result).contains("absolute path content"));
+    }
+
+    #[tokio::test]
+    async fn execute_returns_not_found_for_missing_file() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": "does_not_exist.txt"});
+        let result = tool.execute(input, &make_ctx(&workdir)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_returns_invalid_input_for_missing_path_field() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"offset": 0});
+        let result = tool.execute(input, &make_ctx(&workdir)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_with_offset_and_limit_returns_subset() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("lines.txt");
+        let content = "l0\nl1\nl2\nl3\nl4\nl5\n";
+        tokio::fs::write(file_path.as_std_path(), content)
+            .await
+            .unwrap();
+
+        let tool = FsRead::new();
+        // 从第 2 行（0-based offset=2）取 2 行
+        let input = serde_json::json!({"path": "lines.txt", "offset": 2, "limit": 2});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        let text = result_text(&result);
+        assert!(text.contains("l2"));
+        assert!(text.contains("l3"));
+        assert!(!text.contains("l0"));
+        assert!(!text.contains("l4"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_offset_beyond_end_returns_empty() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("small.txt");
+        tokio::fs::write(file_path.as_std_path(), "only one line\n")
+            .await
+            .unwrap();
+
+        let tool = FsRead::new();
+        // offset 远超行数
+        let input = serde_json::json!({"path": "small.txt", "offset": 100});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        assert_eq!(result_text(&result), "");
+    }
+
+    #[tokio::test]
+    async fn execute_redacts_sensitive_env_file() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join(".env");
+        tokio::fs::write(
+            file_path.as_std_path(),
+            "API_KEY=sk-secret-12345\nPASSWORD=mypass\n",
+        )
+        .await
+        .unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": ".env"});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        let text = result_text(&result);
+        // 敏感字段值应被脱敏（不直接出现在输出中）
+        assert!(!text.contains("sk-secret-12345"));
+        assert!(!text.contains("mypass"));
+    }
+
+    #[tokio::test]
+    async fn execute_truncates_large_output() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("large.txt");
+        // 写入远超 max_output_bytes 的内容
+        let large_content = "x".repeat(10 * 1024);
+        tokio::fs::write(file_path.as_std_path(), &large_content)
+            .await
+            .unwrap();
+
+        let mut ctx = make_ctx(&workdir);
+        ctx.max_output_bytes = 1024; // 1KB 上限
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": "large.txt"});
+        let result = tool.execute(input, &ctx).await.unwrap();
+        // 应被截断（truncated 标志为 true，且文本长度不超过上限）
+        assert!(result.metadata.truncated, "should be truncated");
+        assert!(result_text(&result).len() <= 1024);
+    }
+
+    #[tokio::test]
+    async fn execute_metadata_includes_byte_count() {
+        let dir = tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+        let file_path = workdir.join("bytes.txt");
+        tokio::fs::write(file_path.as_std_path(), "hello")
+            .await
+            .unwrap();
+
+        let tool = FsRead::new();
+        let input = serde_json::json!({"path": "bytes.txt"});
+        let result = tool.execute(input, &make_ctx(&workdir)).await.unwrap();
+        assert_eq!(result.metadata.bytes, 5); // "hello" = 5 bytes
+        assert!(!result.metadata.truncated);
+    }
+
+    #[test]
+    fn fs_read_default_equals_new() {
+        let a = FsRead::new();
+        let b = FsRead::default();
+        assert_eq!(a.name(), b.name());
+        assert_eq!(a.schema().name, b.schema().name);
+    }
+
+    #[test]
+    fn fs_read_side_effect_is_none() {
+        let tool = FsRead::new();
+        assert_eq!(tool.side_effect(), SideEffect::None);
+        assert!(tool.is_read_only());
+    }
 }

@@ -11,7 +11,7 @@ import type { ToolResult } from "./ToolResult";
 /**
  * 事件 DTO（携带 `seq`，用于 SSE cursor 恢复）。
  */
-export type EventDto = {
+export type EventDto = { 
 /**
  * 单调递增序列号（每会话独立计数）。
  *

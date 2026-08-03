@@ -399,8 +399,49 @@ fn usize_from_json(v: Option<&Value>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_pass_by_value)]
 
     use super::*;
+    use futures::stream::StreamExt;
+    use minicoding_core::model::{ToolContent, ToolSchema};
+    use minicoding_core::provider::GenerationParams;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 构造最小 `ChatRequest`（无 system、无 tools、无生成参数）。
+    fn basic_req() -> ChatRequest {
+        ChatRequest {
+            system: String::new(),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::<ToolSchema>::new(),
+            params: GenerationParams {
+                model: "llama3".to_string(),
+                temperature: None,
+                top_p: None,
+                max_output_tokens: None,
+                stop: vec![],
+                seed: None,
+            },
+        }
+    }
+
+    /// 把单个 JSON 值包装为 NDJSON 行（以 `\n` 结尾）。
+    fn ndjson_line(json: &Value) -> String {
+        format!("{json}\n")
+    }
+
+    /// 收集 `BoxStream` 所有 Ok delta（遇 Err 则 panic，便于定位）。
+    async fn collect_deltas(stream: BoxStream<'static, Result<Delta, LlmError>>) -> Vec<Delta> {
+        let mut out = Vec::new();
+        let mut s = stream;
+        while let Some(item) = s.next().await {
+            match item {
+                Ok(d) => out.push(d),
+                Err(e) => panic!("未预期的 delta 错误: {e:?}"),
+            }
+        }
+        out
+    }
 
     #[test]
     fn parse_text_delta() {
@@ -538,5 +579,494 @@ mod tests {
             map_status_error(404, "not found".into()),
             LlmError::Client { status: 404, .. }
         ));
+    }
+
+    // --- chat_stream HTTP mock 测试 ---
+
+    #[tokio::test]
+    async fn chat_stream_parses_text_delta() {
+        // 场景：NDJSON 流含 message.content → Delta::Text；done=true → Delta::Stop
+        let server = MockServer::start().await;
+        let chunk = json!({
+            "model": "llama3",
+            "message": {"role": "assistant", "content": "hello"},
+            "done": false
+        });
+        let done = json!({"model": "llama3", "done": true, "done_reason": "stop"});
+        let body = format!("{}{}", ndjson_line(&chunk), ndjson_line(&done));
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        // 1 text + 1 stop（无 token 统计）
+        assert_eq!(deltas.len(), 2);
+        assert!(matches!(&deltas[0], Delta::Text(t) if t == "hello"));
+        assert!(matches!(&deltas[1], Delta::Stop(StopReason::EndTurn)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_parses_tool_call() {
+        // 场景：NDJSON 流含 tool_calls → Delta::ToolCall；done_reason="tools" → ToolUse
+        let server = MockServer::start().await;
+        let chunk = json!({
+            "model": "llama3",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "fs.read",
+                        "arguments": {"path": "/tmp"},
+                        "id": "call_01"
+                    }
+                }]
+            },
+            "done": false
+        });
+        let done = json!({"model": "llama3", "done": true, "done_reason": "tools"});
+        let body = format!("{}{}", ndjson_line(&chunk), ndjson_line(&done));
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 2);
+        match &deltas[0] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 0);
+                assert_eq!(tc.name.as_deref(), Some("fs.read"));
+                assert_eq!(tc.id.as_deref(), Some("call_01"));
+                assert!(tc.args_chunk.as_ref().is_some_and(|s| s.contains("/tmp")));
+            }
+            other => panic!("期望 ToolCall，得到 {other:?}"),
+        }
+        assert!(matches!(&deltas[1], Delta::Stop(StopReason::ToolUse)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_done_with_usage() {
+        // 场景：done=true 携带 token 统计 → Delta::Stop + Delta::Usage
+        let server = MockServer::start().await;
+        let done = json!({
+            "model": "llama3",
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 42,
+            "eval_count": 10
+        });
+        let body = ndjson_line(&done);
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let deltas = collect_deltas(stream).await;
+        assert_eq!(deltas.len(), 2);
+        assert!(matches!(&deltas[0], Delta::Stop(StopReason::EndTurn)));
+        match &deltas[1] {
+            Delta::Usage(u) => {
+                assert_eq!(u.input_tokens, 42);
+                assert_eq!(u.output_tokens, 10);
+            }
+            other => panic!("期望 Usage，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_404_returns_client_error() {
+        // 场景：HTTP 404 → LlmError::Client
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("404 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::Client { status, body } => {
+                assert_eq!(status, 404);
+                assert_eq!(body, "not found");
+            }
+            other => panic!("期望 Client 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_429_returns_rate_limited() {
+        // 场景：HTTP 429 限流 → LlmError::RateLimited（Ollama 不返回 Retry-After）
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("429 应返回错误，但 chat_stream 成功");
+        };
+        assert!(
+            matches!(
+                err,
+                LlmError::RateLimited {
+                    retry_after_ms: None
+                }
+            ),
+            "期望 RateLimited(retry_after_ms=None)，得到 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_500_returns_server_error() {
+        // 场景：HTTP 500 服务端错误 → LlmError::Server
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("500 应返回错误，但 chat_stream 成功");
+        };
+        match err {
+            LlmError::Server { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "internal error");
+            }
+            other => panic!("期望 Server 错误，得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_connection_refused_returns_network_error() {
+        // 场景：网络错误（连接被拒绝）→ LlmError::Network
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let base = format!("http://{addr}");
+        let provider = OllamaProvider::new(base, "llama3").expect("构造 provider");
+        let result = provider.chat_stream(basic_req()).await;
+        let Err(err) = result else {
+            panic!("连接拒绝应返回错误，但 chat_stream 成功");
+        };
+        assert!(
+            matches!(err, LlmError::Network(_)),
+            "期望 Network 错误，得到 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_invalid_json_returns_parse_error() {
+        // 场景：NDJSON 行为非法 JSON → 流中返回 LlmError::Parse
+        let server = MockServer::start().await;
+        let body = "not valid json\n";
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let mut s = stream;
+        let mut found_parse_error = false;
+        while let Some(item) = s.next().await {
+            if let Err(LlmError::Parse(_)) = item {
+                found_parse_error = true;
+                break;
+            }
+        }
+        assert!(found_parse_error, "流中应包含 Parse 错误");
+    }
+
+    #[tokio::test]
+    async fn chat_stream_sends_model_and_content_type() {
+        // 场景：验证请求含 model 字段与 Content-Type 头（Ollama 无鉴权）
+        let server = MockServer::start().await;
+        let expected_body = json!({"model": "llama3"});
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(header("content-type", "application/json"))
+            .and(body_partial_json(expected_body))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("{\"done\":true,\"done_reason\":\"stop\"}\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = OllamaProvider::new(server.uri(), "llama3").expect("构造 provider");
+        let stream = provider
+            .chat_stream(basic_req())
+            .await
+            .expect("chat_stream");
+        let _ = collect_deltas(stream).await;
+    }
+
+    // --- build_request_body 补充 ---
+
+    #[test]
+    fn build_request_body_with_tools_and_options() {
+        let provider = OllamaProvider::new("http://localhost:11434", "llama3").expect("构造");
+        let req = ChatRequest {
+            system: "rules".to_string(),
+            messages: vec![Message::user_text("hi")],
+            tools: vec![ToolSchema {
+                name: "fs.read".to_string(),
+                description: "read a file".to_string(),
+                input_schema: json!({"type": "object"}),
+            }],
+            params: GenerationParams {
+                model: "llama3".to_string(),
+                temperature: Some(0.5),
+                top_p: Some(0.9),
+                max_output_tokens: Some(256),
+                stop: vec!["END".to_string()],
+                seed: Some(42),
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["model"], "llama3");
+        assert_eq!(body["stream"], true);
+        // system 作为第一条 message（Ollama 接受 system role）
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "rules");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "hi");
+        // tools
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "fs.read");
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+        // options（Ollama 风格：参数放 options 对象）
+        assert_eq!(body["options"]["temperature"], json!(0.5_f32));
+        assert_eq!(body["options"]["top_p"], json!(0.9_f32));
+        assert_eq!(body["options"]["num_predict"], 256);
+        assert_eq!(body["options"]["stop"], json!(["END"]));
+        assert_eq!(body["options"]["seed"], 42);
+    }
+
+    #[test]
+    fn build_request_body_no_system_no_tools_minimal() {
+        let provider = OllamaProvider::new("http://localhost:11434", "llama3").expect("构造");
+        let body = provider.build_request_body(&basic_req());
+        assert_eq!(body["model"], "llama3");
+        assert_eq!(body["stream"], true);
+        // 无 system 时 messages 仅含用户消息
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["messages"][0]["role"], "user");
+        // 无 tools 时不出现 tools 字段
+        assert!(body.get("tools").is_none());
+        // 无可选 params 时不出现 options 字段
+        assert!(body.get("options").is_none());
+    }
+
+    // --- headers ---
+
+    #[test]
+    fn headers_only_content_type_no_auth() {
+        // Ollama 无鉴权，headers 仅含 Content-Type
+        let headers = OllamaProvider::headers();
+        assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+        // 不含 Authorization 头
+        assert!(headers.get(reqwest::header::AUTHORIZATION).is_none());
+    }
+
+    // --- parse_chunk 补充 ---
+
+    #[test]
+    fn parse_chunk_multiple_tool_calls() {
+        let chunk = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "fs.read", "arguments": {"path": "/a"}}},
+                    {"function": {"name": "fs.write", "arguments": {"path": "/b"}}}
+                ]
+            },
+            "done": false
+        });
+        let deltas = parse_chunk(&chunk);
+        assert_eq!(deltas.len(), 2);
+        match &deltas[0] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 0);
+                assert_eq!(tc.name.as_deref(), Some("fs.read"));
+            }
+            other => panic!("期望 ToolCall[0]，得到 {other:?}"),
+        }
+        match &deltas[1] {
+            Delta::ToolCall(tc) => {
+                assert_eq!(tc.index, 1);
+                assert_eq!(tc.name.as_deref(), Some("fs.write"));
+            }
+            other => panic!("期望 ToolCall[1]，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_chunk_done_reason_length_maps_max_tokens() {
+        let chunk = json!({"done": true, "done_reason": "length"});
+        let deltas = parse_chunk(&chunk);
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], Delta::Stop(StopReason::MaxTokens)));
+    }
+
+    #[test]
+    fn parse_chunk_done_with_text_and_stop_in_same_line() {
+        // 文本增量 + done=true 同时出现在一行
+        let chunk = json!({
+            "message": {"role": "assistant", "content": "final"},
+            "done": true,
+            "done_reason": "stop"
+        });
+        let deltas = parse_chunk(&chunk);
+        // 1 text + 1 stop
+        assert_eq!(deltas.len(), 2);
+        assert!(matches!(&deltas[0], Delta::Text(t) if t == "final"));
+        assert!(matches!(&deltas[1], Delta::Stop(StopReason::EndTurn)));
+    }
+
+    // --- extract_text / tool_content_to_string ---
+
+    #[test]
+    fn extract_text_with_tool_result() {
+        let blocks = vec![ContentBlock::ToolResult {
+            call_id: "call_1".to_string(),
+            content: ToolContent::Text("result text".to_string()),
+            is_error: false,
+        }];
+        assert_eq!(extract_text(&blocks), "result text");
+    }
+
+    #[test]
+    fn extract_text_joins_multiple_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "line1".into(),
+            },
+            ContentBlock::Text {
+                text: "line2".into(),
+            },
+        ];
+        assert_eq!(extract_text(&blocks), "line1\nline2");
+    }
+
+    #[test]
+    fn tool_content_to_string_json_variant() {
+        let s = tool_content_to_string(&ToolContent::Json(json!({"key": "val"})));
+        assert!(s.contains("\"key\""));
+        assert!(s.contains("val"));
+    }
+
+    #[test]
+    fn tool_content_to_string_image_returns_empty() {
+        let s = tool_content_to_string(&ToolContent::Image {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3],
+        });
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn tool_content_to_string_mixed_joins_parts() {
+        let s = tool_content_to_string(&ToolContent::Mixed(vec![
+            ToolContent::Text("part1".to_string()),
+            ToolContent::Text("part2".to_string()),
+        ]));
+        assert_eq!(s, "part1\npart2");
+    }
+
+    // --- role_str ---
+
+    #[test]
+    fn role_str_all_variants() {
+        assert_eq!(role_str(&Role::System), "system");
+        assert_eq!(role_str(&Role::User), "user");
+        assert_eq!(role_str(&Role::Assistant), "assistant");
+        assert_eq!(role_str(&Role::Tool), "tool");
+    }
+
+    // --- usize_from_json ---
+
+    #[test]
+    fn usize_from_json_boundaries() {
+        assert_eq!(usize_from_json(Some(&json!(0))), 0);
+        assert_eq!(usize_from_json(Some(&json!(42))), 42);
+        assert_eq!(usize_from_json(None), 0);
+        assert_eq!(usize_from_json(Some(&json!("not a number"))), 0);
+        // 负数：as_u64 返回 None → 回 0
+        assert_eq!(usize_from_json(Some(&json!(-1))), 0);
+    }
+
+    // --- provider 基本方法 ---
+
+    #[test]
+    fn provider_id_and_capabilities() {
+        let provider =
+            OllamaProvider::new("http://localhost:11434", "llama3").expect("构造 provider");
+        assert_eq!(provider.id(), PROVIDER_ID);
+        let caps = provider.capabilities();
+        assert!(caps.supports_tool_call);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_json_mode);
+        assert!(!caps.supports_vision);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_delegates_to_tokenizer() {
+        let provider =
+            OllamaProvider::new("http://localhost:11434", "llama3").expect("构造 provider");
+        let n = provider
+            .count_tokens(&[Message::user_text("hello world")])
+            .await;
+        assert!(n > 0, "count_tokens 应返回正数: {n}");
+    }
+
+    #[test]
+    fn debug_format_does_not_include_sensitive_data() {
+        let provider =
+            OllamaProvider::new("http://localhost:11434", "llama3").expect("构造 provider");
+        let s = format!("{provider:?}");
+        assert!(s.contains("OllamaProvider"), "Debug 应含结构体名: {s}");
+        assert!(s.contains("llama3"), "Debug 应含 model: {s}");
+        assert!(
+            s.contains("http://localhost:11434"),
+            "Debug 应含 api_base: {s}"
+        );
     }
 }

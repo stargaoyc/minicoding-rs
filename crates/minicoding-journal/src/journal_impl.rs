@@ -490,4 +490,345 @@ mod tests {
         let report = j.undo(0).await.unwrap();
         assert_eq!(report.undone_entries, 1);
     }
+
+    // === Default 实现：创建空 journal ===
+
+    #[tokio::test]
+    async fn default_creates_empty_journal() {
+        let j = FileChangeJournal::default();
+        assert!(j.is_empty());
+        assert_eq!(j.len(), 0);
+    }
+
+    // === diff 返回完整字段（op_id / prompt_snippet / files）===
+
+    #[tokio::test]
+    async fn diff_returns_full_fields() {
+        let j = FileChangeJournal::new(None);
+        let file = Utf8PathBuf::from("/tmp/test-diff.txt");
+        j.record(entry(
+            "op-xyz",
+            vec![FileChange::Created {
+                path: file.clone(),
+                content: b"hello".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        let d = j.diff().await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].op_id, "op-xyz");
+        assert_eq!(d[0].prompt_snippet, "prompt-op-xyz");
+        assert_eq!(d[0].files.len(), 1);
+        assert_eq!(d[0].files[0].path(), &file);
+    }
+
+    // === steps > entries 时撤销全部可用 entry ===
+
+    #[tokio::test]
+    async fn undo_more_steps_than_entries_undoes_all() {
+        let j = FileChangeJournal::new(None);
+        j.record(entry("op1", vec![])).await.unwrap();
+        j.record(entry("op2", vec![])).await.unwrap();
+        // steps=10 > 2 entries
+        let report = j.undo(10).await.unwrap();
+        assert_eq!(report.undone_entries, 2);
+        assert!(j.is_empty());
+    }
+
+    // === Edited 撤销恢复 before 内容 ===
+
+    #[tokio::test]
+    async fn undo_edited_restores_before() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("e.txt")).unwrap();
+        fs::write(file.as_std_path(), b"v1").await.unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Edited {
+                path: file.clone(),
+                before: b"v1".to_vec(),
+                after: b"v2".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 修改为 v2
+        fs::write(file.as_std_path(), b"v2").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.restored_files, vec![file.clone()]);
+        let restored = fs::read(file.as_std_path()).await.unwrap();
+        assert_eq!(restored, b"v1");
+    }
+
+    // === Written before=None（新建）撤销删除文件 ===
+
+    #[tokio::test]
+    async fn undo_written_with_none_before_deletes_file() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("w.txt")).unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Written {
+                path: file.clone(),
+                before: None,
+                after: b"new".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 创建文件
+        fs::write(file.as_std_path(), b"new").await.unwrap();
+        assert!(file.as_std_path().exists());
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.restored_files, vec![file.clone()]);
+        assert!(
+            !file.as_std_path().exists(),
+            "before=None 的 Written 撤销应删除文件"
+        );
+    }
+
+    // === Created 撤销时文件已不存在（幂等）===
+
+    #[tokio::test]
+    async fn undo_created_already_deleted_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("c2.txt")).unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Created {
+                path: file.clone(),
+                content: b"created".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 文件不存在（模拟已删除）
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        // 文件已不存在，视为已恢复（幂等）
+        assert!(report.restored_files.contains(&file));
+        assert!(!file.as_std_path().exists());
+    }
+
+    // === Created 撤销时文件被外部修改（冲突，不删除）===
+
+    #[tokio::test]
+    async fn undo_created_modified_file_is_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("c3.txt")).unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Created {
+                path: file.clone(),
+                content: b"original".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 文件被外部修改
+        fs::write(file.as_std_path(), b"modified").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert!(report.restored_files.is_empty());
+        assert_eq!(report.failed_files.len(), 1);
+        // 文件未被删除
+        assert!(file.as_std_path().exists());
+        let cur = fs::read(file.as_std_path()).await.unwrap();
+        assert_eq!(cur, b"modified");
+    }
+
+    // === Deleted 撤销时文件已存在（冲突，不覆盖）===
+
+    #[tokio::test]
+    async fn undo_deleted_when_file_exists_is_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("d2.txt")).unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Deleted {
+                path: file.clone(),
+                content: b"was-deleted".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 文件已存在（模拟删除后被重建）
+        fs::write(file.as_std_path(), b"recreated").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert!(report.restored_files.is_empty());
+        assert_eq!(report.failed_files.len(), 1);
+        // 文件未被覆盖
+        let cur = fs::read(file.as_std_path()).await.unwrap();
+        assert_eq!(cur, b"recreated");
+    }
+
+    // === Edited 撤销时 after 不匹配（冲突）===
+
+    #[tokio::test]
+    async fn undo_edited_conflict_records_failed() {
+        let tmp = TempDir::new().unwrap();
+        let file = Utf8PathBuf::from_path_buf(tmp.path().join("e2.txt")).unwrap();
+        fs::write(file.as_std_path(), b"v1").await.unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![FileChange::Edited {
+                path: file.clone(),
+                before: b"v1".to_vec(),
+                after: b"v2".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        // 外部修改为 v3（不是 after=v2）
+        fs::write(file.as_std_path(), b"v3").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert!(report.restored_files.is_empty());
+        assert_eq!(report.failed_files.len(), 1);
+        // 文件未被覆盖
+        let cur = fs::read(file.as_std_path()).await.unwrap();
+        assert_eq!(cur, b"v3");
+    }
+
+    // === 单 entry 多文件撤销：全部恢复 ===
+
+    #[tokio::test]
+    async fn undo_entry_with_multiple_files() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = Utf8PathBuf::from_path_buf(tmp.path().join("a.txt")).unwrap();
+        let f2 = Utf8PathBuf::from_path_buf(tmp.path().join("b.txt")).unwrap();
+        fs::write(f1.as_std_path(), b"v1").await.unwrap();
+        fs::write(f2.as_std_path(), b"v1").await.unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![
+                FileChange::Written {
+                    path: f1.clone(),
+                    before: Some(b"v1".to_vec()),
+                    after: b"v2".to_vec(),
+                },
+                FileChange::Written {
+                    path: f2.clone(),
+                    before: Some(b"v1".to_vec()),
+                    after: b"v2".to_vec(),
+                },
+            ],
+        ))
+        .await
+        .unwrap();
+        fs::write(f1.as_std_path(), b"v2").await.unwrap();
+        fs::write(f2.as_std_path(), b"v2").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.restored_files.len(), 2);
+        // 两文件均恢复为 v1
+        assert_eq!(fs::read(f1.as_std_path()).await.unwrap(), b"v1");
+        assert_eq!(fs::read(f2.as_std_path()).await.unwrap(), b"v1");
+    }
+
+    // === 单 entry 部分冲突部分成功 ===
+
+    #[tokio::test]
+    async fn undo_partial_conflict_partial_success() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = Utf8PathBuf::from_path_buf(tmp.path().join("ok.txt")).unwrap();
+        let f2 = Utf8PathBuf::from_path_buf(tmp.path().join("conflict.txt")).unwrap();
+        fs::write(f1.as_std_path(), b"v1").await.unwrap();
+        fs::write(f2.as_std_path(), b"v1").await.unwrap();
+        let j = FileChangeJournal::new(None);
+        j.record(entry(
+            "op1",
+            vec![
+                FileChange::Written {
+                    path: f1.clone(),
+                    before: Some(b"v1".to_vec()),
+                    after: b"v2".to_vec(),
+                },
+                FileChange::Written {
+                    path: f2.clone(),
+                    before: Some(b"v1".to_vec()),
+                    after: b"v2".to_vec(),
+                },
+            ],
+        ))
+        .await
+        .unwrap();
+        // f1 改为 v2（正常），f2 改为 v3（冲突）
+        fs::write(f1.as_std_path(), b"v2").await.unwrap();
+        fs::write(f2.as_std_path(), b"v3").await.unwrap();
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        // f1 恢复成功，f2 冲突
+        assert_eq!(report.restored_files.len(), 1);
+        assert!(report.restored_files.contains(&f1));
+        assert_eq!(report.failed_files.len(), 1);
+        assert_eq!(report.failed_files[0].0, f2);
+        // f1 恢复为 v1
+        assert_eq!(fs::read(f1.as_std_path()).await.unwrap(), b"v1");
+        // f2 未被覆盖，仍为 v3
+        assert_eq!(fs::read(f2.as_std_path()).await.unwrap(), b"v3");
+    }
+
+    // === reset_to_initial 后可继续 record ===
+
+    #[tokio::test]
+    async fn reset_to_initial_allows_new_record() {
+        let j = FileChangeJournal::new(None);
+        j.record(entry("op1", vec![])).await.unwrap();
+        j.reset_to_initial().await.unwrap();
+        assert!(j.is_empty());
+        // reset 后可继续 record
+        j.record(entry("op2", vec![])).await.unwrap();
+        assert_eq!(j.len(), 1);
+        let d = j.diff().await.unwrap();
+        assert_eq!(d[0].op_id, "op2");
+    }
+
+    // === 路径校验：绝对路径无 `..` 通过 ===
+
+    #[tokio::test]
+    async fn validate_path_absolute_without_dotdot_is_ok() {
+        let path = Utf8PathBuf::from("/tmp/abc/file.txt");
+        let res = validate_restore_path(&path, None);
+        assert!(res.is_ok());
+    }
+
+    // === 路径校验：workdir 内相对路径通过 ===
+
+    #[tokio::test]
+    async fn validate_path_workdir_relative_inside_is_ok() {
+        let wd = Utf8PathBuf::from("/tmp/abc");
+        let path = Utf8PathBuf::from("subdir/file.txt");
+        let res = validate_restore_path(&path, Some(&wd));
+        assert!(res.is_ok());
+    }
+
+    // === 路径校验：无 workdir 时相对路径无 `..` 通过 ===
+
+    #[tokio::test]
+    async fn validate_path_workdir_none_relative_without_dotdot_is_ok() {
+        let path = Utf8PathBuf::from("subdir/file.txt");
+        let res = validate_restore_path(&path, None);
+        assert!(res.is_ok());
+    }
+
+    // === 路径校验：嵌套 `..` 段被拒绝 ===
+
+    #[tokio::test]
+    async fn validate_path_nested_dotdot_rejected() {
+        let path = Utf8PathBuf::from("a/../b.txt");
+        let res = validate_restore_path(&path, None);
+        assert!(matches!(res, Err(JournalError::PathEscaped(_))));
+    }
 }

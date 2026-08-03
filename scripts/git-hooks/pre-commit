@@ -14,18 +14,44 @@ echo "[pre-commit] cargo clippy (deny warnings) ..."
 cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
 
 echo "[pre-commit] cargo deny check ..."
-cargo deny check advisories licenses bans sources
+# advisories 需要网络 fetch advisory-db。
+# MINICODING_OFFLINE=1 强制离线；否则先在线，网络失败自动降级离线（advisory-db 可能过期）。
+if [ "${MINICODING_OFFLINE:-0}" = "1" ]; then
+  cargo deny --offline check advisories licenses bans sources
+else
+  deny_err=$(mktemp)
+  if cargo deny check advisories licenses bans sources 2>"$deny_err"; then
+    :
+  elif grep -qE "failed to fetch advisory database|Could not connect|TLS connection" "$deny_err"; then
+    echo "[pre-commit] 网络不可用，降级到离线模式（advisory-db 可能过期）" >&2
+    cargo deny --offline check advisories licenses bans sources
+  else
+    cat "$deny_err" >&2
+    rm -f "$deny_err"
+    exit 1
+  fi
+  rm -f "$deny_err"
+fi
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0
-# 排除 ts-rs 自动生成的文件（trailing whitespace 是库输出特性，见 gen-types 脚本后处理）
-EXCLUDE_PATTERN='crates/minicoding-web/src/api/generated/'
+# 排除自动生成的文件（ts-rs 输出 + Tauri schema，工具输出特性，不手动编辑）
+EXCLUDE_PATTERNS=(
+  'crates/minicoding-web/src/api/generated/'
+  'crates/minicoding-desktop/gen/'
+)
 while IFS= read -r f; do
   if [ -f "$f" ] && [ -s "$f" ]; then
     # 跳过自动生成的文件
-    case "$f" in
-      *"$EXCLUDE_PATTERN"*) continue ;;
-    esac
+    skip=false
+    for pat in "${EXCLUDE_PATTERNS[@]}"; do
+      case "$f" in
+        *"$pat"*) skip=true; break ;;
+      esac
+    done
+    [ "$skip" = true ] && continue
+    # 跳过二进制文件（图片/字体/压缩包等，grep -I 检测）
+    grep -qI '' "$f" 2>/dev/null || continue
     # trailing whitespace
     if grep -nE '[[:space:]]+$' "$f" >/dev/null 2>&1; then
       echo "  trailing whitespace: $f"

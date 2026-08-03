@@ -345,6 +345,9 @@ mod tests {
         assert_eq!(result, "cmd ${TOOL_INPUT_PATH");
     }
 
+    // 以下测试使用 sh 语法（echo '...' / read / sed / ${VAR:-default} / true / exit N），
+    // Windows cmd /C 不支持，仅在 Unix 上运行。
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_echoes_continue_output() {
         // 简单脚本：echo 一行 JSON 到 stdout，退出码 0
@@ -362,6 +365,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_exit_two_is_deny() {
         // 退出码 2 → deny，reason 取 stderr
@@ -377,6 +381,7 @@ mod tests {
         assert_eq!(output.reason.as_deref(), Some("blocked by policy"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_exit_one_is_error() {
         // 退出码 1 → HookError::ExitCode
@@ -399,6 +404,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_empty_stdout_is_continue() {
         // 空输出 → Continue（默认）
@@ -416,6 +422,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_timeout() {
         // 超时：sleep 10s，timeout=100ms
@@ -431,6 +438,7 @@ mod tests {
         assert!(matches!(err, HookError::Timeout { .. }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_reads_stdin_json() {
         // 脚本读 stdin JSON，提取 turn 字段 echo 到 stdout。
@@ -447,6 +455,7 @@ mod tests {
         assert_eq!(output.reason.as_deref(), Some("turn=42"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_env_isolation() {
         // 验证 C-04：凭证不下传子进程
@@ -477,6 +486,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn script_hook_placeholder_expansion_with_real_command() {
         // 集成测试：占位符展开 + 命令执行。

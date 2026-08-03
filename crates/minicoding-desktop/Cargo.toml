@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# cargo-dist 排除：Tauri 需平台 GUI 依赖，单独发布 .dmg/.msi/.AppImage
+[package.metadata.dist]
+dist = false
+
 [lib]
 name = "minicoding_desktop"
 path = "src/lib.rs"
@@ -28,17 +32,22 @@ tokio = { workspace = true }
 
 # Tauri 重依赖（feature gate `desktop`，需系统 webview 运行时）
 # 直接声明而非 workspace.dependencies，避免未启用 feature 时 Cargo 解析整个 tauri 依赖树
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 # 系统托盘 + 全局快捷键（Tauri 2.x 内置 tray，global-shortcut 通过 plugin）
 tauri-plugin-global-shortcut = { version = "2", optional = true }
+
+[build-dependencies]
+# tauri-build：generate_context! 宏依赖的 build script（仅 desktop feature 启用）
+tauri-build = { version = "2", optional = true }
 
 [features]
 default = []
 # 启用 Tauri 桌面壳（需 webkit2gtk Linux / WebKit macOS / WebView2 Windows）
 desktop = [
     "dep:tauri",
+    "dep:tauri-build",
     "dep:tauri-plugin-shell",
     "dep:tauri-plugin-updater",
     "dep:tauri-plugin-global-shortcut",

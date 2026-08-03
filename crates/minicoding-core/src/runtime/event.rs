@@ -102,3 +102,136 @@ impl std::fmt::Debug for EventBus {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `EventBus` broadcast 通道测试：构造、订阅、emit、Debug。
+
+    use super::*;
+    use crate::model::Task;
+
+    #[test]
+    fn default_equals_new() {
+        let a = EventBus::default();
+        let b = EventBus::new();
+        // 两者均无订阅者
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    #[test]
+    fn with_capacity_clamps_to_minimum() {
+        // 容量 < 16 时应被钳制到 16（避免 0 容量导致 channel 无法创建）。
+        let bus = EventBus::with_capacity(1);
+        let _rx = bus.subscribe();
+        // 能成功订阅即说明 channel 创建成功
+    }
+
+    #[test]
+    fn debug_shows_subscriber_count() {
+        let bus = EventBus::new();
+        let debug_str = format!("{bus:?}");
+        assert!(debug_str.contains("EventBus"));
+        assert!(debug_str.contains("subscribers"));
+        assert!(debug_str.contains('0'));
+
+        let _rx = bus.subscribe();
+        let debug_str = format!("{bus:?}");
+        assert!(debug_str.contains('1'));
+    }
+
+    #[tokio::test]
+    async fn emit_without_subscribers_is_silent() {
+        // 无订阅者时 emit 不应 panic 或报错。
+        let bus = EventBus::new();
+        bus.emit(Event::Token("orphan".to_string()));
+        bus.emit(Event::ConfigChanged);
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_emitted_events() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        bus.emit(Event::Token("hello".to_string()));
+        let event = rx.recv().await.expect("应收到事件");
+        match event {
+            Event::Token(t) => assert_eq!(t, "hello"),
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_subscribers_each_receive_events() {
+        // broadcast：每个订阅者各自收到一份。
+        let bus = EventBus::new();
+        let mut rx1 = bus.subscribe();
+        let mut rx2 = bus.subscribe();
+        bus.emit(Event::ConfigChanged);
+        let e1 = rx1.recv().await.expect("rx1 应收到");
+        let e2 = rx2.recv().await.expect("rx2 应收到");
+        assert!(matches!(e1, Event::ConfigChanged));
+        assert!(matches!(e2, Event::ConfigChanged));
+    }
+
+    #[tokio::test]
+    async fn emit_various_event_types() {
+        // 验证所有 Event 变体均可通过 EventBus 传播。
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let task = Task::new("test task".to_string());
+        bus.emit(Event::Token("t".to_string()));
+        bus.emit(Event::MessageAppended(crate::model::Message::user_text(
+            "m",
+        )));
+        bus.emit(Event::TurnStreamingStarted);
+        bus.emit(Event::TurnEnd {
+            stop_reason: StopReason::EndTurn,
+        });
+        bus.emit(Event::ToolCallStarted {
+            call_id: "call-1".to_string(),
+            tool: "fs.read".to_string(),
+        });
+        bus.emit(Event::ToolCallFinished {
+            call_id: "call-1".to_string(),
+            result: crate::model::ToolResult::ok_text("ok"),
+        });
+        bus.emit(Event::SessionCreated {
+            id: "sess-1".to_string(),
+        });
+        bus.emit(Event::PermissionRequested {
+            id: "perm-1".to_string(),
+            tool: "fs.write".to_string(),
+            summary: "write file".to_string(),
+            risk: Risk::Low,
+        });
+        bus.emit(Event::PermissionResolved {
+            id: "perm-1".to_string(),
+            decision: Decision::Allow,
+        });
+        bus.emit(Event::PermissionModeChanged {
+            from: PermissionMode::Default,
+            to: PermissionMode::Plan,
+        });
+        bus.emit(Event::TaskUpdated { task });
+        bus.emit(Event::ConfigChanged);
+
+        // 消费 12 个事件，全部应成功接收
+        for _ in 0..12 {
+            rx.recv().await.expect("每个事件都应被订阅者收到");
+        }
+    }
+
+    #[tokio::test]
+    async fn late_subscriber_misses_earlier_events() {
+        // broadcast 不保留历史：后订阅者只收到订阅后的事件。
+        let bus = EventBus::new();
+        bus.emit(Event::Token("before".to_string()));
+        let mut rx = bus.subscribe();
+        bus.emit(Event::Token("after".to_string()));
+        let event = rx.recv().await.expect("应收到订阅后的事件");
+        match event {
+            Event::Token(t) => assert_eq!(t, "after"),
+            other => panic!("expected Token('after'), got {other:?}"),
+        }
+    }
+}

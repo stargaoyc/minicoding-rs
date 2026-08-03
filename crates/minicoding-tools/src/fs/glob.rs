@@ -182,7 +182,11 @@ mod tests {
             .execute(json!({"pattern": "**/*.rs", "path": "."}), &ctx)
             .await
             .expect("glob ok");
-        let mut paths = lines_of(&result);
+        // 规范化路径分隔符：Windows 下 strip_prefix 返回反斜杠，统一为正斜杠以跨平台断言
+        let mut paths: Vec<String> = lines_of(&result)
+            .iter()
+            .map(|p| p.replace('\\', "/"))
+            .collect();
         paths.sort();
         // **/*.rs 递归匹配所有 .rs 文件
         assert!(paths.contains(&"a.rs".to_string()));

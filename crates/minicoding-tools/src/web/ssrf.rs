@@ -86,3 +86,131 @@ fn is_ipv6_link_local(addr: &std::net::Ipv6Addr) -> bool {
     let segs = addr.segments();
     (segs[0] & 0xFFC0) == 0xFE80
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn validate_url_rejects_non_http_scheme() {
+        assert!(validate_url("ftp://example.com").await.is_err());
+        assert!(validate_url("file:///etc/passwd").await.is_err());
+        assert!(validate_url("javascript:alert(1)").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_loopback_ipv4() {
+        assert!(validate_url("http://127.0.0.1/").await.is_err());
+        assert!(validate_url("http://127.0.0.1:8080/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_private_ipv4() {
+        assert!(validate_url("http://10.0.0.1/").await.is_err());
+        assert!(validate_url("http://172.16.0.1/").await.is_err());
+        assert!(validate_url("http://192.168.1.1/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_link_local_ipv4() {
+        assert!(validate_url("http://169.254.1.1/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_unspecified_ipv4() {
+        assert!(validate_url("http://0.0.0.0/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_loopback_ipv6() {
+        assert!(validate_url("http://[::1]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_unspecified_ipv6() {
+        assert!(validate_url("http://[::]/").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_url_rejects_invalid_url() {
+        assert!(validate_url("not a url").await.is_err());
+        assert!(validate_url("").await.is_err());
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_loopback_v4() {
+        assert!(is_blocked_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip(&"127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_private_v4() {
+        assert!(is_blocked_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_blocked_ip(&"192.168.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_link_local_v4() {
+        assert!(is_blocked_ip(&"169.254.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_unspecified_v4() {
+        assert!(is_blocked_ip(&"0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_broadcast_v4() {
+        assert!(is_blocked_ip(&"255.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_documentation_v4() {
+        assert!(is_blocked_ip(&"203.0.113.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_allows_public_v4() {
+        assert!(!is_blocked_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_blocked_ip(&"1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_loopback_v6() {
+        assert!(is_blocked_ip(&"::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_detects_unspecified_v6() {
+        assert!(is_blocked_ip(&"::".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_blocked_ip_allows_public_v6() {
+        assert!(!is_blocked_ip(&"2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_ipv6_ula_detects_fc00_range() {
+        assert!(is_ipv6_ula(&"fc00::1".parse().unwrap()));
+        assert!(is_ipv6_ula(&"fd00::1".parse().unwrap()));
+        assert!(is_ipv6_ula(&"fdff:ffff::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_ipv6_ula_rejects_public() {
+        assert!(!is_ipv6_ula(&"2606:4700::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_ipv6_link_local_detects_fe80_range() {
+        assert!(is_ipv6_link_local(&"fe80::1".parse().unwrap()));
+        assert!(is_ipv6_link_local(&"febf::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_ipv6_link_local_rejects_public() {
+        assert!(!is_ipv6_link_local(&"2606:4700::1".parse().unwrap()));
+    }
+}

@@ -30,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `SANDBOX_NAMED_EXTERNAL`：从文件路径加载 profile（见 `<sandbox.h>`）。
 const SANDBOX_NAMED_EXTERNAL: u64 = 0x2;
 
-extern "C" {
+unsafe extern "C" {
     /// 初始化沙箱（deprecated but functional，见 `<sandbox.h>`）。
     fn sandbox_init(
         profile: *const std::os::raw::c_char,

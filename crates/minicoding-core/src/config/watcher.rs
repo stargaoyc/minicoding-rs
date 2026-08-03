@@ -129,3 +129,60 @@ impl ConfigWatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! `ConfigWatcher` best-effort 降级路径测试（覆盖率补全）。
+    //!
+    //! 仅覆盖可稳定测试的降级场景（无父目录、监听注册失败）；
+    //! 正常监听路径涉及 notify 内部线程与 OS 文件事件，由集成测试覆盖。
+
+    use super::*;
+    use crate::runtime::{Event, EventBus};
+
+    #[test]
+    fn start_with_no_parent_dir_degrades_to_empty_watcher() {
+        // 文件名无父目录（相对路径仅文件名），应降级为空 watcher
+        let path = camino::Utf8Path::new("config.toml");
+        let watcher = ConfigWatcher::start(path, EventBus::new());
+        // `_watcher` 为 private，无法直接断言 `None`；但降级路径不创建线程，
+        // 不订阅事件即可验证不会 panic / 不挂起。
+        drop(watcher);
+    }
+
+    #[test]
+    fn start_with_nonexistent_parent_degrades_gracefully() {
+        // 父目录不存在：`watcher.watch` 注册失败，应降级为空 watcher 不 panic
+        let path = camino::Utf8Path::new("/this/path/does/not/exist/config.toml");
+        let watcher = ConfigWatcher::start(path, EventBus::new());
+        drop(watcher);
+    }
+
+    #[tokio::test]
+    async fn start_with_existing_dir_does_not_panic() {
+        // 临时目录存在，监听应成功注册（不验证实际事件触发，由集成测试覆盖）
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_file = tmp.path().join("config.toml");
+        let config_path = camino::Utf8Path::from_path(&config_file).expect("utf8 path");
+        let watcher = ConfigWatcher::start(config_path, EventBus::new());
+        drop(watcher);
+        // 给后台线程一点时间稳定（即使无事件也不应崩溃）
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[test]
+    fn event_bus_emit_config_changed_does_not_panic_without_subscribers() {
+        // 无订阅者时 emit 应静默丢弃，不 panic
+        let bus = EventBus::new();
+        bus.emit(Event::ConfigChanged);
+    }
+
+    #[test]
+    fn event_bus_subscribe_can_receive_config_changed() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        bus.emit(Event::ConfigChanged);
+        let event = rx.try_recv().expect("should receive event");
+        assert!(matches!(event, Event::ConfigChanged));
+    }
+}
