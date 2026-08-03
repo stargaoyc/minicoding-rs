@@ -35,14 +35,21 @@ fi
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0
-# 排除 ts-rs 自动生成的文件（trailing whitespace 是库输出特性，见 gen-types 脚本后处理）
-EXCLUDE_PATTERN='crates/minicoding-web/src/api/generated/'
+# 排除自动生成的文件（ts-rs 输出 + Tauri schema，工具输出特性，不手动编辑）
+EXCLUDE_PATTERNS=(
+  'crates/minicoding-web/src/api/generated/'
+  'crates/minicoding-desktop/gen/'
+)
 while IFS= read -r f; do
   if [ -f "$f" ] && [ -s "$f" ]; then
     # 跳过自动生成的文件
-    case "$f" in
-      *"$EXCLUDE_PATTERN"*) continue ;;
-    esac
+    skip=false
+    for pat in "${EXCLUDE_PATTERNS[@]}"; do
+      case "$f" in
+        *"$pat"*) skip=true; break ;;
+      esac
+    done
+    [ "$skip" = true ] && continue
     # 跳过二进制文件（图片/字体/压缩包等，grep -I 检测）
     grep -qI '' "$f" 2>/dev/null || continue
     # trailing whitespace

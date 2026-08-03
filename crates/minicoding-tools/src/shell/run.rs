@@ -215,7 +215,9 @@ fn truncate_chars(text: String, max_chars: usize) -> (String, bool) {
 mod tests {
     #![allow(clippy::pedantic)]
     use super::*;
-    use minicoding_core::model::{SideEffect, ToolContent, ToolError};
+    #[cfg(unix)]
+    use minicoding_core::model::ToolContent;
+    use minicoding_core::model::{SideEffect, ToolError};
     use minicoding_core::tool::Tool;
     use tempfile::TempDir;
 

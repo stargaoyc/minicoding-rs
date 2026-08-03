@@ -2,7 +2,7 @@
 //!
 //! 启动 Tauri WebView，注册 `start_session` 命令供前端 `invoke` 调用。
 //! 同时初始化系统托盘 + 全局快捷键（W-07）。
-//! 需要系统 webview 运行时（webkit2gtk Linux / WebKit macOS / WebView2 Windows）。
+//! 需要系统 webview 运行时（`webkit2gtk` Linux / `WebKit` macOS / `WebView2` Windows）。
 
 #![deny(clippy::all, clippy::pedantic)]
 
@@ -25,11 +25,11 @@ fn main() {
         })
         .on_window_event(|window, event| {
             // 关闭窗口时隐藏到托盘而非退出（保持 sidecar 运行）
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if let Some(main_window) = window.get_webview_window("main") {
-                    let _ = main_window.hide();
-                    api.prevent_close();
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && let Some(main_window) = window.get_webview_window("main")
+            {
+                let _ = main_window.hide();
+                api.prevent_close();
             }
         })
         .run(tauri::generate_context!())
