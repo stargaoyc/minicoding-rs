@@ -266,6 +266,7 @@ mod tests {
     }
 
     /// 文件 fallback 权限应为 0600（仅 Linux/Unix 校验）。
+    #[cfg(unix)]
     #[test]
     fn file_permissions_are_0600() {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
