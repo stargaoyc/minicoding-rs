@@ -195,9 +195,10 @@ mod tests {
             .await;
         assert!(result.is_ok(), "apply should succeed: {result:?}");
 
-        // 验证文件已修改
+        // 验证文件已修改（规范化行尾：Windows 下 git 可能把 LF 转 CRLF）
         let content = std::fs::read_to_string(&file_path).expect("read");
-        assert_eq!(content, "hello world\n");
+        let normalized = content.replace("\r\n", "\n");
+        assert_eq!(normalized, "hello world\n");
     }
 
     #[test]
