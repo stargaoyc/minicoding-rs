@@ -4,23 +4,23 @@ import type { TaskStatus } from "./TaskStatus";
 /**
  * 任务（由 `task.create` 创建，`task.update` 增量更新）。
  */
-export type Task = {
+export type Task = { 
 /**
  * ULID，由 Runtime 生成（C-31：ID 不可由 LLM 伪造）。
  */
-id: string,
+id: string, 
 /**
  * 任务描述。
  */
-content: string, status: TaskStatus,
+content: string, status: TaskStatus, 
 /**
  * `Completed`/`Cancelled` 时必填（实际完成内容/证据）。
  */
-summary: string | null,
+summary: string | null, 
 /**
  * 本任务阻塞的其他 `task_id` 列表。
  */
-blocks: Array<string>,
+blocks: Array<string>, 
 /**
  * 阻塞本任务的 `task_id` 列表。
  */

@@ -7,11 +7,11 @@ import type { ToolCall } from "./ToolCall";
 /**
  * 一条对话消息。
  */
-export type Message = { id: string, role: Role, content: Array<ContentBlock>, tool_calls: Array<ToolCall>,
+export type Message = { id: string, role: Role, content: Array<ContentBlock>, tool_calls: Array<ToolCall>, 
 /**
  * `role=Tool` 时指向触发它的 call id。
  */
-tool_call_id: string | null,
+tool_call_id: string | null, 
 /**
  * RFC3339 时间戳（`time::OffsetDateTime` 序列化为 string，见 `design.md` §25.4）。
  */

@@ -229,6 +229,7 @@ mod tests {
     }
 
     /// 从 `ToolResult` 提取文本内容。
+    #[cfg(unix)]
     fn text_of(result: &ToolResult) -> &str {
         match &result.content {
             ToolContent::Text(t) => t,

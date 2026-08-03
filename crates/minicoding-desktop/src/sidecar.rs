@@ -95,6 +95,12 @@ pub fn fallback_session_info() -> Result<SessionInfo, String> {
 ///
 /// 仅 `desktop` feature 启用时可用。生产模式下 sidecar 二进制通过
 /// `tauri.conf.json` 的 `externalBin` 打包。
+///
+/// # Errors
+///
+/// - sidecar 二进制配置错误（`tauri.conf.json` 的 `externalBin` 未正确设置）
+/// - sidecar 进程启动失败（二进制缺失或权限不足）
+/// - 端口解析失败（sidecar stdout 未输出 `PORT=` 行或格式错误）
 #[cfg(feature = "desktop")]
 pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
     use tauri_plugin_shell::ShellExt;
