@@ -14,11 +14,23 @@ echo "[pre-commit] cargo clippy (deny warnings) ..."
 cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings
 
 echo "[pre-commit] cargo deny check ..."
-# 离线模式（无网络时设置 MINICODING_OFFLINE=1）：跳过 advisory-db fetch，使用本地缓存
+# advisories 需要网络 fetch advisory-db。
+# MINICODING_OFFLINE=1 强制离线；否则先在线，网络失败自动降级离线（advisory-db 可能过期）。
 if [ "${MINICODING_OFFLINE:-0}" = "1" ]; then
   cargo deny --offline check advisories licenses bans sources
 else
-  cargo deny check advisories licenses bans sources
+  deny_err=$(mktemp)
+  if cargo deny check advisories licenses bans sources 2>"$deny_err"; then
+    :
+  elif grep -qE "failed to fetch advisory database|Could not connect|TLS connection" "$deny_err"; then
+    echo "[pre-commit] 网络不可用，降级到离线模式（advisory-db 可能过期）" >&2
+    cargo deny --offline check advisories licenses bans sources
+  else
+    cat "$deny_err" >&2
+    rm -f "$deny_err"
+    exit 1
+  fi
+  rm -f "$deny_err"
 fi
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
@@ -31,6 +43,8 @@ while IFS= read -r f; do
     case "$f" in
       *"$EXCLUDE_PATTERN"*) continue ;;
     esac
+    # 跳过二进制文件（图片/字体/压缩包等，grep -I 检测）
+    grep -qI '' "$f" 2>/dev/null || continue
     # trailing whitespace
     if grep -nE '[[:space:]]+$' "$f" >/dev/null 2>&1; then
       echo "  trailing whitespace: $f"

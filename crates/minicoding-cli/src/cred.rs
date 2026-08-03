@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_core::paths;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 /// keyring service 名（OS keychain 中的 namespace）。
@@ -120,8 +121,12 @@ fn store_api_key_to_file(key: &str) -> Result<()> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, key.as_bytes())
         .with_context(|| format!("写入 credentials 临时文件失败: {tmp}"))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("设置 credentials 临时文件权限失败: {tmp}"))?;
+    // Unix 设置 0600 权限（Windows 文件 ACL 由用户目录权限保障）
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("设置 credentials 临时文件权限失败: {tmp}"))?;
+    }
     fs::rename(&tmp, &path).with_context(|| format!("rename credentials 失败: {tmp} -> {path}"))?;
     tracing::info!("api key 已写入文件 fallback（0600）");
     Ok(())

@@ -47,5 +47,5 @@ async fn start_session_handler(
     sidecar::spawn_sidecar(&app)
         .await
         .map_err(|e| e.to_string())
-        .or_else(sidecar::fallback_session_info)
+        .or_else(|_| sidecar::fallback_session_info())
 }
