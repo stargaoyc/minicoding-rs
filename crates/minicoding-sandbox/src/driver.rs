@@ -5,7 +5,10 @@
 //! - macOS：Seatbelt（10.5+ 全版本支持），返回 `SeatbeltDriver`；
 //! - Windows：Job Object（Vista+），返回 `WindowsJobDriver`。
 
-use minicoding_core::sandbox::{NoopDriver, SandboxDriver};
+use minicoding_core::sandbox::SandboxDriver;
+// NoopDriver 仅在非 Windows 平台的降级路径使用（Windows 直接返回 WindowsJobDriver）
+#[cfg(not(target_os = "windows"))]
+use minicoding_core::sandbox::NoopDriver;
 
 /// 探测到的驱动类型（供 `doctor --security` 报告，见 T-M4-10）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

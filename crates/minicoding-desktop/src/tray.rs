@@ -60,7 +60,7 @@ fn setup_global_shortcut(app: &AppHandle) -> Result<()> {
     let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyM);
 
     app.global_shortcut()
-        .on_shortcut(shortcut, move |app, _event| {
+        .on_shortcut(shortcut, move |app, _shortcut, _event| {
             if let Some(window) = main_window(app) {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.hide();
