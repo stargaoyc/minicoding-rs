@@ -91,7 +91,7 @@ chmod +x "$BINARIES_DIR/$SIDECAR_NAME"
 echo "✓ sidecar 已放置：$BINARIES_DIR/$SIDECAR_NAME"
 
 echo "==> [4/4] 调用 cargo tauri build（产出平台安装包）"
-TAURI_ARGS=(build)
+TAURI_ARGS=(build --features desktop)
 if [[ -n "$1" ]]; then
   TAURI_ARGS+=(--target "$TARGET")
 fi
