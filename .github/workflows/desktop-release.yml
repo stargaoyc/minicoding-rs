@@ -106,8 +106,8 @@ jobs:
         run: |
           mkdir -p crates/minicoding-desktop/binaries
           cp target/${{ matrix.target }}/release/minicoding-server \
-             crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}
-          chmod +x crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}
+             crates/minicoding-desktop/binaries/minicoding-server-sidecar-${{ matrix.target }}
+          chmod +x crates/minicoding-desktop/binaries/minicoding-server-sidecar-${{ matrix.target }}
 
       - name: Place sidecar binary (Windows)
         if: runner.os == 'Windows'
@@ -115,7 +115,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path crates/minicoding-desktop/binaries
           Copy-Item "target/${{ matrix.target }}/release/minicoding-server.exe" `
-                    "crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}.exe"
+                    "crates/minicoding-desktop/binaries/minicoding-server-sidecar-${{ matrix.target }}.exe"
 
       - name: Tauri build
         working-directory: crates/minicoding-desktop
