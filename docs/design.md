@@ -3015,7 +3015,7 @@ M9 前端复用 §24 定义的全部 JSON-RPC 方法与 SSE 事件格式，**不
 }
 ```
 
-`externalBin` 约定：Tauri 在打包时自动追加 host target triple 后缀（如 `binaries/minicoding-server-x86_64-pc-windows-msvc.exe`），运行时通过 `tauri-plugin-shell` 的 `app.shell().sidecar("minicoding-server")` 启动。
+`externalBin` 约定：Tauri 在打包时自动追加 host target triple 后缀（如 `binaries/minicoding-server-sidecar-x86_64-pc-windows-msvc.exe`），运行时通过 `tauri-plugin-shell` 的 `app.shell().sidecar("minicoding-server-sidecar")` 启动。sidecar 文件名用 `minicoding-server-sidecar` 而非 `minicoding-server`，避免与 cargo build 目录 `target/release/build/minicoding-server/` 冲突（tauri-build 的 `copy_binaries` 会 `fs::remove_file` 导致 `IsADirectory` panic）。
 
 **构建脚本**（`scripts/`）：
 
@@ -3063,4 +3063,4 @@ macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产�
 
 **CI 中的占位 sidecar**：
 
-`ci.yml` 的 `desktop` job 在 `cargo build` 前创建占位 sidecar（`binaries/minicoding-server-x86_64-unknown-linux-gnu`），以满足 `tauri_build::build()` 对 `externalBin` 路径的编译期校验。真实 sidecar 二进制仅在 `desktop-release.yml` 中构建。
+`ci.yml` 的 `desktop` job 在 `cargo build` 前创建占位 sidecar（`binaries/minicoding-server-sidecar-x86_64-unknown-linux-gnu`），以满足 `tauri_build::build()` 对 `externalBin` 路径的编译期校验。真实 sidecar 二进制仅在 `desktop-release.yml` 中构建。

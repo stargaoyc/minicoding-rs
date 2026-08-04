@@ -247,7 +247,11 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .map_err(|e| anyhow::anyhow!("bind {addr} 失败: {e}", addr = cfg.bind))?;
-    tracing::info!(addr = %cfg.bind, web_dir = ?cfg.web_dir, "minicoding-server 启动");
+    // 输出实际监听地址（端口 0 时由 OS 分配，sidecar 依赖此日志解析端口）
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| anyhow::anyhow!("获取监听地址失败: {e}"))?;
+    tracing::info!(addr = %local_addr, web_dir = ?cfg.web_dir, "minicoding-server 启动");
     axum::serve(listener, app)
         .await
         .map_err(|e| anyhow::anyhow!("server 运行错误: {e}"))?;
