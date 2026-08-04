@@ -82,7 +82,7 @@ cargo run -p minicoding-cli -- --help
 cargo run -p minicoding-cli -- --version
 ```
 
-### 1.3 配置 API Key
+### 1.3 配置 API Key 与 Provider
 
 凭证只从环境变量或 OS keyring 读取，**绝不**写入配置文件明文（`security.md` §6、`AGENTS.md` §5.3）。MVP 阶段最简方式是环境变量：
 
@@ -110,6 +110,44 @@ minicoding auth login --provider anthropic
 # 输入密钥（不回显）→ 写入 OS keyring
 minicoding auth status
 ```
+
+#### 连接 OpenAI 兼容 API（DeepSeek/Moonshot/vLLM 等）
+
+通过 `--api-base` 和 `--provider-name` 连接任何 OpenAI 兼容 API：
+
+```bash
+# DeepSeek
+minicoding --provider openai --provider-name deepseek \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat "重构 utils 模块"
+
+# Moonshot
+minicoding --provider openai --provider-name moonshot \
+  --api-base https://api.moonshot.cn/v1 \
+  --model moonshot-v1-128k "审计依赖图"
+
+# 本地 vLLM
+minicoding --provider openai --provider-name vllm \
+  --api-base http://localhost:8000/v1 \
+  --model meta-llama/Llama-3-70B "生成 API 文档"
+```
+
+或持久化到 `~/.minicoding/config.toml`：
+
+```toml
+[provider]
+default = "openai"
+name = "deepseek"
+api_base = "https://api.deepseek.com"
+model = "deepseek-chat"
+# api_key 留空，从 keyring/环境变量读取（推荐）
+```
+
+配置优先级（所有入口统一）：`CLI 参数 > 环境变量 > config.toml > provider 默认值`。
+
+#### 桌面安装包配置
+
+桌面应用用户无需命令行操作——首次启动自动弹出设置向导，填写 Provider 类型、API base、模型、API key 后保存即可（详见 `product-manual.md` §6.2）。
 
 ### 1.4 首次运行
 
@@ -277,9 +315,12 @@ CC 用 JSON，minicoding 用 TOML（`data-model.md` §3.0、`architecture.md` §
 | `permissions.allow` | `[[allow]]`（`policy.toml`）或 `--allow` CLI | specificity=2 的 L1 条目（`data-model.md` §5） |
 | `permissions.deny` | `[[deny]]`（`policy.toml`）或 `--deny` CLI | specificity=2 的 L1 条目 |
 | `hooks` | `[hooks]` + `[[hooks.<Event>]]` | 事件数从 27 减到 10（见 3.3） |
-| `model` | `--model` CLI 或 `config.toml` | M6 起 `--provider`/`--model` 覆盖（`dev-plan.md` T-M6-5） |
+| `model` | `--model` CLI 或 `config.toml` `[provider].model` | M6 起 `--provider`/`--model` 覆盖（`dev-plan.md` T-M6-5） |
 | `env` | `[shell_environment_policy]` | 白名单/黑名单策略（`security.md` §10） |
 | `mcpServers` | `mcp.json`（local/user/project 三作用域） | project 作用域需首次批准（C-24，`data-model.md` §6.4） |
+| —（CC 无对应） | `[provider].name` | 自定义显示名（DeepSeek/Moonshot 等，`--provider-name`） |
+| —（CC 无对应） | `[provider].api_base` | API base URL 覆盖（`--api-base`，连接 OpenAI 兼容 API） |
+| —（CC 无对应） | `[provider.small]` | 独立小 LLM 配置（摘要/压缩降本，继承主 provider 的 api_base/api_key） |
 
 minicoding 配置加载优先级（高 → 低，见 `architecture.md` §7.1）：
 

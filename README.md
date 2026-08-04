@@ -50,6 +50,20 @@ minicoding --session
 # 指定 Provider 与模型
 minicoding --provider anthropic --model claude-sonnet-4 "重构 utils 模块"
 
+# 连接 OpenAI 兼容 API（DeepSeek/Moonshot/vLLM 等）
+minicoding --provider openai --provider-name deepseek \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat "重构 utils 模块"
+
+# 持久化配置到 config.toml（避免每次输入参数）
+# ~/.minicoding/config.toml:
+# [provider]
+# default = "openai"
+# name = "deepseek"
+# api_base = "https://api.deepseek.com"
+# model = "deepseek-chat"
+minicoding "重构 utils 模块"  # 自动读取 config.toml
+
 # 使用预设（审批模式 × 沙箱策略）
 minicoding --preset auto "重构 utils 模块"           # 默认：工作区写 + OnRequest
 minicoding --preset read-only "审计依赖图"           # 只读 + OnRequest
@@ -153,12 +167,14 @@ minicoding-rs/
 
 ## 6. 四形态前端
 
-| 形态 | 入口 | 适用场景 |
-|------|------|---------|
-| CLI | `minicoding` | 脚本化、批量执行（`minicoding exec`）、CI/容器 |
-| TUI | `minicoding --tui` | 全屏交互式终端会话 |
-| Web | `minicoding-server --web ./dist` | 浏览器访问，远程会话，多客户端 |
-| 桌面 | `minicoding-desktop`（feature `desktop`） | Tauri 原生应用，系统托盘 + 全局快捷键 |
+| 形态 | 入口 | 适用场景 | 配置方式 |
+|------|------|---------|---------|
+| CLI | `minicoding` | 脚本化、批量执行（`minicoding exec`）、CI/容器 | `--api-base`/`--provider-name`/`config.toml`/env/keyring |
+| TUI | `minicoding --tui` | 全屏交互式终端会话 | 同 CLI |
+| Web | `minicoding-server --web ./dist` | 浏览器访问，远程会话，多客户端 | `--api-base`/`config.toml`/env/keyring + `POST /sessions` body |
+| 桌面 | `minicoding-desktop`（feature `desktop`） | Tauri 原生应用，系统托盘 + 全局快捷键 | 应用内设置界面（写入 `config.toml` + keyring） |
+
+所有形态共享统一配置优先级：`CLI 参数 > 环境变量 > config.toml > provider 默认值`。API key 统一存 OS keyring（`KEYRING_SERVICE = "minicoding"`，C-04），CLI/server/desktop 三端共享同一 keyring entry。
 
 ## 7. 许可证
 
