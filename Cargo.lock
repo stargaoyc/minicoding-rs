@@ -3072,6 +3072,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
+ "keyring",
  "minicoding-core",
  "serde",
  "serde_json",
@@ -3080,7 +3081,9 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 
@@ -3262,6 +3265,7 @@ dependencies = [
  "clap",
  "futures",
  "hyper",
+ "keyring",
  "minicoding-context",
  "minicoding-core",
  "minicoding-memory",

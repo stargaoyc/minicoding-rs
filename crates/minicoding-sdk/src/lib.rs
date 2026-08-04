@@ -493,7 +493,7 @@ mod tests {
     }
 
     impl LlmProvider for StubProvider {
-        fn id(&self) -> &'static str {
+        fn id(&self) -> &str {
             "stub"
         }
         fn capabilities(&self) -> Capabilities {
@@ -639,7 +639,7 @@ mod tests {
 
         struct SlowProvider;
         impl LlmProvider for SlowProvider {
-            fn id(&self) -> &'static str {
+            fn id(&self) -> &str {
                 "slow"
             }
             fn capabilities(&self) -> Capabilities {

@@ -439,6 +439,7 @@ mod tests {
     fn test_params() -> ServerRuntimeParams {
         ServerRuntimeParams {
             provider_kind: "openai".to_string(),
+            provider_name: None,
             api_base: "http://localhost:8080/v1".to_string(),
             api_key: "sk-test".to_string(),
             model: "gpt-4o".to_string(),

@@ -44,6 +44,10 @@ export interface CreateSessionBody {
   workdir?: string;
   system?: string;
   provider?: string;
+  /** Provider 自定义显示名（用于日志/metrics，不影响协议分派，与后端 `--provider-name` 对齐）。 */
+  provider_name?: string;
+  /** API base URL（覆盖 server 默认；api_key 不经前端传，C-04 凭证不前端）。 */
+  api_base?: string;
   model?: string;
   permission_mode?: PermissionMode;
 }

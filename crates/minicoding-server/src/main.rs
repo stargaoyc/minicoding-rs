@@ -22,9 +22,13 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: String,
 
-    /// LLM provider 类型（`openai`/`anthropic`/`ollama`）
-    #[arg(long, env = "OPENAI_PROVIDER", default_value = "openai")]
-    provider: String,
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`，默认从 `config.toml` 读取）
+    #[arg(long, env = "OPENAI_PROVIDER")]
+    provider: Option<String>,
+
+    /// Provider 自定义显示名（用于日志/metrics，不影响协议分派，与 CLI `--provider-name` 对齐）
+    #[arg(long, env = "MINICODING_PROVIDER_NAME")]
+    provider_name: Option<String>,
 
     /// API base URL
     #[arg(long, env = "OPENAI_API_BASE")]
@@ -34,9 +38,9 @@ struct Cli {
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
-    /// 模型名称
-    #[arg(long, env = "OPENAI_MODEL", default_value = "gpt-4o")]
-    model: String,
+    /// 模型名称（默认从 `config.toml` 读取）
+    #[arg(long, env = "OPENAI_MODEL")]
+    model: Option<String>,
 
     /// 工作目录
     #[arg(long, default_value = ".")]
@@ -75,21 +79,38 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind address `{}`: {e}", cli.bind))?;
 
-    // 默认 API base（按 provider 选择默认值）
-    let api_base = cli.api_base.unwrap_or_else(|| match cli.provider.as_str() {
-        "ollama" => "http://localhost:11434".to_string(),
-        "anthropic" => "https://api.anthropic.com".to_string(),
-        _ => "https://api.openai.com".to_string(),
-    });
+    // 解析 provider 配置（CLI > env > config.toml > 默认，与 `minicoding serve` 一致）
+    let file_provider = minicoding_core::config::load_config()
+        .map(|c| c.provider)
+        .unwrap_or_default();
 
-    let api_key = cli.api_key.unwrap_or_default();
+    let provider_kind = cli
+        .provider
+        .unwrap_or_else(|| file_provider.default.clone());
+    let provider_name = cli.provider_name.or(file_provider.name.clone());
+    let api_key = cli.api_key.unwrap_or_else(|| file_provider.api_key.clone());
+    let model = cli.model.unwrap_or_else(|| file_provider.model.clone());
+
+    // api_base：CLI > config.toml > 按 provider 选默认
+    let api_base = cli.api_base.unwrap_or_else(|| {
+        if file_provider.api_base.is_empty() {
+            match provider_kind.as_str() {
+                "ollama" => "http://localhost:11434".to_string(),
+                "anthropic" => "https://api.anthropic.com".to_string(),
+                _ => "https://api.openai.com".to_string(),
+            }
+        } else {
+            file_provider.api_base.clone()
+        }
+    });
 
     let cfg = ServerConfig {
         bind,
-        provider_kind: cli.provider,
+        provider_kind,
+        provider_name,
         api_base,
         api_key,
-        model: cli.model,
+        model,
         workdir: Utf8PathBuf::from(cli.workdir),
         system: cli.system,
         permission_timeout_sec: cli.permission_timeout_sec,

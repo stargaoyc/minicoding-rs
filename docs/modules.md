@@ -906,6 +906,16 @@ minicoding-extension-sdk/src/
 
 Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M10+，前端复用 `minicoding-web` 响应式布局。
 
+### 19.5 发布管道
+
+桌面应用独立于 cargo-dist 的 CLI 发布流，详见 `docs/design.md` §26.8。要点：
+
+- `Cargo.toml` 标记 `[package.metadata.dist] dist = false`，cargo-dist 不构建桌面 crate；
+- `tauri.conf.json` 配置 `externalBin: ["binaries/minicoding-server"]` + `beforeBuildCommand`（自动构建前端）；
+- 本地开发：先运行 `scripts/setup-desktop-dev.sh` 创建占位 sidecar（满足 `tauri_build::build()` 编译期校验），再 `cargo build -p minicoding-desktop --features desktop`；
+- 发布构建：`scripts/build-desktop.sh`（前端 → server 二进制 → sidecar 放置 → `cargo tauri build`）；
+- CI 发布：`.github/workflows/desktop-release.yml` 在 tag push 时触发，4 平台 matrix 构建安装包上传到 GitHub Release。
+
 ---
 
 ## 20. 跨模块约定

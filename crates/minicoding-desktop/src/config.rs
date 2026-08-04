@@ -1,0 +1,188 @@
+//! 桌面端配置管理：读写 `~/.minicoding/config.toml` + OS keyring（C-04）。
+//!
+//! 安装包用户无 CLI，通过 Tauri invoke 命令读写配置：
+//! - 非敏感配置（`api_base`/`model`/`provider`/`name`）→ `config.toml`
+//! - API key → OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE`，C-04 凭证不落明文）
+//!
+//! sidecar 启动时由 [`crate::sidecar`] 读取此模块的配置 + keyring，通过 CLI 参数
+//! 传给 `minicoding-server`（内存传递，不下传 env，C-04）。
+//!
+//! 详见 `docs/design.md` §26.5。
+
+use anyhow::{Context, Result};
+use minicoding_core::config::{ProviderConfig, load_config};
+use minicoding_core::paths;
+
+/// keyring service/account（与 CLI `cred.rs` 共享，确保两边读写同一 entry）。
+///
+/// 仅在 `desktop` feature 启用时使用（keyring 操作函数均 `#[cfg(feature = "desktop")]`）。
+#[cfg(feature = "desktop")]
+const KEYRING_SERVICE: &str = "minicoding";
+#[cfg(feature = "desktop")]
+const KEYRING_ACCOUNT: &str = "openai_api_key";
+
+/// 读取 provider 配置（从 `~/.minicoding/config.toml`）。
+///
+/// 配置文件不存在时返回默认值（`openai` + `https://api.openai.com/v1`）。
+///
+/// # Errors
+/// 配置文件存在但解析失败且无 last-known-good 回退时返回错误。
+pub fn get_provider_config() -> Result<ProviderConfig> {
+    let config = load_config().map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))?;
+    Ok(config.provider)
+}
+
+/// 保存 provider 配置到 `~/.minicoding/config.toml`。
+///
+/// 读取现有完整配置（保留 `context`/`tools`/`hooks` 等其他段），替换 `[provider]` 段，
+/// 原子写入（tmp + rename，避免崩溃导致配置文件损坏）。
+///
+/// **不写入 `api_key` 明文**：`ProviderConfig.api_key` 字段留空或用 `env:VAR` 语法，
+/// 真实凭证由 [`store_api_key`] 写入 OS keyring（C-04）。
+///
+/// # Errors
+/// 配置文件序列化失败、IO 错误时返回错误。
+pub fn save_provider_config(provider: ProviderConfig) -> Result<()> {
+    // 读取现有配置（保留其他段）
+    let mut config = load_config()
+        .map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))
+        .unwrap_or_default();
+    config.provider = provider;
+
+    let config_path = paths::config_path().context("无法确定配置文件路径")?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("创建配置目录失败: {parent}"))?;
+    }
+    let serialized = toml::to_string_pretty(&config).context("序列化配置失败")?;
+    // 原子写入：tmp + rename
+    let tmp = config_path.with_extension("toml.tmp");
+    std::fs::write(&tmp, serialized.as_bytes())
+        .with_context(|| format!("写入配置临时文件失败: {tmp}"))?;
+    std::fs::rename(&tmp, &config_path)
+        .with_context(|| format!("rename 配置文件失败: {tmp} -> {config_path}"))?;
+    tracing::info!(path = %config_path, "provider 配置已保存");
+    Ok(())
+}
+
+/// 从 OS keyring 加载 API key（与 CLI `cred.rs` 共享 entry）。
+///
+/// 返回 `Ok(None)` 表示 keyring 可用但无对应 entry；
+/// 返回 `Err` 表示 keyring 不可用（如 Linux 无 secret-service 守护）。
+///
+/// # Errors
+/// keyring 不可用或读取失败时返回错误。
+#[cfg(feature = "desktop")]
+pub fn load_api_key() -> Result<Option<String>> {
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).context("创建 keyring entry 失败")?;
+    match entry.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("keyring get 失败: {e}")),
+    }
+}
+
+/// 写入 API key 到 OS keyring。
+///
+/// 与 CLI `minicoding cred store` 写入同一 entry，两边共享凭证。
+///
+/// # Errors
+/// keyring 写入失败时返回错误。
+#[cfg(feature = "desktop")]
+pub fn store_api_key(key: &str) -> Result<()> {
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).context("创建 keyring entry 失败")?;
+    entry
+        .set_password(key)
+        .map_err(|e| anyhow::anyhow!("keyring set 失败: {e}"))?;
+    tracing::info!("api key 已写入 OS keyring");
+    Ok(())
+}
+
+/// 删除 keyring 中的 API key。
+///
+/// # Errors
+/// keyring 删除失败（非 NoEntry）时返回错误。
+#[cfg(feature = "desktop")]
+pub fn delete_api_key() -> Result<()> {
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).context("创建 keyring entry 失败")?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("keyring delete 失败: {e}")),
+    }
+}
+
+/// 返回配置文件路径（供前端"打开配置文件"功能用）。
+///
+/// # Errors
+/// 无法确定 minicoding home 目录时返回错误。
+pub fn config_file_path() -> Result<camino::Utf8PathBuf> {
+    paths::config_path().context("无法确定配置文件路径")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    #![allow(unsafe_code)] // Rust 2024: set_var/remove_var 标记 unsafe
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// `save_provider_config` + `get_provider_config` 往返测试（隔离 MINICODING_HOME）。
+    #[test]
+    fn provider_config_round_trip() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: 持有 ENV_LOCK 保证串行，无并发 set_var 风险。
+        unsafe {
+            std::env::set_var("MINICODING_HOME", tmp.path());
+        }
+
+        let provider = ProviderConfig {
+            default: "openai".into(),
+            name: Some("deepseek".into()),
+            api_base: "https://api.deepseek.com/v1".into(),
+            api_key: String::new(), // 不落明文
+            model: "deepseek-chat".into(),
+            timeout_sec: 60,
+            max_retries: 3,
+            small: None,
+        };
+
+        save_provider_config(provider.clone()).expect("save provider config");
+
+        let loaded = get_provider_config().expect("get provider config");
+        assert_eq!(loaded.default, "openai");
+        assert_eq!(loaded.name.as_deref(), Some("deepseek"));
+        assert_eq!(loaded.api_base, "https://api.deepseek.com/v1");
+        assert_eq!(loaded.model, "deepseek-chat");
+        assert!(loaded.api_key.is_empty(), "api_key 不应落明文");
+
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MINICODING_HOME");
+        }
+    }
+
+    /// `get_provider_config` 在无配置文件时返回默认值。
+    #[test]
+    fn get_provider_config_defaults_when_no_file() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: 持有 ENV_LOCK 保证串行。
+        unsafe {
+            std::env::set_var("MINICODING_HOME", tmp.path());
+        }
+
+        let loaded = get_provider_config().expect("get provider config");
+        assert_eq!(loaded.default, "openai");
+        assert_eq!(loaded.api_base, "https://api.openai.com/v1");
+
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MINICODING_HOME");
+        }
+    }
+}

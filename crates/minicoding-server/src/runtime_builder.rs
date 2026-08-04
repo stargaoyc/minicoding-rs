@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::ContextManagerImpl;
-use minicoding_core::config::{RuntimeConfig, config_hash};
+use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
 use minicoding_core::memory::SessionSummarizer;
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
 use minicoding_core::provider::LlmProvider;
@@ -39,6 +39,11 @@ use std::sync::Arc;
 pub struct ServerRuntimeParams {
     /// LLM provider 类型（`openai`/`anthropic`/`ollama`）。
     pub provider_kind: String,
+    /// 自定义 provider 显示名（用于日志/metrics/UI，不影响协议分派）。
+    ///
+    /// `None` 时回退到 `provider_kind`；设置后允许为 `OpenAI` 兼容 API
+    /// （`DeepSeek`/`Moonshot`/`vLLM` 等）指定可读名称。与 CLI `--provider-name` 对齐。
+    pub provider_name: Option<String>,
     /// API base URL。
     pub api_base: String,
     /// API key（Ollama 可为空）。
@@ -67,6 +72,7 @@ pub fn build_runtime(
 ) -> Result<Runtime> {
     let ServerRuntimeParams {
         provider_kind,
+        provider_name,
         api_base,
         api_key,
         model,
@@ -78,14 +84,33 @@ pub fn build_runtime(
     // 1. 构造 config
     let mut config = RuntimeConfig::default();
     config.provider.default.clone_from(&provider_kind);
+    config.provider.name = provider_name;
     config.provider.api_base = api_base;
     config.provider.api_key = api_key;
     config.provider.model = model;
 
     // 2. 校验 API key（Ollama 免鉴权）
+    //    C-04：sidecar 模式下 API key 不通过参数/env 传递，从 OS keyring fallback 读取。
+    //    与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"` / `KEYRING_ACCOUNT = "openai_api_key"`。
     let is_ollama = provider_kind == OLLAMA_PROVIDER_ID;
     if !is_ollama && config.provider.api_key.is_empty() {
-        anyhow::bail!("API key 未配置：server 端需在 ServerRuntimeParams.api_key 中提供");
+        match load_api_key_from_keyring() {
+            Ok(Some(key)) => {
+                tracing::info!("API key 从 OS keyring 加载（sidecar/serve 模式 fallback）");
+                config.provider.api_key = key;
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "API key 未配置：CLI `--api-key` / 环境变量 `OPENAI_API_KEY` / OS keyring / `minicoding cred store` 均未提供"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "OS keyring 不可用，API key fallback 失败");
+                anyhow::bail!(
+                    "API key 未配置且 keyring 不可用：{e}。请用 `minicoding cred store` 或 `--api-key` 提供"
+                );
+            }
+        }
     }
 
     // 3. 构造 provider（含 RetryProvider 装饰器，C-13 bounded retries）
@@ -98,13 +123,40 @@ pub fn build_runtime(
         request_timeout: std::time::Duration::from_secs(config.provider.timeout_sec),
     };
     let main_provider: Arc<dyn LlmProvider> =
-        Arc::new(RetryProvider::new(main_provider, retry_config));
+        Arc::new(RetryProvider::new(main_provider, retry_config.clone()));
+
+    // 3b. 构造 small provider（gap-4：[provider.small] 独立小 LLM 配置，与 CLI 一致）
+    //     未配置时退化为 `None`，由后续逻辑回退到主 provider。
+    //     配置 `api_base`/`api_key` 为 `None` 时继承主 provider（典型：同一 OpenAI
+    //     账号但换便宜模型做摘要/压缩，降本见 `design.md` §3.8）。
+    //     small provider 始终用 OpenAI 兼容协议（与 CLI builder 对齐）。
+    let small_provider: Option<Arc<dyn LlmProvider>> = match &config.provider.small {
+        Some(small_cfg) => match build_small_provider(small_cfg, &config.provider) {
+            Ok(p) => {
+                let p: Arc<dyn LlmProvider> = Arc::new(p);
+                Some(Arc::new(RetryProvider::new(p, retry_config)))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "small provider 构造失败，摘要/压缩回退到主 provider"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    // 摘要用 provider：small 优先，回退主 provider（保证 L2 摘要始终可用）。
+    let summary_provider: Arc<dyn LlmProvider> = small_provider
+        .clone()
+        .map_or_else(|| main_provider.clone(), |p| p);
 
     // 4. 构造 system prompt
     let system_prompt =
         system.unwrap_or_else(|| "You are minicoding, a terminal AI coding assistant.".to_string());
 
     // 5. 构造 context manager（ContextManagerImpl + TiktokenTokenizer + 4 级压缩）
+    //    L2 摘要 provider 用 small（如有）降本，回退到主 provider（与 CLI 一致）。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
@@ -113,7 +165,7 @@ pub fn build_runtime(
                     system_prompt,
                     Arc::new(tokenizer),
                     context_window,
-                    Some(main_provider.clone()),
+                    Some(summary_provider.clone()),
                 ))
             }
             Err(e) => {
@@ -150,9 +202,13 @@ pub fn build_runtime(
     let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
     let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
 
-    // 10. 构造 SessionSummarizer（small 未配置，用主 provider 做摘要）
-    let summarizer: Arc<dyn SessionSummarizer> =
-        Arc::new(SessionSummarizerImpl::new(main_provider.clone(), None));
+    // 10. 构造 SessionSummarizer（gap-5/T-M3-6：会话结束时生成摘要落盘 index.json）
+    //     primary = small provider（如有，便宜模型降本），secondary = 主 provider
+    //     （降级兜底）。降级链终端为启发式兜底（C-29），永不失败。与 CLI 一致。
+    let summarizer: Arc<dyn SessionSummarizer> = Arc::new(SessionSummarizerImpl::new(
+        summary_provider.clone(),
+        Some(main_provider.clone()),
+    ));
 
     // 11. 组装 RuntimeBuilder
     let config_hash_val = config_hash(&config);
@@ -206,12 +262,14 @@ fn build_provider(
     cfg: &minicoding_core::config::ProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, minicoding_core::model::LlmError> {
     match kind {
-        OPENAI_PROVIDER_ID => Ok(Arc::new(OpenAiProvider::new(
+        OPENAI_PROVIDER_ID => Ok(Arc::new(OpenAiProvider::with_name(
+            cfg.name.clone(),
             &cfg.api_base,
             &cfg.api_key,
             &cfg.model,
         )?)),
-        ANTHROPIC_PROVIDER_ID => Ok(Arc::new(AnthropicProvider::new(
+        ANTHROPIC_PROVIDER_ID => Ok(Arc::new(AnthropicProvider::with_name(
+            cfg.name.clone(),
             &cfg.api_base,
             &cfg.api_key,
             &cfg.model,
@@ -222,11 +280,56 @@ fn build_provider(
             } else {
                 cfg.api_base.clone()
             };
-            Ok(Arc::new(OllamaProvider::new(api_base, &cfg.model)?))
+            Ok(Arc::new(OllamaProvider::with_name(
+                cfg.name.clone(),
+                api_base,
+                &cfg.model,
+            )?))
         }
         other => Err(minicoding_core::model::LlmError::Client {
             status: 400,
             body: format!("未知 provider `{other}`：支持 `openai`/`anthropic`/`ollama`"),
         }),
+    }
+}
+
+/// 根据 `[provider.small]` 配置构造 small provider（gap-4，与 CLI builder 一致）。
+///
+/// `small_cfg.api_base`/`api_key` 为 `None` 时继承主 `[provider]` 配置：
+/// 让用户用便宜模型（如 `gpt-4o-mini`）做摘要/压缩/记忆提取，降本见
+/// `design.md` §3.8。small provider 始终用 `OpenAI` 兼容协议。
+///
+/// # Errors
+/// `OpenAiProvider::new` 失败时返回 `LlmError` 描述（reqwest 初始化失败、
+/// tiktoken 词表加载失败等）。
+fn build_small_provider(
+    small_cfg: &SmallProviderConfig,
+    main_cfg: &ProviderConfig,
+) -> Result<OpenAiProvider, minicoding_core::model::LlmError> {
+    let api_base = small_cfg
+        .api_base
+        .clone()
+        .unwrap_or_else(|| main_cfg.api_base.clone());
+    let api_key = small_cfg
+        .api_key
+        .clone()
+        .unwrap_or_else(|| main_cfg.api_key.clone());
+    OpenAiProvider::new(&api_base, &api_key, &small_cfg.model)
+}
+
+/// 从 OS keyring 加载 API key（C-04 fallback）。
+///
+/// 与 CLI `cred.rs` / `minicoding-desktop::config` 共享 `KEYRING_SERVICE`/`KEYRING_ACCOUNT`，
+/// 确保三端（CLI / server / desktop）读写同一 keyring entry。
+///
+/// 返回 `Ok(None)` 表示 keyring 可用但无 entry；`Err` 表示 keyring 不可用。
+fn load_api_key_from_keyring() -> Result<Option<String>, anyhow::Error> {
+    const KEYRING_SERVICE: &str = "minicoding";
+    const KEYRING_ACCOUNT: &str = "openai_api_key";
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
+    match entry.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("keyring get 失败: {e}")),
     }
 }

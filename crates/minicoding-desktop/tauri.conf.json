@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.minicoding.desktop",
   "build": {
-    "frontendDist": "../minicoding-web/dist"
+    "frontendDist": "../minicoding-web/dist",
+    "beforeDevCommand": "cd ../minicoding-web && npm run dev",
+    "beforeBuildCommand": "cd ../minicoding-web && npm run build"
   },
   "app": {
     "windows": [
@@ -27,6 +29,9 @@
     "targets": "all",
     "icon": [
       "icons/icon.png"
+    ],
+    "externalBin": [
+      "binaries/minicoding-server"
     ]
   }
 }

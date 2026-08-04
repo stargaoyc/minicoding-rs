@@ -67,7 +67,7 @@ impl std::fmt::Debug for ScriptedProvider {
 }
 
 impl LlmProvider for ScriptedProvider {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "mock"
     }
     fn capabilities(&self) -> Capabilities {

@@ -1,0 +1,164 @@
+# 桌面应用发布工作流（M9，独立于 cargo-dist 的 release.yml）。
+#
+# 触发条件：与 release.yml 相同的版本 tag（如 v0.1.0），但仅构建桌面安装包。
+# 产物：.dmg（macOS）/ .msi（Windows）/ .AppImage + .deb（Linux），上传到同一 GitHub Release。
+#
+# 为什么独立工作流：
+#   - cargo-dist 的 release.yml 仅构建 CLI 二进制（`dist = false` 排除 desktop crate）；
+#   - Tauri 需要 `tauri build` 产出 GUI 安装包，流程与 cargo-dist 不兼容；
+#   - 桌面构建需要前端（npm）+ server 二进制（cargo）+ Tauri 系统库，独立 matrix 更清晰。
+#
+# 详见 `docs/design.md` §26 + `scripts/build-desktop.sh`。
+
+name: Desktop Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  build-desktop:
+    name: build-desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS：Apple Silicon + Intel（macos-14 为 Apple Silicon runner，
+          # x86_64 通过交叉编译产出 Intel 二进制，Rust 原生支持）
+          - os: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-x86_64
+            runner: macos-14
+            target: x86_64-apple-darwin
+          # Windows
+          - os: windows
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          # Linux
+          - os: linux
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: crates/minicoding-web/package-lock.json
+
+      - name: Install cargo-tauri
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libdbus-1-dev \
+            libayatana-appindicator3-dev
+
+      - name: Build Web frontend
+        working-directory: crates/minicoding-web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build minicoding-server binary
+        run: cargo build --release -p minicoding-server --target ${{ matrix.target }}
+
+      - name: Place sidecar binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p crates/minicoding-desktop/binaries
+          cp target/${{ matrix.target }}/release/minicoding-server \
+             crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}
+          chmod +x crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}
+
+      - name: Place sidecar binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path crates/minicoding-desktop/binaries
+          Copy-Item "target/${{ matrix.target }}/release/minicoding-server.exe" `
+                    "crates/minicoding-desktop/binaries/minicoding-server-${{ matrix.target }}.exe"
+
+      - name: Tauri build
+        working-directory: crates/minicoding-desktop
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.app
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.msi
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.exe
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.deb
+          if-no-files-found: warn
+
+  upload-to-release:
+    name: upload-to-release
+    needs: build-desktop
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Uploading desktop artifacts to release: $TAG"
+          # 如果 release 不存在则创建（cargo-dist 的 host job 可能已创建）
+          gh release upload "$TAG" artifacts/**/* --clobber || \
+            gh release create "$TAG" --generate-notes artifacts/**/*

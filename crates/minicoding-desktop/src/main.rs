@@ -1,12 +1,18 @@
 //! `minicoding-desktop` 二进制入口（仅 `desktop` feature 启用时编译）。
 //!
-//! 启动 Tauri WebView，注册 `start_session` 命令供前端 `invoke` 调用。
+//! 启动 Tauri WebView，注册 invoke 命令供前端调用：
+//! - `start_session`：启动 sidecar，返回端口
+//! - `get_provider_config` / `save_provider_config`：读写 `config.toml` 的 provider 配置
+//! - `store_api_key` / `load_api_key` / `delete_api_key`：OS keyring 凭证管理
+//! - `open_config_file`：用系统编辑器打开配置文件
+//!
 //! 同时初始化系统托盘 + 全局快捷键（W-07）。
 //! 需要系统 webview 运行时（`webkit2gtk` Linux / `WebKit` macOS / `WebView2` Windows）。
 
 #![deny(clippy::all, clippy::pedantic)]
 
-use minicoding_desktop::{sidecar, tray};
+use minicoding_core::config::ProviderConfig;
+use minicoding_desktop::{config, sidecar, tray};
 use tauri::Manager;
 
 /// Tauri 应用入口。
@@ -15,7 +21,15 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![start_session_handler])
+        .invoke_handler(tauri::generate_handler![
+            start_session_handler,
+            get_provider_config_handler,
+            save_provider_config_handler,
+            store_api_key_handler,
+            load_api_key_handler,
+            delete_api_key_handler,
+            open_config_file_handler,
+        ])
         .setup(|app| {
             // W-07：初始化系统托盘 + 全局快捷键
             if let Err(e) = tray::init(app.handle()) {
@@ -48,4 +62,55 @@ async fn start_session_handler(
         .await
         .map_err(|e| e.to_string())
         .or_else(|_| sidecar::fallback_session_info())
+}
+
+/// `get_provider_config`：读取 provider 配置（`config.toml`）。
+#[tauri::command]
+fn get_provider_config_handler() -> Result<ProviderConfig, String> {
+    config::get_provider_config().map_err(|e| e.to_string())
+}
+
+/// `save_provider_config`：保存 provider 配置到 `config.toml`（原子写入）。
+///
+/// `api_key` 字段不落明文，由 `store_api_key` 写入 OS keyring（C-04）。
+#[tauri::command]
+fn save_provider_config_handler(provider: ProviderConfig) -> Result<(), String> {
+    config::save_provider_config(provider).map_err(|e| e.to_string())
+}
+
+/// `store_api_key`：写入 API key 到 OS keyring（与 CLI `cred store` 共享 entry）。
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command 参数按值传递（JSON 反序列化）
+fn store_api_key_handler(api_key: String) -> Result<(), String> {
+    config::store_api_key(&api_key).map_err(|e| e.to_string())
+}
+
+/// `load_api_key`：从 OS keyring 读取 API key（`Ok(None)` 表示未设置）。
+#[tauri::command]
+fn load_api_key_handler() -> Result<Option<String>, String> {
+    config::load_api_key().map_err(|e| e.to_string())
+}
+
+/// `delete_api_key`：删除 keyring 中的 API key。
+#[tauri::command]
+fn delete_api_key_handler() -> Result<(), String> {
+    config::delete_api_key().map_err(|e| e.to_string())
+}
+
+/// `open_config_file`：用系统默认编辑器打开 `~/.minicoding/config.toml`。
+///
+/// 调用 `tauri-plugin-shell` 的 `open` 打开配置文件所在目录（跨平台安全）。
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
+fn open_config_file_handler(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_shell::ShellExt;
+    let path = config::config_file_path().map_err(|e| e.to_string())?;
+    let dir = path.parent().unwrap_or_else(|| camino::Utf8Path::new("."));
+    // tauri-plugin-shell 的 `open` 已 deprecated（建议 tauri-plugin-opener），
+    // 但本项目未引入 opener plugin，暂用 shell open（功能正常）。
+    #[allow(deprecated)]
+    app.shell()
+        .open(dir.as_str(), None)
+        .map_err(|e| format!("打开配置目录失败: {e}"))?;
+    Ok(path.to_string())
 }

@@ -38,6 +38,8 @@ pub const DEFAULT_API_BASE: &str = "http://localhost:11434";
 /// 构造后通过 `Arc<dyn LlmProvider>` 注入 Runtime。token 计数复用 `TiktokenTokenizer`
 /// （Ollama 未提供分词器，本地模型多为 Llama 系列，`cl100k_base` 为合理近似）。
 pub struct OllamaProvider {
+    /// 自定义显示名（`None` 时回退到 `PROVIDER_ID`）。
+    display_name: Option<String>,
     api_base: String,
     model: String,
     client: reqwest::Client,
@@ -47,6 +49,7 @@ pub struct OllamaProvider {
 impl std::fmt::Debug for OllamaProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OllamaProvider")
+            .field("display_name", &self.display_name)
             .field("api_base", &self.api_base)
             .field("model", &self.model)
             .field("tokenizer", &self.tokenizer.kind())
@@ -64,12 +67,28 @@ impl OllamaProvider {
     /// - `reqwest::Client` 初始化失败 → [`LlmError::Network`]
     /// - 分词器加载失败 → [`LlmError::Parse`]
     pub fn new(api_base: impl Into<String>, model: impl Into<String>) -> Result<Self, LlmError> {
+        Self::with_name(None, api_base, model)
+    }
+
+    /// 构造 provider 并指定自定义显示名。
+    ///
+    /// `display_name` 为 `None` 时 `id()` 回退到 `PROVIDER_ID`（`"ollama"`）。
+    ///
+    /// # Errors
+    /// - `reqwest::Client` 初始化失败 → [`LlmError::Network`]
+    /// - 分词器加载失败 → [`LlmError::Parse`]
+    pub fn with_name(
+        display_name: Option<String>,
+        api_base: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, LlmError> {
         let model_str = model.into();
         let tokenizer = TiktokenTokenizer::new_for_model(&model_str).map_err(LlmError::Parse)?;
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         Ok(Self {
+            display_name,
             api_base: api_base.into(),
             model: model_str,
             client,
@@ -143,8 +162,8 @@ impl OllamaProvider {
 }
 
 impl LlmProvider for OllamaProvider {
-    fn id(&self) -> &'static str {
-        PROVIDER_ID
+    fn id(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(PROVIDER_ID)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -222,13 +241,17 @@ fn message_to_ollama(m: &Message) -> Value {
     let text = extract_text(&m.content);
 
     // tool 响应消息：role=tool + tool_call_id + content
+    // C-05：工具结果回灌 LLM 时包裹 `<tool_output>` 边界，防 LLM 把输出当指令执行。
     if m.role == Role::Tool {
         let mut obj = serde_json::Map::new();
         obj.insert("role".to_string(), Value::String(role.to_string()));
         if let Some(call_id) = &m.tool_call_id {
             obj.insert("tool_call_id".to_string(), Value::String(call_id.clone()));
         }
-        obj.insert("content".to_string(), Value::String(text));
+        obj.insert(
+            "content".to_string(),
+            Value::String(crate::common::wrap_tool_output(&text)),
+        );
         return Value::Object(obj);
     }
 
@@ -538,7 +561,8 @@ mod tests {
         let v = message_to_ollama(&msg);
         assert_eq!(v["role"], "tool");
         assert_eq!(v["tool_call_id"], "call_01");
-        assert_eq!(v["content"], "result");
+        // C-05：工具结果回灌 LLM 时包裹 `<tool_output>` 边界
+        assert_eq!(v["content"], "<tool_output>\nresult\n</tool_output>");
     }
 
     #[test]

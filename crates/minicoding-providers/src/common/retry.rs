@@ -108,7 +108,7 @@ impl RetryProvider {
 }
 
 impl LlmProvider for RetryProvider {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         self.inner.id()
     }
 
@@ -203,7 +203,7 @@ mod tests {
     }
 
     impl LlmProvider for MockProvider {
-        fn id(&self) -> &'static str {
+        fn id(&self) -> &str {
             self.id
         }
         fn capabilities(&self) -> Capabilities {

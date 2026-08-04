@@ -64,6 +64,10 @@ pub struct ExecCommand {
     #[arg(long)]
     pub provider: Option<String>,
 
+    /// Provider 自定义显示名（用于日志/metrics，不影响协议分派）。
+    #[arg(long, env = "MINICODING_PROVIDER_NAME")]
+    pub provider_name: Option<String>,
+
     /// 模型名称（覆盖配置/环境变量）。
     #[arg(long, env = "OPENAI_MODEL")]
     pub model: Option<String>,
@@ -99,6 +103,7 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
 
     let rt = crate::builder::build_runtime(
         cmd.provider.as_deref(),
+        cmd.provider_name.as_deref(),
         cmd.api_base.as_deref(),
         cmd.api_key.as_deref(),
         cmd.model.as_deref(),

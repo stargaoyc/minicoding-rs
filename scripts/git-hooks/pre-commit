@@ -35,10 +35,11 @@ fi
 
 echo "[pre-commit] trailing whitespace / EOF newline / secrets ..."
 rc=0
-# 排除自动生成的文件（ts-rs 输出 + Tauri schema，工具输出特性，不手动编辑）
+# 排除自动生成的文件（ts-rs 输出 + Tauri schema + sidecar 占位二进制，工具输出特性，不手动编辑）
 EXCLUDE_PATTERNS=(
   'crates/minicoding-web/src/api/generated/'
   'crates/minicoding-desktop/gen/'
+  'crates/minicoding-desktop/binaries/'
 )
 while IFS= read -r f; do
   if [ -f "$f" ] && [ -s "$f" ]; then

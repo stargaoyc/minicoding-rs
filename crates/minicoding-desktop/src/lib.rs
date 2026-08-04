@@ -25,6 +25,7 @@
 
 use camino::Utf8PathBuf;
 
+pub mod config;
 pub mod sidecar;
 
 #[cfg(feature = "desktop")]

@@ -91,6 +91,8 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 ///
 /// `provider_override` 覆盖 `config.provider.default`（`--provider`，T-M6-5），
 /// 决定调用哪家 provider 的 API 协议（`openai`/`anthropic`/`ollama`）。
+/// `provider_name_override` 覆盖 `config.provider.name`（`--provider-name`），
+/// 设置自定义显示名用于日志/metrics，不影响协议分派。
 /// `mode` 控制会话加载方式（`--resume`/`--replay`/`--fork-session`，T-M3-10）。
 /// `sandbox_override` 为 `Some` 时覆盖默认沙箱策略（`exec --sandbox` 用），
 /// 为 `None` 时用默认 `WorkspaceWrite { workdir, [] }`。
@@ -105,6 +107,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 #[allow(clippy::too_many_arguments)] // CLI 组装入口，参数由调用方 CLI flag 决定，聚合为 struct 反而增删不便
 pub fn build_runtime(
     provider_override: Option<&str>,
+    provider_name_override: Option<&str>,
     api_base: Option<&str>,
     api_key: Option<&str>,
     model: Option<&str>,
@@ -127,6 +130,10 @@ pub fn build_runtime(
     if let Ok(m) = std::env::var("OPENAI_MODEL") {
         config.provider.model = m;
     }
+    // 自定义 provider 显示名（env: MINICODING_PROVIDER_NAME）
+    if let Ok(name) = std::env::var("MINICODING_PROVIDER_NAME") {
+        config.provider.name = Some(name);
+    }
     // CLI 参数覆盖
     if let Some(base) = api_base {
         config.provider.api_base = base.to_string();
@@ -140,6 +147,10 @@ pub fn build_runtime(
     // `--provider` 覆盖 `config.provider.default`（T-M6-5）
     if let Some(p) = provider_override {
         config.provider.default = p.to_string();
+    }
+    // `--provider-name` 覆盖 `config.provider.name`（自定义显示名）
+    if let Some(n) = provider_name_override {
+        config.provider.name = Some(n.to_string());
     }
 
     // 2. 校验 API key：CLI/env 未提供时尝试 OS keyring / 文件 fallback（T-M4-11，C-04）
@@ -874,12 +885,14 @@ fn build_main_provider(
     cfg: &ProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, minicoding_core::model::LlmError> {
     match kind {
-        OPENAI_PROVIDER_ID => Ok(Arc::new(OpenAiProvider::new(
+        OPENAI_PROVIDER_ID => Ok(Arc::new(OpenAiProvider::with_name(
+            cfg.name.clone(),
             &cfg.api_base,
             &cfg.api_key,
             &cfg.model,
         )?)),
-        ANTHROPIC_PROVIDER_ID => Ok(Arc::new(AnthropicProvider::new(
+        ANTHROPIC_PROVIDER_ID => Ok(Arc::new(AnthropicProvider::with_name(
+            cfg.name.clone(),
             &cfg.api_base,
             &cfg.api_key,
             &cfg.model,
@@ -891,7 +904,11 @@ fn build_main_provider(
             } else {
                 cfg.api_base.clone()
             };
-            Ok(Arc::new(OllamaProvider::new(api_base, &cfg.model)?))
+            Ok(Arc::new(OllamaProvider::with_name(
+                cfg.name.clone(),
+                api_base,
+                &cfg.model,
+            )?))
         }
         other => Err(minicoding_core::model::LlmError::Client {
             status: 400,

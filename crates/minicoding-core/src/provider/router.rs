@@ -67,7 +67,7 @@ mod tests {
     }
 
     impl LlmProvider for StubProvider {
-        fn id(&self) -> &'static str {
+        fn id(&self) -> &str {
             self.id_str
         }
         fn capabilities(&self) -> Capabilities {

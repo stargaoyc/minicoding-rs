@@ -27,6 +27,12 @@ pub struct RuntimeConfig {
 #[serde(default)]
 pub struct ProviderConfig {
     pub default: String,
+    /// 自定义 provider 显示名（用于日志/metrics/UI，不影响协议分派）。
+    ///
+    /// 未设置（`None`）时回退到 `default`（如 `"openai"`/`"anthropic"`/`"ollama"`）。
+    /// 设置后允许用户为 `OpenAI` 兼容 API（`DeepSeek`/`Moonshot`/`vLLM` 等）指定可读名称，
+    /// 如 `name = "deepseek"` → 日志显示 `provider=deepseek` 而非 `provider=openai`。
+    pub name: Option<String>,
     pub api_base: String,
     /// API key，支持 `env:VAR_NAME` / `env:VAR:-fallback` 语法。
     pub api_key: String,
@@ -57,6 +63,7 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             default: "openai".into(),
+            name: None,
             api_base: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-4o-mini".into(),
