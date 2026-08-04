@@ -169,15 +169,13 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           echo "Uploading desktop artifacts to release: $TAG"
-          # 启用 globstar 使 ** 递归匹配子目录
-          shopt -s globstar nullglob
-          files=(artifacts/**/*)
+          # 只收集文件（排除目录），用 find -type f 确保不误传目录给 gh
+          mapfile -t files < <(find artifacts -type f | sort)
           if [ ${#files[@]} -eq 0 ]; then
             echo "❌ 没有找到任何 artifacts 文件"
             exit 1
           fi
           echo "找到 ${#files[@]} 个文件："
           printf '  %s\n' "${files[@]}"
-          # 如果 release 不存在则创建（cargo-dist 的 host job 可能已创建）
-          gh release upload "$TAG" "${files[@]}" --clobber || \
-            gh release create "$TAG" --generate-notes "${files[@]}"
+          # release 已由 cargo-dist 的 release.yml 创建，直接上传 assets
+          gh release upload "$TAG" "${files[@]}" --clobber
