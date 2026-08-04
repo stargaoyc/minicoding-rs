@@ -330,7 +330,8 @@ async fn handle_send_user_message(
 /// 从 `SessionConfig`（客户端传入）与默认参数构造 `ServerRuntimeParams`。
 ///
 /// 客户端可覆盖 `workdir`/`system`/`provider`/`model`/`permission_mode`；
-/// `api_key`/`api_base` 用 server 端默认（C-04：不通过 NDJSON 传凭证）。
+/// `api_key`/`api_base`/`provider_name` 用 server 端默认（C-04：不通过 NDJSON 传凭证；
+/// `provider_name` 为显示用，跟随 server 启动配置）。
 fn build_params_from_config(
     default: &ServerRuntimeParams,
     config: minicoding_protocol::SessionConfig,
@@ -339,6 +340,7 @@ fn build_params_from_config(
         provider_kind: config
             .provider
             .unwrap_or_else(|| default.provider_kind.clone()),
+        provider_name: default.provider_name.clone(),
         api_base: default.api_base.clone(),
         api_key: default.api_key.clone(),
         model: config.model.unwrap_or_else(|| default.model.clone()),
@@ -361,6 +363,7 @@ mod tests {
     fn test_params() -> ServerRuntimeParams {
         ServerRuntimeParams {
             provider_kind: "openai".to_string(),
+            provider_name: None,
             api_base: "http://localhost:8080/v1".to_string(),
             api_key: "sk-test".to_string(),
             model: "gpt-4o".to_string(),

@@ -34,7 +34,7 @@
 - MCP：`rmcp` 2.2（官方 Rust MCP SDK，**不自研** stdio/http）
 - 详见 `docs/tech-stack.md`
 
-### Workspace 结构（17 个 crate，M0–M8 范围；M9 新增 `minicoding-desktop` 与 `minicoding-web`，实施时加入）
+### Workspace 结构（当前 Cargo workspace 含 18 个 crate：M0–M8 的 17 个 + M9 新增 `minicoding-desktop`；M9 另含 `minicoding-web` 为独立 npm 项目，不入 Cargo workspace）
 
 ```
 minicoding-rs (workspace)
@@ -55,12 +55,11 @@ minicoding-rs (workspace)
     ├── minicoding-extension-sdk # 扩展作者稳定 API（Extension trait + Registrar）
     ├── minicoding-cli           # CLI frontend
     ├── minicoding-tui           # TUI frontend（M7）
-    └── minicoding-sdk           # 嵌入 SDK（M8）
+    ├── minicoding-sdk           # 嵌入 SDK（M8）
+    └── minicoding-desktop       # Tauri 2.x 桌面壳（M9，sidecar 启动 minicoding-server）
 ```
 
-> **M9（低优先级，规划中）** 将新增：
-> - `crates/minicoding-desktop/`：Tauri 2.x 桌面壳（加入 Cargo workspace）；
-> - `crates/minicoding-web/`：纯前端项目（React 19.2 + TypeScript 7.0 + Vite 8.1），独立 `package.json`，不属于 Cargo workspace。
+> **M9 另含** `crates/minicoding-web/`：纯前端项目（React 19.2 + TypeScript 7.0 + Vite 8.1），独立 `package.json`，不属于 Cargo workspace。
 >
 > 技术栈与架构见 `docs/tech-stack.md` §4.1 与 `docs/design.md` §26、`docs/modules.md` §18–§19。
 

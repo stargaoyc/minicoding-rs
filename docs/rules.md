@@ -215,7 +215,7 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 | C-02 | `modules.md` `policy/builtin.rs`；`security.md` §2.3、§4.2；`policy/ssrf.rs`（SSRF 内网黑名单，T-M4-11） |
 | C-03 | `design.md` §4.4；`security.md` §3 |
 | C-04 | `security.md` §6；`design.md` §4.4（env 不含凭证）；`cli/cred.rs`（keyring + 文件 fallback，T-M4-11）；`policy/redact.rs`（敏感文件脱敏，T-M4-11）；`tools/fs/read.rs::is_sensitive_path`（脱敏触发） |
-| C-05 | `security.md` §2.5；系统提示词 `[Security]` |
+| C-05 | `security.md` §2.5；`providers/common/mod.rs::wrap_tool_output`（边界包裹）；`providers/{openai,anthropic,ollama}.rs::message_to_X`（回灌时包裹）；`extension-sdk/contributors/system.rs`（系统提示声明） |
 | C-06 | `design.md` §10（`--replay` 走事件流重放，默认禁副作用工具） |
 | C-07 | `design.md` §4.4 `ToolContext`；`security.md` §4.3 |
 | C-08/09/10 | `design.md` §4.2 `ToolRegistry`；`api.md` §3.3/3.4 |

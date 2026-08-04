@@ -2988,3 +2988,79 @@ M9 前端复用 §24 定义的全部 JSON-RPC 方法与 SSE 事件格式，**不
 - Tauri sidecar 管理：桌面模式专属，不影响协议层。
 
 这保证 M9 的前端可以无缝切换"连本地 sidecar"或"连远程 server"，且 LSP/ACP 适配器（E-15..E-18）与 Web 前端共享同一后端，无重复实现。
+
+### 26.8 桌面应用发布管道
+
+桌面应用独立于 cargo-dist 的 CLI 发布流（`release.yml`），原因是 Tauri 需要平台 GUI 系统库 + 前端构建 + sidecar 打包，与 cargo-dist 的二进制发布模型不兼容。
+
+**配置层**（`crates/minicoding-desktop/`）：
+
+| 文件 | 作用 |
+|------|------|
+| `tauri.conf.json` | Tauri 2.x 配置：`frontendDist` 指向前端构建产物，`externalBin` 声明 sidecar 二进制，`beforeBuildCommand` 自动构建前端 |
+| `Cargo.toml` | `[package.metadata.dist] dist = false` 显式排除 cargo-dist |
+| `binaries/` | sidecar 二进制存放目录（gitignore，构建时生成） |
+
+`tauri.conf.json` 关键配置：
+
+```json
+{
+  "build": {
+    "frontendDist": "../minicoding-web/dist",
+    "beforeBuildCommand": "cd ../minicoding-web && npm run build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/minicoding-server"]
+  }
+}
+```
+
+`externalBin` 约定：Tauri 在打包时自动追加 host target triple 后缀（如 `binaries/minicoding-server-x86_64-pc-windows-msvc.exe`），运行时通过 `tauri-plugin-shell` 的 `app.shell().sidecar("minicoding-server")` 启动。
+
+**构建脚本**（`scripts/`）：
+
+| 脚本 | 用途 |
+|------|------|
+| `build-desktop.sh` | 完整发布构建：前端 → server 二进制 → sidecar 放置 → `cargo tauri build` 产出安装包 |
+| `setup-desktop-dev.sh` | 本地开发占位：创建 sidecar 占位文件以满足 `tauri_build::build()` 的 `externalBin` 路径校验 |
+
+本地开发流程：
+
+```bash
+# 首次：创建占位 sidecar（解决 cargo build 校验）
+./scripts/setup-desktop-dev.sh
+
+# 编译验证
+cargo build -p minicoding-desktop --features desktop
+
+# 发布构建（产出 .dmg/.msi/.AppImage）
+./scripts/build-desktop.sh
+```
+
+**CI/CD 层**（`.github/workflows/`）：
+
+| 工作流 | 作用 |
+|--------|------|
+| `ci.yml` 的 `desktop` job | PR/push 触发：编译验证 + clippy（仅 `cargo build`，不打包） |
+| `desktop-release.yml` | tag 触发：4 平台 matrix（macOS arm64/x86_64、Windows、Linux）构建安装包并上传到 GitHub Release |
+
+`desktop-release.yml` 构建矩阵：
+
+| 平台 | runner | target | 产物 |
+|------|--------|--------|------|
+| macOS Apple Silicon | `macos-14` | `aarch64-apple-darwin` | `.dmg` |
+| macOS Intel | `macos-14`（交叉编译） | `x86_64-apple-darwin` | `.dmg` |
+| Windows | `windows-2022` | `x86_64-pc-windows-msvc` | `.msi` |
+| Linux | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | `.AppImage` / `.deb` |
+
+macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产出，Rust 原生支持 `--target x86_64-apple-darwin`，无需 Intel runner（`macos-13` 已于 2025 年被 GitHub 移除）。
+
+**与 cargo-dist 的协作**：
+
+- 同一 tag（如 `v0.1.0`）同时触发 `release.yml`（CLI 二进制）和 `desktop-release.yml`（桌面安装包）；
+- 两个工作流独立运行，互不依赖；
+- `desktop-release.yml` 的 `upload-to-release` job 使用 `gh release upload --clobber` 将桌面安装包追加到 `release.yml` 创建的 GitHub Release。
+
+**CI 中的占位 sidecar**：
+
+`ci.yml` 的 `desktop` job 在 `cargo build` 前创建占位 sidecar（`binaries/minicoding-server-x86_64-unknown-linux-gnu`），以满足 `tauri_build::build()` 对 `externalBin` 路径的编译期校验。真实 sidecar 二进制仅在 `desktop-release.yml` 中构建。

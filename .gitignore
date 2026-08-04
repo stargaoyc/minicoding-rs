@@ -30,6 +30,11 @@ lerna-debug.log*
 dist-ssr
 *.local
 
+# Tauri 桌面应用构建产物（sidecar 二进制 + bundle）
+crates/minicoding-desktop/binaries/
+crates/minicoding-desktop/target/
+crates/minicoding-desktop/gen/schemas/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

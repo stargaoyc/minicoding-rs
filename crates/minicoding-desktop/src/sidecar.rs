@@ -14,10 +14,44 @@ use tokio::process::Command;
 /// sidecar 启动后等待端口输出的超时时间。
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 从 `config.toml` 构造 provider 非敏感配置的 CLI 参数。
+///
+/// 读 `~/.minicoding/config.toml` 的 `[provider]` 段，返回 `--provider`/`--provider-name`/
+/// `--api-base`/`--model` 参数。**不传 `--api-key`**（C-04：API key 由 sidecar 自己读
+/// keyring，不通过参数/env 传递，避免 `/proc/<pid>/cmdline` 泄露凭证）。
+fn build_provider_args_from_config() -> Vec<String> {
+    let mut args = Vec::new();
+    match crate::config::get_provider_config() {
+        Ok(provider) => {
+            args.push("--provider".into());
+            args.push(provider.default);
+            if let Some(name) = provider.name {
+                args.push("--provider-name".into());
+                args.push(name);
+            }
+            if !provider.api_base.is_empty() {
+                args.push("--api-base".into());
+                args.push(provider.api_base);
+            }
+            if !provider.model.is_empty() {
+                args.push("--model".into());
+                args.push(provider.model);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "读取 provider 配置失败，sidecar 用默认值");
+        }
+    }
+    args
+}
+
 /// 启动 `minicoding-server` sidecar 并返回监听端口（独立版本，无 Tauri 依赖）。
 ///
-/// sidecar 命令：`minicoding-server --bind 127.0.0.1:0 [--web <dir>]`
+/// sidecar 命令：`minicoding-server --bind 127.0.0.1:0 [--web <dir>] [--provider ...]`
 /// 启动后在 stdout 输出实际监听端口（如 `listening on 127.0.0.1:12345`）。
+///
+/// provider 非敏感配置（`api_base`/`model`/`name`）从 `config.toml` 读取并通过 CLI 参数传递；
+/// API key 由 sidecar 自己读 keyring（C-04，不通过参数/env 传）。
 ///
 /// # Errors
 /// - sidecar 二进制未找到；
@@ -30,6 +64,8 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
     let web_dir = crate::resolve_web_dir();
     let mut cmd = Command::new(&bin);
     cmd.args(["--bind", "127.0.0.1:0"]);
+    // 注入 provider 非敏感配置（从 config.toml 读取）
+    cmd.args(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
         cmd.args(["--web", dir.as_str()]);
     }
@@ -113,6 +149,8 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     let web_dir = crate::resolve_web_dir();
     let mut args: Vec<String> = vec!["--bind".into(), "127.0.0.1:0".into()];
+    // 注入 provider 非敏感配置（从 config.toml 读取，API key 由 sidecar 读 keyring）
+    args.extend(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
         args.push("--web".into());
         args.push(dir.to_string());

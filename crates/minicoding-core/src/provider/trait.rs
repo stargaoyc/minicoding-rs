@@ -89,8 +89,12 @@ pub struct Usage {
 /// 实现者写 `impl LlmProvider for MyProvider`，方法体用 `Box::pin(async move { ... })`。
 /// Runtime 持有 `Arc<dyn LlmProvider>`。详见 `api.md` §3 dyn-compatibility 约定。
 pub trait LlmProvider: Send + Sync {
-    /// provider 标识（如 "openai"/"anthropic"），固定字符串。
-    fn id(&self) -> &'static str;
+    /// provider 显示名（如 `"openai"`/`"anthropic"`/`"deepseek"`）。
+    ///
+    /// 返回 `&str` 而非 `&'static str`，允许实现者存储用户配置的自定义名称
+    /// （`ProviderConfig::name`）。未配置自定义名称时回退到 provider 类型常量
+    /// （如 `PROVIDER_ID = "openai"`）。
+    fn id(&self) -> &str;
     /// 能力声明。
     fn capabilities(&self) -> Capabilities;
     /// 关联的分词器。

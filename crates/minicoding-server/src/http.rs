@@ -43,6 +43,8 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     /// 默认 LLM provider 类型（`openai`/`anthropic`/`ollama`）。
     pub provider_kind: String,
+    /// 默认 provider 自定义显示名（`None` 回退到 `provider_kind`，与 CLI `--provider-name` 对齐）。
+    pub provider_name: Option<String>,
     /// 默认 API base URL。
     pub api_base: String,
     /// 默认 API key（Ollama 可为空）。
@@ -72,6 +74,7 @@ pub struct ServerConfig {
 fn default_params(cfg: &ServerConfig) -> ServerRuntimeParams {
     ServerRuntimeParams {
         provider_kind: cfg.provider_kind.clone(),
+        provider_name: cfg.provider_name.clone(),
         api_base: cfg.api_base.clone(),
         api_key: cfg.api_key.clone(),
         model: cfg.model.clone(),
@@ -92,6 +95,9 @@ pub struct AppState {
 struct CreateSessionBody {
     #[serde(default)]
     provider: Option<String>,
+    /// 自定义 provider 显示名（覆盖 server 默认，`None` 用 `default_params.provider_name`）。
+    #[serde(default)]
+    provider_name: Option<String>,
     #[serde(default)]
     api_base: Option<String>,
     #[serde(default)]
@@ -265,6 +271,7 @@ async fn create_session(
         provider_kind: body
             .provider
             .unwrap_or_else(|| default.provider_kind.clone()),
+        provider_name: body.provider_name.or(default.provider_name.clone()),
         api_base: body.api_base.unwrap_or_else(|| default.api_base.clone()),
         api_key: body.api_key.unwrap_or_else(|| default.api_key.clone()),
         model: body.model.unwrap_or_else(|| default.model.clone()),

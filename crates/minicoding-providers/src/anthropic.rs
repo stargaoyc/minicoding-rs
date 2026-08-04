@@ -35,6 +35,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// 构造后通过 `Arc<dyn LlmProvider>` 注入 Runtime。token 计数为近似（Anthropic 未公开
 /// 分词器，按 4 字符 ≈ 1 token 估算，`design.md` §4.4）。
 pub struct AnthropicProvider {
+    /// 自定义显示名（`None` 时回退到 `PROVIDER_ID`）。
+    display_name: Option<String>,
     api_base: String,
     api_key: String,
     model: String,
@@ -45,6 +47,7 @@ pub struct AnthropicProvider {
 impl std::fmt::Debug for AnthropicProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnthropicProvider")
+            .field("display_name", &self.display_name)
             .field("api_base", &self.api_base)
             .field("model", &self.model)
             // 不输出 api_key（C-04：日志脱敏）
@@ -65,10 +68,26 @@ impl AnthropicProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Result<Self, LlmError> {
+        Self::with_name(None, api_base, api_key, model)
+    }
+
+    /// 构造 provider 并指定自定义显示名。
+    ///
+    /// `display_name` 为 `None` 时 `id()` 回退到 `PROVIDER_ID`（`"anthropic"`）。
+    ///
+    /// # Errors
+    /// `reqwest::Client` 初始化失败 → [`LlmError::Network`]
+    pub fn with_name(
+        display_name: Option<String>,
+        api_base: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         Ok(Self {
+            display_name,
             api_base: api_base.into(),
             api_key: api_key.into(),
             model: model.into(),
@@ -139,8 +158,8 @@ impl AnthropicProvider {
 }
 
 impl LlmProvider for AnthropicProvider {
-    fn id(&self) -> &'static str {
-        PROVIDER_ID
+    fn id(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(PROVIDER_ID)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -224,12 +243,13 @@ fn message_to_anthropic(m: &Message) -> Value {
     };
 
     // tool 结果消息：user + tool_result content block
+    // C-05：工具结果回灌 LLM 时包裹 `<tool_output>` 边界，防 LLM 把输出当指令执行。
     if m.role == Role::Tool {
         let call_id = m.tool_call_id.clone().unwrap_or_default();
         let text = extract_text(&m.content);
         return json!({
             "role": role,
-            "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text}],
+            "content": [{"type": "tool_result", "tool_use_id": call_id, "content": crate::common::wrap_tool_output(&text)}],
         });
     }
 
@@ -629,7 +649,11 @@ mod tests {
         assert_eq!(v["role"], "user");
         assert_eq!(v["content"][0]["type"], "tool_result");
         assert_eq!(v["content"][0]["tool_use_id"], "toolu_01");
-        assert_eq!(v["content"][0]["content"], "result");
+        // C-05：工具结果回灌 LLM 时包裹 `<tool_output>` 边界
+        assert_eq!(
+            v["content"][0]["content"],
+            "<tool_output>\nresult\n</tool_output>"
+        );
     }
 
     #[test]

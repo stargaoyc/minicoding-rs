@@ -113,6 +113,13 @@ struct Cli {
     #[arg(long)]
     provider: Option<String>,
 
+    /// Provider 自定义显示名（用于日志/metrics，不影响协议分派）
+    ///
+    /// 连接 `OpenAI` 兼容 API（DeepSeek/Moonshot/vLLM 等）时，设置可读名称使日志
+    /// 显示 `provider=deepseek` 而非 `provider=openai`。未设置时回退到 `--provider` 值。
+    #[arg(long, env = "MINICODING_PROVIDER_NAME")]
+    provider_name: Option<String>,
+
     /// API base URL（覆盖配置/环境变量）
     #[arg(long, env = "OPENAI_API_BASE")]
     api_base: Option<String>,
@@ -230,6 +237,7 @@ fn main() -> Result<()> {
     // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
     let rt = builder::build_runtime(
         cli.provider.as_deref(),
+        cli.provider_name.as_deref(),
         cli.api_base.as_deref(),
         cli.api_key.as_deref(),
         cli.model.as_deref(),

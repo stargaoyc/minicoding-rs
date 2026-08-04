@@ -45,6 +45,9 @@ tower-http = { workspace = true }
 hyper = { version = "1", features = ["http1", "http2"] }
 clap = { workspace = true }
 
+# OS keyring 凭证 fallback（C-04：sidecar 模式下 API key 从 keyring 读取，不通过参数/env 传递）
+keyring = { workspace = true }
+
 # 沙箱驱动（默认启用，与 CLI 对齐；minicoding-server 直接构造 Runtime）
 minicoding-sandbox = { workspace = true }
 

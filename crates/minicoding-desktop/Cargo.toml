@@ -29,6 +29,9 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
+# OS keyring 凭证管理（与 CLI `cred.rs` 共享 `KEYRING_SERVICE`，C-04）
+keyring = { workspace = true, optional = true }
 
 # Tauri 重依赖（feature gate `desktop`，需系统 webview 运行时）
 # 直接声明而非 workspace.dependencies，避免未启用 feature 时 Cargo 解析整个 tauri 依赖树
@@ -51,4 +54,8 @@ desktop = [
     "dep:tauri-plugin-shell",
     "dep:tauri-plugin-updater",
     "dep:tauri-plugin-global-shortcut",
+    "dep:keyring",
 ]
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -58,9 +58,16 @@ pub struct ServeCommand {
     #[arg(long, conflicts_with = "bind")]
     port: Option<u16>,
 
-    /// LLM provider 类型（`openai`/`anthropic`/`ollama`）。
-    #[arg(long, env = "OPENAI_PROVIDER", default_value = "openai")]
-    provider: String,
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`，默认从 `config.toml` 读取）。
+    #[arg(long, env = "OPENAI_PROVIDER")]
+    provider: Option<String>,
+
+    /// Provider 自定义显示名（用于日志/metrics，不影响协议分派）。
+    ///
+    /// 连接 `OpenAI` 兼容 API（DeepSeek/Moonshot/vLLM 等）时，设置可读名称使日志
+    /// 显示 `provider=deepseek` 而非 `provider=openai`。未设置时回退到 `--provider` 值。
+    #[arg(long, env = "MINICODING_PROVIDER_NAME")]
+    provider_name: Option<String>,
 
     /// API base URL（省略时按 provider 选默认）。
     #[arg(long, env = "OPENAI_API_BASE")]
@@ -70,9 +77,9 @@ pub struct ServeCommand {
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
-    /// 模型名称。
-    #[arg(long, env = "OPENAI_MODEL", default_value = "gpt-4o")]
-    model: String,
+    /// 模型名称（默认从 `config.toml` 读取）。
+    #[arg(long, env = "OPENAI_MODEL")]
+    model: Option<String>,
 
     /// 工作目录。
     #[arg(long, default_value = ".")]
@@ -159,6 +166,47 @@ pub struct ServeCommand {
     lsp: bool,
 }
 
+/// 从 `config.toml` + CLI 参数解析最终 provider 配置（CLI > env > `config.toml` > 默认）。
+///
+/// `serve` 子命令的 4 种模式（HTTP/NDJSON/ACP/LSP）共用此解析逻辑，确保配置一致。
+/// 与 CLI 单次/交互模式的 `builder::build_runtime` 优先级对齐：CLI 参数覆盖配置文件。
+///
+/// 返回 `(provider_kind, provider_name, api_base, api_key, model)`。
+fn resolve_provider_config(cmd: &ServeCommand) -> (String, Option<String>, String, String, String) {
+    let file_provider = minicoding_core::config::load_config()
+        .map(|c| c.provider)
+        .unwrap_or_default();
+
+    let provider_kind = cmd
+        .provider
+        .clone()
+        .unwrap_or_else(|| file_provider.default.clone());
+    let provider_name = cmd.provider_name.clone().or(file_provider.name.clone());
+    let api_key = cmd
+        .api_key
+        .clone()
+        .unwrap_or_else(|| file_provider.api_key.clone());
+    let model = cmd
+        .model
+        .clone()
+        .unwrap_or_else(|| file_provider.model.clone());
+
+    // api_base：CLI > config.toml > 按 provider 选默认
+    let api_base = cmd.api_base.clone().unwrap_or_else(|| {
+        if file_provider.api_base.is_empty() {
+            match provider_kind.as_str() {
+                "ollama" => "http://localhost:11434".to_string(),
+                "anthropic" => "https://api.anthropic.com".to_string(),
+                _ => "https://api.openai.com".to_string(),
+            }
+        } else {
+            file_provider.api_base.clone()
+        }
+    });
+
+    (provider_kind, provider_name, api_base, api_key, model)
+}
+
 /// 运行 `serve` 子命令：根据 `--as-mcp-server`/`--ndjson`/`--acp`/`--lsp` 分派到对应模式。
 ///
 /// # Errors
@@ -201,24 +249,16 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind address `{bind_str}`: {e}"))?;
 
-    // 默认 API base（按 provider 选择默认值，与 `minicoding-server` 一致）
-    let api_base = cmd
-        .api_base
-        .clone()
-        .unwrap_or_else(|| match cmd.provider.as_str() {
-            "ollama" => "http://localhost:11434".to_string(),
-            "anthropic" => "https://api.anthropic.com".to_string(),
-            _ => "https://api.openai.com".to_string(),
-        });
-
-    let api_key = cmd.api_key.clone().unwrap_or_default();
+    // 解析 provider 配置（CLI > env > config.toml > 默认）
+    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
 
     let cfg = minicoding_server::ServerConfig {
         bind,
-        provider_kind: cmd.provider.clone(),
+        provider_kind,
+        provider_name,
         api_base,
         api_key,
-        model: cmd.model.clone(),
+        model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_timeout_sec: cmd.permission_timeout_sec,
@@ -302,24 +342,16 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
-    // 1. 默认 API base（按 provider 选择默认值，与 HTTP 模式一致）
-    let api_base = cmd
-        .api_base
-        .clone()
-        .unwrap_or_else(|| match cmd.provider.as_str() {
-            "ollama" => "http://localhost:11434".to_string(),
-            "anthropic" => "https://api.anthropic.com".to_string(),
-            _ => "https://api.openai.com".to_string(),
-        });
-
-    let api_key = cmd.api_key.clone().unwrap_or_default();
+    // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP 模式一致）
+    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（CreateSession 命令未指定覆盖时用此默认）
     let params = ServerRuntimeParams {
-        provider_kind: cmd.provider.clone(),
+        provider_kind,
+        provider_name,
         api_base,
         api_key,
-        model: cmd.model.clone(),
+        model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
@@ -352,24 +384,16 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
-    // 1. 默认 API base（按 provider 选择默认值，与 HTTP/NDJSON 模式一致）
-    let api_base = cmd
-        .api_base
-        .clone()
-        .unwrap_or_else(|| match cmd.provider.as_str() {
-            "ollama" => "http://localhost:11434".to_string(),
-            "anthropic" => "https://api.anthropic.com".to_string(),
-            _ => "https://api.openai.com".to_string(),
-        });
-
-    let api_key = cmd.api_key.clone().unwrap_or_default();
+    // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON 模式一致）
+    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（newConversation 未指定覆盖时用此默认）
     let params = ServerRuntimeParams {
-        provider_kind: cmd.provider.clone(),
+        provider_kind,
+        provider_name,
         api_base,
         api_key,
-        model: cmd.model.clone(),
+        model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
@@ -403,24 +427,16 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
-    // 1. 默认 API base（按 provider 选择默认值，与 HTTP/NDJSON/ACP 模式一致）
-    let api_base = cmd
-        .api_base
-        .clone()
-        .unwrap_or_else(|| match cmd.provider.as_str() {
-            "ollama" => "http://localhost:11434".to_string(),
-            "anthropic" => "https://api.anthropic.com".to_string(),
-            _ => "https://api.openai.com".to_string(),
-        });
-
-    let api_key = cmd.api_key.clone().unwrap_or_default();
+    // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON/ACP 模式一致）
+    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（executeCommand 创建会话时用）
     let params = ServerRuntimeParams {
-        provider_kind: cmd.provider.clone(),
+        provider_kind,
+        provider_name,
         api_base,
         api_key,
-        model: cmd.model.clone(),
+        model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,

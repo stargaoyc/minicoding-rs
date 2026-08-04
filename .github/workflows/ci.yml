@@ -173,6 +173,13 @@ jobs:
         run: |
           mkdir -p crates/minicoding-web/dist
           echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>minicoding</title></head><body><div id="root"></div></body></html>' > crates/minicoding-web/dist/index.html
+      - name: Create placeholder sidecar binary
+        # tauri.conf.json 的 externalBin 在 bundle 时校验二进制存在，
+        # CI 仅编译不 bundle，但 generate_context! 可能读取配置，预留占位文件。
+        run: |
+          mkdir -p crates/minicoding-desktop/binaries
+          echo '#!/bin/sh' > crates/minicoding-desktop/binaries/minicoding-server-x86_64-unknown-linux-gnu
+          chmod +x crates/minicoding-desktop/binaries/minicoding-server-x86_64-unknown-linux-gnu
       - name: cargo build desktop
         run: cargo build -p minicoding-desktop --features desktop
       - name: cargo clippy desktop
