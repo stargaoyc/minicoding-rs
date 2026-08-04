@@ -1,12 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "minicoding",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.minicoding.desktop",
   "build": {
-    "frontendDist": "../minicoding-web/dist",
-    "beforeDevCommand": "cd crates/minicoding-web 2>/dev/null || cd ../minicoding-web; npm run dev",
-    "beforeBuildCommand": "cd crates/minicoding-web 2>/dev/null || cd ../minicoding-web; npm run build"
+    "frontendDist": "../minicoding-web/dist"
   },
   "app": {
     "windows": [
