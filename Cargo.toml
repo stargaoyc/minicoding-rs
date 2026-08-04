@@ -28,7 +28,7 @@ rust-version = "1.99"
 license = "AGPL-3.0-only"
 repository = "https://github.com/minicoding/minicoding-rs"
 homepage = "https://github.com/minicoding/minicoding-rs"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["stargaoyc"]
 
 # 统一依赖版本管理（见 AGENTS.md §2.7、tech-stack.md §12）
