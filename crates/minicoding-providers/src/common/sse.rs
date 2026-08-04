@@ -18,7 +18,9 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>>
 /// SSE 解析流：yield 事件的 `data` payload 字符串。
 pub struct SseStream {
     inner: ByteStream,
-    buffer: String,
+    /// 字节缓冲区（非 String）：避免 chunk 边界切断 UTF-8 字符导致 `from_utf8_lossy` 产生乱码。
+    /// 仅在事件边界（`\n\n`）进行 UTF-8 解码，保证跨 chunk 的多字节字符正确拼接。
+    buffer: Vec<u8>,
     done: bool,
 }
 
@@ -28,16 +30,17 @@ impl SseStream {
     pub fn new(inner: ByteStream) -> Self {
         Self {
             inner,
-            buffer: String::new(),
+            buffer: Vec::new(),
             done: false,
         }
     }
 
     /// 从 buffer 取出一个完整事件（以 `\n\n` 分隔），返回原始事件文本。
     fn take_event(&mut self) -> Option<String> {
-        let pos = self.buffer.find("\n\n")?;
-        let event: String = self.buffer.drain(..pos + 2).collect();
-        Some(event)
+        let pos = self.buffer.windows(2).position(|w| w == b"\n\n")?;
+        let event_bytes: Vec<u8> = self.buffer.drain(..pos + 2).collect();
+        // 事件边界解码：完整事件的字节序列应是有效 UTF-8
+        Some(String::from_utf8_lossy(&event_bytes).into_owned())
     }
 
     /// 从单个事件提取 `data:` payload（多行 `data:` 拼接为 `\n`）。
@@ -73,16 +76,17 @@ impl Stream for SseStream {
             // 2) buffer 不完整时尝试 flush 末尾残留（流结束后）
             if self.done {
                 if !self.buffer.is_empty() {
-                    let event = std::mem::take(&mut self.buffer);
+                    let event_bytes = std::mem::take(&mut self.buffer);
+                    let event = String::from_utf8_lossy(&event_bytes).into_owned();
                     return Poll::Ready(Self::extract_data(&event).map(Ok));
                 }
                 return Poll::Ready(None);
             }
 
-            // 3) 拉取底层流
+            // 3) 拉取底层流：字节直接追加到 buffer，不在 chunk 边界解码 UTF-8
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(LlmError::Network(e.to_string()))));
@@ -166,6 +170,19 @@ mod tests {
         // 事件跨多个字节 chunk 边界，buffer 应正确拼接
         let sse = SseStream::new(byte_stream(vec!["data: {\"par", "t\":1}\n\n"]));
         assert_eq!(collect_ok(sse).await, vec!["{\"part\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn utf8_multibyte_cross_chunk_boundary() {
+        // UTF-8 多字节字符跨 chunk 边界：不能在 chunk 边界用 from_utf8_lossy
+        // "你好" 的 "你" = [E4 BD A0]，在第 7 字节切分（"你" 的首字节之后，非字符边界）
+        let full = "data: 你好\n\n";
+        let bytes = full.as_bytes();
+        let mid = 7; // "data: "(6) + "你"首字节(1) = 7，非 char boundary
+        let items: Vec<Result<Vec<u8>, reqwest::Error>> =
+            vec![Ok(bytes[..mid].to_vec()), Ok(bytes[mid..].to_vec())];
+        let sse = SseStream::new(stream::iter(items).boxed());
+        assert_eq!(collect_ok(sse).await, vec!["你好"]);
     }
 
     #[tokio::test]
