@@ -1418,12 +1418,15 @@ pub enum ToolError {
 pub struct ServerConfig {
     pub bind: std::net::SocketAddr,
     pub provider_kind: String,        // "openai"/"anthropic"/"ollama"
+    pub provider_name: Option<String>, // 自定义显示名（None 回退到 provider_kind）
     pub api_base: String,
     pub api_key: String,
     pub model: String,
     pub workdir: camino::Utf8PathBuf,
     pub system: Option<String>,
     pub permission_timeout_sec: u64,  // 权限交互超时（默认 300）
+    pub web_dir: Option<camino::Utf8PathBuf>,  // M9 --web 静态资源目录
+    pub cors_origins: Vec<String>,             // M9 --cors-origin 允许的来源
 }
 
 /// 启动 HTTP/SSE server（阻塞当前 task 直到 server 关闭）。
@@ -1505,6 +1508,8 @@ impl SessionManager {
 /// `minicoding serve` 子命令参数（clap derive）。
 ///
 /// `--bind` 与 `--port` 互斥；省略时默认 `127.0.0.1:8080`。
+/// Provider 配置（provider/provider_name/api_base/api_key/model）遵循
+/// 统一优先级：CLI 参数 > 环境变量 > config.toml > provider 默认值。
 #[derive(clap::Args, Debug)]
 pub struct ServeCommand {
     /// 监听地址（如 `127.0.0.1:8080`）。与 `--port` 互斥。
@@ -1513,18 +1518,21 @@ pub struct ServeCommand {
     /// 监听端口（绑定 `127.0.0.1:<port>`）。与 `--bind` 互斥。
     #[arg(long, conflicts_with = "bind")]
     pub port: Option<u16>,
-    /// LLM provider 类型（`openai`/`anthropic`/`ollama`）。
-    #[arg(long, env = "OPENAI_PROVIDER", default_value = "openai")]
-    pub provider: String,
-    /// API base URL（省略时按 provider 选默认）。
+    /// LLM provider 类型（`openai`/`anthropic`/`ollama`，默认从 `config.toml` 读取）。
+    #[arg(long, env = "OPENAI_PROVIDER")]
+    pub provider: Option<String>,
+    /// Provider 自定义显示名（用于日志/metrics，不影响协议分派）。
+    #[arg(long, env = "MINICODING_PROVIDER_NAME")]
+    pub provider_name: Option<String>,
+    /// API base URL（省略时按 provider 选默认或从 `config.toml` 读取）。
     #[arg(long, env = "OPENAI_API_BASE")]
     pub api_base: Option<String>,
-    /// API key（Ollama 可省略）。
+    /// API key（Ollama 可省略；未提供时从 OS keyring fallback，C-04）。
     #[arg(long, env = "OPENAI_API_KEY")]
     pub api_key: Option<String>,
-    /// 模型名称。
-    #[arg(long, env = "OPENAI_MODEL", default_value = "gpt-4o")]
-    pub model: String,
+    /// 模型名称（默认从 `config.toml` 读取）。
+    #[arg(long, env = "OPENAI_MODEL")]
+    pub model: Option<String>,
     /// 工作目录。
     #[arg(long, default_value = ".")]
     pub workdir: String,
@@ -1534,13 +1542,21 @@ pub struct ServeCommand {
     /// 权限交互超时（秒）。
     #[arg(long, default_value_t = 300)]
     pub permission_timeout_sec: u64,
+    /// 静态资源目录（M9 `--web`，托管前端 SPA）。
+    #[arg(long)]
+    pub web: Option<String>,
+    /// CORS 允许的来源（M9，可多次指定）。
+    #[arg(long = "cors-origin")]
+    pub cors_origins: Vec<String>,
+    // ... 模式分派 flag：--as-mcp-server / --ndjson / --acp / --lsp（feature gate）
 }
 
-/// 运行 `serve` 子命令：构造 `ServerConfig` 并调用 `minicoding_server::serve`（阻塞）。
+/// 运行 `serve` 子命令：根据模式 flag 分派到 HTTP/NDJSON/ACP/LSP/MCP 模式。
 ///
 /// # Errors
-/// - bind 地址解析失败；
-/// - server 运行时错误（bind 冲突、IO 错误等）。
+/// - bind 地址解析失败（HTTP 模式）；
+/// - server 运行时错误（bind 冲突、IO 错误等）；
+/// - MCP/NDJSON/ACP/LSP 模式下的 stdio IO 错误。
 pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 ```
 

@@ -5,8 +5,8 @@
   "identifier": "com.minicoding.desktop",
   "build": {
     "frontendDist": "../minicoding-web/dist",
-    "beforeDevCommand": "cd ../minicoding-web && npm run dev",
-    "beforeBuildCommand": "cd ../minicoding-web && npm run build"
+    "beforeDevCommand": "cd crates/minicoding-web 2>/dev/null || cd ../minicoding-web; npm run dev",
+    "beforeBuildCommand": "cd crates/minicoding-web 2>/dev/null || cd ../minicoding-web; npm run build"
   },
   "app": {
     "windows": [

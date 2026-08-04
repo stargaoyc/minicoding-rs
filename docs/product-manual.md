@@ -83,7 +83,7 @@
 | 权限模型 | 两层：L0 硬黑名单 + L1 用户策略，决策与交互分离 | 单层 allow/deny，依赖 Hook | 两层（builtin + user） | 简单确认 |
 | 记忆系统 | 三层：工作记忆 + 会话摘要 + 长期记忆双文件 + Auto memory + AGENTS.md | CLAUDE.md + Auto memory | AGENTS.md | 单文件约定 |
 | 可观测性 | OpenTelemetry 一等公民（M0 起接入），全链路 span | 无统一 trace | tracing 日志 | 无 |
-| 可嵌入性 | 17 crate workspace，`minicoding-sdk` 提供 `Client`/`ask`/`run_task` API | 不可嵌入 | 不可嵌入 | 不可嵌入 |
+| 可嵌入性 | 18 crate workspace，`minicoding-sdk` 提供 `Client`/`ask`/`run_task` API | 不可嵌入 | 不可嵌入 | 不可嵌入 |
 | 部署形态 | CLI / TUI / SDK / HTTP server / MCP server / LSP server / Web / 桌面 | CLI | CLI | CLI |
 | 配置格式 | TOML（`~/.minicoding/config.toml`） | JSON | TOML | INI/CLI |
 | 开源协议 | AGPL-3.0-only | 闭源 | Apache-2.0 | Apache-2.0 |
@@ -94,7 +94,7 @@
 2. **OpenTelemetry 一等公民**：从 M0 起接入，生产环境下的 Agent 行为分析、性能瓶颈定位、异常归因成为可能。
 3. **L0 硬约束不可绕过**：35 条约束中 L0 在实现层被强制，不依赖 LLM 自觉或系统提示词（见 `docs/rules.md`）。
 4. **OS 沙箱一等公民 + 两道防线**：应用层（路径沙箱 + 权限策略 + 黑名单）+ OS 层（Landlock/Seatbelt/受限令牌）独立两道防线；Opt-out 而非 opt-in。
-5. **17 crate 可嵌入 + 多部署形态**：`minicoding-core` 可被其他 Rust 项目直接依赖，trait 定义集中在 core，实现可来自任意 crate。
+5. **18 crate 可嵌入 + 多部署形态**：`minicoding-core` 可被其他 Rust 项目直接依赖，trait 定义集中在 core，实现可来自任意 crate。
 6. **AGENTS.md 兼容 + 跨工具迁移**：支持 `CLAUDE.md`/`.cursorrules` 作为 fallback 文件名，无需改名即可复用项目记忆。
 
 ---
@@ -194,7 +194,20 @@ minicoding auth logout --provider anthropic
 
 [provider]
 default = "anthropic"
+# 自定义显示名（可选，用于日志/metrics，不影响协议分派）
+# 连接 OpenAI 兼容 API（DeepSeek/Moonshot/vLLM 等）时设置可读名称
+# name = "deepseek"
+# API base URL（可选，省略时按 provider 选默认：
+#   openai → https://api.openai.com
+#   anthropic → https://api.anthropic.com
+#   ollama → http://localhost:11434）
+# api_base = "https://api.deepseek.com"
+# model = "deepseek-chat"
+# api_key = ""  # 留空，从 keyring/环境变量读取（推荐）
+# timeout_sec = 120
+# retry = { max_attempts = 4, base_delay_ms = 500 }
 
+# Anthropic 示例（默认 provider）
 [provider.anthropic]
 model = "claude-sonnet-4"
 api_key_env = "ANTHROPIC_API_KEY"
@@ -202,6 +215,7 @@ timeout_sec = 120
 retry = { max_attempts = 4, base_delay_ms = 500 }
 
 # 独立小 LLM（为摘要/compact/memory 提取配置独立 provider，可配更便宜模型降本）
+# api_base/api_key 为 None 时继承主 [provider] 配置
 [provider.small]
 model = "claude-haiku-4"
 api_key_env = "ANTHROPIC_API_KEY"
@@ -409,8 +423,11 @@ exec 模式语义：
 
 | 参数 | 说明 |
 |------|------|
-| `--provider <name>` | LLM provider 类型（`openai`/`anthropic`/`ollama`） |
-| `--model <name>` | 模型名称 |
+| `--provider <name>` | LLM provider 类型（`openai`/`anthropic`/`ollama`，默认从 `config.toml` 读取） |
+| `--provider-name <name>` | Provider 自定义显示名（用于日志/metrics，不影响协议分派；连接 OpenAI 兼容 API 如 DeepSeek/Moonshot/vLLM 时推荐设置） |
+| `--api-base <url>` | API base URL 覆盖（如 `https://api.deepseek.com`；省略时按 provider 选默认或从 `config.toml` 读取） |
+| `--model <name>` | 模型名称（默认从 `config.toml` 读取） |
+| `--api-key <key>` | 临时 API Key 覆盖（优先级最高，不推荐在命令行使用以防 `/proc/<pid>/cmdline` 泄露，推荐用 `minicoding auth login` 或环境变量） |
 | `--session` | 启动交互会话 REPL |
 | `--resume <id>` | 恢复指定会话 |
 | `--fork-session <id>` | Fork 会话从分叉点尝试不同方向 |
@@ -422,15 +439,51 @@ exec 模式语义：
 | `--plan` | 启动时直接进入 Plan 模式 |
 | `--allow '<rule>'` | 临时允许规则（仅本次运行，不持久化） |
 | `--deny '<rule>'` | 临时拒绝规则 |
-| `--api-key <key>` | 临时 API Key 覆盖 |
 | `-v` / `-vv` | 日志级别（`DEBUG` / `TRACE`） |
-| `exec` | 批量执行子命令（`--sandbox`/`--json`/`--ephemeral`） |
-| `serve` | 启动 HTTP/SSE server（`--bind`/`--port`/`--web`/`--cors-origin`/`--as-mcp-server`/`--lsp`/`--acp`） |
+| `exec` | 批量执行子命令（`--sandbox`/`--json`/`--ephemeral`，同样支持 `--provider`/`--api-base`/`--api-key`/`--model`） |
+| `serve` | 启动 HTTP/SSE server（`--bind`/`--port`/`--web`/`--cors-origin`/`--as-mcp-server`/`--lsp`/`--acp`，同样支持 `--provider`/`--provider-name`/`--api-base`/`--api-key`/`--model`） |
 | `auth login/status/logout` | 凭证管理 |
 | `mcp list/approve/reset-project-choices` | MCP server 管理 |
 | `session list/delete/export` | 会话管理 |
 | `doctor --security` | 安全自检 |
 | `audit list/stats` | 审计日志查询 |
+
+#### Provider 配置优先级
+
+所有入口（CLI 单次/交互/exec/serve、`minicoding-server` 独立二进制、桌面 sidecar）遵循统一优先级：
+
+```
+CLI 参数（--api-base 等） > 环境变量（OPENAI_API_BASE 等） > config.toml > provider 默认值
+```
+
+典型场景：
+
+```bash
+# 1. 连接 DeepSeek（OpenAI 兼容 API）
+minicoding --provider openai --provider-name deepseek \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat "重构 utils 模块"
+
+# 2. 连接 Moonshot
+minicoding --provider openai --provider-name moonshot \
+  --api-base https://api.moonshot.cn/v1 \
+  --model moonshot-v1-128k "审计依赖图"
+
+# 3. 连接本地 vLLM
+minicoding --provider openai --provider-name vllm \
+  --api-base http://localhost:8000/v1 \
+  --model meta-llama/Llama-3-70B "生成 API 文档"
+
+# 4. 持久化到 config.toml（避免每次输入参数）
+#    ~/.minicoding/config.toml:
+#    [provider]
+#    default = "openai"
+#    name = "deepseek"
+#    api_base = "https://api.deepseek.com"
+#    model = "deepseek-chat"
+#    api_key = ""  # 留空，从 keyring/环境变量读取
+minicoding "重构 utils 模块"  # 自动读取 config.toml 配置
+```
 
 ### 3.5 slash 命令
 
@@ -540,11 +593,62 @@ minicoding serve --bind 127.0.0.1:8080 \
   --cors-origin http://localhost:5173
 ```
 
-### 5.2 `--web` 静态托管
+### 5.2 Provider 配置（server 端）
+
+`minicoding-server` 和 `minicoding serve` 均支持完整的 provider 配置，优先级与 CLI 一致：
+
+```
+CLI 参数 > 环境变量 > config.toml > provider 默认值
+```
+
+```bash
+# 方式一：命令行参数（适合临时/CI 场景）
+minicoding-server \
+  --provider openai \
+  --provider-name deepseek \
+  --api-base https://api.deepseek.com \
+  --model deepseek-chat \
+  --api-key sk-... \
+  --bind 127.0.0.1:8080
+
+# 方式二：环境变量（适合容器/CI）
+export OPENAI_PROVIDER=openai
+export OPENAI_API_BASE=https://api.deepseek.com
+export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=deepseek-chat
+minicoding-server --bind 127.0.0.1:8080
+
+# 方式三：config.toml（适合长期运行，推荐）
+# ~/.minicoding/config.toml:
+# [provider]
+# default = "openai"
+# name = "deepseek"
+# api_base = "https://api.deepseek.com"
+# model = "deepseek-chat"
+minicoding-server --bind 127.0.0.1:8080  # 自动读取 config.toml
+
+# 方式四：OS keyring（API key 从 keyring 读取，C-04）
+minicoding auth login --provider openai  # 先写入 keyring
+minicoding-server --bind 127.0.0.1:8080  # server 自动从 keyring fallback
+```
+
+> **安全提示（C-04）**：`--api-key` 参数会暴露在 `/proc/<pid>/cmdline` 中，生产环境推荐用环境变量或 OS keyring。server 端在 `--api-key` 未提供时自动从 OS keyring fallback（`KEYRING_SERVICE = "minicoding"`，与 CLI 共享同一 keyring entry）。
+
+### 5.3 `--web` 静态托管
 
 `--web` 参数指定前端静态资源目录（通常是 `crates/minicoding-web/dist`），由 `tower-http::ServeDir` 提供 SPA fallback，实现单二进制部署——无需额外 Web 服务器。
 
-### 5.3 `--cors-origin` 跨域配置
+前置条件：需先构建 Web 前端：
+
+```bash
+cd crates/minicoding-web
+npm install
+npm run build  # 产物在 dist/
+cd ../..
+minicoding-server --web ./crates/minicoding-web/dist --bind 127.0.0.1:8080
+```
+
+### 5.4 `--cors-origin` 跨域配置
 
 Web 模式需 `--cors-origin` 配置允许的前端来源，默认仅 `http://localhost:*`：
 
@@ -552,30 +656,83 @@ Web 模式需 `--cors-origin` 配置允许的前端来源，默认仅 `http://lo
 # 允许特定来源
 minicoding serve --cors-origin http://localhost:5173
 
-# 允许多个来源（逗号分隔）
-minicoding serve --cors-origin "http://localhost:5173,http://localhost:3000"
+# 允许多个来源（可多次指定）
+minicoding serve \
+  --cors-origin http://localhost:5173 \
+  --cors-origin http://localhost:3000
+
+# 生产部署：指定实际域名
+minicoding-server --cors-origin https://coding.example.com
 ```
 
-### 5.4 浏览器访问
+> 未指定 `--cors-origin` 时默认允许任意来源（`*`，仅开发用）。生产部署务必指定实际来源。
+
+### 5.5 浏览器访问
 
 浏览器打开 `http://127.0.0.1:8080` 即可使用 Web 前端（React 19.2 + TypeScript 7.0 + Vite 8.1 + Tailwind v4）：
 
 - **对话流**：流式 SSE 渲染 token（TanStack Query 增量更新 + 流式光标）。
-- **工具调用面板**：可展开/折叠，显示工具名、输入、输出、状态。
+- **工具调用面板**：可展开/折叠，显示工具名、输入、输出、状态。工具输出包裹 `<tool_output>` 边界（C-05，防 LLM 把工具输出当指令执行）。
 - **权限确认弹窗**：shadcn/ui Dialog 接收 `PermissionPrompt` → JSON-RPC `permission.resolve` 回传，含风险等级可视化（low/medium/high 三色徽章 + 4 种决策按钮）。
 - **多会话面板**：左侧会话列表 + 右侧对话流，可折叠侧栏。
 - **暗色/亮色主题**：双主题 CSS 变量 + Zustand 持久化 + 系统偏好跟随 + FOUC 预防。
 
-### 5.5 端点
+### 5.6 创建会话时指定 Provider
+
+`POST /sessions` 支持在请求体中覆盖默认 provider 配置（适合多用户/多 provider 场景）：
+
+```bash
+# 创建会话时指定 provider（覆盖 server 默认）
+curl -X POST http://127.0.0.1:8080/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "provider_name": "deepseek",
+    "api_base": "https://api.deepseek.com",
+    "api_key": "sk-...",
+    "model": "deepseek-chat"
+  }'
+```
+
+未指定的字段从 server 启动时的配置 fallback。
+
+### 5.7 端点
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
+| `POST /sessions` | POST | 创建会话（可选 body 覆盖 provider 配置） |
 | `POST /sessions/{id}/messages` | POST | 发送消息 |
 | `GET /sessions/{id}/events` | GET (SSE) | 订阅 SSE 事件流（支持 `Last-Event-ID` cursor 恢复） |
 | `POST /sessions/{id}/permissions/{pid}` | POST | 回传权限决策 |
 | `POST /api/rpc` | POST | JSON-RPC 2.0 入口（`session.list`/`session.create`/`permission.resolve` 等） |
 
 SSE 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复（E-13）；broadcast 溢出时发 `RehydrateRequired`，客户端重拉 snapshot（E-14）。
+
+### 5.8 生产部署示例
+
+```bash
+# 生产部署：systemd 服务 + config.toml + keyring
+# 1. 写入配置
+cat > ~/.minicoding/config.toml << 'EOF'
+[provider]
+default = "openai"
+name = "deepseek"
+api_base = "https://api.deepseek.com"
+model = "deepseek-chat"
+EOF
+
+# 2. 写入 API key 到 keyring
+minicoding auth login --provider openai  # 输入 sk-...
+
+# 3. 构建前端
+cd crates/minicoding-web && npm run build && cd ../..
+
+# 4. 启动 server
+minicoding-server \
+  --bind 0.0.0.0:8080 \
+  --web ./crates/minicoding-web/dist \
+  --cors-origin https://coding.example.com
+```
 
 ---
 
@@ -585,10 +742,25 @@ SSE 事件流携带 cursor（event seq），客户端断连后从 cursor 恢复�
 
 ### 6.1 安装桌面应用
 
+#### 方式一：下载安装包（推荐，面向最终用户）
+
+从 GitHub Releases 下载对应平台的安装包：
+
+| 平台 | 安装包格式 | 说明 |
+|------|-----------|------|
+| macOS (Apple Silicon) | `.dmg` / `.app` | arm64 原生 |
+| macOS (Intel) | `.dmg` / `.app` | x86_64 交叉编译 |
+| Windows | `.msi` / `.exe` | x86_64 |
+| Linux | `.AppImage` / `.deb` | x86_64 |
+
+安装后从启动器/开始菜单打开 "minicoding" 即可。
+
+#### 方式二：从源码构建（开发者）
+
 ```bash
-# 从源码构建桌面应用
+# 开发模式（Tauri + Vite dev）
 cd crates/minicoding-desktop
-cargo tauri dev   # 开发模式（Tauri + Vite dev）
+cargo tauri dev
 
 # 打包
 cargo tauri build # → .dmg (macOS) / .msi (Windows) / .AppImage (Linux)
@@ -596,7 +768,41 @@ cargo tauri build # → .dmg (macOS) / .msi (Windows) / .AppImage (Linux)
 
 桌面应用体积 < 15 MB（Tauri 5-10MB，远低于 Electron 100MB+），内存占用 < 80 MB。
 
-### 6.2 系统托盘
+### 6.2 首次启动配置（安装包用户必读）
+
+安装包用户**无需命令行操作**，所有配置通过桌面应用内的设置界面完成。
+
+#### 首次启动流程
+
+1. **打开应用**：首次启动检测到 `~/.minicoding/config.toml` 不存在或未配置 provider，自动弹出设置向导。
+2. **填写配置**：
+   - **Provider 类型**：选择 `openai` / `anthropic` / `ollama`
+   - **自定义名称**（可选）：如 `deepseek`、`moonshot`（用于日志显示，不影响功能）
+   - **API Base URL**（可选）：如 `https://api.deepseek.com`（省略时用 provider 默认）
+   - **模型名称**：如 `deepseek-chat`、`claude-sonnet-4`
+   - **API Key**：输入密钥（写入 OS keyring，**不落盘明文**，C-04）
+3. **保存配置**：点击保存后，配置写入 `~/.minicoding/config.toml`（非敏感字段）+ OS keyring（API key）。
+4. **自动启动 sidecar**：配置保存后，应用自动启动 `minicoding-server` sidecar 并连接。
+
+#### 配置管理界面
+
+运行中可通过设置界面修改配置：
+
+- **查看当前配置**：显示 provider 类型、名称、API base、模型（API key 显示 `***` 脱敏）
+- **修改配置**：直接编辑后保存，sidecar 重启生效
+- **打开配置文件**：一键在默认编辑器中打开 `~/.minicoding/config.toml`（高级用户）
+
+#### 配置存储说明
+
+| 数据 | 存储位置 | 说明 |
+|------|---------|------|
+| Provider 类型 / 名称 / API base / 模型 | `~/.minicoding/config.toml` | 非敏感，TOML 明文 |
+| API Key | OS keyring | 敏感，加密存储（C-04） |
+| 会话日志 | `~/.minicoding/sessions/` | JSONL 格式 |
+
+> **安全设计（C-04）**：API key **绝不**通过命令行参数或环境变量传递给 sidecar（防 `/proc/<pid>/cmdline` 泄露）。Sidecar 启动时仅接收非敏感配置（api_base/model/provider_name），API key 由 sidecar 自行从 OS keyring 读取。CLI、server、桌面三种客户端共享同一 keyring entry（`KEYRING_SERVICE = "minicoding"`，`KEYRING_ACCOUNT = "openai_api_key"`）。
+
+### 6.3 系统托盘
 
 Tauri System Tray 提供原生系统托盘集成：
 
@@ -604,7 +810,7 @@ Tauri System Tray 提供原生系统托盘集成：
 - 右键菜单：显示窗口 / 退出；
 - 关闭窗口时隐藏到托盘（非退出进程）。
 
-### 6.3 全局快捷键
+### 6.4 全局快捷键
 
 全局快捷键 `Cmd/Ctrl+Shift+M`（`Super+Shift+M`）切换主窗口显示/隐藏：
 
@@ -622,7 +828,7 @@ shortcut.on_shortcut("Super+Shift+M", move |app, _event| {
 })?;
 ```
 
-### 6.4 sidecar 进程通信
+### 6.5 sidecar 进程通信
 
 桌面模式下，Tauri 启动 `minicoding-server` 作为 sidecar：
 
@@ -638,12 +844,31 @@ shortcut.on_shortcut("Super+Shift+M", move |app, _event| {
                                      └─────────────────────┘
 ```
 
-sidecar 启动时绑定 `127.0.0.1:0`（随机端口），Tauri 主进程从 sidecar stdout 读取 `LISTENING_PORT=` 行获取实际端口，前端通过该端口访问 HTTP/SSE。
+sidecar 启动流程：
+1. Tauri 主进程读取 `~/.minicoding/config.toml` 获取非敏感配置（api_base/model/provider_name）
+2. 启动 `minicoding-server` sidecar，通过 CLI 参数传递非敏感配置
+3. Sidecar 绑定 `127.0.0.1:0`（随机端口），Tauri 主进程从 sidecar stdout 读取 `LISTENING_PORT=` 行获取实际端口
+4. Sidecar 自行从 OS keyring 读取 API key（不通过参数/env 传递，C-04）
+5. 前端通过该端口访问 HTTP/SSE
 
-### 6.5 凭证与自动更新
+### 6.6 凭证与自动更新
 
 - **凭证**：桌面端复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04），前端不接触凭证明文——所有凭证操作经 Tauri Rust 命令代理，前端只见 `***` 脱敏。
 - **自动更新**：Tauri Updater 提供签名校验自动更新（`tauri.conf.json` 配置 `updater` 端点与公钥），检查更新 → 下载 → 签名校验 → 安装 → 重启。
+
+### 6.7 Tauri Invoke 命令（高级）
+
+桌面应用通过 Tauri invoke 命令管理配置，开发者可在自定义前端中调用：
+
+| 命令 | 说明 |
+|------|------|
+| `get_provider_config` | 读取当前 provider 配置（API key 脱敏） |
+| `save_provider_config` | 保存非敏感配置到 `config.toml`（provider/api_base/model/name） |
+| `store_api_key` | 写入 API key 到 OS keyring |
+| `get_api_key_status` | 查询 keyring 中是否已有 API key |
+| `open_config_file` | 在默认编辑器中打开 `config.toml` |
+| `get_sidecar_status` | 查询 sidecar 进程状态 |
+| `restart_sidecar` | 重启 sidecar（配置变更后生效） |
 
 ---
 
