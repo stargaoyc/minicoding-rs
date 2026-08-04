@@ -75,7 +75,10 @@ else
 fi
 
 # Windows 二进制带 .exe 后缀
-SIDECAR_NAME="minicoding-server-$TARGET"
+# 注意：sidecar 文件名必须与 tauri.conf.json 的 externalBin 一致（minicoding-server-sidecar），
+# 不能直接用 minicoding-server（会与 cargo 的 build 目录 target/release/build/minicoding-server/ 冲突，
+# 导致 tauri-build 的 copy_binaries 函数 fs::remove_file 时 IsADirectory panic）
+SIDECAR_NAME="minicoding-server-sidecar-$TARGET"
 if [[ "$TARGET" == *"-windows-"* ]]; then
   SIDECAR_NAME="$SIDECAR_NAME.exe"
   SERVER_BIN="$SERVER_BIN.exe"

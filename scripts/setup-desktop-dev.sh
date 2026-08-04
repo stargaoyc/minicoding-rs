@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # 为本地开发创建 sidecar 占位二进制（解决 tauri_build::build() 校验 externalBin 路径）。
 #
-# tauri.conf.json 的 externalBin 在 cargo build 时校验 binaries/minicoding-server-<triple>
+# tauri.conf.json 的 externalBin 在 cargo build 时校验 binaries/minicoding-server-sidecar-<triple>
 # 是否存在。本地开发若未先构建 minicoding-server，需运行此脚本创建占位文件。
 #
 # 真实发布构建请用 scripts/build-desktop.sh（会构建真实 server 二进制并覆盖占位）。
+#
+# 注意：sidecar 文件名用 minicoding-server-sidecar 而非 minicoding-server，
+# 避免与 cargo build 目录 target/release/build/minicoding-server/ 冲突
+# （tauri-build 的 copy_binaries 会 fs::remove_file 导致 IsADirectory panic）。
 #
 # 用法：./scripts/setup-desktop-dev.sh
 
@@ -17,7 +21,7 @@ mkdir -p "$BINARIES_DIR"
 # 获取 host target triple
 TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 
-BIN_NAME="minicoding-server-$TARGET"
+BIN_NAME="minicoding-server-sidecar-$TARGET"
 if [[ "$TARGET" == *"-windows-"* ]]; then
   BIN_NAME="$BIN_NAME.exe"
 fi

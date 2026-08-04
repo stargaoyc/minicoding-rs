@@ -144,7 +144,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     let sidecar = app
         .shell()
-        .sidecar("minicoding-server")
+        .sidecar("minicoding-server-sidecar")
         .map_err(|e| anyhow::anyhow!("sidecar 配置错误: {e}"))?;
 
     let web_dir = crate::resolve_web_dir();
