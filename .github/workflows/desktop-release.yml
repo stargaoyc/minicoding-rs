@@ -121,18 +121,25 @@ jobs:
         working-directory: crates/minicoding-desktop
         run: cargo tauri build --target ${{ matrix.target }} --features desktop
 
+      - name: List bundle output
+        # 调试：显示 Tauri 产出的 bundle 文件（cargo tauri build 使用 workspace target/）
+        shell: bash
+        run: |
+          echo "=== bundle 目录内容 ==="
+          find "target/${{ matrix.target }}/release/bundle" -type f 2>/dev/null | sort || echo "(bundle 目录不存在)"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
           path: |
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.app
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.msi
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.exe
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.AppImage
-            crates/minicoding-desktop/target/${{ matrix.target }}/release/bundle/**/*.deb
-          if-no-files-found: warn
+            target/${{ matrix.target }}/release/bundle/**/*.dmg
+            target/${{ matrix.target }}/release/bundle/**/*.app
+            target/${{ matrix.target }}/release/bundle/**/*.msi
+            target/${{ matrix.target }}/release/bundle/**/*.exe
+            target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            target/${{ matrix.target }}/release/bundle/**/*.deb
+          if-no-files-found: error
 
   upload-to-release:
     name: upload-to-release
@@ -162,6 +169,15 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           echo "Uploading desktop artifacts to release: $TAG"
+          # 启用 globstar 使 ** 递归匹配子目录
+          shopt -s globstar nullglob
+          files=(artifacts/**/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "❌ 没有找到任何 artifacts 文件"
+            exit 1
+          fi
+          echo "找到 ${#files[@]} 个文件："
+          printf '  %s\n' "${files[@]}"
           # 如果 release 不存在则创建（cargo-dist 的 host job 可能已创建）
-          gh release upload "$TAG" artifacts/**/* --clobber || \
-            gh release create "$TAG" --generate-notes artifacts/**/*
+          gh release upload "$TAG" "${files[@]}" --clobber || \
+            gh release create "$TAG" --generate-notes "${files[@]}"

@@ -105,7 +105,7 @@ fi
 
 echo ""
 echo "🎉 桌面应用构建完成！"
-echo "   安装包位置：$DESKTOP_DIR/target/release/bundle/"
+echo "   安装包位置：target/${TARGET}/release/bundle/（workspace target 目录）"
 echo "   - macOS:  .dmg / .app"
 echo "   - Windows: .msi / .exe"
 echo "   - Linux:  .AppImage / .deb"
