@@ -1,11 +1,31 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口默认权限：core + shell sidecar + updater + global-shortcut",
+  "description": "主窗口默认权限：core + shell sidecar + log + updater + global-shortcut",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-execute",
+    "log:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/minicoding-server-sidecar",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/minicoding-server-sidecar",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    },
     "shell:allow-open",
     "shell:allow-kill",
     "updater:default",

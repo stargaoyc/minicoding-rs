@@ -13,11 +13,14 @@ interface UIState {
   sidebarCollapsed: boolean;
   /** 当前主题（W-05，持久化到 localStorage）。 */
   theme: Theme;
+  /** 设置弹窗是否打开（手动触发，与 desktop store 的 needs-config 独立）。 */
+  settingsOpen: boolean;
   setActiveSession: (id: string | null) => void;
   toggleTaskPanel: () => void;
   toggleSidebar: () => void;
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
+  setSettingsOpen: (open: boolean) => void;
 }
 
 /** 从 localStorage 读取初始主题（默认暗色）。 */
@@ -42,9 +45,11 @@ export const useUIStore = create<UIState>((set) => ({
   taskPanelOpen: false,
   sidebarCollapsed: false,
   theme: getInitialTheme(),
+  settingsOpen: false,
   setActiveSession: (id) => set({ activeSessionId: id }),
   toggleTaskPanel: () => set((s) => ({ taskPanelOpen: !s.taskPanelOpen })),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
   setTheme: (theme) => {
     applyTheme(theme);
     if (typeof window !== "undefined") {

@@ -1,16 +1,23 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings, Loader2 } from "lucide-react";
 import { Button } from "../ui/button";
 import { useDesktopStore, type ProviderInput } from "../../stores/desktop";
+import { useUIStore } from "../../stores/ui";
+import { getProviderConfig, loadApiKey, isTauri } from "../../api/tauri";
 import { cn } from "../../lib/utils";
 
 /**
- * 首次启动配置弹窗（M9，见 AGENTS.md §8.1、design.md §26.5）。
+ * 配置弹窗（M9，见 AGENTS.md §8.1、design.md §26.5）。
  *
- * 当 `useDesktopStore.phase === 'needs-config'` 时由 `App.tsx` 渲染。
+ * 两种触发场景：
+ * 1. **首次启动**（`phase === 'needs-config'`）：desktop store 检测到缺少配置时自动弹出
+ * 2. **手动修改**（`settingsOpen === true`）：用户点击顶栏"设置"按钮手动打开
+ *
  * 收集 provider / api_base / model / api_key，提交后由 desktop store 保存
- * 配置（`config.toml` + OS keyring）并启动 sidecar。
+ * 配置（`config.toml` + OS keyring）。
+ *
+ * 编辑模式下会加载当前配置作为初始值；首次启动用 PROVIDER_OPTIONS 默认值。
  *
  * 视觉风格对齐 `PermissionDialog`（framer-motion overlay + glass panel）。
  */
@@ -32,13 +39,35 @@ const DEFAULTS = PROVIDER_OPTIONS[0];
 export function SetupDialog() {
   const phase = useDesktopStore((s) => s.phase);
   const saveConfig = useDesktopStore((s) => s.saveConfig);
+  const settingsOpen = useUIStore((s) => s.settingsOpen);
+  const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
+
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const [provider, setProvider] = useState(DEFAULTS.value);
   const [apiBase, setApiBase] = useState(DEFAULTS.api_base);
   const [model, setModel] = useState(DEFAULTS.model);
   const [apiKey, setApiKey] = useState("");
+
+  // 编辑模式（settingsOpen）下，弹窗显示时加载当前配置作为初始值
+  useEffect(() => {
+    if (!settingsOpen || !isTauri()) return;
+    setLoading(true);
+    Promise.all([getProviderConfig(), loadApiKey()])
+      .then(([cfg, key]) => {
+        setProvider(cfg.default || DEFAULTS.value);
+        setApiBase(cfg.api_base || DEFAULTS.api_base);
+        setModel(cfg.model || DEFAULTS.model);
+        // API key 从 keyring 读取（用户可清空重填，留空则不修改 keyring）
+        setApiKey(key ?? "");
+      })
+      .catch((e) => {
+        setFormError(`加载当前配置失败: ${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => setLoading(false));
+  }, [settingsOpen]);
 
   // 切换 provider 时同步默认 api_base / model（用户可后续手动修改）
   const handleProviderChange = (value: string) => {
@@ -54,8 +83,10 @@ export function SetupDialog() {
     e.preventDefault();
     if (saving) return;
 
-    // 简单校验：非 ollama 必须填 API key
-    if (provider !== "ollama" && !apiKey.trim()) {
+    // 简单校验：非 ollama 必须填 API key（首次启动时）
+    // 编辑模式下允许留空（表示不修改 keyring 中已有的 key）
+    const isEditMode = settingsOpen && phase === "ready";
+    if (provider !== "ollama" && !apiKey.trim() && !isEditMode) {
       setFormError("请填写 API Key（ollama 本地模式可留空）");
       return;
     }
@@ -74,21 +105,37 @@ export function SetupDialog() {
     };
     try {
       await saveConfig(input);
-      // saveConfig 成功后 phase → 'ready'，App.tsx 卸载本弹窗
+      // saveConfig 成功后：
+      // - 首次启动：phase → 'ready'，App.tsx 卸载本弹窗
+      // - 编辑模式：手动关闭弹窗
+      if (isEditMode) {
+        setSettingsOpen(false);
+      }
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e));
+    } finally {
       setSaving(false);
     }
   };
 
+  const handleClose = () => {
+    setSettingsOpen(false);
+    setFormError(null);
+  };
+
+  // 显示条件：首次启动（needs-config）或手动打开（settingsOpen）
+  const visible = phase === "needs-config" || settingsOpen;
+  const isEditMode = settingsOpen && phase === "ready";
+
   return (
     <AnimatePresence>
-      {phase === "needs-config" && (
+      {visible && (
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={isEditMode ? handleClose : undefined}
         >
           <motion.div
             initial={{ scale: 0.95, opacity: 0, y: 10 }}
@@ -96,6 +143,7 @@ export function SetupDialog() {
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: "spring", damping: 20, stiffness: 300 }}
             className="glass w-full max-w-md rounded-2xl p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
           >
             <form onSubmit={handleSubmit} className="space-y-4">
               {/* Header */}
@@ -104,84 +152,119 @@ export function SetupDialog() {
                   <Settings className="h-5 w-5 text-[var(--color-accent-hover)]" />
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold">首次启动配置</h3>
+                  <h3 className="text-base font-semibold">
+                    {isEditMode ? "设置" : "首次启动配置"}
+                  </h3>
                   <p className="text-xs text-[var(--color-text-muted)]">
-                    填写 Provider 信息以启动 sidecar
+                    {isEditMode
+                      ? "修改 Provider 信息后需重启 sidecar 生效"
+                      : "填写 Provider 信息以启动 sidecar"}
                   </p>
                 </div>
               </div>
 
-              {/* Provider */}
-              <Field label="Provider">
-                <select
-                  value={provider}
-                  onChange={(e) => handleProviderChange(e.target.value)}
-                  disabled={saving}
-                  className={cn(INPUT_CLASS, "cursor-pointer")}
-                >
-                  {PROVIDER_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              {/* API Base */}
-              <Field label="API Base">
-                <input
-                  type="text"
-                  value={apiBase}
-                  onChange={(e) => setApiBase(e.target.value)}
-                  disabled={saving}
-                  placeholder="https://api.openai.com/v1"
-                  className={INPUT_CLASS}
-                />
-              </Field>
-
-              {/* Model */}
-              <Field label="模型">
-                <input
-                  type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={saving}
-                  placeholder="gpt-4o"
-                  className={INPUT_CLASS}
-                />
-              </Field>
-
-              {/* API Key */}
-              <Field label="API Key" hint={provider === "ollama" ? "ollama 本地模式可留空" : "存入 OS keyring，不落明文（C-04）"}>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  disabled={saving}
-                  placeholder="sk-..."
-                  className={INPUT_CLASS}
-                  autoComplete="off"
-                />
-              </Field>
-
-              {/* Error */}
-              {formError && (
-                <div className="rounded-lg bg-[var(--color-risk-high)]/10 px-3 py-2 text-xs text-[var(--color-risk-high)]">
-                  {formError}
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-[var(--color-accent-hover)]" />
+                  <span className="ml-2 text-sm text-[var(--color-text-muted)]">加载配置中…</span>
                 </div>
-              )}
+              ) : (
+                <>
+                  {/* Provider */}
+                  <Field label="Provider">
+                    <select
+                      value={provider}
+                      onChange={(e) => handleProviderChange(e.target.value)}
+                      disabled={saving}
+                      className={cn(INPUT_CLASS, "cursor-pointer")}
+                    >
+                      {PROVIDER_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
 
-              {/* Actions */}
-              <Button type="submit" disabled={saving} className="w-full">
-                {saving ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    正在保存…
-                  </>
-                ) : (
-                  "保存并启动"
-                )}
-              </Button>
+                  {/* API Base */}
+                  <Field label="API Base">
+                    <input
+                      type="text"
+                      value={apiBase}
+                      onChange={(e) => setApiBase(e.target.value)}
+                      disabled={saving}
+                      placeholder="https://api.openai.com/v1"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  {/* Model */}
+                  <Field label="模型">
+                    <input
+                      type="text"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      disabled={saving}
+                      placeholder="gpt-4o"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  {/* API Key */}
+                  <Field
+                    label="API Key"
+                    hint={
+                      provider === "ollama"
+                        ? "ollama 本地模式可留空"
+                        : isEditMode
+                          ? "存入 OS keyring，不落明文（C-04）。留空表示不修改"
+                          : "存入 OS keyring，不落明文（C-04）"
+                    }
+                  >
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      disabled={saving}
+                      placeholder="sk-..."
+                      className={INPUT_CLASS}
+                      autoComplete="off"
+                    />
+                  </Field>
+
+                  {/* Error */}
+                  {formError && (
+                    <div className="rounded-lg bg-[var(--color-risk-high)]/10 px-3 py-2 text-xs text-[var(--color-risk-high)]">
+                      {formError}
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="flex gap-2">
+                    {isEditMode && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={handleClose}
+                        disabled={saving}
+                        className="flex-1"
+                      >
+                        取消
+                      </Button>
+                    )}
+                    <Button type="submit" disabled={saving} className="flex-1">
+                      {saving ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          正在保存…
+                        </>
+                      ) : (
+                        isEditMode ? "保存并重启 sidecar" : "保存并启动"
+                      )}
+                    </Button>
+                  </div>
+                </>
+              )}
             </form>
           </motion.div>
         </motion.div>

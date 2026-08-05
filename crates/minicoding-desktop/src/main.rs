@@ -15,10 +15,48 @@ use minicoding_core::config::ProviderConfig;
 use minicoding_desktop::{config, sidecar, tray};
 use tauri::Manager;
 
+/// panic 日志文件名（写入 temp 目录，Windows 下 `%TEMP%\\minicoding-panic.log`）。
+const PANIC_LOG_FILE: &str = "minicoding-panic.log";
+
+/// 将 panic 信息直接写入临时文件（不依赖 log crate，确保 logger 未初始化时也能记录）。
+///
+/// Windows 双击启动时 stderr 不可见，若 panic 仅输出到 stderr 则用户无法诊断。
+/// 此函数将 panic 信息追加写入 `%TEMP%\\minicoding-panic.log`（或 `/tmp/minicoding-panic.log`）。
+fn write_panic_to_file(location: &str, payload: &str) {
+    use std::io::Write;
+    let timestamp = chrono_like_timestamp();
+
+    // 获取系统临时目录
+    let log_path = std::env::temp_dir().join(PANIC_LOG_FILE);
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(
+            file,
+            "[{timestamp}] panic at {location}\n  payload: {payload}\n  version: {}\n---",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}
+
+/// 简单时间戳（避免引入 chrono 依赖，用 `std::time` + 本地格式化）。
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // 简单格式：Unix 秒数（足够诊断，无需完整日期格式化）
+    format!("unix:{secs}")
+}
+
 /// Tauri 应用入口。
 fn main() {
-    // 安装 panic hook：将 panic 信息写入日志文件，便于诊断崩溃
-    // （默认 panic 只输出到 stderr，Windows 双击启动时 stderr 不可见）
+    // 安装 panic hook：将 panic 信息写入文件 + stderr，便于诊断崩溃。
+    // 必须在 Tauri builder 之前安装，确保任何阶段的 panic 都能被捕获。
+    // （Tauri plugin-log 在 builder 阶段才初始化，此前 log::error! 是 no-op）
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().map_or_else(
             || "<unknown>".to_string(),
@@ -30,11 +68,18 @@ fn main() {
             .map(|s| (*s).to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic payload>".to_string());
+
         eprintln!("panic at {location}: {payload}");
+
+        // 直接写文件（不依赖 log crate，确保 logger 未初始化时也能记录）
+        write_panic_to_file(&location, &payload);
+
+        // log crate 可能已初始化（panic 发生在 builder 之后），尝试记录
         log::error!("应用 panic: location={location}, payload={payload}");
     }));
 
-    tauri::Builder::default()
+    // 启动 Tauri 应用，失败时弹出错误对话框（Windows 下 stderr 不可见）
+    let run_result = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -59,7 +104,10 @@ fn main() {
             open_config_file_handler,
         ])
         .setup(|app| {
-            log::info!("minicoding-desktop 启动中…");
+            log::info!(
+                "minicoding-desktop 启动中… (version: {})",
+                env!("CARGO_PKG_VERSION")
+            );
             // W-07：初始化系统托盘 + 全局快捷键（失败非致命，不阻塞启动）
             if let Err(e) = tray::init(app.handle()) {
                 log::warn!("系统托盘/全局快捷键初始化失败（非致命）: {e}");
@@ -76,25 +124,85 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .unwrap_or_else(|e| {
-            eprintln!("Tauri 应用启动失败: {e}");
-            log::error!("Tauri 应用启动失败: {e}");
-        });
+        .run(tauri::generate_context!());
+
+    if let Err(e) = run_result {
+        let msg = format!("Tauri 应用启动失败: {e}");
+        eprintln!("{msg}");
+        log::error!("{msg}");
+
+        // 写入 panic 日志文件（确保 stderr 不可见时也能诊断）
+        write_panic_to_file("tauri::Builder::run", &msg);
+
+        // 尝试弹出 native 错误对话框（Windows 下用户双击启动时 stderr 不可见）
+        // 若对话框也失败，至少文件已写入，用户可查看 %TEMP%\minicoding-panic.log
+        show_error_dialog("minicoding 启动失败", &msg);
+    }
+}
+
+/// 跨平台弹出 native 错误对话框。
+///
+/// - Windows: `MessageBoxW`（通过 tauri 的 winapi 集成）
+/// - macOS/Linux: 若 `tauri-plugin-dialog` 可用则使用，否则仅 stderr + 文件
+///
+/// 此函数 intentionally 不返回 Result —— 对话框失败不应影响错误日志已写入文件。
+fn show_error_dialog(title: &str, message: &str) {
+    // 方案 1：尝试用 std::process::Command 调用平台原生对话框
+    // 这是最简单可靠的方案，不依赖额外 Tauri 插件
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: 用 PowerShell 弹出 MessageBox
+        let ps_cmd = format!(
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{message}', '{title}', 'OK', 'Error')",
+            message = message.replace('\'', "''"),
+            title = title.replace('\'', "''")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: 用 osascript 弹出对话框
+        let script = format!(
+            "display dialog \"{message}\" with title \"{title}\" buttons {{\"OK\"}} default button \"OK\" with icon stop",
+            message = message.replace('"', "\\\""),
+            title = title.replace('"', "\\\"")
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: 尝试 zenity，失败则静默（日志已写入文件）
+        let _ = std::process::Command::new("zenity")
+            .args(["--error", "--title", title, "--text", message])
+            .spawn();
+    }
+
+    // 非 Windows/macOS/Linux 平台：仅 stderr + 文件（已由调用方处理）
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (title, message);
+    }
 }
 
 /// `start_session` Tauri 命令（`invoke('start_session')`）。
 ///
 /// 前端调用此命令获取 sidecar 端口，然后用 `fetch` + `EventSource` 连接
-/// `http://127.0.0.1:PORT`。失败时回退到开发默认端口 8080。
+/// `http://127.0.0.1:PORT`。失败时返回错误，前端显示错误界面。
 #[tauri::command]
 async fn start_session_handler(
     app: tauri::AppHandle,
 ) -> Result<minicoding_desktop::SessionInfo, String> {
-    sidecar::spawn_sidecar(&app)
-        .await
-        .map_err(|e| e.to_string())
-        .or_else(|_| sidecar::fallback_session_info())
+    sidecar::spawn_sidecar(&app).await.map_err(|e| {
+        let err_str = e.to_string();
+        log::error!("sidecar 启动失败: {err_str}");
+        err_str
+    })
 }
 
 /// `get_provider_config`：读取 provider 配置（`config.toml`）。
