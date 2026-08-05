@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle } from "lucide-react";
+import { ListTodo, Loader2, AlertCircle, Settings } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
@@ -104,7 +104,7 @@ function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => voi
 }
 
 function AppInner() {
-  const { activeSessionId, taskPanelOpen, toggleTaskPanel } = useUIStore();
+  const { activeSessionId, taskPanelOpen, toggleTaskPanel, setSettingsOpen } = useUIStore();
   const permissions = usePermissions();
   const { data: sessions } = useSessions();
 
@@ -163,6 +163,14 @@ function AppInner() {
                 {tasks.length}
               </span>
             )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSettingsOpen(true)}
+            title="设置"
+          >
+            <Settings className="h-4 w-4" />
           </Button>
         </div>
 
