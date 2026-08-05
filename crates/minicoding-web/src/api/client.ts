@@ -9,8 +9,9 @@
  * - `GET /sessions/{id}/events` SSE 事件流（Last-Event-ID 恢复）
  * - `POST /sessions/{id}/permissions/{pid}` 回传权限决策
  *
- * API base 默认空串（同源，开发用 Vite proxy / 生产用 `--web` 托管），
- * Tauri 桌面模式通过 `VITE_API_BASE` 注入 sidecar 端口。
+ * API base 默认空串（同源，开发用 Vite proxy / 生产用 `--web` 托管）；
+ * Tauri 桌面模式由 `useDesktopStore` 在 sidecar 启动后调用 `setApiBase`
+ * 注入 `http://127.0.0.1:{port}`（design.md §26.5）。
  */
 
 import type {
@@ -22,12 +23,32 @@ import type {
   PermissionMode,
 } from "./generated";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+/**
+ * 当前 API base（动态）。
+ *
+ * - Web 模式：`VITE_API_BASE` 环境变量或空串（同源）
+ * - Tauri 桌面模式：sidecar 启动后由 `setApiBase` 设为 `http://127.0.0.1:{port}`
+ */
+let apiBase: string = import.meta.env.VITE_API_BASE ?? "";
+
+/** 读取当前 API base。 */
+export function getApiBase(): string {
+  return apiBase;
+}
+
+/**
+ * 设置 API base（Tauri 桌面模式 sidecar 启动后调用）。
+ *
+ * 传入空串则回退到同源 / `VITE_API_BASE`，便于 Web 模式重置。
+ */
+export function setApiBase(base: string): void {
+  apiBase = base;
+}
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────────
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, {
+  const resp = await fetch(`${apiBase}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
@@ -111,7 +132,7 @@ export function subscribeEvents(
   onEvent: (event: EventDto) => void,
   onError?: (e: Event) => void,
 ): SSESubscription {
-  const url = `${API_BASE}/sessions/${sessionId}/events`;
+  const url = `${apiBase}/sessions/${sessionId}/events`;
   const source = new EventSource(url);
 
   source.onmessage = (ev) => {

@@ -1,16 +1,19 @@
-import { useCallback } from "react";
-import { ListTodo } from "lucide-react";
+import { useCallback, useEffect } from "react";
+import { ListTodo, Loader2, AlertCircle } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
 import { ChatInput } from "./components/chat/ChatInput";
 import { PermissionDialog } from "./components/permission/PermissionDialog";
 import { TaskPanel } from "./components/tasks/TaskPanel";
+import { SetupDialog } from "./components/setup/SetupDialog";
 import { Button } from "./components/ui/button";
 import { useMessages, useSendMessage, useSSEStream } from "./hooks/useChat";
 import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
+import { useDesktopStore } from "./stores/desktop";
 import { useSessions } from "./hooks/useSessions";
+import { setApiBase } from "./api/client";
 import type { Task } from "./api/generated";
 
 const queryClient = new QueryClient({
@@ -22,8 +25,81 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AppInner />
+      <DesktopGate />
     </QueryClientProvider>
+  );
+}
+
+/**
+ * 桌面端启动门控（M9，见 AGENTS.md §8.1、design.md §26.5）。
+ *
+ * 根据桌面初始化阶段决定渲染加载屏 / 配置弹窗 / 错误屏 / 主界面：
+ * - `loading`：初始化中（检查配置 / 启动 sidecar）
+ * - `needs-config`：缺少 provider 配置或 API key，弹 SetupDialog
+ * - `error`：初始化失败，显示错误信息 + 重试按钮
+ * - `ready`：sidecar 已启动，渲染主界面
+ *
+ * SetupDialog 在 `needs-config` / `ready` 阶段保持挂载，由其内部
+ * AnimatePresence 根据 phase 控制可见性（保证退出动画播放）。
+ */
+function DesktopGate() {
+  const phase = useDesktopStore((s) => s.phase);
+  const apiBase = useDesktopStore((s) => s.apiBase);
+  const error = useDesktopStore((s) => s.error);
+  const init = useDesktopStore((s) => s.init);
+
+  // mount 时初始化桌面环境（Web 模式直接 ready，Tauri 模式检查配置并启动 sidecar）
+  useEffect(() => {
+    void init();
+  }, [init]);
+
+  // apiBase 变化时同步到 HTTP/SSE 客户端（sidecar 启动后注入端口）
+  useEffect(() => {
+    setApiBase(apiBase);
+  }, [apiBase]);
+
+  if (phase === "loading") {
+    return <LoadingScreen />;
+  }
+
+  if (phase === "error") {
+    return <ErrorScreen message={error ?? "未知错误"} onRetry={() => void init()} />;
+  }
+
+  // needs-config / ready：SetupDialog 常驻（内部按 phase 控制可见性）
+  return (
+    <>
+      {phase === "ready" && <AppInner />}
+      <SetupDialog />
+    </>
+  );
+}
+
+/** 加载屏（初始化 sidecar 期间显示）。 */
+function LoadingScreen() {
+  return (
+    <div className="flex h-screen w-screen flex-col items-center justify-center gap-4">
+      <Loader2 className="h-8 w-8 animate-spin text-[var(--color-accent-hover)]" />
+      <p className="text-sm text-[var(--color-text-muted)]">正在初始化…</p>
+    </div>
+  );
+}
+
+/** 错误屏（初始化失败时显示，提供重试按钮）。 */
+function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex h-screen w-screen flex-col items-center justify-center gap-4 px-6 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--color-risk-high)]/15">
+        <AlertCircle className="h-6 w-6 text-[var(--color-risk-high)]" />
+      </div>
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">启动失败</h2>
+        <p className="max-w-md text-sm text-[var(--color-text-muted)]">{message}</p>
+      </div>
+      <Button variant="secondary" size="sm" onClick={onRetry}>
+        重试
+      </Button>
+    </div>
   );
 }
 
