@@ -60,7 +60,7 @@ pub fn save_provider_config(provider: ProviderConfig) -> Result<()> {
         .with_context(|| format!("写入配置临时文件失败: {tmp}"))?;
     std::fs::rename(&tmp, &config_path)
         .with_context(|| format!("rename 配置文件失败: {tmp} -> {config_path}"))?;
-    tracing::info!(path = %config_path, "provider 配置已保存");
+    log::info!("provider 配置已保存: {config_path}");
     Ok(())
 }
 
@@ -95,7 +95,7 @@ pub fn store_api_key(key: &str) -> Result<()> {
     entry
         .set_password(key)
         .map_err(|e| anyhow::anyhow!("keyring set 失败: {e}"))?;
-    tracing::info!("api key 已写入 OS keyring");
+    log::info!("api key 已写入 OS keyring");
     Ok(())
 }
 

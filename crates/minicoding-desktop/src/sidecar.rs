@@ -39,7 +39,7 @@ fn build_provider_args_from_config() -> Vec<String> {
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "读取 provider 配置失败，sidecar 用默认值");
+            log::warn!("读取 provider 配置失败，sidecar 用默认值: {e}");
         }
     }
     args
@@ -83,7 +83,7 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {
         while let Ok(Some(line)) = reader.next_line().await {
-            tracing::info!(line = %line, "sidecar stdout");
+            log::info!("sidecar stdout: {line}");
             if let Some(p) = parse_port(&line) {
                 return Ok(p);
             }
@@ -93,7 +93,7 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
     .await
     .context("sidecar 启动超时")??;
 
-    tracing::info!(port, pid, "sidecar 已启动");
+    log::info!("sidecar 已启动: port={port}, pid={pid}");
     Ok(SessionInfo { port, pid })
 }
 
@@ -121,7 +121,7 @@ fn parse_port(line: &str) -> Option<u16> {
 /// # Errors
 /// 此函数始终返回 `Ok`，标记 `Result` 仅用于与调用点（`or_else`）类型对齐。
 pub fn fallback_session_info() -> Result<SessionInfo, String> {
-    tracing::warn!("sidecar 启动失败，回退到默认端口 8080（开发模式）");
+    log::warn!("sidecar 启动失败，回退到默认端口 8080（开发模式）");
     Ok(SessionInfo { port: 8080, pid: 0 })
 }
 
@@ -166,7 +166,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Stdout(line_bytes) = event {
                 let line = String::from_utf8_lossy(&line_bytes);
-                tracing::info!(line = %line.trim(), "sidecar stdout");
+                log::info!("sidecar stdout: {}", line.trim());
                 if let Some(p) = parse_port(&line) {
                     return Ok(p);
                 }
@@ -177,7 +177,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
     .await
     .context("sidecar 启动超时")??;
 
-    tracing::info!(port, pid, "Tauri sidecar 已启动");
+    log::info!("Tauri sidecar 已启动: port={port}, pid={pid}");
     Ok(SessionInfo { port, pid })
 }
 

@@ -30,8 +30,14 @@ fn setup_tray(app: &AppHandle) -> Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
+    // 获取窗口图标，缺失时用空白图标兜底（不 panic）
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("default_window_icon 为 None（图标未嵌入）"))?;
+
     TrayIconBuilder::new()
-        .icon(app.default_window_icon().cloned().unwrap())
+        .icon(icon)
         .tooltip("minicoding")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -49,7 +55,7 @@ fn setup_tray(app: &AppHandle) -> Result<()> {
         })
         .build(app)?;
 
-    tracing::info!("系统托盘已初始化");
+    log::info!("系统托盘已初始化");
     Ok(())
 }
 
@@ -71,7 +77,7 @@ fn setup_global_shortcut(app: &AppHandle) -> Result<()> {
             }
         })?;
 
-    tracing::info!("全局快捷键已注册: Cmd/Ctrl+Shift+M");
+    log::info!("全局快捷键已注册: Cmd/Ctrl+Shift+M");
     Ok(())
 }
 

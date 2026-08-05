@@ -17,7 +17,35 @@ use tauri::Manager;
 
 /// Tauri 应用入口。
 fn main() {
+    // 安装 panic hook：将 panic 信息写入日志文件，便于诊断崩溃
+    // （默认 panic 只输出到 stderr，Windows 双击启动时 stderr 不可见）
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().map_or_else(
+            || "<unknown>".to_string(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        eprintln!("panic at {location}: {payload}");
+        log::error!("应用 panic: location={location}, payload={payload}");
+    }));
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("minicoding".to_string()),
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -31,10 +59,12 @@ fn main() {
             open_config_file_handler,
         ])
         .setup(|app| {
-            // W-07：初始化系统托盘 + 全局快捷键
+            log::info!("minicoding-desktop 启动中…");
+            // W-07：初始化系统托盘 + 全局快捷键（失败非致命，不阻塞启动）
             if let Err(e) = tray::init(app.handle()) {
-                tracing::warn!(error = %e, "系统托盘/全局快捷键初始化失败（非致命）");
+                log::warn!("系统托盘/全局快捷键初始化失败（非致命）: {e}");
             }
+            log::info!("minicoding-desktop 启动完成");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -47,7 +77,10 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Tauri 应用启动失败");
+        .unwrap_or_else(|e| {
+            eprintln!("Tauri 应用启动失败: {e}");
+            log::error!("Tauri 应用启动失败: {e}");
+        });
 }
 
 /// `start_session` Tauri 命令（`invoke('start_session')`）。
