@@ -6,6 +6,7 @@ import {
   subscribeEvents,
   type EventDto,
 } from "../api/client";
+import type { Message } from "../api/generated";
 
 /**
  * 对话 hook：消息快照 + SSE 流式增量（见 AGENTS.md §8.5）。
@@ -14,7 +15,7 @@ import {
  * - `useSSEStream`：EventSource 订阅事件流，`Token` 增量追加到当前 streaming
  *   消息，`MessageAppended` 替换整条消息并 invalidate 快照缓存；
  *   `PermissionRequested` / `TaskUpdated` 通过回调通知调用方
- * - `useSendMessage`：发送消息（阻塞至 turn 完成），成功后 invalidate
+ * - `useSendMessage`：发送消息（阻塞至 turn 完成），乐观更新立即显示用户消息
  */
 export function useMessages(sessionId: string | null) {
   return useQuery({
@@ -28,6 +29,31 @@ export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (text: string) => sendMessage(sessionId!, text),
+    // 乐观更新：发送时立即在 UI 显示用户消息（不等 POST 完成）
+    onMutate: async (text: string) => {
+      if (!sessionId) return {};
+      // 取消进行中的 refetch，避免覆盖乐观更新
+      await qc.cancelQueries({ queryKey: ["messages", sessionId] });
+      const prev = qc.getQueryData<Message[]>(["messages", sessionId]);
+      const optimistic: Message = {
+        id: `optimistic-${Date.now()}`,
+        role: "user",
+        content: [{ type: "text", text }],
+        tool_calls: [],
+        tool_call_id: null,
+        created_at: new Date().toISOString(),
+        metadata: { tokens: null, pinned: false, summarized: false, source: "user" },
+      };
+      qc.setQueryData<Message[]>(["messages", sessionId], (old) => [...(old ?? []), optimistic]);
+      return { prev };
+    },
+    // POST 失败时回滚
+    onError: (_err, _text, context) => {
+      if (sessionId && context?.prev) {
+        qc.setQueryData(["messages", sessionId], context.prev);
+      }
+    },
+    // POST 成功后 invalidate（SSE message_appended 也会 invalidate，这里兜底）
     onSuccess: () => qc.invalidateQueries({ queryKey: ["messages", sessionId] }),
   });
 }
