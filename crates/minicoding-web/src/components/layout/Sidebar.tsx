@@ -5,6 +5,9 @@ import { Badge } from "../ui/badge";
 import { ScrollArea } from "../ui/scroll-area";
 import { useSessions, useCreateSession } from "../../hooks/useSessions";
 import { useUIStore } from "../../stores/ui";
+import { isTauri } from "../../api/tauri";
+import { loadWebSettings } from "../../stores/webSettings";
+import type { CreateSessionBody } from "../../api/client";
 import { cn, formatTime } from "../../lib/utils";
 import type { SessionMeta } from "../../api/generated";
 
@@ -15,7 +18,18 @@ export function Sidebar() {
     useUIStore();
 
   const handleNewSession = () => {
-    createSession.mutate(undefined, {
+    // Web 模式：从 localStorage 读取 provider 配置注入会话创建请求
+    // Tauri 模式：sidecar 启动时已读 config.toml，无需注入
+    let body: CreateSessionBody | undefined;
+    if (!isTauri()) {
+      const settings = loadWebSettings();
+      body = {
+        provider: settings.default,
+        api_base: settings.api_base,
+        model: settings.model,
+      };
+    }
+    createSession.mutate(body, {
       onSuccess: (resp) => setActiveSession(resp.session_id),
     });
   };

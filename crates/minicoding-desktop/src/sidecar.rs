@@ -114,20 +114,6 @@ fn parse_port(line: &str) -> Option<u16> {
     (1024..=65535).contains(&p).then_some(p)
 }
 
-/// sidecar 启动失败时的兜底（返回开发默认端口 8080）。
-///
-/// 仅用于开发模式（sidecar 由用户手动启动）。生产模式应直接报错。
-///
-/// **已废弃**：保留函数签名仅为向后兼容，不再实际使用。
-/// 前端会收到 sidecar 启动错误并显示错误界面。
-///
-/// # Errors
-/// 此函数始终返回 `Err`，明确告知调用方 sidecar 启动失败。
-pub fn fallback_session_info() -> Result<SessionInfo, String> {
-    log::warn!("sidecar 启动失败，返回错误给前端（不再 fallback 到 8080）");
-    Err("sidecar 启动失败：minicoding-server 二进制可能缺失或无法执行".to_string())
-}
-
 // ─── Tauri 集成（feature gate `desktop`）────────────────────────────────────
 
 /// 启动 sidecar（Tauri 版本，通过 `tauri-plugin-shell` sidecar API）。

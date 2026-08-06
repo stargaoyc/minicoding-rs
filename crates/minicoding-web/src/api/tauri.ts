@@ -27,7 +27,7 @@ export function isTauri(): boolean {
 export interface SessionInfo {
   /** sidecar 监听端口。 */
   port: number;
-  /** sidecar 进程 PID（fallback 模式下为 0）。 */
+  /** sidecar 进程 PID。 */
   pid: number;
 }
 
@@ -89,4 +89,9 @@ export function deleteApiKey(): Promise<void> {
 /** 用系统文件管理器打开配置文件所在目录，返回配置文件绝对路径。 */
 export function openConfigFile(): Promise<string> {
   return invoke<string>("open_config_file");
+}
+
+/** 重启应用（编辑模式保存配置后调用，确保新 sidecar 配置生效）。 */
+export function restartApp(): Promise<void> {
+  return invoke<void>("restart_app");
 }

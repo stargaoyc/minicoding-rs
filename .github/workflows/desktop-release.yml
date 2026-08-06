@@ -134,7 +134,6 @@ jobs:
           name: desktop-${{ matrix.os }}
           path: |
             target/${{ matrix.target }}/release/bundle/**/*.dmg
-            target/${{ matrix.target }}/release/bundle/**/*.app
             target/${{ matrix.target }}/release/bundle/**/*.msi
             target/${{ matrix.target }}/release/bundle/**/*.exe
             target/${{ matrix.target }}/release/bundle/**/*.AppImage

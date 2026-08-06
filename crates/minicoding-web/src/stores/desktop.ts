@@ -9,6 +9,7 @@ import {
   type ProviderConfig,
 } from "../api/tauri";
 import { setApiBase } from "../api/client";
+import { loadWebSettings, saveWebSettings, type WebProviderSettings } from "./webSettings";
 
 /**
  * 桌面端启动阶段（M9，见 AGENTS.md §8.1、design.md §26.5）。
@@ -40,10 +41,14 @@ interface DesktopState {
   apiBase: string;
   /** 错误信息（`phase === 'error'` 时非空）。 */
   error: string | null;
+  /** 编辑模式保存成功后设置为 true，提示用户需要重启。 */
+  restartRequired: boolean;
   /** 初始化桌面环境（App mount 时调用）。 */
   init: () => Promise<void>;
-  /** 保存 provider 配置 + API key，完成后重新初始化。 */
+  /** 保存 provider 配置 + API key。首次启动后自动 init；编辑模式仅保存并提示重启。 */
   saveConfig: (input: ProviderInput) => Promise<void>;
+  /** 清除 restartRequired 标志（用户确认后）。 */
+  clearRestartRequired: () => void;
 }
 
 /** 默认 provider 配置（与 Rust `ProviderConfig::default` 对齐）。 */
@@ -79,11 +84,16 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   phase: "loading",
   apiBase: "",
   error: null,
+  restartRequired: false,
+
+  clearRestartRequired: () => set({ restartRequired: false }),
 
   init: async () => {
     // Web 模式（非 Tauri）：直接就绪，API base 走同源 / VITE_API_BASE
     if (!isTauri()) {
       setApiBase("");
+      // Web 模式从 localStorage 加载设置（供创建会话时注入）
+      loadWebSettings();
       set({ phase: "ready", apiBase: "", error: null });
       return;
     }
@@ -112,10 +122,26 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
   },
 
   saveConfig: async (input) => {
+    // Web 模式：存 localStorage，无需 keyring/sidecar
     if (!isTauri()) {
-      set({ phase: "error", error: "Web 模式不支持保存 provider 配置" });
+      try {
+        const settings: WebProviderSettings = {
+          default: input.default,
+          api_base: input.api_base,
+          model: input.model,
+        };
+        saveWebSettings(settings);
+        // Web 模式无需重启，直接关闭弹窗
+      } catch (e) {
+        set({
+          phase: "error",
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
       return;
     }
+
+    const wasReady = get().phase === "ready";
 
     try {
       // 构造完整 ProviderConfig（保留默认 timeout/retries，C-04：api_key 留空）
@@ -133,8 +159,15 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
         await storeApiKey(input.apiKey);
       }
 
-      // 重新初始化（启动 sidecar）
-      await get().init();
+      if (wasReady) {
+        // 编辑模式：sidecar 已在运行，旧进程无法安全杀死。
+        // 标记 restartRequired，提示用户重启应用以应用新配置。
+        // 直接调用 init() 会启动第二个 sidecar（资源泄漏），故不调用。
+        set({ restartRequired: true });
+      } else {
+        // 首次启动：配置就绪，启动 sidecar
+        await get().init();
+      }
     } catch (e) {
       set({
         phase: "error",
