@@ -28,7 +28,7 @@ rust-version = "1.99"
 license = "AGPL-3.0-only"
 repository = "https://github.com/minicoding/minicoding-rs"
 homepage = "https://github.com/minicoding/minicoding-rs"
-version = "0.2.14"
+version = "0.2.15"
 authors = ["stargaoyc"]
 
 # 统一依赖版本管理（见 AGENTS.md §2.7、tech-stack.md §12）
@@ -62,7 +62,7 @@ anyhow = "1.0"
 camino = { version = "1.1", features = ["serde1"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 ulid = { version = "1.1", features = ["serde"] }
-time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting", "parsing", "macros"] }
 home = "0.5"
 
 # 语义化版本（ExtensionManifest 版本字段用，见 design.md §23）

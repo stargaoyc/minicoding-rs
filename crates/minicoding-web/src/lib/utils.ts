@@ -6,9 +6,10 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** 格式化时间戳为短显示（`14:32` / `昨天` / `8/2`）。 */
+/** 格式化时间戳为短显示（`14:32` / `昨天` / `8/2`）。无效日期返回空串。 */
 export function formatTime(iso: string): string {
   const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
   const now = new Date();
   const sameDay = d.toDateString() === now.toDateString();
   if (sameDay) {

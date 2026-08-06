@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import { User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message } from "../../api/generated";
-import { cn } from "../../lib/utils";
+import { cn, formatTime } from "../../lib/utils";
 import { extractText } from "../../lib/message";
 
 const ROLE_CONFIG = {
@@ -62,10 +62,7 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
             {config.label}
           </span>
           <span className="text-[10px] text-[var(--color-text-muted)]/60">
-            {new Date(message.created_at).toLocaleTimeString("zh-CN", {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
+            {formatTime(message.created_at)}
           </span>
         </div>
         <div className="prose prose-invert max-w-none text-sm leading-relaxed">

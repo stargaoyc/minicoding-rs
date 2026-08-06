@@ -96,6 +96,7 @@ pub struct Message {
     pub tool_call_id: Option<super::ToolCallId>,
     /// RFC3339 时间戳（`time::OffsetDateTime` 序列化为 string，见 `design.md` §25.4）。
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub metadata: MessageMeta,
 }
