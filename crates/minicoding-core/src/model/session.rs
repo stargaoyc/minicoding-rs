@@ -18,9 +18,11 @@ pub type SessionId = String;
 pub struct SessionMeta {
     pub id: SessionId,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub message_count: usize,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub last_message_at: OffsetDateTime,
     /// 任务列表（跨压缩保留，见 `design.md` §18.5、C-31）。
     ///
@@ -40,6 +42,7 @@ pub struct SessionMeta {
 pub struct Session {
     pub id: SessionId,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub workdir: Utf8PathBuf,

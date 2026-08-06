@@ -184,6 +184,19 @@ function AppInner() {
               isStreaming={isStreaming}
               isLoading={isLoading}
             />
+            {/* 发送错误提示 */}
+            {sendMessage.isError && (
+              <div className="border-t border-[var(--color-risk-high)]/30 bg-[var(--color-risk-high)]/10 px-4 py-2 text-sm text-[var(--color-risk-high)]">
+                发送失败：{sendMessage.error instanceof Error ? sendMessage.error.message : String(sendMessage.error)}
+              </div>
+            )}
+            {/* "思考中" 指示器：POST 请求进行中但 SSE 还未开始流式输出 */}
+            {sendMessage.isPending && !isStreaming && (
+              <div className="flex items-center gap-2 border-t border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-text-muted)]">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在思考…
+              </div>
+            )}
             <ChatInput
               onSend={handleSend}
               isStreaming={isStreaming}

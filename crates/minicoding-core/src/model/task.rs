@@ -72,8 +72,10 @@ pub struct Task {
     /// 阻塞本任务的 `task_id` 列表。
     pub blocked_by: Vec<String>,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[cfg_attr(feature = "ts", ts(type = "string"))]
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 

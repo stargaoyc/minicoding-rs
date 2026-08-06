@@ -153,18 +153,40 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {
         while let Some(event) = rx.recv().await {
-            if let CommandEvent::Stdout(line_bytes) = event {
-                let line = String::from_utf8_lossy(&line_bytes);
-                log::info!("sidecar stdout: {}", line.trim());
-                if let Some(p) = parse_port(&line) {
-                    return Ok(p);
+            match event {
+                CommandEvent::Stdout(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    log::info!("sidecar stdout: {}", line.trim());
+                    if let Some(p) = parse_port(&line) {
+                        return Ok(p);
+                    }
                 }
+                CommandEvent::Stderr(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    log::warn!("sidecar stderr: {}", line.trim());
+                }
+                _ => {}
             }
         }
         anyhow::bail!("sidecar 未输出端口信息")
     })
     .await
     .context("sidecar 启动超时")??;
+
+    // 端口解析后继续捕获 sidecar 日志（后台 task，避免服务器错误不可见）
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line_bytes) => {
+                    log::info!("sidecar: {}", String::from_utf8_lossy(&line_bytes).trim());
+                }
+                CommandEvent::Stderr(line_bytes) => {
+                    log::warn!("sidecar: {}", String::from_utf8_lossy(&line_bytes).trim());
+                }
+                _ => {}
+            }
+        }
+    });
 
     log::info!("Tauri sidecar 已启动: port={port}, pid={pid}");
     Ok(SessionInfo { port, pid })
