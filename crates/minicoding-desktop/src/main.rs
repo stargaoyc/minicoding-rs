@@ -102,6 +102,7 @@ fn main() {
             load_api_key_handler,
             delete_api_key_handler,
             open_config_file_handler,
+            restart_app_handler,
         ])
         .setup(|app| {
             log::info!(
@@ -140,18 +141,20 @@ fn main() {
     }
 }
 
-/// 跨平台弹出 native 错误对话框。
+/// 跨平台弹出 native 错误对话框（阻塞直到用户关闭）。
 ///
-/// - Windows: `MessageBoxW`（通过 tauri 的 winapi 集成）
-/// - macOS/Linux: 若 `tauri-plugin-dialog` 可用则使用，否则仅 stderr + 文件
+/// - Windows: PowerShell `MessageBox.Show()`（阻塞等待用户点击 OK）
+/// - macOS: `osascript display dialog`（阻塞等待用户点击 OK）
+/// - Linux: `zenity --error`（阻塞等待用户点击 OK）
+///
+/// **必须用 `status()` 而非 `spawn()`**：`spawn()` 不等待子进程，主进程可能在
+/// 对话框显示前就退出，用户看不到错误。`status()` 阻塞直到对话框关闭。
 ///
 /// 此函数 intentionally 不返回 Result —— 对话框失败不应影响错误日志已写入文件。
 fn show_error_dialog(title: &str, message: &str) {
-    // 方案 1：尝试用 std::process::Command 调用平台原生对话框
-    // 这是最简单可靠的方案，不依赖额外 Tauri 插件
     #[cfg(target_os = "windows")]
     {
-        // Windows: 用 PowerShell 弹出 MessageBox
+        // Windows: 用 PowerShell 弹出 MessageBox（阻塞等待用户确认）
         let ps_cmd = format!(
             "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{message}', '{title}', 'OK', 'Error')",
             message = message.replace('\'', "''"),
@@ -159,12 +162,12 @@ fn show_error_dialog(title: &str, message: &str) {
         );
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps_cmd])
-            .spawn();
+            .status();
     }
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: 用 osascript 弹出对话框
+        // macOS: 用 osascript 弹出对话框（阻塞等待用户确认）
         let script = format!(
             "display dialog \"{message}\" with title \"{title}\" buttons {{\"OK\"}} default button \"OK\" with icon stop",
             message = message.replace('"', "\\\""),
@@ -172,15 +175,16 @@ fn show_error_dialog(title: &str, message: &str) {
         );
         let _ = std::process::Command::new("osascript")
             .args(["-e", &script])
-            .spawn();
+            .status();
     }
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: 尝试 zenity，失败则静默（日志已写入文件）
+        // Linux: 用 zenity 弹出错误对话框（阻塞等待用户确认）
+        // zenity 不存在时 status() 返回 Err，静默忽略（日志已写入文件）
         let _ = std::process::Command::new("zenity")
             .args(["--error", "--title", title, "--text", message])
-            .spawn();
+            .status();
     }
 
     // 非 Windows/macOS/Linux 平台：仅 stderr + 文件（已由调用方处理）
@@ -254,4 +258,15 @@ fn open_config_file_handler(app: tauri::AppHandle) -> Result<String, String> {
         .open(dir.as_str(), None)
         .map_err(|e| format!("打开配置目录失败: {e}"))?;
     Ok(path.to_string())
+}
+
+/// `restart_app`：重启应用（编辑模式保存配置后调用）。
+///
+/// Tauri `AppHandle::restart()` 会重启当前进程，`kill_on_drop` 确保
+/// 旧 sidecar 子进程在进程退出时被杀死，新进程启动后读取新配置。
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
+fn restart_app_handler(app: tauri::AppHandle) {
+    log::info!("用户请求重启应用以应用新 sidecar 配置");
+    app.restart();
 }

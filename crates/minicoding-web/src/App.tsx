@@ -164,6 +164,7 @@ function AppInner() {
               </span>
             )}
           </Button>
+          {/* 设置按钮：Tauri 模式修改 config.toml + keyring；Web 模式修改 localStorage */}
           <Button
             variant="ghost"
             size="sm"
