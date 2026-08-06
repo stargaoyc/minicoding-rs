@@ -94,14 +94,14 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            start_session_handler,
-            get_provider_config_handler,
-            save_provider_config_handler,
-            store_api_key_handler,
-            load_api_key_handler,
-            delete_api_key_handler,
-            open_config_file_handler,
-            restart_app_handler,
+            start_session,
+            get_provider_config,
+            save_provider_config,
+            store_api_key,
+            load_api_key,
+            delete_api_key,
+            open_config_file,
+            restart_app,
         ])
         .setup(|app| {
             log::info!(
@@ -198,9 +198,7 @@ fn show_error_dialog(title: &str, message: &str) {
 /// 前端调用此命令获取 sidecar 端口，然后用 `fetch` + `EventSource` 连接
 /// `http://127.0.0.1:PORT`。失败时返回错误，前端显示错误界面。
 #[tauri::command]
-async fn start_session_handler(
-    app: tauri::AppHandle,
-) -> Result<minicoding_desktop::SessionInfo, String> {
+async fn start_session(app: tauri::AppHandle) -> Result<minicoding_desktop::SessionInfo, String> {
     sidecar::spawn_sidecar(&app).await.map_err(|e| {
         let err_str = e.to_string();
         log::error!("sidecar 启动失败: {err_str}");
@@ -210,7 +208,7 @@ async fn start_session_handler(
 
 /// `get_provider_config`：读取 provider 配置（`config.toml`）。
 #[tauri::command]
-fn get_provider_config_handler() -> Result<ProviderConfig, String> {
+fn get_provider_config() -> Result<ProviderConfig, String> {
     config::get_provider_config().map_err(|e| e.to_string())
 }
 
@@ -218,26 +216,26 @@ fn get_provider_config_handler() -> Result<ProviderConfig, String> {
 ///
 /// `api_key` 字段不落明文，由 `store_api_key` 写入 OS keyring（C-04）。
 #[tauri::command]
-fn save_provider_config_handler(provider: ProviderConfig) -> Result<(), String> {
+fn save_provider_config(provider: ProviderConfig) -> Result<(), String> {
     config::save_provider_config(provider).map_err(|e| e.to_string())
 }
 
 /// `store_api_key`：写入 API key 到 OS keyring（与 CLI `cred store` 共享 entry）。
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command 参数按值传递（JSON 反序列化）
-fn store_api_key_handler(api_key: String) -> Result<(), String> {
+fn store_api_key(api_key: String) -> Result<(), String> {
     config::store_api_key(&api_key).map_err(|e| e.to_string())
 }
 
 /// `load_api_key`：从 OS keyring 读取 API key（`Ok(None)` 表示未设置）。
 #[tauri::command]
-fn load_api_key_handler() -> Result<Option<String>, String> {
+fn load_api_key() -> Result<Option<String>, String> {
     config::load_api_key().map_err(|e| e.to_string())
 }
 
 /// `delete_api_key`：删除 keyring 中的 API key。
 #[tauri::command]
-fn delete_api_key_handler() -> Result<(), String> {
+fn delete_api_key() -> Result<(), String> {
     config::delete_api_key().map_err(|e| e.to_string())
 }
 
@@ -246,7 +244,7 @@ fn delete_api_key_handler() -> Result<(), String> {
 /// 调用 `tauri-plugin-shell` 的 `open` 打开配置文件所在目录（跨平台安全）。
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
-fn open_config_file_handler(app: tauri::AppHandle) -> Result<String, String> {
+fn open_config_file(app: tauri::AppHandle) -> Result<String, String> {
     use tauri_plugin_shell::ShellExt;
     let path = config::config_file_path().map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or_else(|| camino::Utf8Path::new("."));
@@ -265,7 +263,7 @@ fn open_config_file_handler(app: tauri::AppHandle) -> Result<String, String> {
 /// 旧 sidecar 子进程在进程退出时被杀死，新进程启动后读取新配置。
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
-fn restart_app_handler(app: tauri::AppHandle) {
+fn restart_app(app: tauri::AppHandle) {
     log::info!("用户请求重启应用以应用新 sidecar 配置");
     app.restart();
 }
