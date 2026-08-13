@@ -97,7 +97,6 @@ function WorkspaceBody({ sessionId }: { sessionId: string }) {
       setSwitching(false);
     }
   };
-
   return (
     <div className="flex flex-col gap-1 px-3 pb-3">
       {rootLoading ? (
@@ -139,6 +138,11 @@ function WorkspaceBody({ sessionId }: { sessionId: string }) {
           切换
         </Button>
       </div>
+      {switching && (
+        <p className="px-1 text-[10px] text-[var(--color-text-muted)]">
+          等待授权确认…（权限弹窗未出现时 65s 后超时）
+        </p>
+      )}
       {switchError && (
         <p className="px-1 text-[10px] text-[var(--color-risk-high)]">{switchError}</p>
       )}

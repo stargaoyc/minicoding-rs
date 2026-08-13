@@ -16,15 +16,53 @@ use common::{
 
 /// 构造测试用 Runtime：注入 mock provider、内存存储、空工具表。
 fn build_runtime(provider: ScriptedProvider, tools: ToolRegistry) -> Runtime {
+    build_runtime_with_prompter(provider, tools, Arc::new(DenyPrompter))
+}
+
+/// 构造测试用 Runtime（可指定 prompter，供 switch_workdir 权限路径测试）。
+fn build_runtime_with_prompter(
+    provider: ScriptedProvider,
+    tools: ToolRegistry,
+    prompter: Arc<dyn minicoding_core::policy::PermissionPrompter>,
+) -> Runtime {
     RuntimeBuilder::new()
         .provider(Arc::new(provider))
         .context(Arc::new(TestContext::new("test system prompt")))
         .storage(Arc::new(InMemoryStorage::new()))
         .tools(tools)
+        .prompter(prompter)
         .config(RuntimeConfig::default())
         .workdir(Utf8PathBuf::from("."))
         .build()
         .expect("runtime build")
+}
+
+/// 恒拒绝的 prompter（默认测试策略：权限全部 Deny）。
+#[derive(Default)]
+struct DenyPrompter;
+
+impl minicoding_core::policy::PermissionPrompter for DenyPrompter {
+    fn prompt(
+        &self,
+        _p: minicoding_core::policy::PermissionPrompt,
+    ) -> minicoding_core::provider::BoxFuture<'_, minicoding_core::policy::Decision> {
+        Box::pin(async {
+            minicoding_core::policy::Decision::Deny("test denies by default".to_string())
+        })
+    }
+}
+
+/// 恒允许的 prompter（供 switch_workdir Allow 路径测试）。
+#[derive(Default)]
+struct AllowPrompter;
+
+impl minicoding_core::policy::PermissionPrompter for AllowPrompter {
+    fn prompt(
+        &self,
+        _p: minicoding_core::policy::PermissionPrompt,
+    ) -> minicoding_core::provider::BoxFuture<'_, minicoding_core::policy::Decision> {
+        Box::pin(async { minicoding_core::policy::Decision::Allow })
+    }
 }
 
 /// 场景 1：纯文本回复，无工具调用 → 单次迭代即终止。
@@ -148,4 +186,68 @@ async fn multiple_readonly_tools_executed() {
 
     assert_eq!(tool_a.take_calls().len(), 1);
     assert_eq!(tool_b.take_calls().len(), 1);
+}
+
+// ─── workspace.switch（W-11）：目录校验 + 权限路径 ───────────────────────────
+
+/// 场景 5：目标目录不存在 → 立即报错（不进入权限弹窗等待）。
+#[tokio::test]
+async fn switch_workdir_nonexistent_dir_errors() {
+    let rt = build_runtime(ScriptedProvider::new(vec![]), ToolRegistry::new());
+    let target = Utf8PathBuf::from("/definitely/nonexistent/minicoding-test-xyz");
+    let res = rt.switch_workdir(&target).await;
+    assert!(res.is_err(), "切换到不存在的目录应报错而非等待审批");
+}
+
+/// 场景 6：目标是文件而非目录 → 报错。
+#[tokio::test]
+async fn switch_workdir_file_target_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = tmp.path().join("afile.txt");
+    std::fs::write(&file, b"x").expect("write fixture");
+    let rt = build_runtime(ScriptedProvider::new(vec![]), ToolRegistry::new());
+    let target = camino::Utf8PathBuf::from_path_buf(file).expect("utf8 path");
+    assert!(
+        rt.switch_workdir(&target).await.is_err(),
+        "目标是文件应报错"
+    );
+}
+
+/// 场景 7：用户拒绝（Deny）→ `Ok(false)`，workdir 保持不变。
+#[tokio::test]
+async fn switch_workdir_denied_keeps_workdir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8 path");
+    let rt = build_runtime(ScriptedProvider::new(vec![]), ToolRegistry::new());
+    assert_eq!(rt.workdir().await, Utf8PathBuf::from("."));
+
+    let switched = rt.switch_workdir(&dir).await.expect("switch returns Ok");
+    assert!(!switched, "Deny 后不应切换");
+    assert_eq!(
+        rt.workdir().await,
+        Utf8PathBuf::from("."),
+        "workdir 应保持不变"
+    );
+}
+
+/// 场景 8：用户允许（Allow）→ `Ok(true)`，workdir 更新为 canonical 后的路径。
+#[tokio::test]
+async fn switch_workdir_allowed_updates_workdir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8 path");
+    let rt = build_runtime_with_prompter(
+        ScriptedProvider::new(vec![]),
+        ToolRegistry::new(),
+        Arc::new(AllowPrompter),
+    );
+
+    let switched = rt.switch_workdir(&dir).await.expect("switch returns Ok");
+    assert!(switched, "Allow 后应切换成功");
+    // canonicalize 会规范化路径（如 /tmp → /private/tmp），断言指向同一目录
+    let canonical = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    assert_eq!(
+        rt.workdir().await.as_std_path(),
+        canonical.as_path(),
+        "workdir 应为 canonical 路径"
+    );
 }

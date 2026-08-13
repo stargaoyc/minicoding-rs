@@ -3095,12 +3095,28 @@ macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产�
 - **切换工作区**：新增 `Runtime::switch_workdir(&self, target) -> Result<bool, RuntimeError>`
   （`docs/api.md` §9.2：非绝对路径拒绝、`workspace.switch` Ask 审批 `AllowOnce`、
   事件 + 审计 + `RwLock<Utf8PathBuf>` 更新，后续工具调用自动生效）；
+- **切换前置校验**：`switch_workdir` 先 `canonicalize` + `is_dir` 校验目标**真实存在
+  且是目录**——不存在/不可访问/指向文件时立即报错（HTTP 400），不进入权限弹窗
+  （避免"切换成功但所有浏览 404"的假成功态）；`Allow` 后用 canonical 路径更新
+  workdir（盘符/UNC/尾斜杠统一规范化）；
+- **切换等待护栏**：HTTP handler 对 `turn_lock` 设 60s 等待上限，turn 进行中（最长
+  600s）时返回 409 而非无界排队；前端 `switchWorkspace` 设 65s abort 超时，
+  防止"切换中"无限转圈；
+- **SSE 首次连接不回放历史**：`GET /sessions/{id}/events` 无 `Last-Event-ID` 时走
+  `sse_live`（只推新事件）。此前从 seq 0 重放会把已决的 `permission_requested`
+  重推给前端，导致权限弹窗 pid 覆盖错位、真实审批悬空直到 300s 超时
+  （"切换中"卡死的根因之一）；断线重连由浏览器自动携带 `Last-Event-ID` 走
+  `sse_stream` 恢复路径（不丢事件）；
 - **diff 数据源**：server `runtime_builder` 默认注入 `FileChangeJournal`
   （与 CLI `file-undo` feature 对齐），`FileChange` → `WorkspaceFileChange`
   （`tag = "kind"` 序列化）DTO 转换在 server 层完成，不改 core 序列化形态；
 - workdir 由不可变字段改为 `RwLock`（`&self` 下可切换；`Debug` 用 `try_read` 不阻塞；
   `Session.workdir` 保持创建时快照，仅 event sourcing 重建用）；
-- `Runtime::workdir()` 改为 `async`（读锁克隆），SDK `Client::workdir()` 同步变更。
+- `Runtime::workdir()` 改为 `async`（读锁克隆），SDK `Client::workdir()` 同步变更；
+- **新建会话先选目录**：桌面端 `POST /sessions` 支持 `workdir` 字段（`CreateSessionBody`），
+  前端新建会话弹 `NewSessionDialog` 输入/选择工作目录（Tauri 模式走
+  `tauri-plugin-dialog` 原生目录选择器 `select_workspace_dir` 命令），
+  不再默认继承 sidecar CWD。
 
 约束：
 
@@ -3135,14 +3151,18 @@ api/
 - 文件树/预览是只读，不弹权限弹窗（与 `fs.read` 一致，C-01 只约束副作用）；
 - 写操作（fs.write/edit）仍由模型发起 + 权限弹窗（W-03），前端不新增写入口（第一版）；
 - C-03 越界：后端返回 403 `PathEscaped`，前端 toast 展示，不吞错（§8.6）；
-- 桌面端（Tauri）：`workspace/root` 返回 `config.toml` 的 workdir；"打开文件夹"选项目录（`tauri-plugin-dialog`）为 M9 后续项，本节不做（sidecar workdir 已由配置决定）。
+- 桌面端（Tauri）：新建会话先选工作目录（`tauri-plugin-dialog` 原生目录选择器，
+  `POST /sessions` 携带 `workdir`）；sidecar 自身不传 `--workdir`（默认 CWD），
+  会话目录由用户在新建会话时显式选定。
 
 **26.9.5 迭代路径**：
 
 1. **MVP（本节）**：文件树浏览 + 文件预览 + 根路径展示；验证 C-03/只读不弹权限/事件流驱动刷新；
 2. **diff 视图**：tool 消息携带 `before/after`（已有 `FileChange` 语义），前端渲染 `DiffEntry` 列表；
 3. **工作区切换**：`POST /sessions/{id}/workspace` 切换 workdir（需审批，Ask 级别，C-01）；
-4. **编辑器集成**：`tauri-plugin-dialog` 选择项目文件夹 + 文件双击用系统编辑器打开（`shell.open`）。
+4. **编辑器集成**：`tauri-plugin-dialog` 选择项目文件夹 + 文件双击用系统编辑器打开（`shell.open`）；
+5. **先选目录再新建对话**：新建会话弹目录选择/输入对话框，`workdir` 随 `POST /sessions` 提交
+   （桌面端原生目录选择器 `tauri-plugin-dialog`，Web 端输入框）。
 
 **验证标准**（对应 §8.8 测试策略）：
 

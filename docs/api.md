@@ -1572,17 +1572,21 @@ HTTP 端点（`axum` 路由，`minicoding-server/src/workspace.rs`）：
 | `/sessions/{id}/workspace/list?path=` | GET | 目录列表（单层，ignore 过滤） | 403 越界（C-03）/ 404 目录不存在 |
 | `/sessions/{id}/workspace/read?path=` | GET | 文件内容（≤ 64 KiB 截断，C-07） | 403 越界 / 404 文件不存在 / 400 目录 |
 | `/sessions/{id}/workspace/diff` | GET | 会话内文件改动历史（journal） | 404 / 501 journal 未启用 |
-| `/sessions/{id}/workspace` | POST | 切换工作目录（Ask 审批） | 400 非绝对路径 / 404 |
+| `/sessions/{id}/workspace` | POST | 切换工作目录（Ask 审批） | 400 非法目标（非绝对/不存在/非目录）/ 404 / 409 turn 忙（等待 >60s） |
 
 安全性（与 `docs/rules.md` L0 对齐）：
 
 - 只读浏览（list/read）等价 `fs.read`——C-01 仅约束副作用，不经 `PermissionPolicy`，但落审计（`AuditKind::ToolCall`，detail 前缀 `workspace browse:`）；
 - 路径一律经 `minicoding_tools::util::resolve_path` 相对 workdir 解析（C-03），越界 403 `PathEscaped`；
 - 切换工作区 `Runtime::switch_workdir(&self, target: &Utf8PathBuf) -> Result<bool, RuntimeError>`：
-  1. 非绝对路径 → `RuntimeError::Permission`；
+  1. 非绝对路径 → `RuntimeError::Permission`；`canonicalize` + `is_dir` 校验目标真实存在
+     且是目录（不存在/不可访问/指向文件同样返回 `Permission`，**在弹权限窗前立即报错**）；
   2. 构造 `PermissionPrompt`（`tool: "workspace.switch"`，`Risk::Medium`，仅 `AllowOnce`——不允许 `AllowAlways`），广播 `Event::PermissionRequested` → `prompter.prompt` → 广播 + 持久化 `PermissionResolved` → 落审计；
-  3. `Allow` → 更新 `workdir`（`RwLock`，后续工具调用自动生效），`Deny` → 保持原目录，返回 `false`。
-- HTTP handler 在 `turn_lock` 保护下调用（与进行中的 turn 互斥，C-31）。
+  3. `Allow` → 更新 `workdir` 为 canonical 路径（`RwLock`，后续工具调用自动生效），`Deny` → 保持原目录，返回 `false`。
+- HTTP handler 在 `turn_lock` 保护下调用（与进行中的 turn 互斥，C-31），等待超 60s 返回 409；
+- SSE 端点 `GET /sessions/{id}/events`：**首次连接（无 `Last-Event-ID`）只推新事件**（`sse_live`，
+  不回放历史——避免历史 `permission_requested` 重推导致前端弹窗 pid 错位）；断线重连由浏览器
+  自动携带 `Last-Event-ID` 走 `sse_stream` 恢复（重放 + 新订阅）。
 
 ```rust
 // minicoding-protocol/src/workspace.rs（ts_rs 导出到前端 generated/）

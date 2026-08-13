@@ -222,8 +222,11 @@ pub async fn workspace_diff(
 
 /// `POST /workspace` — 切换工作目录（Ask 审批 + 审计 + SSE 权限弹窗）。
 ///
+/// 目标路径校验（绝对路径 + 目录存在性）在 `Runtime::switch_workdir` 内完成。
+///
 /// # Errors
-/// 会话不存在返回 404；目标路径非绝对路径返回 400。
+/// 会话不存在返回 404；目标路径非法（非绝对/不存在/非目录）返回 400；
+/// turn 进行中等待超过 60s 返回 409。
 pub async fn workspace_switch(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -234,8 +237,16 @@ pub async fn workspace_switch(
         .get(&session_id)
         .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
 
-    // turn 串行锁：切换与进行中的 turn 互斥（C-31 上下文一致性）
-    let _turn_guard = session.turn_lock.lock().await;
+    // turn 串行锁：切换与进行中的 turn 互斥（C-31 上下文一致性）。等待设
+    // 60s 上限——turn 最长 600s，若先前消息仍在跑（LLM 卡住等），切换应立即
+    // 返回 409 而不是无界排队（否则前端"切换中"无限转圈）。
+    let _turn_guard =
+        tokio::time::timeout(std::time::Duration::from_secs(60), session.turn_lock.lock())
+            .await
+            .map_err(|_| HttpError {
+                status: StatusCode::CONFLICT,
+                message: "会话忙：上一轮消息仍在处理中，请稍后再试".to_string(),
+            })?;
     let target = camino::Utf8PathBuf::from(body.path);
     let switched = session
         .runtime
