@@ -15,12 +15,17 @@ interface UIState {
   theme: Theme;
   /** 设置弹窗是否打开（手动触发，与 desktop store 的 needs-config 独立）。 */
   settingsOpen: boolean;
+  /** 工作区文件预览（W-11）：当前预览的相对路径（null = 关闭预览）。 */
+  previewPath: string | null;
+  /** 预览面板是否展开。 */
+  previewOpen: boolean;
   setActiveSession: (id: string | null) => void;
   toggleTaskPanel: () => void;
   toggleSidebar: () => void;
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
   setSettingsOpen: (open: boolean) => void;
+  setPreview: (path: string | null, open?: boolean) => void;
 }
 
 /** 从 localStorage 读取初始主题（默认暗色）。 */
@@ -46,10 +51,14 @@ export const useUIStore = create<UIState>((set) => ({
   sidebarCollapsed: false,
   theme: getInitialTheme(),
   settingsOpen: false,
+  previewPath: null,
+  previewOpen: false,
   setActiveSession: (id) => set({ activeSessionId: id }),
   toggleTaskPanel: () => set((s) => ({ taskPanelOpen: !s.taskPanelOpen })),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+  setPreview: (path, open) =>
+    set(() => ({ previewPath: path, previewOpen: open ?? path != null })),
   setTheme: (theme) => {
     applyTheme(theme);
     if (typeof window !== "undefined") {

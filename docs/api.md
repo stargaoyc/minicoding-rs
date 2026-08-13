@@ -1562,6 +1562,46 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 
 `SessionManager::send_message_boxed` 的关联函数形态是 HRTB 兼容方案的关键——`Arc<SessionManager>` owned 移入 future，无 `&self` 借用泄漏。`Runtime::run_turn_owned`（§4.1）同理。详见 `design.md` §24。
 
+### 9.2 Workspace 端点（W-11 项目工作区，见 `design.md` §26.9）
+
+HTTP 端点（`axum` 路由，`minicoding-server/src/workspace.rs`）：
+
+| 端点 | 方法 | 说明 | 错误 |
+|------|------|------|------|
+| `/sessions/{id}/workspace` | GET | 当前工作目录（`WorkspaceRoot`） | 404 会话不存在 |
+| `/sessions/{id}/workspace/list?path=` | GET | 目录列表（单层，ignore 过滤） | 403 越界（C-03）/ 404 目录不存在 |
+| `/sessions/{id}/workspace/read?path=` | GET | 文件内容（≤ 64 KiB 截断，C-07） | 403 越界 / 404 文件不存在 / 400 目录 |
+| `/sessions/{id}/workspace/diff` | GET | 会话内文件改动历史（journal） | 404 / 501 journal 未启用 |
+| `/sessions/{id}/workspace` | POST | 切换工作目录（Ask 审批） | 400 非绝对路径 / 404 |
+
+安全性（与 `docs/rules.md` L0 对齐）：
+
+- 只读浏览（list/read）等价 `fs.read`——C-01 仅约束副作用，不经 `PermissionPolicy`，但落审计（`AuditKind::ToolCall`，detail 前缀 `workspace browse:`）；
+- 路径一律经 `minicoding_tools::util::resolve_path` 相对 workdir 解析（C-03），越界 403 `PathEscaped`；
+- 切换工作区 `Runtime::switch_workdir(&self, target: &Utf8PathBuf) -> Result<bool, RuntimeError>`：
+  1. 非绝对路径 → `RuntimeError::Permission`；
+  2. 构造 `PermissionPrompt`（`tool: "workspace.switch"`，`Risk::Medium`，仅 `AllowOnce`——不允许 `AllowAlways`），广播 `Event::PermissionRequested` → `prompter.prompt` → 广播 + 持久化 `PermissionResolved` → 落审计；
+  3. `Allow` → 更新 `workdir`（`RwLock`，后续工具调用自动生效），`Deny` → 保持原目录，返回 `false`。
+- HTTP handler 在 `turn_lock` 保护下调用（与进行中的 turn 互斥，C-31）。
+
+```rust
+// minicoding-protocol/src/workspace.rs（ts_rs 导出到前端 generated/）
+pub struct WorkspaceRoot { pub path: String, pub name: String }
+pub struct WorkspaceListEntry { pub name: String, pub kind: String, pub size: Option<u64> }
+pub struct WorkspaceReadResponse { pub content: String, pub size: u64, pub truncated: bool }
+pub struct WorkspaceDiffResponse { pub entries: Vec<WorkspaceDiffEntry> }
+
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceFileChange {
+    Written { path: String, before: Option<String>, after: String },
+    Edited { path: String, before: String, after: String },
+    Deleted { path: String, content: String },
+    Created { path: String, content: String },
+}
+```
+
+`WorkspaceFileChange` 与 `core::journal::FileChange` 四种变体一一对应（diff 数据源自 `FileChangeJournal`，server 的 `runtime_builder` 已默认注入 journal）。前端据此渲染红/绿对比视图，不改动 `core` 的序列化形态（journal 内部格式与协议 DTO 解耦）。
+
 ---
 
 ## 10. 内置工具目录（参考 CC/Codex）

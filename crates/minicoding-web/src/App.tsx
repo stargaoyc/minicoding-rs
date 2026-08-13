@@ -7,6 +7,7 @@ import { ChatInput } from "./components/chat/ChatInput";
 import { PermissionDialog } from "./components/permission/PermissionDialog";
 import { TaskPanel } from "./components/tasks/TaskPanel";
 import { SetupDialog } from "./components/setup/SetupDialog";
+import { FilePreview } from "./components/workspace/FilePreview";
 import { Button } from "./components/ui/button";
 import { useMessages, useSendMessage, useSSEStream } from "./hooks/useChat";
 import { usePermissions } from "./hooks/usePermissions";
@@ -206,6 +207,9 @@ function AppInner() {
         ) : (
           <EmptyState />
         )}
+
+        {/* 工作区文件预览（W-11，底部滑出面板） */}
+        <FilePreview sessionId={activeSessionId} />
       </div>
 
       {/* Task panel (right side, collapsible) */}

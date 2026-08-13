@@ -47,6 +47,7 @@ pub mod prompter;
 pub mod runtime_builder;
 pub mod session_mgr;
 pub mod sse;
+pub mod workspace;
 
 pub use acp::{AcpError, serve_acp};
 pub use http::{ServerConfig, serve};

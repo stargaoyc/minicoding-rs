@@ -774,8 +774,9 @@ minicoding-server/src/
 ├── main.rs                # minicoding-server 入口（独立二进制）
 ├── lib.rs                 # re-export + `serve(cfg)` 入口（供 CLI `serve` feature 调用）
 ├── http.rs                # Axum HTTP/SSE handler + `ServerConfig` + `serve(cfg)`
+├── workspace.rs           # 项目工作区端点（W-11：root/list/read/diff/switch，见 design.md §26.9）
 ├── session_mgr.rs         # `SessionManager` 多会话管理（HTTP path 带 session_id）
-├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime）
+├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime；默认注入 FileChangeJournal）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
 ├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
@@ -872,7 +873,8 @@ minicoding-extension-sdk/src/
 
 - **协议**：HTTP/SSE JSON-RPC 2.0（见 `design.md` §24），前端不引入新协议；
 - **类型同步**：`minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 生成 TypeScript 类型 + Zod schema，避免手写双份；
-- **CORS**：`minicoding serve --cors-origin` 配置允许的前端来源（默认仅 `http://localhost:*`）。
+- **CORS**：`minicoding serve --cors-origin` 配置允许的前端来源（默认仅 `http://localhost:*`）；
+- **工作区（W-11）**：`/sessions/{id}/workspace*` 5 个端点（见 `design.md` §26.9、`docs/api.md` §9.2）；桌面端额外经 Tauri `open_workspace_file` 命令打开系统编辑器（`main.rs`，见 §19）。
 
 ---
 
@@ -891,6 +893,7 @@ minicoding-extension-sdk/src/
 
 - **sidecar 管理**：Tauri 启动 sidecar，读取 stdout 获取实际监听端口，注入前端（`sidecar.rs`）；
 - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信走 HTTP/SSE（同源，无 CORS 问题）；
+- **文件打开（W-11）**：`invoke('open_workspace_file', { path })` 用系统默认编辑器打开工作区文件（`app.shell().open`，Rust 侧不做路径解析，路径由前端拼接 root 绝对路径）。
 - **系统托盘**（W-07）：右键菜单"显示窗口/退出"，关闭窗口时隐藏到托盘而非退出（`tray.rs`）；
 - **全局快捷键**（W-07）：`Ctrl+Alt+M` 切换窗口显示/隐藏（`tauri-plugin-global-shortcut`）；
 - **自动更新**：Tauri updater 配置签名公钥，更新包需签名校验通过才安装；

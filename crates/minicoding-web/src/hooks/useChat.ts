@@ -114,7 +114,6 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
           optsRef.current?.onTaskUpdated?.();
           break;
         case "tool_call_started":
-        case "tool_call_finished":
         case "permission_resolved":
         case "permission_mode_changed":
         case "session_created":
@@ -123,6 +122,14 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         case "session_retrieved":
         case "command_error":
           qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+          break;
+        case "tool_call_finished":
+          // 工具完成后刷新消息 + 工作区（文件改动后树/预览/diff 失效，W-11）
+          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "diff", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "file", sessionId] });
           break;
       }
     },

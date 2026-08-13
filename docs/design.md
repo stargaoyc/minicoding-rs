@@ -3065,7 +3065,10 @@ macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产�
 
 `ci.yml` 的 `desktop` job 在 `cargo build` 前创建占位 sidecar（`binaries/minicoding-server-sidecar-x86_64-unknown-linux-gnu`），以满足 `tauri_build::build()` 对 `externalBin` 路径的编译期校验。真实 sidecar 二进制仅在 `desktop-release.yml` 中构建。
 
-### 26.9 项目工作区（前端增强设计，未实现）
+### 26.9 项目工作区（前端增强设计，已实现）
+
+> **实现状态**：已实现（W-11，含 MVP + diff 视图 + 工作区切换 + 桌面端编辑器集成）。
+> 实现细节见 `docs/api.md` §9.2（后端契约）与本节的变更记录。
 
 **背景**：§26.1–§26.8 交付的 Web/桌面前端是"会话 MVP"——只有聊天流、权限弹窗、任务面板（W-01..W-10），没有"项目"概念。用户反馈"前端像大模型聊天机器人"，缺少在项目文件夹内操作的能力。本节设计把前端从"会话 UI"升级为"项目工作区 UI"（参考 Claude Code / Codex 桌面版）。
 
@@ -3083,12 +3086,27 @@ macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产�
 | `/sessions/{id}/workspace/root` | GET | — | `{ "path": "...", "name": "..." }` | 返回会话 workdir（`ServerRuntimeParams.workdir`） |
 | `/sessions/{id}/workspace/list` | GET | `?path=<相对路径>` | `{ "entries": [ { "name", "kind": "file"/"dir", "size"? } ] }` | 目录列表（1 层，不递归）；`path` 省略=根目录；越界 403 |
 | `/sessions/{id}/workspace/read` | GET | `?path=<相对路径>` | `{ "content": "...", "size", "truncated" }` | 文件内容（≤ 64 KiB，超出截断并置 `truncated=true`，C-07 输出上限） |
+| `/sessions/{id}/workspace/diff` | GET | — | `{ "entries": [ { "op_id", "prompt_snippet", "files" } ] }` | 会话内文件改动历史（journal 快照转 DTO） |
+| `/sessions/{id}/workspace` | POST | `{ "path": "<绝对路径>" }` | `{ "switched": bool, "path": "..." }` | 切换 workdir（Ask 审批 + 审计，见 26.9.4） |
+
+**实现变更记录**（相对本节初稿）：
+
+- `root` 改为 `GET /workspace`（与 POST 同路由，`get`/`post` 合并）；
+- **切换工作区**：新增 `Runtime::switch_workdir(&self, target) -> Result<bool, RuntimeError>`
+  （`docs/api.md` §9.2：非绝对路径拒绝、`workspace.switch` Ask 审批 `AllowOnce`、
+  事件 + 审计 + `RwLock<Utf8PathBuf>` 更新，后续工具调用自动生效）；
+- **diff 数据源**：server `runtime_builder` 默认注入 `FileChangeJournal`
+  （与 CLI `file-undo` feature 对齐），`FileChange` → `WorkspaceFileChange`
+  （`tag = "kind"` 序列化）DTO 转换在 server 层完成，不改 core 序列化形态；
+- workdir 由不可变字段改为 `RwLock`（`&self` 下可切换；`Debug` 用 `try_read` 不阻塞；
+  `Session.workdir` 保持创建时快照，仅 event sourcing 重建用）；
+- `Runtime::workdir()` 改为 `async`（读锁克隆），SDK `Client::workdir()` 同步变更。
 
 约束：
 
-- `path` 一律相对 workdir 解析，经 `crates/minicoding-tools/src/util::resolve_path` + 路径沙箱校验（C-03）；
+- `path` 一律相对 workdir 解析，经 `crates/minicoding-tools/src/util.rs::resolve_path` + 路径沙箱校验（C-03）；
 - 忽略 `node_modules`/`.git`/`target`/`dist` 等目录（内置 ignore 列表，避免前端拉取大目录）；
-- 新端点**不经过** `PermissionPolicy`（只读等价 `fs.read`），但记录审计日志（只读浏览记录，供会话审计）；
+- 新端点**不经过** `PermissionPolicy`（只读等价 `fs.read`），但记录审计日志（`workspace browse:` 轨迹，供会话审计）；
 - 不改动既有协议（§24）；TS 类型由 `minicoding-protocol` 新增 DTO 自动生成（§8.4）。
 
 **26.9.2 前端组件与分层**（`crates/minicoding-web/src/`）

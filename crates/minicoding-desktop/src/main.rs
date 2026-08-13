@@ -5,6 +5,7 @@
 //! - `get_provider_config` / `save_provider_config`：读写 `config.toml` 的 provider 配置
 //! - `store_api_key` / `load_api_key` / `delete_api_key`：OS keyring 凭证管理
 //! - `open_config_file`：用系统编辑器打开配置文件
+//! - `open_workspace_file`：用系统默认编辑器打开工作区文件（W-11）
 //!
 //! 同时初始化系统托盘 + 全局快捷键（W-07）。
 //! 需要系统 webview 运行时（`webkit2gtk` Linux / `WebKit` macOS / `WebView2` Windows）。
@@ -104,6 +105,7 @@ fn main() {
             load_api_key,
             delete_api_key,
             open_config_file,
+            open_workspace_file,
             restart_app,
         ])
         .setup(|app| {
@@ -260,8 +262,23 @@ fn open_config_file(app: tauri::AppHandle) -> Result<String, String> {
     Ok(path.to_string())
 }
 
-/// `restart_app`：重启应用（编辑模式保存配置后调用）。
+/// `open_workspace_file`：用系统默认编辑器打开工作区文件（W-11）。
 ///
+/// `path` 为**绝对路径**（前端由工作区 root + 相对路径拼接；桌面端
+/// sidecar 的 workdir 可能与桌面进程 CWD 不一致，相对路径不可靠）。
+/// 走 `tauri-plugin-shell` 的 `open`（与 `open_config_file` 一致），
+/// 不经前端权限链路（系统编辑器打开文件由用户桌面会话授权）。
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
+fn open_workspace_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    #[allow(deprecated)] // 同 open_config_file：暂未引入 tauri-plugin-opener
+    app.shell()
+        .open(&path, None)
+        .map_err(|e| format!("打开文件失败: {e}"))
+}
+
+/// `restart_app`：重启应用（编辑模式保存配置后调用）。///
 /// Tauri `AppHandle::restart()` 会重启当前进程，`kill_on_drop` 确保
 /// 旧 sidecar 子进程在进程退出时被杀死，新进程启动后读取新配置。
 #[tauri::command]

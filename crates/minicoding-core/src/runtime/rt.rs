@@ -26,8 +26,8 @@ use crate::model::{
 };
 use crate::otel::span_name;
 use crate::policy::{
-    Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompter,
-    PlanModeController, PlanModeSnapshot, PreApprovedPrompt, Verdict,
+    Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompt,
+    PermissionPrompter, PlanModeController, PlanModeSnapshot, PreApprovedPrompt, Verdict,
 };
 use crate::provider::{BoxFuture, ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
@@ -67,7 +67,13 @@ pub struct Runtime {
     pub(crate) config: RuntimeConfig,
     pub(crate) session: Session,
     pub(crate) events: EventBus,
-    pub(crate) workdir: Utf8PathBuf,
+    /// 当前工作目录（W-11 工作区切换：`switch_workdir` 在 `&self` 下更新，需内部可变）。
+    ///
+    /// 工具每次执行时经 `ToolContext::new(self.workdir.read().await.clone(), ..)`
+    /// 读取（见 `dispatch_calls`），切换后下一次工具调用自动生效（C-03 路径沙箱
+    /// 同步跟随新 root）。`Session.workdir` 是创建时快照（event sourcing 重建用），
+    /// 切换不反写。
+    pub(crate) workdir: RwLock<Utf8PathBuf>,
     pub(crate) policy: Arc<dyn PermissionPolicy>,
     pub(crate) prompter: Arc<dyn PermissionPrompter>,
     pub(crate) audit: Arc<dyn AuditSink>,
@@ -150,6 +156,12 @@ impl Runtime {
         &self.session
     }
 
+    /// 返回审计 sink（W-11 只读浏览审计，`workspace.rs` 用）。
+    #[must_use]
+    pub fn audit(&self) -> Arc<dyn AuditSink> {
+        self.audit.clone()
+    }
+
     /// 返回事件总线引用（订阅事件流）。
     #[must_use]
     pub fn events(&self) -> &EventBus {
@@ -168,10 +180,85 @@ impl Runtime {
         &self.storage
     }
 
-    /// 返回工作目录。
+    /// 返回当前工作目录（`RwLock` 读取，切换工作区后返回新值）。
     #[must_use]
-    pub fn workdir(&self) -> &Utf8PathBuf {
-        &self.workdir
+    pub async fn workdir(&self) -> Utf8PathBuf {
+        self.workdir.read().await.clone()
+    }
+
+    /// 切换工作目录（W-11 工作区切换，需用户显式批准，Ask 级权限）。
+    ///
+    /// 流程（与副作用工具权限路径一致，见 `design.md` §9）：
+    /// 1. 校验 `target` 为绝对路径（相对路径无意义，拒绝）；
+    /// 2. 构造 `PermissionPrompt`（`tool: "workspace.switch"`，`Risk::Medium`，
+    ///    仅 `AllowOnce`/`DenyOnce`——不允许 `AllowAlways`，切换必须逐次确认）；
+    /// 3. 广播 `Event::PermissionRequested`（SSE 推送到前端弹窗，复用 W-03 权限
+    ///    弹窗机制）→ `prompter.prompt` 等待决策；
+    /// 4. 广播 + 持久化 `Event::PermissionResolved`，落 `audit.log`（C-01 语义：
+    ///    工作区切换改变后续所有副作用工具的作用范围，等同副作用决策）；
+    /// 5. `Allow` → 更新 `workdir`（后续工具调用自动生效，C-03 跟随新 root）；
+    ///    `Deny` → 保持原目录。
+    ///
+    /// 调用方（HTTP `POST /sessions/{id}/workspace`）应在持有 turn 锁时调用，
+    /// 避免与进行中的 turn 交错（本方法在 Runtime 内不自行加锁）。
+    ///
+    /// # Errors
+    /// `target` 非绝对路径时返回 `RuntimeError::Permission`；存储持久化失败时
+    /// 返回 `RuntimeError::Storage`。
+    ///
+    /// # Returns
+    /// `true` = 切换成功；`false` = 用户拒绝。
+    pub async fn switch_workdir(&self, target: &Utf8PathBuf) -> Result<bool, RuntimeError> {
+        if !target.is_absolute() {
+            return Err(RuntimeError::Permission(
+                "workspace.switch: 目标路径必须是绝对路径".to_string(),
+            ));
+        }
+
+        let prompt = PermissionPrompt {
+            id: format!("ws-{}", ulid::Ulid::new()),
+            tool: "workspace.switch".to_string(),
+            summary: format!("切换工作区到 {}", target.as_str()),
+            risk: crate::policy::Risk::Medium,
+            options: vec![crate::policy::PromptOption::AllowOnce],
+        };
+
+        self.events.emit(Event::PermissionRequested {
+            id: prompt.id.clone(),
+            tool: prompt.tool.clone(),
+            summary: prompt.summary.clone(),
+            risk: prompt.risk,
+        });
+        let decision = self.prompter.prompt(prompt.clone()).await;
+        let prompt_id = prompt.id.clone();
+        let event = Event::PermissionResolved {
+            id: prompt_id.clone(),
+            decision: decision.clone(),
+        };
+        self.persist_event(&event).await;
+        self.events.emit(event);
+        self.record_permission_audit("workspace.switch", &decision, Some(prompt_id))
+            .await;
+
+        match decision {
+            Decision::Allow => {
+                *self.workdir.write().await = target.clone();
+                tracing::info!(
+                    session = %self.session.id,
+                    workdir = %target,
+                    "workspace switched"
+                );
+                Ok(true)
+            }
+            Decision::Deny(reason) => {
+                tracing::info!(
+                    session = %self.session.id,
+                    reason = %reason,
+                    "workspace switch denied"
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// 返回取消 token 的克隆（供 frontend 在 `select!` 中组合等待，如 Ctrl-C handler）。
@@ -786,7 +873,7 @@ impl Runtime {
         calls: &[ToolCall],
     ) -> Result<Vec<(ToolCallId, ToolResult)>, RuntimeError> {
         // 构造 ToolContext：注入沙箱驱动/策略/journal（M4，shell.run/fs 用）
-        let ctx = ToolContext::new(self.workdir.clone(), self.session.id.clone())
+        let ctx = ToolContext::new(self.workdir.read().await.clone(), self.session.id.clone())
             .with_sandbox(self.sandbox_driver.clone(), self.sandbox_policy.clone())
             .with_journal_opt(self.journal.clone());
 
@@ -933,7 +1020,7 @@ impl Runtime {
         let plan_snap = self.plan_state.read().await.clone();
         let perm_ctx = PermissionContext {
             session: self.session.id.clone(),
-            workdir: self.workdir.clone(),
+            workdir: self.workdir.read().await.clone(),
             side_effect,
             turn: 0,
             history: Vec::new(),
@@ -1060,8 +1147,9 @@ impl Runtime {
         effective_call: &mut ToolCall,
     ) -> Result<Option<Decision>, RuntimeError> {
         let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
-        let hook_input =
-            self.build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict));
+        let hook_input = self
+            .build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict))
+            .await;
         let result = self
             .hook_registry
             .dispatch(hook_input, dispatch_cfg.clone())
@@ -1113,12 +1201,14 @@ impl Runtime {
             Verdict::Deny(msg) => Ok((Decision::Deny(msg.clone()), None)),
             Verdict::Ask(prompt) => {
                 // PermissionRequest Hook（Verdict::Ask 时、prompter 前）
-                let hook_input = self.build_hook_input(
-                    HookEvent::PermissionRequest,
-                    call,
-                    side_effect,
-                    Some(verdict),
-                );
+                let hook_input = self
+                    .build_hook_input(
+                        HookEvent::PermissionRequest,
+                        call,
+                        side_effect,
+                        Some(verdict),
+                    )
+                    .await;
                 let result = self
                     .hook_registry
                     .dispatch(hook_input, dispatch_cfg.clone())
@@ -1200,7 +1290,7 @@ impl Runtime {
     }
 
     /// 构造 `HookInput`（工具相关事件通用）。
-    fn build_hook_input(
+    async fn build_hook_input(
         &self,
         event: HookEvent,
         call: &ToolCall,
@@ -1224,7 +1314,7 @@ impl Runtime {
             tool: Some(call.clone()),
             side_effect: Some(side_effect),
             verdict: verdict_serde,
-            cwd: self.workdir.clone(),
+            cwd: self.workdir.read().await.clone(),
             extras: serde_json::Value::Null,
         }
     }
@@ -1248,7 +1338,9 @@ impl Runtime {
             timeout: Duration::from_secs(hook_config.default_timeout_sec),
             builtin_deny: None,
         };
-        let hook_input = self.build_hook_input(HookEvent::PostToolUse, call, side_effect, None);
+        let hook_input = self
+            .build_hook_input(HookEvent::PostToolUse, call, side_effect, None)
+            .await;
         let result = self.hook_registry.dispatch(hook_input, dispatch_cfg).await;
         if let Some(fatal) = result.fatal_error {
             tracing::error!(hook_error = %fatal, "PostToolUse hook fatal error");
@@ -1276,8 +1368,9 @@ impl Runtime {
             timeout: Duration::from_secs(hook_config.default_timeout_sec),
             builtin_deny: None,
         };
-        let hook_input =
-            self.build_hook_input(HookEvent::PostToolUseFailure, call, side_effect, None);
+        let hook_input = self
+            .build_hook_input(HookEvent::PostToolUseFailure, call, side_effect, None)
+            .await;
         let result = self.hook_registry.dispatch(hook_input, dispatch_cfg).await;
         if let Some(fatal) = result.fatal_error {
             tracing::error!(hook_error = %fatal, "PostToolUseFailure hook fatal error");
@@ -1415,7 +1508,13 @@ impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
             .field("session_id", &self.session.id)
-            .field("workdir", &self.workdir)
+            .field(
+                "workdir",
+                &self.workdir.try_read().map_or_else(
+                    |_| camino::Utf8PathBuf::from("<locked>"),
+                    |guard| guard.clone(),
+                ),
+            )
             .field("tools_count", &self.tools.len())
             .finish_non_exhaustive()
     }

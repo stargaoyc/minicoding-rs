@@ -24,9 +24,14 @@ pub mod cursor;
 pub mod event;
 pub mod jsonrpc;
 pub mod rehydrate;
+pub mod workspace;
 
 pub use command::{Command, SessionConfig};
 pub use cursor::EventCursor;
 pub use event::{EventDto, EventKind};
 pub use jsonrpc::{Error as RpcError, Id, Notification, Request, Response, Version};
 pub use rehydrate::RehydrateRequired;
+pub use workspace::{
+    WorkspaceDiffEntry, WorkspaceDiffResponse, WorkspaceFileChange, WorkspaceListEntry,
+    WorkspaceListResponse, WorkspaceReadResponse, WorkspaceRoot, WorkspaceSwitchResponse,
+};

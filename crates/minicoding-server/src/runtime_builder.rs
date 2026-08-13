@@ -230,6 +230,13 @@ pub fn build_runtime(
         .event_store(event_store)
         .snapshot_store(snapshot_store);
 
+    // 11b. 注入文件改动 journal（W-11 diff 视图，C-28：/undo 语义复用 FileChangeJournal）
+    //      与 CLI `file-undo` feature 对齐：`workspace/diff` 端点展示会话内文件改动历史。
+    let journal: Arc<dyn minicoding_core::journal::Journal> = Arc::new(
+        minicoding_journal::FileChangeJournal::new(Some(workdir.clone())),
+    );
+    builder = builder.journal(journal);
+
     // 12. 注入沙箱驱动（与 CLI 一致，Linux Landlock / 降级 NoopDriver）
     let sandbox_policy = SandboxPolicy::WorkspaceWrite {
         workdir: workdir.clone(),

@@ -21,6 +21,14 @@ import type {
   SessionMeta,
   Decision,
   PermissionMode,
+  WorkspaceDiffEntry,
+  WorkspaceDiffResponse,
+  WorkspaceFileChange,
+  WorkspaceListEntry,
+  WorkspaceListResponse,
+  WorkspaceReadResponse,
+  WorkspaceRoot,
+  WorkspaceSwitchResponse,
 } from "./generated";
 
 /**
@@ -115,6 +123,42 @@ export function resolvePermission(sessionId: string, pid: string, decision: Deci
   });
 }
 
+// ─── Workspace API（W-11 项目工作区，见 design.md §26.9）────────────────────
+
+/** `GET /sessions/{id}/workspace` — 当前工作目录。 */
+export function getWorkspaceRoot(sessionId: string): Promise<WorkspaceRoot> {
+  return http<WorkspaceRoot>(`/sessions/${sessionId}/workspace`);
+}
+
+/** `GET /sessions/{id}/workspace/list?path=` — 目录列表（单层，后端已应用 ignore 过滤）。 */
+export function listWorkspace(sessionId: string, path?: string): Promise<WorkspaceListResponse> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : "";
+  return http<WorkspaceListResponse>(`/sessions/${sessionId}/workspace/list${q}`);
+}
+
+/** `GET /sessions/{id}/workspace/read?path=` — 文件内容（≤ 64 KiB 截断）。 */
+export function readWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceReadResponse> {
+  return http<WorkspaceReadResponse>(
+    `/sessions/${sessionId}/workspace/read?path=${encodeURIComponent(path)}`,
+  );
+}
+
+/** `GET /sessions/{id}/workspace/diff` — 会话内文件改动历史（journal）。 */
+export function getWorkspaceDiff(sessionId: string): Promise<WorkspaceDiffResponse> {
+  return http<WorkspaceDiffResponse>(`/sessions/${sessionId}/workspace/diff`);
+}
+
+/**
+ * `POST /sessions/{id}/workspace` — 切换工作目录（Ask 审批：后端广播
+ * `permission_requested`，前端弹权限窗，用户允许后生效）。
+ */
+export function switchWorkspace(sessionId: string, path: string): Promise<WorkspaceSwitchResponse> {
+  return http<WorkspaceSwitchResponse>(`/sessions/${sessionId}/workspace`, {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
 // ─── SSE 事件流 ─────────────────────────────────────────────────────────────
 
 export interface SSESubscription {
@@ -154,4 +198,19 @@ export function subscribeEvents(
 }
 
 // Re-export types for convenience
-export type { SessionConfig, SessionMeta, Message, EventDto, Decision, PermissionMode };
+export type {
+  SessionConfig,
+  SessionMeta,
+  Message,
+  EventDto,
+  Decision,
+  PermissionMode,
+  WorkspaceRoot,
+  WorkspaceListResponse,
+  WorkspaceListEntry,
+  WorkspaceReadResponse,
+  WorkspaceDiffResponse,
+  WorkspaceDiffEntry,
+  WorkspaceFileChange,
+  WorkspaceSwitchResponse,
+};

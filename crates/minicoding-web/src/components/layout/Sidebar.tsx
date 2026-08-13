@@ -10,6 +10,7 @@ import { loadWebSettings } from "../../stores/webSettings";
 import type { CreateSessionBody } from "../../api/client";
 import { cn, formatTime } from "../../lib/utils";
 import type { SessionMeta } from "../../api/generated";
+import { WorkspacePanel } from "../workspace/WorkspacePanel";
 
 export function Sidebar() {
   const { data: sessions, isLoading } = useSessions();
@@ -118,6 +119,9 @@ export function Sidebar() {
           </div>
         )}
       </ScrollArea>
+
+      {/* 项目工作区（W-11：文件树 + 预览 + diff + 切换，见 design.md §26.9） */}
+      <WorkspacePanel sessionId={activeSessionId} />
     </div>
   );
 }

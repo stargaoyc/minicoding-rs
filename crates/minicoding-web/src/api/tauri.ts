@@ -9,6 +9,7 @@
  * - `get_provider_config` / `save_provider_config`：读写 `~/.minicoding/config.toml`
  * - `store_api_key` / `load_api_key` / `delete_api_key`：OS keyring 凭证管理（C-04）
  * - `open_config_file`：用系统文件管理器打开配置目录
+ * - `open_workspace_file`：用系统默认编辑器打开工作区文件（W-11）
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -94,4 +95,14 @@ export function openConfigFile(): Promise<string> {
 /** 重启应用（编辑模式保存配置后调用，确保新 sidecar 配置生效）。 */
 export function restartApp(): Promise<void> {
   return invoke<void>("restart_app");
+}
+
+/**
+ * 用系统默认编辑器打开工作区文件（W-11 `open_workspace_file` 命令）。
+ *
+ * `path` 为相对 workdir 的路径（预览面板展示的相对路径）；Rust 侧将其
+ * 拼接 workdir 后交给系统 opener（桌面端才可用，Web 模式调用会失败）。
+ */
+export function openWorkspaceFile(path: string): Promise<void> {
+  return invoke<void>("open_workspace_file", { path });
 }

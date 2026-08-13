@@ -11,7 +11,16 @@
 //! GET    /sessions/{id}                     → GetSession
 //! GET    /sessions/{id}/events              → SSE 事件流（Last-Event-ID 恢复）
 //! POST   /sessions/{id}/permissions/{pid}   → ResolvePermission
+//! GET    /sessions/{id}/workspace           → WorkspaceRoot（W-11 工作区）
+//! GET    /sessions/{id}/workspace/list      → WorkspaceList（单层，ignore 过滤）
+//! GET    /sessions/{id}/workspace/read      → WorkspaceRead（≤ 64 KiB 截断）
+//! GET    /sessions/{id}/workspace/diff      → WorkspaceDiff（journal 改动历史）
+//! POST   /sessions/{id}/workspace           → WorkspaceSwitch（Ask 审批）
 //! ```
+//!
+//! Workspace 端点见 `design.md` §26.9：只读浏览等价 `fs.read` 不经权限（C-01），
+//! 路径经 `resolve_path` 校验（C-03）；切换工作区走 Ask 审批 + 审计（复用
+//! W-03 权限弹窗与 `Event::PermissionRequested`）。
 //!
 //! `Undo` 端点暂未实现（需 `Journal` feature gate，T-M8 后续补）。
 
@@ -152,9 +161,9 @@ struct ListSessionsResponse {
 
 /// HTTP 错误响应（实现 `IntoResponse`，handler 用 `Result<T, HttpError>` 返回）。
 #[derive(Debug)]
-struct HttpError {
-    status: StatusCode,
-    message: String,
+pub struct HttpError {
+    pub status: StatusCode,
+    pub message: String,
 }
 
 impl IntoResponse for HttpError {
@@ -218,6 +227,23 @@ fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/events", get(sse_events))
         .route("/sessions/{id}/permissions/{pid}", post(resolve_permission))
+        // W-11 项目工作区（见 `docs/design.md` §26.9）
+        .route(
+            "/sessions/{id}/workspace",
+            get(crate::workspace::workspace_root).post(crate::workspace::workspace_switch),
+        )
+        .route(
+            "/sessions/{id}/workspace/list",
+            get(crate::workspace::workspace_list),
+        )
+        .route(
+            "/sessions/{id}/workspace/read",
+            get(crate::workspace::workspace_read),
+        )
+        .route(
+            "/sessions/{id}/workspace/diff",
+            get(crate::workspace::workspace_diff),
+        )
         .route("/health", get(health));
 
     let app = if let Some(dir) = web_dir {
