@@ -79,11 +79,13 @@ jobs:
           run_install: false
 
       - name: Setup Node.js
-        # 注意：不配置 setup-node 的 cache: 'pnpm'——该模式下 setup-node 会执行
-        # `pnpm store path` 探测，pnpm 11 + corepack 组合下该步骤报错（v0.2.17 失败根因）
+        # node ≥ 22.13：pnpm 11 依赖内置模块 node:sqlite（v20 上启动即崩
+        # ERR_UNKNOWN_BUILTIN_MODULE，v0.2.17 失败根因）。
+        # 不配置 cache: 'pnpm'——setup-node 的 pnpm store path 探测与
+        # pnpm/action-setup 安装组合在 runner 上报错。
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install cargo-tauri
         run: rustup run stable cargo install tauri-cli --version "^2" --locked
