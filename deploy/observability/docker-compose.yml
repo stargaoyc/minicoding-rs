@@ -1,0 +1,74 @@
+# minicoding 可观测性基础设施（OTel Collector + Jaeger + Prometheus + Grafana）
+#
+# 架构：minicoding 进程（宿主机）通过 OTLP 协议上报 trace/metrics 到 otel-collector，
+# collector 将 trace 转发 Jaeger、metrics 暴露给 Prometheus 抓取，Grafana 统一查询展示。
+# 详见 docs/observability.md §7。
+#
+# 启动：docker compose up -d
+# 停止：docker compose down（-v 清空数据卷）
+
+name: minicoding-observability
+
+services:
+  otel-collector:
+    image: ${OTEL_COLLECTOR_IMG:-otel/opentelemetry-collector-contrib:0.119.0}
+    container_name: minicoding-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      # OTLP 入口（minicoding 上报端点，见 docs/observability.md §7.3）
+      - "127.0.0.1:${OTLP_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${OTLP_GRPC_PORT:-4317}:4317"
+      # collector 自身健康检查（curl http://127.0.0.1:13133）
+      - "127.0.0.1:13133:13133"
+    restart: unless-stopped
+
+  jaeger:
+    # Jaeger v2 all-in-one：原生 OTLP 接收 + 内存存储（开发场景；生产需换持久存储，见 README）
+    image: ${JAEGER_IMG:-jaegertracing/jaeger:2.9.0}
+    container_name: minicoding-jaeger
+    environment:
+      # 显式开启 OTLP 接收（v2 默认开启，配置保留保证行为稳定）
+      JAEGER_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686" # Jaeger UI
+      # OTLP 直连端口（collector 已转发，无需直连；保留便于排障）
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    restart: unless-stopped
+
+  prometheus:
+    image: ${PROMETHEUS_IMG:-prom/prometheus:v2.55.1}
+    container_name: minicoding-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_IMG:-grafana/grafana:11.5.2}
+    container_name: minicoding-grafana
+    environment:
+      # 首次登录 admin/admin（仅本机可访问；生产部署务必修改并开启持久化，见 README）
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - otel-collector
+      - jaeger
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

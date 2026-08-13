@@ -1,0 +1,13 @@
+# Prometheus 配置：抓取 otel-collector 暴露的 metrics（otlp 管线的 prometheus exporter，
+# 端口 8889）。minicoding 的 trace 事件不在此抓取（走 Jaeger），见 docs/observability.md §7.2。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: minicoding-otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          component: minicoding-observability

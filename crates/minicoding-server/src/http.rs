@@ -151,6 +151,8 @@ struct ResolvePermissionBody {
 struct GetSessionResponse {
     session_id: String,
     messages: Vec<minicoding_core::model::Message>,
+    /// 任务列表快照（`task_state`，见 `SessionManager`）。
+    tasks: Vec<minicoding_core::model::Task>,
 }
 
 /// `ListSessions` 响应。
@@ -329,9 +331,19 @@ async fn get_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<GetSessionResponse>, HttpError> {
     let messages = state.mgr.get_messages(&session_id).await?;
+    let session = state
+        .mgr
+        .get(&session_id)
+        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+    let tasks = session
+        .task_state
+        .lock()
+        .expect("task_state mutex poisoned")
+        .clone();
     Ok(Json(GetSessionResponse {
         session_id,
         messages,
+        tasks,
     }))
 }
 

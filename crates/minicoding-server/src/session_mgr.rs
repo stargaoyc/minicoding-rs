@@ -13,12 +13,12 @@
 use crate::prompter::{PendingPermissions, ServerPrompter};
 use crate::runtime_builder::{ServerRuntimeParams, build_runtime};
 use minicoding_core::metrics;
-use minicoding_core::model::{Message, SessionId, SessionMeta, TurnOutcome, UserInput};
+use minicoding_core::model::{Message, SessionId, SessionMeta, Task, TurnOutcome, UserInput};
 use minicoding_core::policy::Decision;
 use minicoding_core::runtime::{Event, Runtime};
 use minicoding_protocol::cursor::EventCursor;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
@@ -46,7 +46,8 @@ pub enum SessionManagerError {
 /// 单个 server 会话的状态。
 ///
 /// 持有 `Arc<Runtime>`（单会话聚合根）、`EventCursor`（seq 分配）、
-/// `PendingPermissions`（权限交互表）、`turn_lock`（turn 串行化）。
+/// `PendingPermissions`（权限交互表）、`turn_lock`（turn 串行化）、
+/// `task_state`（任务快照，供 `list_sessions`/`get_session` 返回）。
 pub struct ServerSession {
     /// Runtime 聚合根（单会话）。
     pub runtime: Arc<Runtime>,
@@ -59,6 +60,10 @@ pub struct ServerSession {
     /// turn 串行锁（同一 session 同一时刻只允许一个 turn）。`TokioMutex` 因锁跨
     /// `run_turn().await` 持有（不能跨 await 持有 `std::sync::Mutex`）。
     pub turn_lock: TokioMutex<()>,
+    /// 任务列表快照（由 `Event::TaskUpdated` 订阅者维护，纯内存态）。
+    /// `StdMutex` 因仅做 `Vec` 查/改（无 async 上下文）。任务权威源是
+    /// `TaskStore`（tools crate），此字段只用于 HTTP 查询返回。
+    pub task_state: StdMutex<Vec<Task>>,
 }
 
 impl ServerSession {
@@ -69,6 +74,7 @@ impl ServerSession {
             cursor: TokioMutex::new(EventCursor::new(1024)),
             pending_permissions: pending,
             turn_lock: TokioMutex::new(()),
+            task_state: StdMutex::new(Vec::new()),
         }
     }
 
@@ -238,6 +244,35 @@ impl SessionManager {
         let runtime = Arc::new(runtime);
         let session = Arc::new(ServerSession::new(runtime, pending));
 
+        // 常驻订阅 `Event::TaskUpdated`，把任务快照写入 `task_state`（供 HTTP 查询）。
+        // 任务权威源是 `TaskStore`（task.create/update 工具），此处仅镜像其变更；
+        // 会话删除后广播 sender drop，receiver 收到 closed，task 自然退出。
+        // `Lagged` 必须续跑：总线承载大量 `Token` 事件，订阅者必然周期性落后
+        //（`broadcast` 容量耗尽时丢历史事件），若退出则任务快照永久停更。
+        let subscriber = session.clone();
+        tokio::spawn(async move {
+            let mut rx = subscriber.runtime.events().subscribe();
+            loop {
+                // 总线被 `Token` 事件冲满时丢历史事件，续跑即可（任务事件量少，不会丢关键快照）
+                let event = match rx.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                if let Event::TaskUpdated { task } = event {
+                    let mut state = subscriber
+                        .task_state
+                        .lock()
+                        .expect("task_state mutex poisoned");
+                    if let Some(existing) = state.iter_mut().find(|t| t.id == task.id) {
+                        *existing = task;
+                    } else {
+                        state.push(task);
+                    }
+                }
+            }
+        });
+
         let session_id = session.session_id().clone();
         let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
         guard.insert(session_id, session.clone());
@@ -277,7 +312,12 @@ impl SessionManager {
                     .messages
                     .last()
                     .map_or(session_model.created_at, |m| m.created_at),
-                tasks: Vec::new(),
+                // 任务快照来自 `task_state`（TaskUpdated 订阅镜像，见 `ServerSession`）
+                tasks: session
+                    .task_state
+                    .lock()
+                    .expect("task_state mutex poisoned")
+                    .clone(),
             });
         }
         metas

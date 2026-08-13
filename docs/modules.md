@@ -779,6 +779,7 @@ minicoding-server/src/
 ├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime；默认注入 FileChangeJournal）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
+├── otel_init.rs           # OTLP 初始化（镜像 cli/otel_init.rs，feature gate `otel` 默认启用，见 observability.md §7.3）
 ├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
 ├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，feature gate `lsp`）
 ├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest 点对点权限交互）
@@ -792,7 +793,7 @@ minicoding-server/src/
 - **ServerPrompter**：实现 `PermissionPrompter`，用 `PendingPermissions`（`Arc<TokioMutex<HashMap<String, oneshot::Sender<Decision>>>>`）+ 超时（默认 300s）完成点对点权限交互；HTTP `POST /permissions/{pid}` 通过 `SessionManager::resolve_permission` 投递决策。
 - **ACP stdio**：作为 `minicoding serve --acp` 子模式，stdio 传输 JSON-RPC；
 - **LSP stdio**：作为 `minicoding serve --lsp` 子模式，基于 `tower-lsp` 实现，把 minicoding 能力映射到 LSP 标准方法（`workspace/executeCommand`/`$/progress`/`window/showMessageRequest` 等，见 `design.md` §24 语义映射表）；`LspPrompter` 实现点对点权限交互；
-- **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）+ `tower-lsp`（feature gate `lsp`，M8 引入）。
+- **依赖**：`minicoding-core` + `minicoding-protocol` + `minicoding-tools` + `axum`/`tower`（M6/M8 引入）+ `tower-lsp`（feature gate `lsp`，M8 引入）+ `opentelemetry` 系列（feature gate `otel`，默认启用，保证桌面 sidecar 开箱接入 OTLP，见 `observability.md` §7）。
 
 ---
 

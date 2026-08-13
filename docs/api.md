@@ -1562,6 +1562,16 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 
 `SessionManager::send_message_boxed` 的关联函数形态是 HRTB 兼容方案的关键——`Arc<SessionManager>` owned 移入 future，无 `&self` 借用泄漏。`Runtime::run_turn_owned`（§4.1）同理。详见 `design.md` §24。
 
+**会话快照与取消端点**（`minicoding-server/src/http.rs` / `session_mgr.rs`）：
+
+- `GET /sessions/{id}` 响应体含 `tasks: Vec<Task>`——由 `ServerSession::task_state` 返回
+  （常驻订阅 `Event::TaskUpdated` 的镜像快照，任务权威源是 `TaskStore`）。前端据此渲染任务面板；
+- `POST /sessions/{id}/cancel` → `SessionManager::cancel` → `Runtime::cancel()`（CancellationToken），
+  中断当前 turn，SSE 推 `TurnEnd { stop_reason: interrupted }`，`POST /sessions/{id}/messages`
+  返回 `final_text = "[已取消]"`；
+- 前端 turn 进行中（`POST /messages` 阻塞）接收 SSE `tool_call_started`/`tool_call_finished`
+  渲染工具调用卡片（进行中/✓完成/✗失败），`elapsed` 计时区分"正在运行/疑似卡死"。
+
 ### 9.2 Workspace 端点（W-11 项目工作区，见 `design.md` §26.9）
 
 HTTP 端点（`axum` 路由，`minicoding-server/src/workspace.rs`）：
