@@ -94,30 +94,54 @@ pub fn sse_stream(
         }
 
         // 2. 订阅 EventBus 推送新事件
-        let event_rx = session.runtime.events().subscribe();
-        let mut stream = BroadcastStream::new(event_rx);
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(event) => {
-                    let seq = session.push_event(&event).await;
-                    let kind = EventKind::from(&event);
-                    let kind_json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
-                    let sse = format_sse_event(seq, &kind_json);
-                    if tx.send(Ok(sse)).await.is_err() {
-                        // 客户端断连
-                        break;
-                    }
-                }
-                Err(_lagged) => {
-                    // broadcast 溢出——发 RehydrateRequired
-                    let _ = tx.send(Ok(format_rehydrate(session.session_id(), 0))).await;
-                    // 继续推送（客户端收到 RehydrateRequired 后自行决定是否重拉 snapshot）
-                }
-            }
-        }
-        // tx drop 后 rx 返回 None，SSE 流关闭
+        push_new_events(session, tx).await;
     });
 
     ReceiverStream::new(rx)
+}
+
+/// 构造 **只推新事件** 的 SSE 流（首次连接，无 `Last-Event-ID`）。
+///
+/// 背景：若按 `sse_stream` 从 seq 0 重放，连接建立前的历史事件（如已决的
+/// `permission_requested`/`permission_resolved`）会被重新推给前端，导致弹窗
+/// 覆盖错位（新请求的权限弹窗被历史 pid 顶掉，审批悬空直到 300s 超时）。
+/// 首次连接直接订阅 EventBus，只收连接建立之后的事件；断线重连由浏览器
+/// `Last-Event-ID` 走 `sse_stream` 的恢复路径（不丢事件）。
+pub fn sse_live(session: Arc<ServerSession>) -> ReceiverStream<Result<String, Infallible>> {
+    let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
+
+    tokio::spawn(async move {
+        push_new_events(session, tx).await;
+    });
+
+    ReceiverStream::new(rx)
+}
+
+/// 订阅 `EventBus` 并把新事件转为 SSE 块，直到客户端断连（tx send 失败）。
+async fn push_new_events(
+    session: Arc<ServerSession>,
+    tx: mpsc::Sender<Result<String, Infallible>>,
+) {
+    let event_rx = session.runtime.events().subscribe();
+    let mut stream = BroadcastStream::new(event_rx);
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                let seq = session.push_event(&event).await;
+                let kind = EventKind::from(&event);
+                let kind_json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+                let sse = format_sse_event(seq, &kind_json);
+                if tx.send(Ok(sse)).await.is_err() {
+                    // 客户端断连
+                    break;
+                }
+            }
+            Err(_lagged) => {
+                // broadcast 溢出——发 RehydrateRequired
+                let _ = tx.send(Ok(format_rehydrate(session.session_id(), 0))).await;
+                // 继续推送（客户端收到 RehydrateRequired 后自行决定是否重拉 snapshot）
+            }
+        }
+    }
 }

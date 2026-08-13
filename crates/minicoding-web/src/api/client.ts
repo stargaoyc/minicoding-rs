@@ -55,16 +55,32 @@ export function setApiBase(base: string): void {
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────────
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${apiBase}${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${body}`);
+async function http<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
+  const controller = new AbortController();
+  const timer =
+    timeoutMs != null && Number.isFinite(timeoutMs)
+      ? setTimeout(() => controller.abort(new Error(`请求超时（${timeoutMs}ms）`)), timeoutMs)
+      : undefined;
+  try {
+    const resp = await fetch(`${apiBase}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${body}`);
+    }
+    return resp.json() as Promise<T>;
+  } catch (e) {
+    // AbortController 中止时统一为超时错误（浏览器原生抛出 AbortError/DOMException）
+    if (controller.signal.aborted) {
+      throw new Error(`请求超时（${timeoutMs}ms），请重试`);
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return resp.json() as Promise<T>;
 }
 
 // ─── Session API ────────────────────────────────────────────────────────────
@@ -151,12 +167,19 @@ export function getWorkspaceDiff(sessionId: string): Promise<WorkspaceDiffRespon
 /**
  * `POST /sessions/{id}/workspace` — 切换工作目录（Ask 审批：后端广播
  * `permission_requested`，前端弹权限窗，用户允许后生效）。
+ *
+ * 65s 前端超时：正常审批在弹窗确认后立即返回；若权限弹窗未出现
+ * （SSE 断连等），65s 后明确报错而非无限转圈（后端 prompter 300s 超时兜底）。
  */
 export function switchWorkspace(sessionId: string, path: string): Promise<WorkspaceSwitchResponse> {
-  return http<WorkspaceSwitchResponse>(`/sessions/${sessionId}/workspace`, {
-    method: "POST",
-    body: JSON.stringify({ path }),
-  });
+  return http<WorkspaceSwitchResponse>(
+    `/sessions/${sessionId}/workspace`,
+    {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    },
+    65_000,
+  );
 }
 
 // ─── SSE 事件流 ─────────────────────────────────────────────────────────────

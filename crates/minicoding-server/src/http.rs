@@ -382,10 +382,17 @@ async fn sse_events(
         .get(&session_id)
         .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
 
-    let last_seq =
-        sse::parse_last_event_id(headers.get("last-event-id").and_then(|v| v.to_str().ok()));
-
-    let stream = sse::sse_stream(session, last_seq);
+    let headers = headers.clone();
+    let header = headers.get("last-event-id").and_then(|v| v.to_str().ok());
+    let stream = if header.is_some() {
+        // 断线重连（浏览器 EventSource 自动携带 Last-Event-ID）：从断点恢复重放
+        let last_seq = sse::parse_last_event_id(header);
+        sse::sse_stream(session, last_seq)
+    } else {
+        // 首次连接：只推新事件，不回放历史（历史 permission_requested 若重放
+        // 会让前端弹窗 pid 错乱，见 `sse.rs::sse_live` 说明）
+        sse::sse_live(session)
+    };
     let mapped = stream.map(|item| {
         let sse_str = item.unwrap_or_default();
         Ok::<_, Infallible>(parse_sse_block(&sse_str))

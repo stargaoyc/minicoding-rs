@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-cli"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-context"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "criterion",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-core"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "futures",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-desktop"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "camino",
@@ -3076,6 +3076,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-log",
  "tauri-plugin-shell",
@@ -3086,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-extension-sdk"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3100,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-hooks"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3114,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-journal"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3130,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-mcp"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "futures",
@@ -3151,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-memory"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "futures",
@@ -3169,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-policy"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3187,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-protocol"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "minicoding-core",
  "serde",
@@ -3200,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-providers"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "futures",
  "minicoding-core",
@@ -3216,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sandbox"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "landlock",
@@ -3231,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sdk"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "camino",
@@ -3254,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-server"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "axum",
@@ -3291,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-storage"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "fs2",
@@ -3307,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tools"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "camino",
  "futures",
@@ -3334,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tui"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "camino",
@@ -3706,6 +3707,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
 ]
@@ -4872,6 +4874,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfd"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "glib-sys",
+ "gobject-sys",
+ "gtk-sys",
+ "js-sys",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5929,6 +5955,48 @@ dependencies = [
  "serde_json",
  "tauri-utils",
  "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-dialog"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2d3c1dbe38037e7f590cdf2492594d5ceebe031e7bc7e827509b22a999d2940"
+dependencies = [
+ "log",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tauri-plugin-fs",
+ "thiserror 2.0.19",
+ "url",
+]
+
+[[package]]
+name = "tauri-plugin-fs"
+version = "2.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ecc274121aca0c036a2b42d1cbe83d368d348f54e0bb8a735c2b1548e8f371"
+dependencies = [
+ "anyhow",
+ "dunce",
+ "glob",
+ "log",
+ "objc2-foundation",
+ "percent-encoding",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "tauri",
+ "tauri-plugin",
+ "tauri-utils",
+ "thiserror 2.0.19",
+ "toml 1.1.4+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
