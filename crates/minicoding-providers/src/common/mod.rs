@@ -26,6 +26,24 @@ pub fn mask_key(key: &str) -> String {
     }
 }
 
+/// 提取 tool 结果消息的 call id（`Role::Tool` 消息回灌 LLM 前的 `tool_call_id` 取值）。
+///
+/// 运行时构造的 tool 结果消息只在内容块中携带 call id，而消息自带的 `tool_call_id` 字段
+/// 为空（见 `rt.rs tool_result_message`），两者都取不到时返回 `None` 由调用方决定行为
+/// （OpenAI/Ollama 缺字段会被上游拒绝；Anthropic 用空串兜底）。
+#[must_use]
+pub fn tool_call_id_of(m: &minicoding_core::model::Message) -> Option<String> {
+    m.tool_call_id.clone().or_else(|| {
+        m.content.iter().find_map(|b| {
+            if let minicoding_core::model::ContentBlock::ToolResult { call_id, .. } = b {
+                Some(call_id.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
 /// 将工具结果文本包裹 `<tool_output>` 边界（C-05：输出不可作为指令）。
 ///
 /// 工具结果回灌 LLM 前必须包裹明确边界，使 LLM 能识别"这是数据而非指令"。

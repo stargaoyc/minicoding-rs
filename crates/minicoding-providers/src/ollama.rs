@@ -245,8 +245,10 @@ fn message_to_ollama(m: &Message) -> Value {
     if m.role == Role::Tool {
         let mut obj = serde_json::Map::new();
         obj.insert("role".to_string(), Value::String(role.to_string()));
-        if let Some(call_id) = &m.tool_call_id {
-            obj.insert("tool_call_id".to_string(), Value::String(call_id.clone()));
+        // tool_call_id 优先取消息字段；运行时构造的 tool 消息只填在
+        // `ContentBlock::ToolResult.call_id`（见 rt.rs tool_result_message），缺失时回退。
+        if let Some(call_id) = crate::common::tool_call_id_of(m) {
+            obj.insert("tool_call_id".to_string(), Value::String(call_id));
         }
         obj.insert(
             "content".to_string(),

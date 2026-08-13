@@ -838,7 +838,12 @@ impl Runtime {
                         call_id: call_id.clone(),
                         tool: tool_name.clone(),
                     });
-                    let result = tools.dispatch(&call, &ctx).await?;
+                    let result = match tools.dispatch(&call, &ctx).await {
+                        Ok(r) => r,
+                        // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，
+                        // 不中止 turn（未知工具/参数不合法等模型可自行纠正）。
+                        Err(e) => ToolResult::err_text(format!("tool error: {e}")),
+                    };
                     events.emit(Event::ToolCallFinished {
                         call_id: call_id.clone(),
                         result: result.clone(),
@@ -1180,10 +1185,8 @@ impl Runtime {
                 // PostToolUseFailure Hook（非 denial 错误）
                 self.run_post_failure_hook(effective_call, side_effect, &e)
                     .await;
-                return Err(RuntimeError::Tool {
-                    tool: original_call.name.clone(),
-                    source: e,
-                });
+                // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，不中止 turn。
+                ToolResult::err_text(format!("tool error: {e}"))
             }
         };
         // PostToolUse Hook（执行成功后）
