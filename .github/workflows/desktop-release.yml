@@ -69,6 +69,13 @@ jobs:
         with:
           workspaces: ". -> target"
 
+      - name: Setup pnpm
+        # 锁定 pnpm 版本：pnpm-lock.yaml 由 pnpm 11.13.0 生成（lockfileVersion 9.0），
+        # runner 预装 pnpm 版本不固定，版本不匹配会导致 install --frozen-lockfile 失败
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
