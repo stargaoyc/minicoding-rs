@@ -1,6 +1,6 @@
 //! Journal 记录辅助（T-M4-9 集成）。
 //!
-//! `fs.write`/`fs.edit`/`fs.delete` 成功后调用 [`record_change`] 把改动记入
+//! `fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete` 成功后调用 [`record_change`] 把改动记入
 //! `Journal`，供 `/undo` 回滚（C-28）。仅当 `ToolContext::journal` 注入时生效；
 //! 未注入（`file-undo` feature 关闭）时为 no-op，不影响工具主流程。
 //!
