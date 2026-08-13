@@ -487,7 +487,7 @@ mod tests {
             "done": false
         });
         let deltas = parse_chunk(&chunk);
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     #[test]
@@ -1025,7 +1025,7 @@ mod tests {
             mime: "image/png".to_string(),
             data: vec![1, 2, 3],
         });
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[test]

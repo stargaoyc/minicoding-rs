@@ -250,7 +250,7 @@ mod tests {
             make_assistant_msg_with_tool_call("fs.list", "src/"),
         ];
         let files = extract_read_files(&msgs, 5);
-        assert!(files.is_empty());
+        assert!(files.is_empty(), "expected empty: files");
     }
 
     #[test]

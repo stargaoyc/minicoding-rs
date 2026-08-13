@@ -76,7 +76,7 @@ mod tests {
             ))
             .await
             .expect("build");
-        assert!(!s.content.is_empty());
+        assert!(!s.content.is_empty(), "expected non-empty: s.content");
         assert!(s.content.contains("先读后改"));
         assert!(s.cacheable);
     }

@@ -221,7 +221,10 @@ mod tests {
         let dto = EventDto::from_event(1, &Event::MessageAppended(msg));
         match dto.kind {
             EventKind::MessageAppended { message } => {
-                assert!(!message.content.is_empty());
+                assert!(
+                    !message.content.is_empty(),
+                    "expected non-empty: message.content"
+                );
             }
             _ => panic!("expected MessageAppended"),
         }

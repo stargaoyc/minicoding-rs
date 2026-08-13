@@ -263,7 +263,7 @@ mod tests {
         let dir = utf8(tmp.path());
         let loader = ProjectDocLoaderImpl::new(dir.clone(), dir);
         let doc = loader.load().await.unwrap();
-        assert!(doc.is_empty());
+        assert!(doc.is_empty(), "expected empty: doc");
     }
 
     #[tokio::test]
@@ -272,7 +272,7 @@ mod tests {
         let dir = utf8(tmp.path());
         let loader = ProjectDocLoaderImpl::new(dir.clone(), dir);
         let doc = loader.load().await.unwrap();
-        assert!(doc.is_empty());
+        assert!(doc.is_empty(), "expected empty: doc");
     }
 
     #[tokio::test]
@@ -308,7 +308,7 @@ mod tests {
         let dir = utf8(tmp.path());
         let loader = ProjectDocLoaderImpl::new(dir.clone(), dir).with_skip(true);
         let doc = loader.load().await.unwrap();
-        assert!(doc.is_empty());
+        assert!(doc.is_empty(), "expected empty: doc");
     }
 
     #[tokio::test]

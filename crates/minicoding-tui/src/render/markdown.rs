@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn parse_empty_input() {
         let lines = parse_markdown("");
-        assert!(lines.is_empty());
+        assert!(lines.is_empty(), "expected empty: lines");
     }
 
     #[test]

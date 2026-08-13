@@ -471,6 +471,6 @@ mod tests {
     fn save_summary_missing_session_noop() {
         let mut index = SessionIndex::new();
         save_summary(&mut index, "nonexistent", "summary".to_string());
-        assert!(index.is_empty());
+        assert!(index.is_empty(), "expected empty: index");
     }
 }

@@ -797,7 +797,7 @@ mod tests {
         s.insert_char('i');
         let text = s.submit();
         assert_eq!(text.as_deref(), Some("hi"));
-        assert!(s.buffer.is_empty());
+        assert!(s.buffer.is_empty(), "expected empty: s.buffer");
         assert_eq!(s.history, vec!["hi".to_string()]);
         // 重复内容不重复记录
         s.insert_char('h');
@@ -834,7 +834,7 @@ mod tests {
         s.history_next();
         assert_eq!(s.buffer, "second");
         s.history_next();
-        assert!(s.buffer.is_empty());
+        assert!(s.buffer.is_empty(), "expected empty: s.buffer");
     }
 
     #[test]

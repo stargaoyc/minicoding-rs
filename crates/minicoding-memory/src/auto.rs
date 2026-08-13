@@ -447,7 +447,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mem = make(tmp.path());
         let rendered = mem.load_rendered().await.unwrap();
-        assert!(rendered.is_empty());
+        assert!(rendered.is_empty(), "expected empty: rendered");
     }
 
     #[tokio::test]
@@ -483,7 +483,7 @@ mod tests {
         assert!(!tmp.path().join(AUTO_INDEX_FILE).exists());
 
         let rendered = mem.load_rendered().await.unwrap();
-        assert!(rendered.is_empty());
+        assert!(rendered.is_empty(), "expected empty: rendered");
     }
 
     #[tokio::test]
@@ -893,7 +893,7 @@ mod tests {
     fn evict_until_fit_empty_no_panic() {
         let mut entries: Vec<AutoEntry> = Vec::new();
         evict_until_fit(&mut entries);
-        assert!(entries.is_empty());
+        assert!(entries.is_empty(), "expected empty: entries");
     }
 
     // === 指令性检测：英文全大写也命中 ===

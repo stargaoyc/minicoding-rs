@@ -799,7 +799,10 @@ mod tests {
         // 无 auth_header、无 custom_headers（仅断言不 panic 且 URI 正确）
         assert_eq!(config.uri.as_ref(), "http://localhost:8000/mcp");
         assert!(config.auth_header.is_none());
-        assert!(config.custom_headers.is_empty());
+        assert!(
+            config.custom_headers.is_empty(),
+            "expected empty: config.custom_headers"
+        );
     }
 
     #[test]

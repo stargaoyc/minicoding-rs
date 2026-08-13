@@ -265,7 +265,7 @@ mod tests {
         st.delete(&id).await.unwrap();
 
         let records = st.load(&id).await.unwrap();
-        assert!(records.is_empty());
+        assert!(records.is_empty(), "expected empty: records");
     }
 
     #[tokio::test]
@@ -273,7 +273,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let records = st.load(&"01NOEXIST".to_string()).await.unwrap();
-        assert!(records.is_empty());
+        assert!(records.is_empty(), "expected empty: records");
     }
 
     #[tokio::test]

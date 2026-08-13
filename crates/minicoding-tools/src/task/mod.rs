@@ -281,7 +281,7 @@ mod tests {
         let task = store.create("demo task".to_string()).await.unwrap();
         assert_eq!(task.status, TaskStatus::Pending);
         assert_eq!(task.id.len(), 26);
-        assert!(task.blocks.is_empty());
+        assert!(task.blocks.is_empty(), "expected empty: task.blocks");
     }
 
     #[tokio::test]
@@ -453,7 +453,10 @@ mod tests {
             .into_iter()
             .find(|t| t.id == a.id)
             .unwrap();
-        assert!(a_now.blocked_by.is_empty());
+        assert!(
+            a_now.blocked_by.is_empty(),
+            "expected empty: a_now.blocked_by"
+        );
     }
 
     #[tokio::test]

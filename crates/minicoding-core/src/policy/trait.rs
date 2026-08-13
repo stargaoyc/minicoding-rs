@@ -255,7 +255,10 @@ mod tests {
     fn plan_mode_snapshot_default_is_default_with_empty_prompts() {
         let snap = PlanModeSnapshot::default();
         assert_eq!(snap.mode, PermissionMode::Default);
-        assert!(snap.allowed_prompts.is_empty());
+        assert!(
+            snap.allowed_prompts.is_empty(),
+            "expected empty: snap.allowed_prompts"
+        );
     }
 
     #[tokio::test]

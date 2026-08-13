@@ -161,7 +161,7 @@ mod tests {
     fn new_task_is_pending_with_ulid() {
         let task = Task::new("hello".to_string());
         assert_eq!(task.status, TaskStatus::Pending);
-        assert!(!task.id.is_empty());
+        assert!(!task.id.is_empty(), "expected non-empty: task.id");
         // ULID 长度 26
         assert_eq!(task.id.len(), 26);
     }

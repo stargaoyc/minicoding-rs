@@ -895,7 +895,7 @@ mod tests {
             .expect("chat_stream");
         let deltas = collect_deltas(stream).await;
         // [DONE] 不产出任何 delta
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     #[tokio::test]
@@ -1203,7 +1203,7 @@ mod tests {
             .await
             .expect("chat_stream");
         let deltas = collect_deltas(stream).await;
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     // --- auth_headers 补充 ---
@@ -1300,7 +1300,7 @@ mod tests {
             mime: "image/png".to_string(),
             data: vec![1, 2, 3],
         });
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[test]

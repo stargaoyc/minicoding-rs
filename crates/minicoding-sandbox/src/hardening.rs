@@ -123,7 +123,7 @@ mod tests {
     fn vcs_dirs_empty_when_none() {
         let tmp = TempDir::new().unwrap();
         let dirs = vcs_protected_dirs(tmp.path());
-        assert!(dirs.is_empty());
+        assert!(dirs.is_empty(), "expected empty: dirs");
     }
 
     #[test]

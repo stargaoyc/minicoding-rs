@@ -90,7 +90,7 @@ mod tests {
     async fn stub_memory_store_load_returns_empty() {
         let store = StubMemoryStore;
         let content = store.load().await.expect("load 应成功");
-        assert!(content.is_empty());
+        assert!(content.is_empty(), "expected empty: content");
     }
 
     #[tokio::test]

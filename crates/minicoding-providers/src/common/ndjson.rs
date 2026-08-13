@@ -177,6 +177,6 @@ mod tests {
     #[tokio::test]
     async fn empty_stream_yields_nothing() {
         let stream = NdjsonStream::new(byte_stream(vec![]));
-        assert!(collect_ok(stream).await.is_empty());
+        assert!(collect_ok(stream).await.is_empty(), "stream 应为空");
     }
 }

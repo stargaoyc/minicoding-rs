@@ -470,6 +470,6 @@ mod tests {
     async fn list_sessions_returns_empty() {
         let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
         let list = mgr.list_sessions();
-        assert!(list.is_empty());
+        assert!(list.is_empty(), "expected empty: list");
     }
 }

@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn bundle_is_initially_empty() {
         let b = RegistrationBundle::new();
-        assert!(b.is_empty());
+        assert!(b.is_empty(), "expected empty: b");
         assert!(b.counts_by_capability().is_empty());
     }
 
@@ -225,7 +225,7 @@ mod tests {
         })
         .unwrap();
         let b = r.into_bundle();
-        assert!(!b.is_empty());
+        assert!(!b.is_empty(), "expected non-empty: b");
         let counts = b.counts_by_capability();
         assert!(counts.contains(&(Capability::Tool, 2)));
         assert!(counts.contains(&(Capability::Command, 1)));

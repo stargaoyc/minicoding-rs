@@ -262,7 +262,7 @@ mod tests {
             分支命名 feature/xxx，提交用 Conventional Commits。\n";
         let idx = MemoryIndex::from_long_term(content);
         let results = idx.search("Rust 错误处理", 2);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "expected non-empty: results");
         assert_eq!(results[0].id, "Rust 编码规范");
     }
 
@@ -270,7 +270,7 @@ mod tests {
     fn empty_index_returns_empty() {
         let idx = MemoryIndex::new();
         assert!(idx.search("anything", 5).is_empty());
-        assert!(idx.is_empty());
+        assert!(idx.is_empty(), "expected empty: idx");
     }
 
     #[test]

@@ -195,6 +195,6 @@ mod tests {
     #[test]
     fn section_empty_is_empty() {
         let s = PromptSection::empty("ext", PromptSectionOrder::Extension);
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 }

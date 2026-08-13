@@ -114,7 +114,7 @@ mod tests {
         acc.push(Delta::Stop(StopReason::EndTurn));
         let msg = acc.finalize();
         assert_eq!(msg.text(), "Hello world");
-        assert!(msg.tool_calls.is_empty());
+        assert!(msg.tool_calls.is_empty(), "expected empty: msg.tool_calls");
     }
 
     #[test]

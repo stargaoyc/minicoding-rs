@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(host.list_extensions().await.len(), 3);
 
         let failures = host.shutdown_all().await;
-        assert!(failures.is_empty());
+        assert!(failures.is_empty(), "expected empty: failures");
         assert!(host.list_extensions().await.is_empty());
     }
 }

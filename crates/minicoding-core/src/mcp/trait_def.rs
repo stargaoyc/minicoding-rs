@@ -249,7 +249,7 @@ mod tests {
             } => {
                 assert_eq!(url, "https://example.com/mcp");
                 assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
-                assert!(http_headers.is_empty());
+                assert!(http_headers.is_empty(), "expected empty: http_headers");
             }
             McpTransport::Stdio { .. } => panic!("expected Http, got Stdio"),
         }
@@ -327,7 +327,7 @@ mod tests {
     async fn noop_mcp_client_list_tools_returns_empty() {
         let client = NoopMcpClient;
         let tools = client.list_tools().await;
-        assert!(tools.is_empty());
+        assert!(tools.is_empty(), "expected empty: tools");
     }
 
     #[tokio::test]

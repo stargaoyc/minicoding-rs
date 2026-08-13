@@ -125,7 +125,10 @@ mod tests {
         // op_id 是 ULID（26 字符）
         assert_eq!(entry.op_id.len(), 26);
         // fs 工具不接触用户消息原文
-        assert!(entry.prompt_snippet.is_empty());
+        assert!(
+            entry.prompt_snippet.is_empty(),
+            "expected empty: entry.prompt_snippet"
+        );
     }
 
     #[tokio::test]

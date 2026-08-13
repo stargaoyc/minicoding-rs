@@ -190,8 +190,8 @@ mod tests {
     async fn empty_pipeline_returns_empty_prompt() {
         let p = PromptPipeline::new();
         let sp = p.build(&ctx()).await.expect("build");
-        assert!(sp.text.is_empty());
-        assert!(sp.sections.is_empty());
+        assert!(sp.text.is_empty(), "expected empty: sp.text");
+        assert!(sp.sections.is_empty(), "expected empty: sp.sections");
     }
 
     #[tokio::test]

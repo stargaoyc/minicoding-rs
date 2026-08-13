@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn index_crud_add_remove_list() {
         let mut idx = SessionIndex::new();
-        assert!(idx.is_empty());
+        assert!(idx.is_empty(), "expected empty: idx");
 
         idx.add(entry("01H8", 3));
         idx.add(entry("01H9", 5));
@@ -321,7 +321,7 @@ mod tests {
         // load 不存在的文件返回空索引
         let missing: Utf8PathBuf = dir.path().join("missing.json").try_into().unwrap();
         let empty = SessionIndex::load(&missing).unwrap();
-        assert!(empty.is_empty());
+        assert!(empty.is_empty(), "expected empty: empty");
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn index_default_is_empty() {
         let idx = SessionIndex::default();
-        assert!(idx.is_empty());
+        assert!(idx.is_empty(), "expected empty: idx");
         assert_eq!(idx.len(), 0);
         assert!(idx.list().is_empty());
         assert!(idx.to_metas().is_empty());
@@ -535,7 +535,7 @@ mod tests {
         let path: Utf8PathBuf = dir.path().join("empty.json").try_into().unwrap();
         std::fs::write(path.as_std_path(), "   \n  ").unwrap();
         let loaded = SessionIndex::load(&path).unwrap();
-        assert!(loaded.is_empty());
+        assert!(loaded.is_empty(), "expected empty: loaded");
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         idx.add(entry("01RA2", 2));
         idx.remove("01RA1");
         idx.remove("01RA2");
-        assert!(idx.is_empty());
+        assert!(idx.is_empty(), "expected empty: idx");
         assert_eq!(idx.len(), 0);
         assert_eq!(idx.list_windowed(), "");
     }
