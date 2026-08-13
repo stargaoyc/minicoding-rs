@@ -724,7 +724,7 @@ mod tests {
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
         // notification 无响应——stdout 应为空
-        assert!(captured.is_empty());
+        assert!(captured.is_empty(), "expected empty: captured");
     }
 
     #[tokio::test]

@@ -57,13 +57,17 @@ pub struct ToolSchema {
 }
 
 /// 工具返回内容（支持文本/JSON/图片/混合）。
+///
+/// 序列化用 adjacent tagging（`{"type":"text","content":"..."}`）：internal tag 无法
+/// 序列化 newtype 变体（`Text(String)`/`Json(Value)` 内容不是 map/struct），会导致
+/// 工具结果落盘序列化失败。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(
     feature = "ts",
     ts(export, export_to = "../../minicoding-web/src/api/generated/")
 )]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ToolContent {
     Text(String),
     Json(serde_json::Value),

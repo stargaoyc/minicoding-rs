@@ -245,7 +245,9 @@ fn message_to_anthropic(m: &Message) -> Value {
     // tool 结果消息：user + tool_result content block
     // C-05：工具结果回灌 LLM 时包裹 `<tool_output>` 边界，防 LLM 把输出当指令执行。
     if m.role == Role::Tool {
-        let call_id = m.tool_call_id.clone().unwrap_or_default();
+        // tool_use_id 优先取消息字段；运行时构造的 tool 消息只填在
+        // `ContentBlock::ToolResult.call_id`，缺失时回退（仍取不到则空串兜底）。
+        let call_id = crate::common::tool_call_id_of(m).unwrap_or_default();
         let text = extract_text(&m.content);
         return json!({
             "role": role,
@@ -862,7 +864,7 @@ mod tests {
             .await
             .expect("chat_stream");
         let deltas = collect_deltas(stream).await;
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     #[tokio::test]
@@ -1275,7 +1277,7 @@ mod tests {
             mime: "image/png".to_string(),
             data: vec![1, 2, 3],
         });
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[test]

@@ -383,7 +383,7 @@ mod tests {
 
         // 第二次 poll 应为空
         let second_poll = mgr.poll().await;
-        assert!(second_poll.is_empty());
+        assert!(second_poll.is_empty(), "expected empty: second_poll");
     }
 
     #[tokio::test]
@@ -423,7 +423,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let active = mgr.active_tasks();
-        assert!(active.is_empty());
+        assert!(active.is_empty(), "expected empty: active");
     }
 
     #[tokio::test]

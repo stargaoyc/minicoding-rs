@@ -332,7 +332,10 @@ mod tests {
             input_schema: serde_json::Value::Null,
         };
         let tool = convert_schema_to_mcp_tool(schema);
-        assert!(tool.input_schema.is_empty());
+        assert!(
+            tool.input_schema.is_empty(),
+            "expected empty: tool.input_schema"
+        );
     }
 
     #[test]

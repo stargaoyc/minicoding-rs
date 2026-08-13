@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn record_and_diff() {
         let j = FileChangeJournal::new(None);
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
         j.record(entry("op1", vec![])).await.unwrap();
         j.record(entry("op2", vec![])).await.unwrap();
         assert_eq!(j.len(), 2);
@@ -337,11 +337,14 @@ mod tests {
         let report = j.undo(1).await.unwrap();
         assert_eq!(report.undone_entries, 1);
         assert_eq!(report.restored_files, vec![file.clone()]);
-        assert!(report.failed_files.is_empty());
+        assert!(
+            report.failed_files.is_empty(),
+            "expected empty: report.failed_files"
+        );
         let restored = fs::read(file.as_std_path()).await.unwrap();
         assert_eq!(restored, b"old");
         // undo 后 journal 清空
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
     }
 
     #[tokio::test]
@@ -365,7 +368,10 @@ mod tests {
             .unwrap();
         let report = j.undo(1).await.unwrap();
         assert_eq!(report.undone_entries, 1);
-        assert!(report.restored_files.is_empty());
+        assert!(
+            report.restored_files.is_empty(),
+            "expected empty: report.restored_files"
+        );
         assert_eq!(report.failed_files.len(), 1);
         assert_eq!(report.failed_files[0].0, file);
         // 文件未被覆盖
@@ -447,7 +453,7 @@ mod tests {
         let report = j.undo(2).await.unwrap();
         assert_eq!(report.undone_entries, 2);
         assert_eq!(report.restored_files.len(), 2);
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
     }
 
     #[tokio::test]
@@ -462,7 +468,7 @@ mod tests {
         let j = FileChangeJournal::new(None);
         j.record(entry("op1", vec![])).await.unwrap();
         j.reset_to_initial().await.unwrap();
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
     }
 
     #[tokio::test]
@@ -499,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn default_creates_empty_journal() {
         let j = FileChangeJournal::default();
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
         assert_eq!(j.len(), 0);
     }
 
@@ -536,7 +542,7 @@ mod tests {
         // steps=10 > 2 entries
         let report = j.undo(10).await.unwrap();
         assert_eq!(report.undone_entries, 2);
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
     }
 
     // === Edited 撤销恢复 before 内容 ===
@@ -639,7 +645,10 @@ mod tests {
         fs::write(file.as_std_path(), b"modified").await.unwrap();
         let report = j.undo(1).await.unwrap();
         assert_eq!(report.undone_entries, 1);
-        assert!(report.restored_files.is_empty());
+        assert!(
+            report.restored_files.is_empty(),
+            "expected empty: report.restored_files"
+        );
         assert_eq!(report.failed_files.len(), 1);
         // 文件未被删除
         assert!(file.as_std_path().exists());
@@ -667,7 +676,10 @@ mod tests {
         fs::write(file.as_std_path(), b"recreated").await.unwrap();
         let report = j.undo(1).await.unwrap();
         assert_eq!(report.undone_entries, 1);
-        assert!(report.restored_files.is_empty());
+        assert!(
+            report.restored_files.is_empty(),
+            "expected empty: report.restored_files"
+        );
         assert_eq!(report.failed_files.len(), 1);
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
@@ -696,7 +708,10 @@ mod tests {
         fs::write(file.as_std_path(), b"v3").await.unwrap();
         let report = j.undo(1).await.unwrap();
         assert_eq!(report.undone_entries, 1);
-        assert!(report.restored_files.is_empty());
+        assert!(
+            report.restored_files.is_empty(),
+            "expected empty: report.restored_files"
+        );
         assert_eq!(report.failed_files.len(), 1);
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
@@ -790,7 +805,7 @@ mod tests {
         let j = FileChangeJournal::new(None);
         j.record(entry("op1", vec![])).await.unwrap();
         j.reset_to_initial().await.unwrap();
-        assert!(j.is_empty());
+        assert!(j.is_empty(), "expected empty: j");
         // reset 后可继续 record
         j.record(entry("op2", vec![])).await.unwrap();
         assert_eq!(j.len(), 1);

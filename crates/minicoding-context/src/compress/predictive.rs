@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn new_tracker_is_empty() {
         let t = PredictiveTracker::new();
-        assert!(t.is_empty());
+        assert!(t.is_empty(), "expected empty: t");
         assert_eq!(t.len(), 0);
     }
 

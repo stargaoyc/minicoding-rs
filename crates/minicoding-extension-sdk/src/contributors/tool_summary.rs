@@ -67,7 +67,7 @@ mod tests {
         let c = ToolSummaryContributor;
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/tmp"));
         let s = c.build(&ctx).await.expect("build");
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[tokio::test]

@@ -99,7 +99,7 @@ mod tests {
             panic!("expected json content");
         };
         let tasks = value["tasks"].as_array().expect("tasks array");
-        assert!(tasks.is_empty());
+        assert!(tasks.is_empty(), "expected empty: tasks");
     }
 
     #[tokio::test]

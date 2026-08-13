@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn parse_ddg_results_empty_html_returns_empty() {
         let results = parse_ddg_results("", 5);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "expected empty: results");
     }
 
     #[test]

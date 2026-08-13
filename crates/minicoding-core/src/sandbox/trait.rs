@@ -106,7 +106,7 @@ mod tests {
         match p {
             SandboxPolicy::WorkspaceWrite { workdir, writable } => {
                 assert_eq!(workdir, camino::Utf8PathBuf::from("."));
-                assert!(writable.is_empty());
+                assert!(writable.is_empty(), "expected empty: writable");
             }
             other => panic!("expected WorkspaceWrite, got {other:?}"),
         }

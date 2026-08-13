@@ -977,7 +977,10 @@ mod tests {
         let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
         let result = reg.dispatch(input, DispatchConfig::default()).await;
         assert_eq!(result.decision, HookDecision::Continue);
-        assert!(result.inject_contexts.is_empty());
+        assert!(
+            result.inject_contexts.is_empty(),
+            "expected empty: result.inject_contexts"
+        );
     }
 
     #[tokio::test]
@@ -1338,10 +1341,16 @@ mod tests {
         assert_eq!(r.decision, HookDecision::Continue);
         assert!(r.reason.is_none());
         assert!(r.modify_input.is_none());
-        assert!(r.inject_contexts.is_empty());
-        assert!(r.exit_messages.is_empty());
+        assert!(
+            r.inject_contexts.is_empty(),
+            "expected empty: r.inject_contexts"
+        );
+        assert!(
+            r.exit_messages.is_empty(),
+            "expected empty: r.exit_messages"
+        );
         assert!(r.async_rewake.is_none());
-        assert!(r.errors.is_empty());
+        assert!(r.errors.is_empty(), "expected empty: r.errors");
         assert!(r.fatal_error.is_none());
     }
 
@@ -1776,7 +1785,7 @@ mod tests {
         let result = reg.dispatch(input, config).await;
         // Fail 短路：第二个 hook 不执行
         assert!(result.fatal_error.is_some());
-        assert!(result.errors.is_empty());
+        assert!(result.errors.is_empty(), "expected empty: result.errors");
         assert_eq!(result.decision, HookDecision::Continue);
     }
 

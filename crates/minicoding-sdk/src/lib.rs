@@ -92,7 +92,6 @@ impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("session_id", &self.runtime.session().id)
-            .field("workdir", &self.runtime.workdir())
             .finish_non_exhaustive()
     }
 }
@@ -184,10 +183,10 @@ impl Client {
         &self.runtime.session().id
     }
 
-    /// 返回工作目录。
+    /// 返回当前工作目录（`Runtime::workdir` 为 `RwLock`，异步读取）。
     #[must_use]
-    pub fn workdir(&self) -> &Utf8PathBuf {
-        self.runtime.workdir()
+    pub async fn workdir(&self) -> Utf8PathBuf {
+        self.runtime.workdir().await
     }
 }
 

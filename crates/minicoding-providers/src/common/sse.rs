@@ -209,7 +209,7 @@ mod tests {
     #[tokio::test]
     async fn empty_stream_yields_nothing() {
         let sse = SseStream::new(byte_stream(vec![]));
-        assert!(collect_ok(sse).await.is_empty());
+        assert!(collect_ok(sse).await.is_empty(), "sse 应为空");
     }
 
     #[test]

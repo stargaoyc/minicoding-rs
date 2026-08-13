@@ -323,7 +323,7 @@ mod tests {
         let store = NoopEventStore;
         let id = "01NOOP".to_string();
         let records = store.load(&id).await.unwrap();
-        assert!(records.is_empty());
+        assert!(records.is_empty(), "expected empty: records");
         let next = store.next_seq(&id).await.unwrap();
         assert_eq!(next, 1);
     }
@@ -342,6 +342,6 @@ mod tests {
         store.append(&id, record).await.unwrap();
         // append 后 load 仍为空（no-op）
         let records = store.load(&id).await.unwrap();
-        assert!(records.is_empty());
+        assert!(records.is_empty(), "expected empty: records");
     }
 }

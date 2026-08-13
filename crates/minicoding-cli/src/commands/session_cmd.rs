@@ -179,7 +179,7 @@ mod tests {
     fn fmt_short_returns_non_empty_string() {
         let t = OffsetDateTime::now_utc();
         let s = fmt_short(&t);
-        assert!(!s.is_empty());
+        assert!(!s.is_empty(), "expected non-empty: s");
     }
 
     /// 验证 `format_description!` 宏在当前 `time` 配置下可用。

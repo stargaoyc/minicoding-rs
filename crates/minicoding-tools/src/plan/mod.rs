@@ -91,7 +91,10 @@ mod tests {
         let ctrl = make_controller();
         let snap = ctrl.snapshot().await;
         assert_eq!(snap.mode, PermissionMode::Default);
-        assert!(snap.allowed_prompts.is_empty());
+        assert!(
+            snap.allowed_prompts.is_empty(),
+            "expected empty: snap.allowed_prompts"
+        );
     }
 
     #[tokio::test]

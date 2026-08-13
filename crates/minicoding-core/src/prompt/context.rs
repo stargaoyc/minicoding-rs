@@ -205,7 +205,7 @@ mod tests {
             content: "use rust 2024".into(),
             layers: vec!["AGENTS.md".into()],
         };
-        assert!(!doc.is_empty());
+        assert!(!doc.is_empty(), "expected non-empty: doc");
     }
 
     #[test]
@@ -221,6 +221,9 @@ mod tests {
             ctx.git_info.as_ref().and_then(|g| g.branch.clone()),
             Some("main".into())
         );
-        assert!(!ctx.user_rules.is_empty());
+        assert!(
+            !ctx.user_rules.is_empty(),
+            "expected non-empty: ctx.user_rules"
+        );
     }
 }

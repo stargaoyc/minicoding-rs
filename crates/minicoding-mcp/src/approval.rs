@@ -420,7 +420,10 @@ mod tests {
         assert_eq!(result[0].name, "local-srv");
         // local 作用域不写 choices
         let choices = store.load().unwrap();
-        assert!(choices.choices.is_empty());
+        assert!(
+            choices.choices.is_empty(),
+            "expected empty: choices.choices"
+        );
     }
 
     #[tokio::test]
@@ -459,7 +462,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "expected empty: result");
     }
 
     #[tokio::test]

@@ -58,7 +58,7 @@ mod tests {
             ))
             .await
             .expect("build");
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
         assert!(!s.cacheable);
     }
 }

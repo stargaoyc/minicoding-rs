@@ -153,7 +153,7 @@ mod tests {
         match policy {
             SandboxPolicy::WorkspaceWrite { workdir, writable } => {
                 assert_eq!(workdir, "/tmp/work");
-                assert!(writable.is_empty());
+                assert!(writable.is_empty(), "expected empty: writable");
             }
             _ => panic!("期望 WorkspaceWrite"),
         }

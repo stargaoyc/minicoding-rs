@@ -572,7 +572,7 @@ mod tests {
             .unwrap();
         st.delete(&id.to_string()).await.unwrap();
         let metas = st.list_sessions().await.unwrap();
-        assert!(metas.is_empty());
+        assert!(metas.is_empty(), "expected empty: metas");
     }
 
     #[tokio::test]
@@ -640,7 +640,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let msgs = st.load(&"01NONE".to_string()).await.unwrap();
-        assert!(msgs.is_empty());
+        assert!(msgs.is_empty(), "expected empty: msgs");
     }
 
     #[tokio::test]
@@ -660,7 +660,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let msgs = st.load_messages_sync(&"01NONE".to_string()).unwrap();
-        assert!(msgs.is_empty());
+        assert!(msgs.is_empty(), "expected empty: msgs");
     }
 
     #[tokio::test]
@@ -695,7 +695,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let metas = st.list_sessions_sync().unwrap();
-        assert!(metas.is_empty());
+        assert!(metas.is_empty(), "expected empty: metas");
     }
 
     #[tokio::test]
@@ -813,7 +813,7 @@ mod tests {
         st.fork_session_sync(&new_id.to_string(), &empty).unwrap();
         // 空消息列表 fork 后应创建空文件（不报错）
         let forked = st.load_messages_sync(&new_id.to_string()).unwrap();
-        assert!(forked.is_empty());
+        assert!(forked.is_empty(), "expected empty: forked");
     }
 
     #[tokio::test]
@@ -947,7 +947,7 @@ mod tests {
             "/tmp/minicoding-test-nonexistent-dir-xyz-12345",
         ));
         let metas = st.list_sessions().await.unwrap();
-        assert!(metas.is_empty());
+        assert!(metas.is_empty(), "expected empty: metas");
     }
 
     #[tokio::test]

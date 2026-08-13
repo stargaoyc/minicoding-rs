@@ -39,7 +39,7 @@ async fn single_turn_text_only() {
     match outcome {
         TurnOutcome::Finished(msg) => {
             assert_eq!(msg.text(), "Hello, world!");
-            assert!(msg.tool_calls.is_empty());
+            assert!(msg.tool_calls.is_empty(), "expected empty: msg.tool_calls");
         }
         other => panic!("expected Finished, got {other:?}"),
     }

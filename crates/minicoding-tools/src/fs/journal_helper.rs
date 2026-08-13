@@ -1,6 +1,6 @@
 //! Journal 记录辅助（集成）。
 //!
-//! `fs.write`/`fs.edit`/`fs.delete` 成功后调用 [`record_change`] 把改动记入
+//! `fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete` 成功后调用 [`record_change`] 把改动记入
 //! `Journal`，供 `/undo` 回滚（C-28）。仅当 `ToolContext::journal` 注入时生效；
 //! 未注入（`file-undo` feature 关闭）时为 no-op，不影响工具主流程。
 //!
@@ -125,7 +125,10 @@ mod tests {
         // op_id 是 ULID（26 字符）
         assert_eq!(entry.op_id.len(), 26);
         // fs 工具不接触用户消息原文
-        assert!(entry.prompt_snippet.is_empty());
+        assert!(
+            entry.prompt_snippet.is_empty(),
+            "expected empty: entry.prompt_snippet"
+        );
     }
 
     #[tokio::test]

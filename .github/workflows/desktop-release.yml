@@ -6,7 +6,7 @@
 # 为什么独立工作流：
 #   - cargo-dist 的 release.yml 仅构建 CLI 二进制（`dist = false` 排除 desktop crate）；
 #   - Tauri 需要 `tauri build` 产出 GUI 安装包，流程与 cargo-dist 不兼容；
-#   - 桌面构建需要前端（npm）+ server 二进制（cargo）+ Tauri 系统库，独立 matrix 更清晰。
+#   - 桌面构建需要前端（pnpm）+ server 二进制（cargo）+ Tauri 系统库，独立 matrix 更清晰。
 #
 # 详见 `docs/design.md` §26 + `scripts/build-desktop.sh`。
 
@@ -69,12 +69,23 @@ jobs:
         with:
           workspaces: ". -> target"
 
+      - name: Setup pnpm
+        # 锁定 pnpm 版本：pnpm-lock.yaml 由 pnpm 11.13.0 生成（lockfileVersion 9.0），
+        # runner 预装 pnpm 版本不固定，版本不匹配会导致 install --frozen-lockfile 失败。
+        # 不在此处开启 cache（corepack 安装模式下 store path 探测与 setup-node 冲突）。
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.0
+          run_install: false
+
       - name: Setup Node.js
+        # node ≥ 22.13：pnpm 11 依赖内置模块 node:sqlite（v20 上启动即崩
+        # ERR_UNKNOWN_BUILTIN_MODULE，v0.2.17 失败根因）。
+        # 不配置 cache: 'pnpm'——setup-node 的 pnpm store path 探测与
+        # pnpm/action-setup 安装组合在 runner 上报错。
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: crates/minicoding-web/package-lock.json
+          node-version: '22'
 
       - name: Install cargo-tauri
         run: rustup run stable cargo install tauri-cli --version "^2" --locked
@@ -95,8 +106,8 @@ jobs:
       - name: Build Web frontend
         working-directory: crates/minicoding-web
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Build minicoding-server binary
         run: cargo build --release -p minicoding-server --target ${{ matrix.target }}

@@ -22,7 +22,7 @@
 
 ### 1.1 文档目的
 
-`minicoding-rs` 是一个 Rust 实现的终端 AI Coding 助手，包含 18 个 Cargo workspace crate（M0–M9 范围）与 1 个独立 npm 前端项目（`crates/minicoding-web/`），支持 CLI、TUI、Web、桌面四种部署形态。本文档旨在为开发者提供：
+`minicoding-rs` 是一个 Rust 实现的终端 AI Coding 助手，包含 18 个 Cargo workspace crate（M0–M9 范围）与 1 个独立 pnpm 前端项目（`crates/minicoding-web/`），支持 CLI、TUI、Web、桌面四种部署形态。本文档旨在为开发者提供：
 
 - 从零搭建构建环境的完整步骤；
 - 各 crate 的 feature gate 语义与按需编译方法；
@@ -51,7 +51,7 @@
 | TUI | `minicoding-tui` | cargo | `minicoding-tui` 二进制 |
 | HTTP/SSE Server | `minicoding-server` | cargo | `minicoding-server` 二进制 |
 | 嵌入 SDK | `minicoding-sdk` | cargo | library crate |
-| Web 前端 | `minicoding-web/` | npm + Vite | `dist/` 静态资源 |
+| Web 前端 | `minicoding-web/` | pnpm + Vite | `dist/` 静态资源 |
 | 桌面应用 | `minicoding-desktop` | cargo + Tauri | `.dmg`/`.msi`/`.AppImage` |
 
 crate 结构与依赖方向见 `docs/modules.md` §0.1–§0.2。
@@ -187,7 +187,7 @@ cat Cargo.toml | grep "^version"   # workspace.package.version = "0.1.0"
 
 ```
 minicoding-rs/
-├── crates/                    # 18 个 Cargo crate + 1 个 npm 前端项目
+├── crates/                    # 18 个 Cargo crate + 1 个 pnpm 前端项目
 │   ├── minicoding-core/       # 抽象层 + Runtime 编排
 │   ├── minicoding-cli/        # CLI 前端
 │   ├── minicoding-server/     # HTTP/SSE server
@@ -393,7 +393,7 @@ windows-sys = { version = "0.59", features = [
 
 #### 6.1.1 技术栈
 
-`crates/minicoding-web/` 是独立 npm 项目（不属于 Cargo workspace），技术栈锁定见 `docs/m9-design.md` §3：
+`crates/minicoding-web/` 是独立 pnpm 项目（不属于 Cargo workspace），技术栈锁定见 `docs/m9-design.md` §3：
 
 | 用途 | 选型 | 版本（package.json） |
 |------|------|------|
@@ -413,19 +413,16 @@ windows-sys = { version = "0.59", features = [
 ```bash
 cd crates/minicoding-web
 
-# npm（package-lock.json 已提交）
-npm install
-
-# 或 pnpm（m9-design.md 示例使用 pnpm）
+# pnpm（pnpm-lock.yaml 已提交）
 pnpm install --frozen-lockfile
 ```
 
-`package-lock.json` 提交到仓库，与 `Cargo.lock` 同等对待（见 `AGENTS.md` §8.7）。
+`pnpm-lock.yaml` 提交到仓库，与 `Cargo.lock` 同等对待（见 `AGENTS.md` §8.7）。
 
 #### 6.1.3 开发模式（HMR）
 
 ```bash
-npm run dev
+pnpm run dev
 # Vite dev server 默认监听 http://localhost:5173
 # 自动代理 /sessions 与 /health 到 http://localhost:8080（minicoding-server）
 ```
@@ -457,7 +454,7 @@ export default defineConfig({
 #### 6.1.4 生产构建
 
 ```bash
-npm run build
+pnpm run build
 # 等价于：tsc -b && vite build
 # 产物：crates/minicoding-web/dist/
 ```
@@ -484,7 +481,7 @@ cargo build --release -p minicoding-cli --features serve
 
 ```bash
 cd crates/minicoding-web
-npm run gen-types
+pnpm run gen-types
 ```
 
 底层执行的命令（见 `package.json` `scripts.gen-types`）：
@@ -510,7 +507,7 @@ find src/api/generated -name '*.ts' -exec sed -i 's/[[:space:]]*$//' {} +
 后端 DTO 变更后必须重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`，见 `AGENTS.md` §8.4）：
 
 ```bash
-npm run gen-types
+pnpm run gen-types
 git diff --exit-code src/api/generated/   # 应无 diff
 ```
 
@@ -1155,7 +1152,7 @@ CI 阻塞合并（见 `AGENTS.md` §6.3）。
 
 ```bash
 cd crates/minicoding-web
-npm run gen-types
+pnpm run gen-types
 git add src/api/generated/
 git commit -m "feat(web): 同步生成 TypeScript 类型"
 ```
@@ -1288,10 +1285,10 @@ cargo llvm-cov --workspace --exclude minicoding-desktop --all-features --fail-un
 
 # === 前端 ===
 cd crates/minicoding-web
-npm install
-npm run dev                                              # 开发 HMR
-npm run build                                            # 生产构建
-npm run gen-types                                        # 生成 TS 类型
+pnpm install
+pnpm run dev                                              # 开发 HMR
+pnpm run build                                            # 生产构建
+pnpm run gen-types                                        # 生成 TS 类型
 
 # === 桌面 ===
 cargo build -p minicoding-desktop --features desktop     # 编译

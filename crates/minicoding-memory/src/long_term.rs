@@ -251,7 +251,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mem = make(tmp.path());
         let content = mem.load().await.unwrap();
-        assert!(content.is_empty());
+        assert!(content.is_empty(), "expected empty: content");
         assert!(mem.last_mtime().is_none());
     }
 

@@ -285,7 +285,10 @@ mod tests {
         let input = json!({"plan_path": ".minicoding/plan.md"});
         let result = tool.execute(input, &make_ctx()).await.unwrap();
         assert!(!result.is_error);
-        assert!(controller.snapshot().await.allowed_prompts.is_empty());
+        assert!(
+            controller.snapshot().await.allowed_prompts.is_empty(),
+            "allowed_prompts 应为空"
+        );
     }
 
     #[tokio::test]

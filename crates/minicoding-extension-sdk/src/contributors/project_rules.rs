@@ -58,7 +58,7 @@ mod tests {
         let c = ProjectRulesContributor;
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/tmp"));
         let s = c.build(&ctx).await.expect("build");
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[tokio::test]
@@ -70,7 +70,7 @@ mod tests {
                 layers: vec!["AGENTS.md".into()],
             });
         let s = c.build(&ctx).await.expect("build");
-        assert!(!s.is_empty());
+        assert!(!s.is_empty(), "expected non-empty: s");
         assert_eq!(s.boundary, Some("project_doc"));
         assert!(s.content.contains("MSRV"));
         assert!(!s.cacheable);

@@ -58,7 +58,7 @@ mod tests {
         let c = UserRulesContributor;
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/tmp"));
         let s = c.build(&ctx).await.expect("build");
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[tokio::test]
@@ -67,7 +67,7 @@ mod tests {
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/tmp"))
             .with_user_rules(MemoryBlock::from_content("Always use Rust 2024 edition."));
         let s = c.build(&ctx).await.expect("build");
-        assert!(!s.is_empty());
+        assert!(!s.is_empty(), "expected non-empty: s");
         assert_eq!(s.boundary, Some("user_rules"));
         assert!(s.content.contains("Rust 2024"));
         assert!(!s.cacheable);

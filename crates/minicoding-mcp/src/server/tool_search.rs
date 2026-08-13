@@ -232,14 +232,14 @@ mod tests {
         ];
         let idx = ToolSearchIndex::from_schemas(&schemas);
         let results = idx.search("读文件", 2);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "expected non-empty: results");
         assert_eq!(results[0].name, "fs.read");
     }
 
     #[test]
     fn empty_index_returns_empty() {
         let idx = ToolSearchIndex::new();
-        assert!(idx.is_empty());
+        assert!(idx.is_empty(), "expected empty: idx");
         assert!(idx.search("anything", 5).is_empty());
     }
 
@@ -268,7 +268,7 @@ mod tests {
         };
         let idx = ToolSearchIndex::from_schemas(&[schema]);
         let results = idx.search("database", 1);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "expected non-empty: results");
         assert_eq!(results[0].name, "custom.tool");
     }
 }

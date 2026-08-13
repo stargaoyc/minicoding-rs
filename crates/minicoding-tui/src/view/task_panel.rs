@@ -151,7 +151,7 @@ mod tests {
         let task = make_task("demo", TaskStatus::InProgress);
         let line = task_line(&task, &theme, 40);
         // 第一段是标记前缀
-        assert!(!line.spans.is_empty());
+        assert!(!line.spans.is_empty(), "expected non-empty: line.spans");
     }
 
     #[test]

@@ -243,8 +243,11 @@ fn message_to_openai(m: &Message) -> Value {
     if m.role == Role::Tool {
         let mut obj = serde_json::Map::new();
         obj.insert("role".to_string(), Value::String(role.to_string()));
-        if let Some(call_id) = &m.tool_call_id {
-            obj.insert("tool_call_id".to_string(), Value::String(call_id.clone()));
+        // tool_call_id 优先取消息字段；运行时构造的 tool 消息只填在
+        // `ContentBlock::ToolResult.call_id`（见 rt.rs tool_result_message），缺失时回退。
+        let call_id = crate::common::tool_call_id_of(m);
+        if let Some(call_id) = call_id {
+            obj.insert("tool_call_id".to_string(), Value::String(call_id));
         }
         obj.insert(
             "content".to_string(),
@@ -892,7 +895,7 @@ mod tests {
             .expect("chat_stream");
         let deltas = collect_deltas(stream).await;
         // [DONE] 不产出任何 delta
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     #[tokio::test]
@@ -1200,7 +1203,7 @@ mod tests {
             .await
             .expect("chat_stream");
         let deltas = collect_deltas(stream).await;
-        assert!(deltas.is_empty());
+        assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
     // --- auth_headers 补充 ---
@@ -1297,7 +1300,7 @@ mod tests {
             mime: "image/png".to_string(),
             data: vec![1, 2, 3],
         });
-        assert!(s.is_empty());
+        assert!(s.is_empty(), "expected empty: s");
     }
 
     #[test]

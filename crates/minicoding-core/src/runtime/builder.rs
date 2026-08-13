@@ -372,7 +372,7 @@ impl RuntimeBuilder {
             config: self.config,
             session,
             events: self.events,
-            workdir,
+            workdir: tokio::sync::RwLock::new(workdir),
             policy: self.policy.unwrap_or_else(|| Arc::new(NoopPolicy)),
             prompter: self.prompter.unwrap_or_else(|| Arc::new(NoopPrompter)),
             audit: self.audit.unwrap_or_else(|| Arc::new(NoopAudit)),

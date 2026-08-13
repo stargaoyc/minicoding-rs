@@ -1,6 +1,8 @@
 //! `fs.multiedit`：同文件多次顺序替换（原子性）。
 
+use crate::fs::journal_helper::record_change;
 use crate::util::resolve_path;
+use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
@@ -90,6 +92,7 @@ impl Tool for FsMultiEdit {
         ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
+        let journal = ctx.journal.clone();
         Box::pin(async move {
             let args: MultiEditInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
@@ -105,6 +108,8 @@ impl Tool for FsMultiEdit {
                         std::io::ErrorKind::NotFound => ToolError::NotFound(args.path.clone()),
                         _ => ToolError::Io(e),
                     })?;
+            // journal 需要编辑前的原始内容（C-28），必须在替换前捕获
+            let before_bytes = content.clone().into_bytes();
 
             for (i, edit) in args.edits.iter().enumerate() {
                 if edit.old_string == edit.new_string {
@@ -136,6 +141,18 @@ impl Tool for FsMultiEdit {
             tokio::fs::write(&path, content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
+
+            // 记入 journal（若注入；C-28）。multiedit 是一次原子操作，
+            // 故记录单个 Edited（before=编辑前全文，after=编辑后全文）。
+            record_change(
+                journal.as_ref(),
+                FileChange::Edited {
+                    path: path.clone(),
+                    before: before_bytes,
+                    after: content.into_bytes(),
+                },
+            )
+            .await;
 
             Ok(ToolResult::ok_text(format!(
                 "applied {} edit(s) to {}",
