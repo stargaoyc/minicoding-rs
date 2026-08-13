@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useState } from "react";
 import { Plus, MessageSquare, PanelLeftClose, PanelLeft, Sun, Moon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
@@ -11,14 +12,16 @@ import type { CreateSessionBody } from "../../api/client";
 import { cn, formatTime } from "../../lib/utils";
 import type { SessionMeta } from "../../api/generated";
 import { WorkspacePanel } from "../workspace/WorkspacePanel";
+import { NewSessionDialog } from "./NewSessionDialog";
 
 export function Sidebar() {
   const { data: sessions, isLoading } = useSessions();
   const createSession = useCreateSession();
   const { activeSessionId, setActiveSession, sidebarCollapsed, toggleSidebar, theme, toggleTheme } =
     useUIStore();
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
 
-  const handleNewSession = () => {
+  const handleNewSession = (workdir?: string) => {
     // Web 模式：从 localStorage 读取 provider 配置注入会话创建请求
     // Tauri 模式：sidecar 启动时已读 config.toml，无需注入
     let body: CreateSessionBody | undefined;
@@ -30,6 +33,10 @@ export function Sidebar() {
         model: settings.model,
       };
     }
+    if (workdir) {
+      body = { ...body, workdir };
+    }
+    setNewSessionOpen(false);
     createSession.mutate(body, {
       onSuccess: (resp) => setActiveSession(resp.session_id),
     });
@@ -41,7 +48,7 @@ export function Sidebar() {
         <Button variant="ghost" size="icon" onClick={toggleSidebar} title="展开侧栏">
           <PanelLeft className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon" onClick={handleNewSession} title="新会话">
+        <Button variant="ghost" size="icon" onClick={() => setNewSessionOpen(true)} title="新会话">
           <Plus className="h-4 w-4" />
         </Button>
         <Button
@@ -81,20 +88,20 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* New session button */}
+      {/* 新建会话：先选目录再建对话（W-11） */}
       <div className="px-3 pb-2">
         <Button
           className="w-full justify-start"
           variant="secondary"
-          onClick={handleNewSession}
+          onClick={() => setNewSessionOpen(true)}
           disabled={createSession.isPending}
         >
           <Plus className="h-4 w-4" />
-          新建会话
+          {createSession.isPending ? "创建中…" : "新建会话"}
         </Button>
       </div>
 
-      {/* Session list */}
+      {/* 会话列表 */}
       <ScrollArea className="flex-1 px-2">
         {isLoading ? (
           <div className="px-3 py-8 text-center text-sm text-[var(--color-text-muted)]">
@@ -122,6 +129,13 @@ export function Sidebar() {
 
       {/* 项目工作区（W-11：文件树 + 预览 + diff + 切换，见 design.md §26.9） */}
       <WorkspacePanel sessionId={activeSessionId} />
+
+      <NewSessionDialog
+        open={newSessionOpen}
+        creating={createSession.isPending}
+        onConfirm={handleNewSession}
+        onClose={() => setNewSessionOpen(false)}
+      />
     </div>
   );
 }

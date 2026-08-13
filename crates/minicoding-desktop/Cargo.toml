@@ -40,6 +40,8 @@ tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-log = { version = "2", optional = true, features = ["colored"] }
 # W-07：系统托盘 + 全局快捷键（Tauri 2.x 内置 tray，global-shortcut 通过 plugin）
 tauri-plugin-global-shortcut = { version = "2", optional = true }
+# W-11 新建会话目录选择（官方原生对话框插件）
+tauri-plugin-dialog = { version = "2", optional = true }
 
 [build-dependencies]
 # tauri-build：generate_context! 宏依赖的 build script（仅 desktop feature 启用）
@@ -54,6 +56,7 @@ desktop = [
     "dep:tauri-plugin-shell",
     "dep:tauri-plugin-log",
     "dep:tauri-plugin-global-shortcut",
+    "dep:tauri-plugin-dialog",
     "dep:keyring",
 ]
 

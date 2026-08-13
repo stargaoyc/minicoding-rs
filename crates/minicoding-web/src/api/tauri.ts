@@ -10,6 +10,7 @@
  * - `store_api_key` / `load_api_key` / `delete_api_key`：OS keyring 凭证管理（C-04）
  * - `open_config_file`：用系统文件管理器打开配置目录
  * - `open_workspace_file`：用系统默认编辑器打开工作区文件（W-11）
+ * - `select_workspace_dir`：原生目录选择器（W-11 新建会话先选工作目录）
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -105,4 +106,14 @@ export function restartApp(): Promise<void> {
  */
 export function openWorkspaceFile(path: string): Promise<void> {
   return invoke<void>("open_workspace_file", { path });
+}
+
+/**
+ * 原生目录选择器（W-11 `select_workspace_dir` 命令）。
+ *
+ * 返回用户选择的目录绝对路径；用户取消时返回 `null`（调用方回退默认目录）。
+ * 仅 Tauri 模式可用——Web 模式调用会失败，前端需先用 `isTauri()` 守卫。
+ */
+export function selectWorkspaceDir(): Promise<string | null> {
+  return invoke<string | null>("select_workspace_dir");
 }

@@ -6,6 +6,7 @@
 //! - `store_api_key` / `load_api_key` / `delete_api_key`：OS keyring 凭证管理
 //! - `open_config_file`：用系统编辑器打开配置文件
 //! - `open_workspace_file`：用系统默认编辑器打开工作区文件（W-11）
+//! - `select_workspace_dir`：原生目录选择器（W-11 新建会话先选工作目录）
 //!
 //! 同时初始化系统托盘 + 全局快捷键（W-07）。
 //! 需要系统 webview 运行时（`webkit2gtk` Linux / `WebKit` macOS / `WebView2` Windows）。
@@ -97,6 +98,7 @@ fn main() {
         )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             start_session,
             get_provider_config,
@@ -106,6 +108,7 @@ fn main() {
             delete_api_key,
             open_config_file,
             open_workspace_file,
+            select_workspace_dir,
             restart_app,
         ])
         .setup(|app| {
@@ -276,6 +279,31 @@ fn open_workspace_file(app: tauri::AppHandle, path: String) -> Result<(), String
     app.shell()
         .open(&path, None)
         .map_err(|e| format!("打开文件失败: {e}"))
+}
+
+/// `select_workspace_dir`：原生目录选择器（W-11 新建会话先选工作目录）。
+///
+/// 用户取消时返回 `Ok(None)`（前端回退到默认目录）。选中的目录将作为
+/// `POST /sessions` 的 `workdir` 传给 sidecar（同机路径，无需转换）。
+/// `pick_folder` 是回调 API（对话框在系统 UI 线程弹出），用 oneshot 桥接
+/// 为 async 返回值（不阻塞 command 的 runtime 线程）。
+#[tauri::command]
+async fn select_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("选择工作目录")
+        .pick_folder(move |path| {
+            // `into_path` 返回 `Result<PathBuf>`（非 URL 路径时 Ok，桌面文件夹选择恒为本地路径）
+            let picked = path.and_then(|p| {
+                p.into_path()
+                    .ok()
+                    .map(|pb| pb.to_string_lossy().to_string())
+            });
+            let _ = tx.send(picked);
+        });
+    rx.await.map_err(|_| "目录选择器未返回结果".to_string())
 }
 
 /// `restart_app`：重启应用（编辑模式保存配置后调用）。///
