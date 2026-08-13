@@ -112,8 +112,16 @@ export function listSessions(): Promise<{ sessions: SessionMeta[] }> {
   return http<{ sessions: SessionMeta[] }>("/sessions");
 }
 
-export function getSession(sessionId: string): Promise<{ session_id: string; messages: Message[] }> {
-  return http<{ session_id: string; messages: Message[] }>(`/sessions/${sessionId}`);
+export function getSession(sessionId: string): Promise<{
+  session_id: string;
+  messages: Message[];
+  tasks: import("./generated").Task[];
+}> {
+  return http<{
+    session_id: string;
+    messages: Message[];
+    tasks: import("./generated").Task[];
+  }>(`/sessions/${sessionId}`);
 }
 
 export interface SendMessageResponse {

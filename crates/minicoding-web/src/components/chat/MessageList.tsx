@@ -3,21 +3,23 @@ import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
 import type { Message } from "../../api/generated";
+import type { ActiveTool } from "../../hooks/useChat";
 
 interface MessageListProps {
   messages: Message[] | undefined;
   streamingText: string;
   isStreaming: boolean;
   isLoading: boolean;
+  activeTools: ActiveTool[];
 }
 
-export function MessageList({ messages, streamingText, isStreaming, isLoading }: MessageListProps) {
+export function MessageList({ messages, streamingText, isStreaming, isLoading, activeTools }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // 新消息或流式增量时自动滚动到底部
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText]);
+  }, [messages, streamingText, activeTools]);
 
   if (isLoading) {
     return (
@@ -30,7 +32,7 @@ export function MessageList({ messages, streamingText, isStreaming, isLoading }:
   const hasMessages = messages && messages.length > 0;
   const hasStreaming = isStreaming && streamingText.length > 0;
 
-  if (!hasMessages && !hasStreaming) {
+  if (!hasMessages && !hasStreaming && activeTools.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
         <div className="gradient-accent flex h-16 w-16 items-center justify-center rounded-2xl text-2xl font-bold text-white">
@@ -54,6 +56,9 @@ export function MessageList({ messages, streamingText, isStreaming, isLoading }:
             <MessageBubble key={msg.id} message={msg} />
           ))}
         </AnimatePresence>
+
+        {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
+        {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
 
         {/* 流式生成中的临时消息 */}
         {hasStreaming && (
@@ -81,5 +86,89 @@ export function MessageList({ messages, streamingText, isStreaming, isLoading }:
         <div ref={bottomRef} />
       </div>
     </ScrollArea>
+  );
+}
+
+/**
+ * 工具调用卡片列表：进行中显示 spinner，完成后显示 ✓/✗ 与结果摘要。
+ * 让用户能区分"正在执行工具 / 已完成 / 失败"，而不是笼统的"思考中"。
+ */
+function ToolCallList({ tools }: { tools: ActiveTool[] }) {
+  return (
+    <div className="space-y-1.5">
+      {tools.map((t) => (
+        <ToolCallCard key={t.callId} tool={t} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 从 `ToolResult` 提取摘要文本（`ToolContent` 联合类型的文本/JSON 分支）。
+ */
+function extractToolSummary(result: unknown): string {
+  if (!result || typeof result !== "object") return "";
+  const r = result as { content?: unknown; is_error?: boolean };
+  const content = r.content;
+  if (content && typeof content === "object" && "content" in (content as object)) {
+    const c = content as { type?: string; content?: unknown };
+    if (c.type === "text" && typeof c.content === "string") return c.content;
+    if (c.type === "mixed" && Array.isArray(c.content)) {
+      return c.content
+        .map((part) => extractToolSummary({ content: part, is_error: false } as never))
+        .join("\n");
+    }
+    if (c.type === "json") {
+      try {
+        return JSON.stringify(c.content).slice(0, 200);
+      } catch {
+        return "[json]";
+      }
+    }
+  }
+  return "";
+}
+
+function ToolCallCard({ tool }: { tool: ActiveTool }) {
+  const { callId, tool: name, status, result } = tool;
+
+  let icon: string;
+  let iconClass: string;
+  let statusLabel: string;
+  switch (status) {
+    case "running":
+      icon = "◌";
+      iconClass = "animate-spin text-[var(--color-risk-medium)]";
+      statusLabel = "执行中";
+      break;
+    case "ok":
+      icon = "✓";
+      iconClass = "text-[var(--color-risk-low)]";
+      statusLabel = "完成";
+      break;
+    case "err":
+      icon = "✗";
+      iconClass = "text-[var(--color-risk-high)]";
+      statusLabel = "失败";
+      break;
+  }
+
+  // 结果摘要（截断，失败时优先展示错误）
+  const summary = extractToolSummary(result);
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/60 px-3 py-2">
+      <div className="flex items-center gap-2 text-xs">
+        <span className={`${iconClass} text-sm leading-none`}>{icon}</span>
+        <span className="font-mono text-[var(--color-text)]">{name}</span>
+        <span className="text-[10px] text-[var(--color-text-muted)]">{callId.slice(-6)}</span>
+        <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">{statusLabel}</span>
+      </div>
+      {summary && (
+        <p className="mt-1 line-clamp-2 text-[11px] text-[var(--color-text-muted)]">
+          {summary}
+        </p>
+      )}
+    </div>
   );
 }

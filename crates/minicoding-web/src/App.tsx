@@ -14,7 +14,7 @@ import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
 import { useSessions } from "./hooks/useSessions";
-import { setApiBase } from "./api/client";
+import { cancelTurn, setApiBase } from "./api/client";
 import type { Task } from "./api/generated";
 
 const queryClient = new QueryClient({
@@ -115,7 +115,7 @@ function AppInner() {
 
   // 消息 + SSE 流（含权限请求回调）
   const { data: messages, isLoading } = useMessages(activeSessionId);
-  const { streamingText, isStreaming } = useSSEStream(activeSessionId, {
+  const { streamingText, isStreaming, activeTools, elapsedSec } = useSSEStream(activeSessionId, {
     onPermissionRequested: (e) => {
       if (activeSessionId) {
         permissions.requestPermission({ sessionId: activeSessionId, ...e });
@@ -131,6 +131,17 @@ function AppInner() {
     },
     [activeSessionId, sendMessage],
   );
+
+  // 停止当前 turn（POST cancel；sendMessage 的 POST 阻塞至 turn 结束，取消后返回）
+  const handleCancel = useCallback(() => {
+    if (activeSessionId) {
+      cancelTurn(activeSessionId).catch(() => {
+        console.warn("cancel failed");
+      });
+    }
+  }, [activeSessionId]);
+
+  const turnBusy = sendMessage.isPending || isStreaming;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -184,6 +195,7 @@ function AppInner() {
               streamingText={streamingText}
               isStreaming={isStreaming}
               isLoading={isLoading}
+              activeTools={activeTools}
             />
             {/* 发送错误提示 */}
             {sendMessage.isError && (
@@ -191,16 +203,23 @@ function AppInner() {
                 发送失败：{sendMessage.error instanceof Error ? sendMessage.error.message : String(sendMessage.error)}
               </div>
             )}
-            {/* "思考中" 指示器：POST 请求进行中但 SSE 还未开始流式输出 */}
+            {/* "运行中" 指示器：POST 请求进行中但 SSE 还未开始流式输出 */}
             {sendMessage.isPending && !isStreaming && (
               <div className="flex items-center gap-2 border-t border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-text-muted)]">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                正在思考…
+                <span>正在思考…</span>
+                {elapsedSec > 0 && <span className="text-xs">已等待 {elapsedSec}s</span>}
+                {elapsedSec >= 60 && (
+                  <span className="text-xs text-[var(--color-risk-medium)]">
+                    （长时间无输出：可能等待权限确认，或 LLM 无响应，可点右侧停止）
+                  </span>
+                )}
               </div>
             )}
             <ChatInput
               onSend={handleSend}
-              isStreaming={isStreaming}
+              onCancel={handleCancel}
+              isStreaming={turnBusy}
               disabled={sendMessage.isPending}
             />
           </>

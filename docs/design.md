@@ -1918,7 +1918,10 @@ B.blocked_by = ["A"]
 - **压缩免疫**：任务列表存 `SessionMeta`（§3.7），不进 `messages`，不受压缩管道影响；
 - **resume 恢复**：`--resume <session>` 时从磁盘重建任务列表，继续未完成任务；
 - **跨会话共享**（后续）：`MINICODING_TASK_LIST_ID` 环境变量让多会话共享同一任务列表（参考 CC 的 `CLAUDE_CODE_TASK_LIST_ID`），适合多 Agent 协作大任务；
-- **清理**：所有任务 `Completed`/`Deleted` 后列表自动归档到 `tasks/archive/{session_id}.jsonl`。
+- **清理**：所有任务 `Completed`/`Deleted` 后列表自动归档到 `tasks/archive/{session_id}.jsonl`；
+- **HTTP 查询路径**（§24）：`TaskStore`（内存态）是任务权威源，`ServerSession::task_state`
+  常驻订阅 `Event::TaskUpdated` 镜像其变更，`GET /sessions`/`GET /sessions/{id}` 返回该快照
+  （此前 `SessionMeta.tasks` 恒空导致前端任务面板无数据）；CLI/TUI 侧走 `TaskStore` 直读。
 
 ### 18.6 校验规则（参考 CC 硬约束）
 
@@ -3162,7 +3165,15 @@ api/
 3. **工作区切换**：`POST /sessions/{id}/workspace` 切换 workdir（需审批，Ask 级别，C-01）；
 4. **编辑器集成**：`tauri-plugin-dialog` 选择项目文件夹 + 文件双击用系统编辑器打开（`shell.open`）；
 5. **先选目录再新建对话**：新建会话弹目录选择/输入对话框，`workdir` 随 `POST /sessions` 提交
-   （桌面端原生目录选择器 `tauri-plugin-dialog`，Web 端输入框）。
+   （桌面端原生目录选择器 `tauri-plugin-dialog`，Web 端输入框）；
+6. **turn 执行可见性与任务面板数据链路（已实现）**：
+   - 前端工具调用卡片：SSE `tool_call_started`/`tool_call_finished` → 进行中/✓/✗ 状态 + 结果摘要；
+   - 等待计时：turn 进行中显示 elapsed 秒数，≥60s 无输出提示可能等待权限/网络，可主动停止；
+   - **停止按钮**：`POST /sessions/{id}/cancel` → `Runtime::cancel()`，SSE 推
+     `TurnEnd { stop_reason: interrupted }`（前端 `ChatInput` 常驻提供，不再只有"思考中"黑盒）；
+   - **任务面板真数据**：`ServerSession::task_state` 常驻订阅 `Event::TaskUpdated` 镜像
+     `TaskStore` 变更，`GET /sessions`/`GET /sessions/{id}` 返回 `tasks`（此前恒为空数组，
+     前端任务按钮因 `tasks.length === 0` 永远禁用）。
 
 **验证标准**（对应 §8.8 测试策略）：
 

@@ -6,7 +6,15 @@ import {
   subscribeEvents,
   type EventDto,
 } from "../api/client";
-import type { Message } from "../api/generated";
+import type { Message, ToolResult } from "../api/generated";
+
+/** 进行中的工具调用（供 UI 渲染工具卡片，见 AGENTS.md §8.5 流式状态）。 */
+export interface ActiveTool {
+  callId: string;
+  tool: string;
+  status: "running" | "ok" | "err";
+  result?: ToolResult;
+}
 
 /**
  * 对话 hook：消息快照 + SSE 流式增量（见 AGENTS.md §8.5）。
@@ -78,6 +86,9 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
   const qc = useQueryClient();
   const [streamingText, setStreamingText] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
+  // turn 开始时刻（`turn_streaming_started` 或首个 `tool_call_started`），供 elapsed 计时
+  const turnStartedAt = useRef<number | null>(null);
   const subRef = useRef<ReturnType<typeof subscribeEvents> | null>(null);
   const optsRef = useRef(options);
   optsRef.current = options;
@@ -88,6 +99,8 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         case "turn_streaming_started":
           setStreamingText("");
           setIsStreaming(true);
+          setActiveTools([]);
+          turnStartedAt.current = Date.now();
           break;
         case "token":
           setStreamingText((prev) => prev + event.text);
@@ -100,6 +113,33 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         case "turn_end":
           setIsStreaming(false);
           break;
+        case "tool_call_started":
+          // 工具开始：加入 active 列表（UI 显示 spinner + 工具名）
+          setActiveTools((prev) => [
+            ...prev.filter((t) => t.callId !== event.call_id),
+            { callId: event.call_id, tool: event.tool, status: "running" },
+          ]);
+          break;
+        case "tool_call_finished": {
+          setActiveTools((prev) =>
+            prev.map((t) =>
+              t.callId === event.call_id
+                ? {
+                    ...t,
+                    status: event.result.is_error ? "err" : "ok",
+                    result: event.result,
+                  }
+                : t,
+            ),
+          );
+          // 工具完成后刷新消息 + 工作区（文件改动后树/预览/diff 失效，W-11）
+          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "diff", sessionId] });
+          qc.invalidateQueries({ queryKey: ["workspace", "file", sessionId] });
+          break;
+        }
         case "permission_requested":
           optsRef.current?.onPermissionRequested?.({
             id: event.id,
@@ -113,7 +153,6 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
           qc.invalidateQueries({ queryKey: ["sessions"] });
           optsRef.current?.onTaskUpdated?.();
           break;
-        case "tool_call_started":
         case "permission_resolved":
         case "permission_mode_changed":
         case "session_created":
@@ -122,14 +161,6 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         case "session_retrieved":
         case "command_error":
           qc.invalidateQueries({ queryKey: ["messages", sessionId] });
-          break;
-        case "tool_call_finished":
-          // 工具完成后刷新消息 + 工作区（文件改动后树/预览/diff 失效，W-11）
-          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "diff", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "file", sessionId] });
           break;
       }
     },
@@ -144,5 +175,18 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
     return () => subRef.current?.close();
   }, [sessionId, handleEvent]);
 
-  return { streamingText, isStreaming };
+  // turn 进行中 elapsed 秒数（1s tick；无事件期间用户可感知"还在运行"而非"卡死"）
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!isStreaming || turnStartedAt.current === null) {
+      setElapsedSec(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - (turnStartedAt.current ?? Date.now())) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isStreaming]);
+
+  return { streamingText, isStreaming, activeTools, elapsedSec };
 }
