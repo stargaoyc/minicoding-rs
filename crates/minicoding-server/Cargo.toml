@@ -35,6 +35,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# OTLP 导出（桌面 sidecar 与独立 server 可观测性接入，见 `docs/observability.md` §7）
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
@@ -53,7 +58,10 @@ keyring = { workspace = true }
 minicoding-sandbox = { workspace = true }
 
 [features]
-default = []
+default = ["otel"]
+# OTLP 可观测性（与 CLI `otel` feature 对齐；默认启用，保证桌面 sidecar 开箱可接入，
+# 见 `docs/observability.md` §7；未配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时降级为纯本地 fmt 日志）
+otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 # LSP 适配器（T-M8-8，tower-lsp 重依赖，feature gate）
 lsp = ["dep:tower-lsp"]
 # ACP 适配器（T-M8-7）

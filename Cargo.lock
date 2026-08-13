@@ -3274,6 +3274,9 @@ dependencies = [
  "minicoding-sandbox",
  "minicoding-storage",
  "minicoding-tools",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "tempfile",
@@ -3286,6 +3289,7 @@ dependencies = [
  "tower-http",
  "tower-lsp",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "ulid",
 ]

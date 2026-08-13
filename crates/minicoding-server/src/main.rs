@@ -12,6 +12,7 @@
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use clap::Parser;
+use minicoding_server::otel_init::{TracingGuard, init_tracing};
 use minicoding_server::{ServerConfig, serve};
 
 /// minicoding-server — HTTP/SSE server
@@ -71,8 +72,8 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 初始化日志
-    let _guard = init_tracing(cli.verbose);
+    // 初始化日志/trace（配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时接入 OTLP，见 `otel_init`）
+    let _otel_guard: Option<TracingGuard> = init_tracing(cli.verbose);
 
     let bind: std::net::SocketAddr = cli
         .bind
@@ -119,19 +120,4 @@ async fn main() -> Result<()> {
     };
 
     serve(cfg).await
-}
-
-/// 初始化 tracing 日志（简化版，server 不需要 OTLP）。
-fn init_tracing(verbose: bool) -> tracing::subscriber::DefaultGuard {
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::util::SubscriberInitExt;
-    let filter = if verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("info")
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .set_default()
 }

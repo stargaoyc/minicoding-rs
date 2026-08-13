@@ -365,7 +365,86 @@ match result {
 
 ---
 
-## §7 实现路线图
+## §7 基础设施与接入（Docker 一键部署）
+
+### 7.1 组件与选型
+
+| 组件 | 选型 | 职责 |
+|------|------|------|
+| OTel Collector | `otel/opentelemetry-collector-contrib` | 统一 OTLP 入口（4317 gRPC / 4318 HTTP），batch + 内存限流，转发 trace/metrics |
+| Trace 后端 | Jaeger v2（all-in-one） | 原生 OTLP 接收，span 存储与 UI 查询（16686） |
+| Metrics 存储 | Prometheus | 抓取 collector 暴露的 metrics（8889），保留时长可配 |
+| 统一 UI | Grafana | 预置 Prometheus + Jaeger datasource，统一查询 |
+
+**选型依据**：与 `docs/tech-stack.md` §7 的 "Jaeger/Tempo/Grafana" 方向一致；collector 网关模式与本文 §3.4 的消费方式描述吻合（"OTLP layer 将 metrics 事件转发到 OTel Collector，由 Collector 转发到 Prometheus/Jaeger"）。Jaeger v2 原生支持 OTLP 接收，无需额外转换器。基础设施位于 `deploy/observability/`，默认只绑定 `127.0.0.1`（trace 数据含路径/会话信息，不应暴露到局域网）。
+
+### 7.2 架构
+
+```text
+minicoding (宿主进程)                          docker compose (deploy/observability/)
+┌──────────────────────┐   OTLP HTTP 4318   ┌──────────────────────────────┐
+│ CLI / server /       │ ──────────────────▶ │ otel-collector  (batch+限流) │
+│ desktop sidecar      │                     │   │  OTLP gRPC (容器内网)      │
+└──────────────────────┘                     │   ▼                          │
+                                             │ jaeger (16686 UI, 内存存储)  │
+                                             │   │  /metrics :8889          │
+                                             │   ▼                          │
+                                             │ prometheus (9090) ◀─ grafana │
+                                             └──────────────────────────────┘
+```
+
+架构说明：
+
+- minicoding 进程在**宿主机**运行（不容器化），仅观测后端容器化；
+- collector 是唯一上报入口，trace 经 OTLP gRPC 转发 Jaeger，metrics 以 `/metrics` 暴露给 Prometheus 抓取；
+- Jaeger/Prometheus 端口映射到宿主机 `127.0.0.1`，Grafana 通过容器内网访问二者（datasource 预置）。
+
+### 7.3 接入配置（环境变量）
+
+minicoding 各入口通过**标准 OTel 环境变量**接入，无配置文件改动：
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 未设置（不导出） | 上报端点，接入时设为 `http://127.0.0.1:4318` |
+| `OTEL_TRACES_SAMPLER` | `always_on` | `traceidratio` 按比例采样（生产推荐） |
+| `OTEL_TRACES_SAMPLER_ARG` | `0.1` | 采样比例（配合 `traceidratio`） |
+
+入口支持矩阵：
+
+| 入口 | 支持 | 说明 |
+|------|------|------|
+| CLI（`minicoding`） | ✅ `otel` feature（`full` 含） | `cli/otel_init.rs`，service.name = `minicoding` |
+| Server（`minicoding-server`） | ✅ `otel` feature（默认启用） | `server/otel_init.rs`，service.name = `minicoding-server` |
+| Desktop（Tauri sidecar） | ✅ 继承 | 经 sidecar 启动 server，读取宿主机环境变量 |
+
+使用方式示例（CLI）：
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 minicoding --verbose
+```
+
+环境变量设置说明：接入后 span 在 Jaeger 中按 `service.name` 区分（`minicoding`/`minicoding-server`）。采样策略实现见 `core/otel.rs` 的 `Sampler::from_env`，OTLP 初始化见 `cli/otel_init.rs` 与 `server/otel_init.rs`（两者实现镜像，依赖方向约束见 `modules.md` §0.2，禁止 server 依赖 CLI）。
+
+### 7.4 使用指引
+
+1. **启动**：`cd deploy/observability && docker compose up -d`
+2. **上报**：按 §7.3 设置环境变量后运行 minicoding（CLI / server / 桌面）
+3. **查 trace**：Jaeger UI `http://127.0.0.1:16686`，按 service 选 `minicoding-server`，span 名见 §4.1（`session`/`turn`/`llm.chat_stream`/`tool.call`/`permission.check`）
+4. **查 metrics**：Grafana `http://127.0.0.1:3000`（admin/admin，首次登录后修改），Explore → Prometheus
+
+> 注意：当前版本 metrics 事件以 `tracing::debug!(target: "metrics::*")` 埋点（§3），trace 完整导出；metrics 的 OTLP 导出 layer 尚未启用，§7 基础设施中的 Prometheus/Grafana 已就绪，metrics 完整导出后即可消费。
+
+### 7.5 安全与生产注意事项
+
+- **仅本机绑定**：compose 默认所有端口绑定 `127.0.0.1`，trace 含路径/会话信息，勿改为 `0.0.0.0`
+- **Jaeger 内存存储**：all-in-one 默认内存存储，重启丢数据；生产应换持久存储（Badger/ES/ClickHouse 等），见 Jaeger 文档
+- **Grafana 密码**：默认 `admin/admin`，生产务必修改（`GRAFANA_ADMIN_PASSWORD`）
+- **凭证安全**：minicoding 上报的 span 属性含会话 id/路径/模型名（§4.2），**不含 API key**（C-04 凭证不落日志/span）
+- **镜像版本**：compose 中镜像版本经 `.env` 变量可覆盖（见 `.env.example`），升级时统一调整
+
+---
+
+## §8 实现路线图
 
 ### P0：Metrics 模块（最高优先级）
 
@@ -402,7 +481,7 @@ match result {
 
 ---
 
-## §8 验收标准
+## §9 验收标准
 
 - [x] `core/metrics.rs` 创建，所有 metrics 函数有 doc comment（14 个函数）
 - [x] 13 处 span 断裂全部补齐，`cargo clippy` 无警告
@@ -418,7 +497,7 @@ match result {
 
 ---
 
-## §9 与其他文档的引用关系
+## §10 与其他文档的引用关系
 
 - 本文档扩展 `docs/design.md` §15（OTel 设计）
 - span 名/属性常量定义在 `crates/minicoding-core/src/otel.rs`

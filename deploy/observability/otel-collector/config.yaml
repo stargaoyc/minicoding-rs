@@ -1,0 +1,51 @@
+# otel-collector 配置：minicoding 统一 OTLP 入口，trace 转发 Jaeger、metrics 暴露给 Prometheus。
+# 架构说明见 docs/observability.md §7.2。
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  # trace → Jaeger（OTLP gRPC，内网容器通信无需 TLS）
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # metrics → Prometheus 抓取端点（/metrics）
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: minicoding
+    add_metric_suffixes: false
+    resource_to_telemetry_conversion:
+      enabled: true
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]

@@ -43,6 +43,7 @@ pub mod lsp;
 #[cfg(feature = "lsp")]
 pub mod lsp_prompter;
 pub mod ndjson;
+pub mod otel_init;
 pub mod prompter;
 pub mod runtime_builder;
 pub mod session_mgr;
