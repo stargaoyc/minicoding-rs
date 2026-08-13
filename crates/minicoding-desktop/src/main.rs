@@ -82,6 +82,9 @@ fn main() {
     let run_result = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
+                // 过滤 DEBUG 噪音（tao event loop / keyring / tauri::manager 的
+                // 内部调试日志）；业务日志从 INFO 起
+                .level(log::LevelFilter::Info)
                 .targets([
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),

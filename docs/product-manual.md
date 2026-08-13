@@ -812,11 +812,11 @@ Tauri System Tray 提供原生系统托盘集成：
 
 ### 6.4 全局快捷键
 
-全局快捷键 `Cmd/Ctrl+Shift+M`（`Super+Shift+M`）切换主窗口显示/隐藏：
+全局快捷键 `Ctrl+Alt+M` 切换主窗口显示/隐藏：
 
 ```rust
 // crates/minicoding-desktop/src/shortcut.rs
-shortcut.on_shortcut("Super+Shift+M", move |app, _event| {
+    shortcut.on_shortcut("Ctrl+Alt+M", move |app, _event| {
     if let Some(window) = app.get_window("main") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();

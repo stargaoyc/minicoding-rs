@@ -3064,3 +3064,72 @@ macOS Intel 二进制通过 `macos-14`（Apple Silicon runner）交叉编译产�
 **CI 中的占位 sidecar**：
 
 `ci.yml` 的 `desktop` job 在 `cargo build` 前创建占位 sidecar（`binaries/minicoding-server-sidecar-x86_64-unknown-linux-gnu`），以满足 `tauri_build::build()` 对 `externalBin` 路径的编译期校验。真实 sidecar 二进制仅在 `desktop-release.yml` 中构建。
+
+### 26.9 项目工作区（前端增强设计，未实现）
+
+**背景**：§26.1–§26.8 交付的 Web/桌面前端是"会话 MVP"——只有聊天流、权限弹窗、任务面板（W-01..W-10），没有"项目"概念。用户反馈"前端像大模型聊天机器人"，缺少在项目文件夹内操作的能力。本节设计把前端从"会话 UI"升级为"项目工作区 UI"（参考 Claude Code / Codex 桌面版）。
+
+**设计原则**（约束对齐）：
+
+- **前端只做展示与交互，零业务逻辑**（§8.1）：文件树、diff 均基于后端数据渲染，不做权限决策；
+- **只读浏览不触发权限**：文件树/预览等价 `fs.read`（只读，C-01 仅约束副作用）；写操作仍走既有权限弹窗（W-03）；
+- **C-03 路径沙箱在后端强制**：目录列表/文件读取端点复用 `sandbox_path` 校验，越界返回 `PathEscaped`，前端不可绕过；
+- **复用既有事件流**：文件改动后的 diff/刷新由 `Event::MessageAppended`（tool 消息）驱动，不新增专用事件。
+
+**26.9.1 后端 API 契约**（`minicoding-server` 新增端点）
+
+| 端点 | 方法 | 请求 | 响应 | 说明 |
+|------|------|------|------|------|
+| `/sessions/{id}/workspace/root` | GET | — | `{ "path": "...", "name": "..." }` | 返回会话 workdir（`ServerRuntimeParams.workdir`） |
+| `/sessions/{id}/workspace/list` | GET | `?path=<相对路径>` | `{ "entries": [ { "name", "kind": "file"/"dir", "size"? } ] }` | 目录列表（1 层，不递归）；`path` 省略=根目录；越界 403 |
+| `/sessions/{id}/workspace/read` | GET | `?path=<相对路径>` | `{ "content": "...", "size", "truncated" }` | 文件内容（≤ 64 KiB，超出截断并置 `truncated=true`，C-07 输出上限） |
+
+约束：
+
+- `path` 一律相对 workdir 解析，经 `crates/minicoding-tools/src/util::resolve_path` + 路径沙箱校验（C-03）；
+- 忽略 `node_modules`/`.git`/`target`/`dist` 等目录（内置 ignore 列表，避免前端拉取大目录）；
+- 新端点**不经过** `PermissionPolicy`（只读等价 `fs.read`），但记录审计日志（只读浏览记录，供会话审计）；
+- 不改动既有协议（§24）；TS 类型由 `minicoding-protocol` 新增 DTO 自动生成（§8.4）。
+
+**26.9.2 前端组件与分层**（`crates/minicoding-web/src/`）
+
+```
+components/workspace/
+├── WorkspacePanel.tsx   # 工作区面板容器（侧栏下方：根路径 + 文件树 + 刷新）
+├── FileTree.tsx         # 递归文件树（懒加载子目录，虚拟滚动预留）
+├── FileNode.tsx         # 单节点（图标/名称/大小；dir 可展开）
+└── FilePreview.tsx      # 文件内容预览（只读，Markdown/文本高亮；diff 视图 M9 后续）
+hooks/
+├── useWorkspace.ts      # TanStack Query：root/list/read 封装 + 失效策略
+└── useFileTree.ts       # 展开状态（Zustand：目录展开集合，纯 UI 状态）
+api/
+└── client.ts            # 新增 listWorkspace/readWorkspaceFile（§8.5 服务端状态走 Query）
+```
+
+**26.9.3 状态管理**：
+
+- 服务端状态（目录/文件内容）→ TanStack Query（`useWorkspace`，缓存 5s，`staleTime` 短；工具执行后由 SSE `tool_call_finished` 触发 `invalidateQueries`）；
+- 客户端 UI 状态（展开目录集合、面板折叠）→ Zustand（`usePanelStore` 扩展，不双写）；
+- 文件内容预览不进缓存（大文件 + 低频查看，直接用 Query 数据）。
+
+**26.9.4 权限与安全边界**：
+
+- 文件树/预览是只读，不弹权限弹窗（与 `fs.read` 一致，C-01 只约束副作用）；
+- 写操作（fs.write/edit）仍由模型发起 + 权限弹窗（W-03），前端不新增写入口（第一版）；
+- C-03 越界：后端返回 403 `PathEscaped`，前端 toast 展示，不吞错（§8.6）；
+- 桌面端（Tauri）：`workspace/root` 返回 `config.toml` 的 workdir；"打开文件夹"选项目录（`tauri-plugin-dialog`）为 M9 后续项，本节不做（sidecar workdir 已由配置决定）。
+
+**26.9.5 迭代路径**：
+
+1. **MVP（本节）**：文件树浏览 + 文件预览 + 根路径展示；验证 C-03/只读不弹权限/事件流驱动刷新；
+2. **diff 视图**：tool 消息携带 `before/after`（已有 `FileChange` 语义），前端渲染 `DiffEntry` 列表；
+3. **工作区切换**：`POST /sessions/{id}/workspace` 切换 workdir（需审批，Ask 级别，C-01）；
+4. **编辑器集成**：`tauri-plugin-dialog` 选择项目文件夹 + 文件双击用系统编辑器打开（`shell.open`）。
+
+**验证标准**（对应 §8.8 测试策略）：
+
+- Rust 侧：新端点单元测试（越界 403、ignore 列表、截断）；`wiremock` 不连真实服务（§5.4）；
+- 前端侧：MSW mock 目录列表/读取，Testing Library 测 FileTree 展开/懒加载、预览渲染；
+- E2E（Playwright）：打开工作区 → 展开目录 → 预览文件 → 发消息让模型改文件 → 树自动刷新。
+
+**约束 ID 同步**：本节设计不新增 L0/L1 约束（C-03/C-07 已覆盖），features.md 新增 W-11 功能项。

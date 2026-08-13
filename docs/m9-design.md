@@ -450,7 +450,7 @@ use tauri::{GlobalShortcut, Manager};
 
 pub fn setup(app: &tauri::App) -> tauri::Result<()> {
     let shortcut = app.global_shortcut();
-    shortcut.on_shortcut("Super+Shift+M", move |app, _event| {
+    shortcut.on_shortcut("Ctrl+Alt+M", move |app, _event| {
         if let Some(window) = app.get_window("main") {
             if window.is_visible().unwrap_or(false) {
                 let _ = window.hide();

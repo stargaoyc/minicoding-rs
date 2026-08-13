@@ -234,10 +234,11 @@
 | W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Query 缓存管理 | M9 | 已实现（可折叠侧栏 + 会话元数据展示） |
 | W-05 | 暗色/亮色主题 | Tailwind v4 + shadcn/ui theme provider | M9 | 已实现（双主题 CSS 变量 + Zustand 持久化 + 系统偏好跟随 + FOUC 预防） |
 | W-06 | Tauri 桌面壳 | Tauri 2.x + Rust sidecar（`minicoding-server`），三平台打包 `.dmg`/`.msi`/`.AppImage` | M9 | 已实现（`crates/minicoding-desktop`，feature gate `desktop`） |
-| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 已实现（系统托盘 + `Cmd/Ctrl+Shift+M` 全局快捷键 + 关闭隐藏到托盘 + Tauri updater） |
+| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 已实现（系统托盘 + `Ctrl+Alt+M` 全局快捷键 + 关闭隐藏到托盘 + Tauri updater） |
 | W-08 | 静态资源托管 | `minicoding serve --web ./dist` 单二进制部署 + CORS 配置 | M9 | 已实现（`tower-http::ServeDir` + SPA fallback + `--cors-origin`） |
 | W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 已实现（禁用 `dangerouslySetInnerHTML`、Markdown 经 React 转义、权限后端强制 C-01） |
 | W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 已实现（package.json 内置 `lint`/`format` 脚本） |
+| W-11 | 项目工作区 | 文件树浏览 + 文件预览 + workdir 展示（只读，C-03 后端强制） | M9 | 设计完成（见 `docs/design.md` §26.9，未实现） |
 
 ## 13. 工程与质量
 
@@ -289,10 +290,10 @@
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 10 |
-| **合计** | **182** |
+| Web 与桌面（M9） | 11 |
+| **合计** | **183** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-10）10 项低优先级可选。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-10）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-11）11 项低优先级可选（W-11 项目工作区为设计完成待实现）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-11）是参考 CC/Codex 后的核心增强。
 
 ---
 

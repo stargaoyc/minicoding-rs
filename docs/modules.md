@@ -892,7 +892,7 @@ minicoding-extension-sdk/src/
 - **sidecar 管理**：Tauri 启动 sidecar，读取 stdout 获取实际监听端口，注入前端（`sidecar.rs`）；
 - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信走 HTTP/SSE（同源，无 CORS 问题）；
 - **系统托盘**（W-07）：右键菜单"显示窗口/退出"，关闭窗口时隐藏到托盘而非退出（`tray.rs`）；
-- **全局快捷键**（W-07）：`Cmd/Ctrl+Shift+M` 切换窗口显示/隐藏（`tauri-plugin-global-shortcut`）；
+- **全局快捷键**（W-07）：`Ctrl+Alt+M` 切换窗口显示/隐藏（`tauri-plugin-global-shortcut`）；
 - **自动更新**：Tauri updater 配置签名公钥，更新包需签名校验通过才安装；
 - **安全**：Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格（`script-src 'self'`）。
 

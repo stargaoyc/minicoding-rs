@@ -1,7 +1,8 @@
 //! 系统托盘 + 全局快捷键（W-07，feature gate `desktop`）。
 //!
 //! - **系统托盘**：显示应用图标，右键菜单含"显示窗口"/"退出"；
-//! - **全局快捷键**：`Cmd/Ctrl+Shift+M` 切换窗口显示/隐藏。
+//! - **全局快捷键**：`Ctrl+Alt+M` 切换窗口显示/隐藏（原 `Win/Cmd+Shift+M` 在
+//!   Windows 上被系统保留为"最小化所有窗口"，注册必然失败，故改用无冲突组合）。
 //!
 //! 详见 `docs/design.md` §26.5、`docs/features.md` W-07。
 
@@ -16,11 +17,17 @@ use tauri::{
 
 /// 初始化系统托盘与全局快捷键（在 Tauri `setup` 中调用）。
 ///
+/// 托盘失败返回错误（阻塞启动流程）；全局快捷键失败仅降级告警——
+/// 部分平台/桌面环境会占用组合键导致注册失败（如 Windows 的 `Win+Shift+M`），
+/// 此时托盘菜单仍可完成"显示窗口/退出"，不应让整个初始化失败。
+///
 /// # Errors
 /// 托盘或菜单创建失败时返回错误。
 pub fn init(app: &AppHandle) -> Result<()> {
     setup_tray(app)?;
-    setup_global_shortcut(app)?;
+    if let Err(e) = setup_global_shortcut(app) {
+        log::warn!("全局快捷键注册失败（非致命，托盘仍可用）: {e}");
+    }
     Ok(())
 }
 
@@ -59,11 +66,15 @@ fn setup_tray(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// 注册全局快捷键 `Cmd/Ctrl+Shift+M` 切换窗口显示/隐藏。
+/// 注册全局快捷键 `Ctrl+Alt+M` 切换窗口显示/隐藏。
+///
+/// 键位选型说明（why）：原 `Win/Cmd+Shift+M` 在 Windows 上被系统保留为
+/// "最小化所有窗口"快捷键，注册必失败；`Ctrl+Alt+M` 在 Windows/macOS/Linux
+/// 均无系统保留冲突，且不与编辑器常用组合冲突。
 fn setup_global_shortcut(app: &AppHandle) -> Result<()> {
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
-    let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyM);
+    let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyM);
 
     app.global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, _event| {
@@ -77,7 +88,7 @@ fn setup_global_shortcut(app: &AppHandle) -> Result<()> {
             }
         })?;
 
-    log::info!("全局快捷键已注册: Cmd/Ctrl+Shift+M");
+    log::info!("全局快捷键已注册: Ctrl+Alt+M");
     Ok(())
 }
 
