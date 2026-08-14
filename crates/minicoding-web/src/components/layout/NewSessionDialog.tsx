@@ -1,8 +1,36 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { FolderOpen, Loader2 } from "lucide-react";
+import { FolderOpen, Loader2, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "../ui/button";
 import { isTauri, selectWorkspaceDir } from "../../api/tauri";
+import { cn } from "../../lib/utils";
+
+/** 会话安全模式（新建会话时选定，映射到 `permission_mode`/`preset`）。 */
+export type SessionModeKey = "default" | "accept_edits" | "full_access";
+
+const MODE_OPTIONS: {
+  key: SessionModeKey;
+  label: string;
+  desc: string;
+  danger?: boolean;
+}[] = [
+  {
+    key: "default",
+    label: "默认",
+    desc: "文件编辑与命令执行均需确认（最安全）",
+  },
+  {
+    key: "accept_edits",
+    label: "编辑自动",
+    desc: "工作区内文件编辑自动执行，命令仍确认（推荐）",
+  },
+  {
+    key: "full_access",
+    label: "全自动·沙箱外",
+    desc: "不弹窗且绕过沙箱——仅限受信隔离容器内使用",
+    danger: true,
+  },
+];
 
 /**
  * 新建会话对话框（W-11：先选工作目录，再新建对话）。
@@ -22,12 +50,14 @@ export function NewSessionDialog({
   open: boolean;
   /** 创建请求进行中（禁用确定按钮，防重复提交）。 */
   creating: boolean;
-  onConfirm: (workdir: string | undefined) => void;
+  onConfirm: (workdir: string | undefined, mode: SessionModeKey) => void;
   onClose: () => void;
 }) {
   const [workdir, setWorkdir] = useState("");
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
+  const [mode, setMode] = useState<SessionModeKey>("accept_edits");
+  const [ackDanger, setAckDanger] = useState(false);
 
   if (!open) return null;
 
@@ -46,8 +76,10 @@ export function NewSessionDialog({
 
   const handleConfirm = () => {
     const trimmed = workdir.trim();
-    onConfirm(trimmed ? trimmed : undefined);
+    onConfirm(trimmed ? trimmed : undefined, mode);
   };
+
+  const dangerMode = mode === "full_access";
 
   return (
     <div
@@ -99,13 +131,72 @@ export function NewSessionDialog({
           {pickError && <p className="text-[10px] text-[var(--color-risk-high)]">{pickError}</p>}
         </div>
 
+        <div className="flex flex-col gap-1">
+          <label className="text-xs text-[var(--color-text-muted)]">权限模式</label>
+          <div className="grid grid-cols-3 gap-1.5">
+            {MODE_OPTIONS.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setMode(opt.key)}
+                className={cn(
+                  "flex flex-col gap-0.5 rounded-md border px-2 py-1.5 text-left transition-all",
+                  mode === opt.key
+                    ? opt.danger
+                      ? "border-[var(--color-risk-high)]/60 bg-[var(--color-risk-high)]/10"
+                      : "border-[var(--color-accent)]/60 bg-[var(--color-accent)]/10"
+                    : "border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-2)]",
+                )}
+              >
+                <span
+                  className={cn(
+                    "flex items-center gap-1 text-[11px] font-medium",
+                    opt.danger
+                      ? "text-[var(--color-risk-high)]"
+                      : "text-[var(--color-text)]",
+                  )}
+                >
+                  {opt.danger ? (
+                    <ShieldAlert className="h-3 w-3" />
+                  ) : (
+                    <ShieldCheck className="h-3 w-3" />
+                  )}
+                  {opt.label}
+                </span>
+                <span className="text-[10px] leading-tight text-[var(--color-text-muted)]">
+                  {opt.desc}
+                </span>
+              </button>
+            ))}
+          </div>
+          {dangerMode && (
+            <div className="flex flex-col gap-1 rounded-md border border-[var(--color-risk-high)]/40 bg-[var(--color-risk-high)]/5 px-2.5 py-2">
+              <p className="text-[11px] font-medium text-[var(--color-risk-high)]">
+                ⚠ 沙箱外全自动运行：AI 可直接修改文件、执行命令、访问网络，不弹任何确认。
+              </p>
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                请仅在受信任的隔离容器（如专用 VM/Docker）内启用（C-22）。桌面应用请使用"编辑自动"模式。
+              </p>
+              <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-text)]">
+                <input
+                  type="checkbox"
+                  checked={ackDanger}
+                  onChange={(e) => setAckDanger(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[var(--color-risk-high)]"
+                />
+                我已了解风险，仍要启用
+              </label>
+            </div>
+          )}
+        </div>
+
         <div className="flex justify-end gap-2">
           <Button variant="ghost" size="sm" disabled={creating} onClick={onClose}>
             取消
           </Button>
-          <Button size="sm" disabled={creating} onClick={handleConfirm}>
+          <Button size="sm" disabled={creating || (dangerMode && !ackDanger)} onClick={handleConfirm}>
             {creating ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-            创建
+            {dangerMode ? "启用全自动并创建" : "创建"}
           </Button>
         </div>
       </motion.div>

@@ -475,6 +475,7 @@ mod tests {
     #![allow(clippy::pedantic)]
     use super::*;
     use camino::Utf8PathBuf;
+    use minicoding_core::sandbox::SandboxPolicy;
 
     fn test_params() -> ServerRuntimeParams {
         ServerRuntimeParams {
@@ -486,6 +487,10 @@ mod tests {
             workdir: Utf8PathBuf::from("."),
             system: None,
             permission_mode: minicoding_core::policy::PermissionMode::Default,
+            sandbox_policy: SandboxPolicy::WorkspaceWrite {
+                workdir: Utf8PathBuf::from("."),
+                writable: Vec::new(),
+            },
         }
     }
 

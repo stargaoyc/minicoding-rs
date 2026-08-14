@@ -36,6 +36,7 @@ use axum::routing::{get, post};
 use camino::Utf8PathBuf;
 use minicoding_core::model::TurnOutcome;
 use minicoding_core::policy::{Decision, PermissionMode};
+use minicoding_core::sandbox::SandboxPolicy;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -77,11 +78,13 @@ pub struct ServerConfig {
     /// 空列表 = 允许任意来源（`Access-Control-Allow-Origin: *`，开发默认）；
     /// 非空列表 = 仅允许列出的来源（精确匹配，生产部署用）。桌面模式同源无需配置。
     pub cors_origins: Vec<String>,
+    /// 默认安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`）。
+    pub preset: String,
 }
 
 /// 构造默认 `ServerRuntimeParams`（从 `ServerConfig` 派生）。
 fn default_params(cfg: &ServerConfig) -> ServerRuntimeParams {
-    ServerRuntimeParams {
+    let mut params = ServerRuntimeParams {
         provider_kind: cfg.provider_kind.clone(),
         provider_name: cfg.provider_name.clone(),
         api_base: cfg.api_base.clone(),
@@ -90,7 +93,20 @@ fn default_params(cfg: &ServerConfig) -> ServerRuntimeParams {
         workdir: cfg.workdir.clone(),
         system: cfg.system.clone(),
         permission_mode: PermissionMode::Default,
+        sandbox_policy: SandboxPolicy::WorkspaceWrite {
+            workdir: cfg.workdir.clone(),
+            writable: Vec::new(),
+        },
+    };
+    // `--preset` 覆盖默认模式与沙箱策略（C-22：full-access 打印 red 警告）
+    if let Ok((mode, policy, warning)) = build_preset_policy(&cfg.preset, &cfg.workdir) {
+        params.permission_mode = mode;
+        params.sandbox_policy = policy;
+        if let Some(w) = warning {
+            eprintln!("\x1b[31m{w}\x1b[0m");
+        }
     }
+    params
 }
 
 /// 共享状态（注入到 axum `State`）。
@@ -119,6 +135,10 @@ struct CreateSessionBody {
     system: Option<String>,
     #[serde(default)]
     permission_mode: Option<PermissionMode>,
+    /// 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见 `Preset`）。
+    /// `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。
+    #[serde(default)]
+    preset: Option<String>,
 }
 
 /// `CreateSession` 响应。
@@ -303,7 +323,7 @@ async fn create_session(
     Json(body): Json<CreateSessionBody>,
 ) -> Result<Json<CreateSessionResponse>, HttpError> {
     let default = state.mgr.default_params();
-    let params = ServerRuntimeParams {
+    let mut params = ServerRuntimeParams {
         provider_kind: body
             .provider
             .unwrap_or_else(|| default.provider_kind.clone()),
@@ -316,11 +336,69 @@ async fn create_session(
             .map_or_else(|| default.workdir.clone(), Utf8PathBuf::from),
         system: body.system.or(default.system.clone()),
         permission_mode: body.permission_mode.unwrap_or(default.permission_mode),
+        sandbox_policy: default.sandbox_policy.clone(),
     };
+    // preset 解析（会话级覆盖）：`full-access` 强制 `BypassPermissions` 全自动 +
+    // `DangerFullAccess` 沙箱外运行（C-22：显式选定 + red 警告，见 build_preset_policy）
+    if let Some(preset_str) = body.preset.as_deref() {
+        let (mode, policy, warning) = build_preset_policy(preset_str, &params.workdir)?;
+        // body.permission_mode 显式指定时优先于 preset 的默认模式
+        if params.permission_mode == PermissionMode::Default {
+            params.permission_mode = mode;
+        }
+        params.sandbox_policy = policy;
+        if let Some(w) = warning {
+            tracing::warn!("{w}");
+        }
+    }
 
     let session = state.mgr.create_session(Some(params))?;
     let session_id = session.session_id().clone();
     Ok(Json(CreateSessionResponse { session_id }))
+}
+
+/// 解析安全预设为 `(PermissionMode, SandboxPolicy, 警告信息)`。
+///
+/// - `auto`：默认（`WorkspaceWrite` 工作区内可写，其余 Ask）；
+/// - `read-only`：`ReadOnly`（文件只读，命令/网络仍 Ask）；
+/// - `external-sandbox`：`ExternalSandbox`（依赖容器/外部沙箱隔离，C-22）；
+/// - `full-access`：`DangerFullAccess` + `BypassPermissions` 全自动——沙箱外运行，
+///   仅受信隔离容器内使用（C-22：red 警告 + 显式选定；API 传参视为显式选定，
+///   返回警告供调用方/日志展示）。
+fn build_preset_policy(
+    preset: &str,
+    workdir: &Utf8PathBuf,
+) -> Result<(PermissionMode, SandboxPolicy, Option<String>), HttpError> {
+    match preset {
+        "auto" => Ok((
+            PermissionMode::Default,
+            SandboxPolicy::WorkspaceWrite {
+                workdir: workdir.clone(),
+                writable: Vec::new(),
+            },
+            None,
+        )),
+        "read-only" => Ok((PermissionMode::Default, SandboxPolicy::ReadOnly, None)),
+        "external-sandbox" => Ok((
+            PermissionMode::Default,
+            SandboxPolicy::ExternalSandbox,
+            None,
+        )),
+        "full-access" => Ok((
+            PermissionMode::BypassPermissions,
+            SandboxPolicy::DangerFullAccess,
+            Some(
+                "WARNING: 会话以 full-access 预设运行（沙箱外 + 权限全自动）——                 仅限受信隔离容器内使用（C-22）"
+                    .to_string(),
+            ),
+        )),
+        other => Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: format!(
+                "未知预设 `{other}`，可选：auto / read-only / external-sandbox / full-access"
+            ),
+        }),
+    }
 }
 
 /// `GET /sessions` — 列出所有会话。

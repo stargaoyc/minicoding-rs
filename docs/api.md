@@ -1548,6 +1548,10 @@ pub struct ServeCommand {
     /// CORS 允许的来源（M9，可多次指定）。
     #[arg(long = "cors-origin")]
     pub cors_origins: Vec<String>,
+    /// 安全预设（auto/read-only/external-sandbox/full-access，见 security.md §2.6）。
+    /// full-access = BypassPermissions + DangerFullAccess，启动打印 C-22 red 警告。
+    #[arg(long, default_value = "auto")]
+    pub preset: String,
     // ... 模式分派 flag：--as-mcp-server / --ndjson / --acp / --lsp（feature gate）
 }
 

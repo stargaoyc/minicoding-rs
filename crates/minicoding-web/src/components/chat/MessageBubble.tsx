@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import type { Message } from "../../api/generated";
+import type { Message, ToolCall } from "../../api/generated";
 import { cn, formatTime } from "../../lib/utils";
 import { extractText } from "../../lib/message";
 
@@ -32,11 +32,50 @@ const ROLE_CONFIG = {
   },
 } as const;
 
+/** 工具输入参数摘要：优先取关键字段（path/command/target 等），否则 JSON 截断。 */
+function summarizeInput(input: unknown): string {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    const json = JSON.stringify(input);
+    return json.length > 60 ? `${json.slice(0, 60)}…` : json;
+  }
+  const record = input as Record<string, unknown>;
+  for (const key of ["path", "command", "target", "query", "pattern"] as const) {
+    const v = record[key];
+    if (typeof v === "string" && v.trim()) {
+      return v.length > 48 ? `${key}=${v.slice(0, 48)}…` : `${key}=${v}`;
+    }
+  }
+  const json = JSON.stringify(input);
+  return json.length > 80 ? `${json.slice(0, 80)}…` : json;
+}
+
+/** 工具调用列表（`Message.tool_calls`，LLM 发出的工具请求，见 api.md §2.4）。 */
+function ToolCallList({ calls }: { calls: ToolCall[] }) {
+  return (
+    <div className="space-y-1.5">
+      {calls.map((tc) => (
+        <div
+          key={tc.id}
+          className="flex items-start gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2"
+        >
+          <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+          <div className="min-w-0">
+            <span className="text-xs font-medium text-[var(--color-text)]">{tc.name}</span>
+            <span className="ml-2 text-[11px] text-[var(--color-text-muted)]">
+              {summarizeInput(tc.input)}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function MessageBubble({ message, isStreaming }: { message: Message; isStreaming?: boolean }) {
   const config = ROLE_CONFIG[message.role] ?? ROLE_CONFIG.assistant;
   const Icon = config.icon;
   const text = extractText(message);
-  const toolCallCount = message.tool_calls?.length ?? 0;
+  const toolCalls = message.tool_calls ?? [];
 
   return (
     <motion.div
@@ -85,13 +124,13 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
             >
               {text}
             </ReactMarkdown>
+          ) : toolCalls.length > 0 ? (
+            <ToolCallList calls={toolCalls} />
           ) : (
             <span className="text-[var(--color-text-muted)] italic">
-              {message.role === "assistant" && toolCallCount > 0
-                ? `⚙ 已调用 ${toolCallCount} 个工具（无文本）`
-                : message.role === "assistant"
-                  ? "（无文本内容：工具请求被拒或模型未输出）"
-                  : "（无文本内容）"}
+              {message.role === "assistant"
+                ? "（无文本内容：工具请求被拒或模型未输出）"
+                : "（无文本内容）"}
             </span>
           )}
           {isStreaming && <span className="streaming-cursor" />}

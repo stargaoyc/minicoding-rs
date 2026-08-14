@@ -2,6 +2,7 @@
 
 use crate::fs::journal_helper::record_change;
 use crate::util::resolve_path;
+use camino::Utf8PathBuf;
 use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
@@ -77,7 +78,26 @@ impl Tool for FsWrite {
         Box::pin(async move {
             let args: WriteInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-            let path = resolve_path(&workdir, &args.path)?;
+            let path = match resolve_path(&workdir, &args.path) {
+                Ok(p) => p,
+                // 父目录不存在时 `resolve_path` 返回 NotFound（util.rs：目标不存在需
+                // 规范化父目录）；mkdir -p 语义：先创建父目录再重试解析（模型常写
+                // 新目录下的文件，不建目录会失败并触发无谓重试/权限询问）
+                Err(ToolError::NotFound(_)) => {
+                    let candidate = if std::path::Path::new(&args.path).is_absolute() {
+                        Utf8PathBuf::from(&args.path)
+                    } else {
+                        workdir.join(&args.path)
+                    };
+                    if let Some(parent) = candidate.parent() {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .map_err(ToolError::Io)?;
+                    }
+                    resolve_path(&workdir, &args.path)?
+                }
+                Err(e) => return Err(e),
+            };
 
             // 读取 before 内容（若存在）用于 journal 撤销恢复（C-28）
             let before = tokio::fs::read(&path).await.ok();
@@ -168,20 +188,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_to_nonexistent_subdir_returns_io_error() {
+    async fn write_to_nonexistent_subdir_creates_parent_dirs() {
         let (_tmp, workdir) = make_workdir();
-        let ctx = ToolContext::new(workdir, "test".to_string());
+        let ctx = ToolContext::new(workdir.clone(), "test".to_string());
         let tool = FsWrite::new();
-        // tokio::fs::write 不会创建父目录，父目录不存在 → Io 错误
-        // 注：resolve_path 对 "nodir/file.txt" 因父目录 nodir 不存在会返回 NotFound
-        let err = tool
-            .execute(json!({"path": "nodir/file.txt", "content": "x"}), &ctx)
+        // mkdir -p 语义：父目录不存在时先创建（resolve_path 对 "nodir/file.txt"
+        // 会先返回 NotFound，write.rs 建目录后重试解析）
+        let result = tool
+            .execute(json!({"path": "nodir/deep/file.txt", "content": "x"}), &ctx)
             .await
-            .unwrap_err();
-        // 父目录不存在 → resolve_path 返回 NotFound
-        assert!(
-            matches!(err, ToolError::NotFound(_)),
-            "expected NotFound, got {err:?}"
+            .expect("should create parent dirs");
+        assert!(text_of(&result).contains("wrote"));
+        assert_eq!(
+            std::fs::read_to_string(workdir.join("nodir/deep/file.txt")).unwrap(),
+            "x"
         );
     }
 

@@ -56,6 +56,8 @@ pub struct ServerRuntimeParams {
     pub system: Option<String>,
     /// 初始权限模式。
     pub permission_mode: PermissionMode,
+    /// 沙箱策略（`--preset` 解析结果，见 `minicoding_policy::Preset`）。
+    pub sandbox_policy: SandboxPolicy,
 }
 
 /// 构造 server 端 `Runtime`。
@@ -79,6 +81,7 @@ pub fn build_runtime(
         workdir,
         system,
         permission_mode,
+        sandbox_policy,
     } = params.clone();
 
     // 1. 构造 config
@@ -238,10 +241,8 @@ pub fn build_runtime(
     builder = builder.journal(journal);
 
     // 12. 注入沙箱驱动（与 CLI 一致，Linux Landlock / 降级 NoopDriver）
-    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
-        workdir: workdir.clone(),
-        writable: Vec::new(),
-    };
+    //     策略来自 `--preset`（http.rs `CreateSessionBody.preset` 可会话级覆盖）；
+    //     `ExternalSandbox`/`DangerFullAccess` 需用户显式选定（C-22）。
     let driver: Arc<dyn SandboxDriver> = Arc::from(minicoding_sandbox::detect_driver());
     builder = builder
         .sandbox_driver(driver)
