@@ -103,15 +103,15 @@ export function MessageList({
 /**
  * 思考过程块（reasoning/thinking）。
  *
- * `details` 原生折叠：默认展开（`open`），用户手动收起后流式更新不会强制展开
- *（非受控，React 保留 DOM 开关状态）。思考过程为瞬态数据，刷新后不保留。
+ * `details` 原生折叠：**默认闭合**（`open` 省略）——长思考（如 DeepSeek R1
+ * 输出上千字推理）时逐 token 流式更新若默认展开会导致整段 `pre` 全量重渲染，
+ * 页面卡顿（用户感知"思考很慢"）。闭合时内容不渲染，性能开销为零；
+ * 用户点击展开查看。用户手动展开后流式更新不会强制收起（非受控，
+ * React 保留 DOM 开关状态）。思考过程为瞬态数据，刷新后不保留。
  */
 function ReasoningBlock({ text }: { text: string }) {
   return (
-    <details
-      open
-      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
-    >
+    <details className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2">
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
         💭 思考过程
       </summary>
