@@ -36,13 +36,13 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
   const config = ROLE_CONFIG[message.role] ?? ROLE_CONFIG.assistant;
   const Icon = config.icon;
   const text = extractText(message);
+  const toolCallCount = message.tool_calls?.length ?? 0;
 
   return (
     <motion.div
-      layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
+      transition={{ duration: 0.15 }}
       className={cn("flex gap-3 rounded-xl px-4 py-3", config.bg)}
     >
       {/* Avatar */}
@@ -87,9 +87,11 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
             </ReactMarkdown>
           ) : (
             <span className="text-[var(--color-text-muted)] italic">
-              {message.role === "assistant"
-                ? "（无文本内容：工具请求被拒或模型未输出）"
-                : "（无文本内容）"}
+              {message.role === "assistant" && toolCallCount > 0
+                ? `⚙ 已调用 ${toolCallCount} 个工具（无文本）`
+                : message.role === "assistant"
+                  ? "（无文本内容：工具请求被拒或模型未输出）"
+                  : "（无文本内容）"}
             </span>
           )}
           {isStreaming && <span className="streaming-cursor" />}

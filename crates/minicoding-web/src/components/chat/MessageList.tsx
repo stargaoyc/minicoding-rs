@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
@@ -24,10 +24,33 @@ export function MessageList({
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // 新消息或流式增量时自动滚动到底部
+  // 自动滚动到底部；仅当用户本来就接近底部（<120px）时跟随，
+  // 否则会强制把阅读历史中的用户拉到底部（也是"抖动"的一种来源）。
+  const scrollToBottom = useCallback((smooth: boolean) => {
+    const bottom = bottomRef.current;
+    if (!bottom) return;
+    const viewport = bottom.closest(".overflow-y-auto");
+    if (!viewport) {
+      bottom.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
+      return;
+    }
+    const nearBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+    if (nearBottom) {
+      bottom.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
+    }
+  }, []);
+
+  // 新消息/工具卡片变化时平滑滚动到底部（频率低，动画不被打断）
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText, activeTools]);
+    scrollToBottom(true);
+  }, [messages, activeTools, scrollToBottom]);
+
+  // 流式 token 增量时**瞬时**滚动（无动画）——每 token 触发 smooth 滚动
+  // 会导致滚动动画持续被打断重启，视觉上"一抖一抖"（用户反馈）
+  useEffect(() => {
+    scrollToBottom(false);
+  }, [streamingText, scrollToBottom]);
 
   if (isLoading) {
     return (
