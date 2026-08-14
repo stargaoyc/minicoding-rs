@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   getSession,
+  getPendingPermissions,
   sendMessage,
   subscribeEvents,
   type EventDto,
@@ -108,6 +109,18 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
   const optsRef = useRef(options);
   optsRef.current = options;
 
+  /** 处理一条权限请求（SSE 实时事件或 pending 快照恢复共用）。 */
+  const handlePermissionRequested = useCallback(
+    (e: { id: string; tool: string; summary: string; risk: "low" | "medium" | "high" }) => {
+      const w = { id: e.id, tool: e.tool, summary: e.summary, risk: e.risk };
+      waitingRef.current = w;
+      setWaitingPermission(w);
+      setPermissionDeniedMsg(null);
+      optsRef.current?.onPermissionRequested?.(w);
+    },
+    [],
+  );
+
   const handleEvent = useCallback(
     (event: EventDto) => {
       switch (event.type) {
@@ -176,16 +189,12 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
           break;
         }
         case "permission_requested": {
-          const w = {
+          handlePermissionRequested({
             id: event.id,
             tool: event.tool,
             summary: event.summary,
             risk: event.risk,
-          };
-          waitingRef.current = w;
-          setWaitingPermission(w);
-          setPermissionDeniedMsg(null);
-          optsRef.current?.onPermissionRequested?.(w);
+          });
           break;
         }
         case "permission_resolved": {
@@ -221,11 +230,34 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
 
   useEffect(() => {
     if (!sessionId) return;
-    subRef.current = subscribeEvents(sessionId, handleEvent, () => {
-      console.warn(`SSE connection error for session ${sessionId}`);
-    });
+    // 连接建立/重连成功后拉取未决权限快照，恢复断线期间丢失的弹窗
+    // （`PermissionRequested` 是瞬态事件，重连重放不可用，见 server `sse.rs`）。
+    const refreshPending = () => {
+      getPendingPermissions(sessionId)
+        .then(({ pending }) => {
+          for (const p of pending) {
+            handlePermissionRequested({
+              id: p.id,
+              tool: p.tool,
+              summary: p.summary,
+              risk: p.risk,
+            });
+          }
+        })
+        .catch(() => {
+          // 快照拉取失败不影响后续事件流
+        });
+    };
+    subRef.current = subscribeEvents(
+      sessionId,
+      handleEvent,
+      () => {
+        console.warn(`SSE connection error for session ${sessionId}`);
+      },
+      refreshPending,
+    );
     return () => subRef.current?.close();
-  }, [sessionId, handleEvent]);
+  }, [sessionId, handleEvent, handlePermissionRequested]);
 
   // turn 进行中 elapsed 秒数（1s tick；无事件期间用户可感知"还在运行"而非"卡死"）
   const [elapsedSec, setElapsedSec] = useState(0);

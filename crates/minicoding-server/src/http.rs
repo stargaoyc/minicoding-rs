@@ -228,6 +228,10 @@ fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[
         .route("/sessions/{id}/messages", post(send_message))
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/events", get(sse_events))
+        .route(
+            "/sessions/{id}/permissions/pending",
+            get(pending_permissions),
+        )
         .route("/sessions/{id}/permissions/{pid}", post(resolve_permission))
         // W-11 项目工作区（见 `docs/design.md` §26.9）
         .route(
@@ -424,6 +428,22 @@ async fn resolve_permission(
         .resolve_permission(&session_id, &permission_id, body.decision)
         .await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// `GET /sessions/{id}/permissions/pending` — 未决权限请求快照。
+///
+/// SSE 断线/页面刷新后，前端拉取此快照恢复权限弹窗（`PermissionRequested`
+/// 是瞬态事件，重连重放不可用，见 `sse.rs` 模块注释）。
+async fn pending_permissions(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let session = state
+        .mgr
+        .get(&session_id)
+        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+    let pending = crate::prompter::list_pending_permissions(&session.pending_permissions).await;
+    Ok(Json(serde_json::json!({"pending": pending})))
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -1597,6 +1597,13 @@ HTTP 端点（`axum` 路由，`minicoding-server/src/workspace.rs`）：
 - SSE 端点 `GET /sessions/{id}/events`：**首次连接（无 `Last-Event-ID`）只推新事件**（`sse_live`，
   不回放历史——避免历史 `permission_requested` 重推导致前端弹窗 pid 错位）；断线重连由浏览器
   自动携带 `Last-Event-ID` 走 `sse_stream` 恢复（重放 + 新订阅）。
+  **SSE 事件不带 `event:` 命名事件字段**（`id:` + `data:`，事件类型由 `data` JSON 的 `type`
+  字段区分）——浏览器 `EventSource.onmessage` 只能收到默认 `message` 类型事件，命名事件会
+  被静默丢弃（曾导致前端收不到 token/工具/权限事件，权限弹窗不出现 → 300s 超时静默 Deny）。
+- `GET /sessions/{id}/permissions/pending`：未决权限请求快照（`{ pending: [{ id, tool, summary,
+  risk }] }`）。SSE 断线/页面刷新后前端拉取此快照恢复权限弹窗——`PermissionRequested` 是瞬态
+  事件，重连重放不可用；前端在 SSE 连接建立/重连成功（`EventSource.onopen`）时拉取，已决请求
+  会从快照消失。
 
 ```rust
 // minicoding-protocol/src/workspace.rs（ts_rs 导出到前端 generated/）

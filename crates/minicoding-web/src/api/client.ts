@@ -147,6 +147,28 @@ export function resolvePermission(sessionId: string, pid: string, decision: Deci
   });
 }
 
+/**
+ * `GET /sessions/{id}/permissions/pending` — 未决权限请求快照。
+ *
+ * SSE 断线/页面刷新后调用，恢复权限弹窗（`PermissionRequested` 为瞬态事件，
+ * 重连重放不可用，见后端 `sse.rs`）。返回空数组表示无未决请求。
+ */
+export function getPendingPermissions(
+  sessionId: string,
+): Promise<{ pending: PendingPermissionDto[] }> {
+  return http<{ pending: PendingPermissionDto[] }>(
+    `/sessions/${sessionId}/permissions/pending`,
+  );
+}
+
+/** 未决权限请求（与 SSE `PermissionRequested` 事件结构一致）。 */
+export interface PendingPermissionDto {
+  id: string;
+  tool: string;
+  summary: string;
+  risk: "low" | "medium" | "high";
+}
+
 // ─── Workspace API（W-11 项目工作区，见 design.md §26.9）────────────────────
 
 /** `GET /sessions/{id}/workspace` — 当前工作目录。 */
@@ -200,12 +222,15 @@ export interface SSESubscription {
  * 订阅会话 SSE 事件流。
  *
  * 使用原生 `EventSource`（浏览器内置，自动重连 + Last-Event-ID 恢复）。
- * `onEvent` 回调收到每个 `EventDto`；`onError` 在 EventSource 报错时调用。
+ * `onEvent` 回调收到每个 `EventDto`；`onError` 在 EventSource 报错时调用；
+ * `onOpen` 在连接建立/重连成功时调用（前端借此拉取未决权限快照，
+ * 恢复断线期间丢失的权限弹窗）。
  */
 export function subscribeEvents(
   sessionId: string,
   onEvent: (event: EventDto) => void,
   onError?: (e: Event) => void,
+  onOpen?: () => void,
 ): SSESubscription {
   const url = `${apiBase}/sessions/${sessionId}/events`;
   const source = new EventSource(url);
@@ -221,6 +246,10 @@ export function subscribeEvents(
 
   source.onerror = (e) => {
     onError?.(e);
+  };
+
+  source.onopen = () => {
+    onOpen?.();
   };
 
   return {

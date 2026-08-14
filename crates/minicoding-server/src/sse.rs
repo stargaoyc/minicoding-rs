@@ -1,13 +1,19 @@
 //! SSE 流（Server-Sent Events，T-M8-2）。
 //!
-//! 把 `EventBus` 的 `Event` 转为 SSE 格式（`id:`/`event:`/`data:`），
+//! 把 `EventBus` 的 `Event` 转为 SSE 格式（`id:`/`data:`），
 //! 支持 `Last-Event-ID` header cursor 恢复。
+//!
+//! 事件类型约定：**不使用 `event:` 命名事件字段**，所有事件走默认
+//! `message` 类型（浏览器 `EventSource.onmessage` 即可接收）。若发送
+//! `event: <kind>` 命名事件，浏览器只触发对应的 `addEventListener(kind)`
+//! 回调，`onmessage` 收不到——曾导致前端 token/工具/权限事件全部丢失
+//! （权限弹窗不出现 → 300s 超时静默 Deny）。事件类型由 `data` JSON 的
+//! `type` 字段区分。
 //!
 //! SSE 协议格式：
 //! ```text
 //! id: 42
-//! event: token
-//! data: {"text":"hello"}
+//! data: {"type":"token","text":"hello"}
 //!
 //! ```
 //!
@@ -38,21 +44,20 @@ pub fn parse_last_event_id(header: Option<&str>) -> u64 {
         .unwrap_or(0)
 }
 
-/// 构造单条 SSE 事件块（`id:`/`event:`/`data:` + 空行终止符）。
+/// 构造单条 SSE 事件块（`id:`/`data:` + 空行终止符）。
+///
+/// 不发送 `event:` 命名事件字段：浏览器 `onmessage` 只能收到默认
+/// `message` 类型事件，命名事件会静默丢失（见模块注释）。
 fn format_sse_event(seq: u64, kind_json: &serde_json::Value) -> String {
-    let kind_str = kind_json
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("event");
     let data = serde_json::to_string(kind_json).unwrap_or_default();
-    format!("id: {seq}\nevent: {kind_str}\ndata: {data}\n\n")
+    format!("id: {seq}\ndata: {data}\n\n")
 }
 
 /// 构造 `RehydrateRequired` SSE 事件块。
 fn format_rehydrate(session_id: &str, last_known_seq: u64) -> String {
     let rehydrate = RehydrateRequired::new(session_id, last_known_seq);
     let payload = serde_json::to_string(&rehydrate).unwrap_or_default();
-    format!("id: 0\nevent: rehydrate_required\ndata: {payload}\n\n")
+    format!("id: 0\ndata: {payload}\n\n")
 }
 
 /// 构造 SSE 流。
