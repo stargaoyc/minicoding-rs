@@ -97,6 +97,14 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
     match ctx.side_effect {
         SideEffect::None => Verdict::Allow,
         SideEffect::FileWrite => check_file_write(tool, input, ctx),
+        // BypassPermissions（design.md §16.2）：全放行（仅隔离容器内使用，对齐 CC
+        // `bypassPermissions`）。文件写入仍走 `check_file_write` 保留 C-03 越界 Deny
+        // 与 C-23 项目约束文件 Ask——L0 硬约束不受用户模式影响。
+        SideEffect::Command | SideEffect::Network
+            if ctx.permission_mode == PermissionMode::BypassPermissions =>
+        {
+            Verdict::Allow
+        }
         SideEffect::Command => Verdict::Ask(make_prompt(
             tool,
             command_summary(input),
@@ -257,12 +265,24 @@ fn check_file_write(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdi
 
     // C-03：写入路径必须落在 workdir 之内，否则直接 Deny。
     match resolve_under(&ctx.workdir, path) {
-        Ok(_) => Verdict::Ask(make_prompt(
-            tool,
-            format!("写入文件 {path}"),
-            Risk::Medium,
-            full_options(),
-        )),
+        Ok(_) => {
+            // `AcceptEdits`/`BypassPermissions` 模式（design.md §16.2）：工作区内文件
+            // 编辑自动 Allow，不弹窗（高频编辑场景）；shell/网络仍 Ask（危险操作需
+            // 确认，BypassPermissions 除外）。项目约束文件（C-23）与越界路径（C-03）
+            // 已在上面分支拦截，不进入此处。
+            if matches!(
+                ctx.permission_mode,
+                PermissionMode::AcceptEdits | PermissionMode::BypassPermissions
+            ) {
+                return Verdict::Allow;
+            }
+            Verdict::Ask(make_prompt(
+                tool,
+                format!("写入文件 {path}"),
+                Risk::Medium,
+                full_options(),
+            ))
+        }
         Err(e) => Verdict::Deny(format!("path not allowed: {e}")),
     }
 }
@@ -814,6 +834,82 @@ mod tests {
             }
             other => panic!("期望 Ask，实际 {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn file_write_accept_edits_mode_returns_allow() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::AcceptEdits,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.write", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "AcceptEdits 工作区内写入应 Allow，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_write_accept_edits_agents_md_still_asks() {
+        // C-23：AcceptEdits 也不放行项目约束文件写入
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "AGENTS.md", "content": "x"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::AcceptEdits,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.write", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Ask(_)),
+            "AGENTS.md 应保持 Ask，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_write_accept_edits_path_escape_still_denies() {
+        // C-03：AcceptEdits 也不放行越界路径
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let escape_path = if cfg!(unix) {
+            "../../etc/passwd"
+        } else {
+            "../../Windows/System32/drivers/etc/hosts"
+        };
+        let input = serde_json::json!({"path": escape_path, "content": "x"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::FileWrite,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::AcceptEdits,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.write", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Deny(_)),
+            "越界应 Deny，实际 {verdict:?}"
+        );
     }
 
     #[tokio::test]

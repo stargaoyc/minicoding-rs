@@ -94,6 +94,13 @@ Prompt 注入的危险性来自三要素叠加（"致命三角"）：
 | `web.fetch`（内网） | Network | Deny | RFC1918 / 169.254.169.254 |
 | `git.apply` | FileWrite | Ask | |
 
+> **模式影响**（`PermissionMode`，见 `design.md` §16.2）：`AcceptEdits` 下工作区内
+> `FileWrite` 自动 `Allow`（shell/网络仍 `Ask`）；`BypassPermissions` 下
+> `Command`/`Network`/工作区内 `FileWrite` 均自动 `Allow`。两者都不放行 L0 硬约束：
+> 内置黑名单（C-02）、路径越界 `Deny`（C-03）、AGENTS.md 写（C-23）保持最高优先级。
+> 全自动模式仅通过 `--preset full-access` 或 `CreateSessionBody.preset` 显式启用
+> （C-22 警告 + 前端二次确认，见 §2.6）。
+
 ### 2.3 决策持久化与两层解析模型
 
 用户选择 `AllowAlways` / `DenyAlways` 写入 `~/.minicoding/policy.toml`（见 `data-model.md` §5），作为 L1 用户策略的 specificity=2 条目持久化（见 `design.md` §9.5）。权限解析采用**两层模型**：
@@ -156,6 +163,8 @@ pub enum ApprovalMode {
 | `full-access` | Never | DangerFullAccess | 受信沙箱内全自动部署（需显式确认 + red 警告） |
 
 CLI：`minicoding --preset auto`，或 `--approval-mode on-failure --sandbox workspace-write` 细粒度覆盖。预设展开为 L1 规则后与 `policy.toml`/granular 共存于同一命名空间，按 specificity 竞争——预设定"基调"（specificity=1），`policy.toml`（specificity=2）与 granular（specificity=3~5）可覆盖；内置黑名单（L0）始终最高优先级。
+
+**server/桌面接线**：`minicoding-server --preset <auto|read-only|external-sandbox|full-access>` 设定默认（`full-access` 启动时打印红色警告到 stderr，C-22 显式选定）；会话级 `CreateSessionBody.preset` 可覆盖默认（`full-access` 会话落 WARN 日志）。桌面/Web 前端"新建会话"对话框提供三档模式选择：默认确认 / 编辑自动（`permission_mode=accept_edits`）/ 全自动·沙箱外（`preset=full-access` + 红色警告 + "我已了解风险"勾选二次确认，见 `docs/features.md` W-11）。
 
 > 与 §2.1 双 trait 的关系：审批模式展开为 L1 规则后决定 `PermissionPolicy` 的默认 `Verdict`（如 `Untrusted` 模式展开为"所有非只读 → Ask"），`PermissionPrompter` 仍负责交互。`Never` 模式展开为"所有 `Ask` → `Allow`"，但 L0 黑名单、高 specificity 的 `deny` 规则、OS 沙箱仍生效——这是 `full-access` 预设依赖 `DangerFullAccess` 沙箱却仍建议在容器内运行的原因。
 

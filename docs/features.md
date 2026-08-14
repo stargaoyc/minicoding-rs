@@ -47,7 +47,7 @@
 | T-02 | `fs.list` | 列目录 | None | M1 | 已实现 |
 | T-03 | `fs.glob` | glob 匹配（globset+ignore） | None | M1 | 已实现 |
 | T-04 | `fs.grep` | 内容搜索（regex+ignore） | None | M1 | 已实现 |
-| T-05 | `fs.write` | 写文件（整文件覆盖）+ Journal 记录 | FileWrite | M2 | 已实现 |
+| T-05 | `fs.write` | 写文件（整文件覆盖，自动创建父目录 mkdir -p 语义）+ Journal 记录 | FileWrite | M2 | 已实现 |
 | T-06 | `fs.edit` | 精确字符串替换（唯一性校验）+ Journal | FileWrite | M2 | 已实现 |
 | T-06b | `fs.multiedit` | 同文件多次顺序替换（原子性，参考 CC） | FileWrite | M2 | 已实现 |
 | T-07 | `fs.delete` | 删除文件 + Journal 记录 | FileWrite | M2 | 已实现 |
@@ -121,6 +121,7 @@
 | P-22 | `minicoding exec` | 非交互批量执行 + 沙箱策略 | M4 | 已实现 |
 | P-23 | `doctor --security` 自检 | 沙箱驱动/权限/VCS 保护检查 | M4 | 已实现 |
 | P-24 | AGENTS.md 写保护 | fs.write/edit 对 AGENTS.md 默认 Ask | M3 | 已实现 |
+| P-25 | PermissionMode 模式生效 | `AcceptEdits`（工作区内文件编辑自动 Allow，shell 仍 Ask）/ `BypassPermissions`（全自动，C-03 越界与 C-23 仍硬拦）；server `--preset` 与会话级 `CreateSessionBody.preset`（auto/read-only/external-sandbox/full-access，C-22 警告） | M2 | 已实现 |
 
 ## 7. Hooks 系统（参考 Claude Code）
 
@@ -229,7 +230,7 @@
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
 | W-01 | Web 前端 | React 19 + TS + Vite 6 + Tailwind v4，对话/工具/权限 UI（`crates/minicoding-web`） | M9 | 已实现（现代暗色主题 + glassmorphism + 渐变 accent） |
-| W-02 | 流式 SSE 渲染 | `Event::Token`/`ToolCall`/`PermissionRequest` 实时渲染，TanStack Query 增量更新 + 流式光标 | M9 | 已实现 |
+| W-02 | 流式 SSE 渲染 | `Event::Token`/`ToolCall`/`PermissionRequest` 实时渲染，TanStack Query 增量更新 + 流式光标；快照气泡渲染 `tool_calls` 工具名+参数摘要（无文本不空白） | M9 | 已实现 |
 | W-03 | 权限确认弹窗 | shadcn/ui Dialog 接收 `PermissionPrompt` → JSON-RPC `permission.resolve` 回传，含风险等级可视化 | M9 | 已实现（low/medium/high 三色徽章 + 4 种决策按钮） |
 | W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Query 缓存管理 | M9 | 已实现（可折叠侧栏 + 会话元数据展示） |
 | W-05 | 暗色/亮色主题 | Tailwind v4 + shadcn/ui theme provider | M9 | 已实现（双主题 CSS 变量 + Zustand 持久化 + 系统偏好跟随 + FOUC 预防） |
@@ -238,7 +239,7 @@
 | W-08 | 静态资源托管 | `minicoding serve --web ./dist` 单二进制部署 + CORS 配置 | M9 | 已实现（`tower-http::ServeDir` + SPA fallback + `--cors-origin`） |
 | W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 已实现（禁用 `dangerouslySetInnerHTML`、Markdown 经 React 转义、权限后端强制 C-01） |
 | W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 已实现（package.json 内置 `lint`/`format` 脚本） |
-| W-11 | 项目工作区 | 文件树浏览 + 文件预览 + workdir 展示（只读，C-03 后端强制）+ 会话内 diff + 工作区切换（Ask 审批）+ 桌面端系统编辑器打开 + 新建会话先选目录（原生目录选择器/输入框）+ 切换护栏（目录校验/锁等待/前端超时） | M9 | 已实现（后端 5 端点 §26.9/`docs/api.md` §9.2；前端文件树/预览/diff 弹窗，切换走权限弹窗，diff 依赖 journal，桌面端 `open_workspace_file` 命令；新建会话 `POST /sessions` 携 `workdir`，`switch_workdir` canonical 校验 + turn 锁 60s 超时 409，SSE 首连不回放历史） |
+| W-11 | 项目工作区 | 文件树浏览 + 文件预览 + workdir 展示（只读，C-03 后端强制）+ 会话内 diff + 工作区切换（Ask 审批）+ 桌面端系统编辑器打开 + 新建会话先选目录 + 权限模式选择（默认/编辑自动/全自动·沙箱外，C-22 二次确认）+ 切换护栏（目录校验/锁等待/前端超时） | M9 | 已实现（后端 5 端点 §26.9/`docs/api.md` §9.2；前端文件树/预览/diff 弹窗，切换走权限弹窗，diff 依赖 journal，桌面端 `open_workspace_file` 命令；新建会话 `POST /sessions` 携 `workdir`/`permission_mode`/`preset`，`switch_workdir` canonical 校验 + turn 锁 60s 超时 409，SSE 首连不回放历史） |
 
 ## 13. 工程与质量
 
@@ -280,7 +281,7 @@
 | 工具系统 | 22 |
 | 上下文管理 | 9 |
 | 记忆 | 8 |
-| 权限与安全 | 24 |
+| 权限与安全 | 25 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
@@ -291,7 +292,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 11 |
-| **合计** | **183** |
+| **合计** | **184** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-11）11 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-11）是参考 CC/Codex 后的核心增强。
 

@@ -428,6 +428,7 @@ async fn handle_new_conversation(
             .unwrap_or(default.workdir),
         system: p.system.or(default.system),
         permission_mode: p.permission_mode.unwrap_or(default.permission_mode),
+        sandbox_policy: default.sandbox_policy,
     };
     match mgr.create_session(Some(params)) {
         Ok(session) => {
@@ -608,6 +609,7 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use minicoding_core::policy::PermissionMode;
+    use minicoding_core::sandbox::SandboxPolicy;
     use std::time::Duration;
 
     fn test_params() -> ServerRuntimeParams {
@@ -620,6 +622,10 @@ mod tests {
             workdir: Utf8PathBuf::from("."),
             system: None,
             permission_mode: PermissionMode::Default,
+            sandbox_policy: SandboxPolicy::WorkspaceWrite {
+                workdir: Utf8PathBuf::from("."),
+                writable: Vec::new(),
+            },
         }
     }
 

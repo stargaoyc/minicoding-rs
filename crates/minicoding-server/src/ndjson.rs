@@ -349,6 +349,7 @@ fn build_params_from_config(
             .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from),
         system: config.system.or(default.system.clone()),
         permission_mode: config.permission_mode,
+        sandbox_policy: default.sandbox_policy.clone(),
     }
 }
 
@@ -358,6 +359,7 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use minicoding_core::policy::PermissionMode;
+    use minicoding_core::sandbox::SandboxPolicy;
     use std::time::Duration;
 
     fn test_params() -> ServerRuntimeParams {
@@ -370,6 +372,10 @@ mod tests {
             workdir: Utf8PathBuf::from("."),
             system: None,
             permission_mode: PermissionMode::Default,
+            sandbox_policy: SandboxPolicy::WorkspaceWrite {
+                workdir: Utf8PathBuf::from("."),
+                writable: Vec::new(),
+            },
         }
     }
 

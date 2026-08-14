@@ -11,6 +11,7 @@ import { loadWebSettings } from "../../stores/webSettings";
 import type { CreateSessionBody } from "../../api/client";
 import { cn, formatTime } from "../../lib/utils";
 import type { SessionMeta } from "../../api/generated";
+import type { SessionModeKey } from "./NewSessionDialog";
 import { WorkspacePanel } from "../workspace/WorkspacePanel";
 import { NewSessionDialog } from "./NewSessionDialog";
 
@@ -21,7 +22,7 @@ export function Sidebar() {
     useUIStore();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
 
-  const handleNewSession = (workdir?: string) => {
+  const handleNewSession = (workdir?: string, mode: SessionModeKey = "accept_edits") => {
     // Web 模式：从 localStorage 读取 provider 配置注入会话创建请求
     // Tauri 模式：sidecar 启动时已读 config.toml，无需注入
     let body: CreateSessionBody | undefined;
@@ -32,6 +33,12 @@ export function Sidebar() {
         api_base: settings.api_base,
         model: settings.model,
       };
+    }
+    // 权限模式 → CreateSessionBody（accept_edits 走 permission_mode；full-access 走 preset）
+    if (mode === "accept_edits") {
+      body = { ...body, permission_mode: "accept_edits" };
+    } else if (mode === "full_access") {
+      body = { ...body, preset: "full-access" };
     }
     if (workdir) {
       body = { ...body, workdir };

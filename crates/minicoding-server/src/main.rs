@@ -66,6 +66,12 @@ struct Cli {
     /// 启用详细日志
     #[arg(long, short = 'v')]
     verbose: bool,
+
+    /// 安全预设：`auto`（默认，工作区可写其余 Ask）/ `read-only` /
+    /// `external-sandbox`（外部沙箱）/ `full-access`（沙箱外全自动，
+    /// 仅受信隔离容器内使用，C-22 red 警告）
+    #[arg(long, default_value = "auto")]
+    preset: String,
 }
 
 #[tokio::main]
@@ -117,6 +123,7 @@ async fn main() -> Result<()> {
         permission_timeout_sec: cli.permission_timeout_sec,
         web_dir: cli.web.map(Utf8PathBuf::from),
         cors_origins: cli.cors_origins,
+        preset: cli.preset,
     };
 
     serve(cfg).await

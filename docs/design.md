@@ -1641,6 +1641,14 @@ pub enum PermissionMode {
 
 CLI：`minicoding --plan` 进入 Plan 模式；斜杠命令 `/plan` 切换；`/plan open` 在外部编辑器打开 plan 文件。
 
+**模式生效范围**（`policy::builtin` 实现层强制）：
+
+- `AcceptEdits`：工作区内 `FileWrite` 自动 `Allow`（高频编辑场景不弹窗），`shell.run`/`web.fetch` 仍 `Ask`；
+- `BypassPermissions`：`Command`/`Network`/工作区内 `FileWrite` 全部自动 `Allow`（仅受信隔离容器内使用）；
+- 二者均不放松 L0 硬约束：内置黑名单（C-02）、路径越界 `Deny`（C-03）、AGENTS.md/CLAUDE.md 写 `Ask`（C-23）在 `AcceptEdits`/`BypassPermissions` 下依旧生效（实现见 `minicoding-policy/src/builtin.rs` `compute_verdict`/`check_file_write`）。
+
+server 通过 `--preset` 或会话级 `CreateSessionBody.preset` 设定模式与沙箱策略（`auto`/`read-only`/`external-sandbox`/`full-access`，full-access 映射 `BypassPermissions` + `DangerFullAccess`，C-22 警告），见 `docs/security.md` §2.6。
+
 ### 16.3 工作流（参考 CC 5 阶段）
 
 ```

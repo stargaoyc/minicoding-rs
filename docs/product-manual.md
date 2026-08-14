@@ -696,6 +696,19 @@ curl -X POST http://127.0.0.1:8080/sessions \
 
 未指定的字段从 server 启动时的配置 fallback。
 
+**权限模式与会话预设**（§5.7/`docs/security.md` §2.6）：`permission_mode` 支持
+`default`/`accept_edits`（工作区内文件编辑自动执行，命令仍确认，日常推荐）/`plan`/
+`auto`/`bypass_permissions`；`preset` 支持 `auto`/`read-only`/`external-sandbox`/
+`full-access`（沙箱外全自动，仅受信容器内使用，C-22）。桌面/Web 前端新建会话对话框
+提供三档快捷选择（默认确认 / 编辑自动 / 全自动·沙箱外），见 `docs/features.md` W-11。
+
+```bash
+# 编辑自动模式会话（文件编辑不再逐个确认）
+curl -X POST http://127.0.0.1:8080/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"permission_mode": "accept_edits", "workdir": "E:/projects/my-project"}'
+```
+
 ### 5.7 端点
 
 | 端点 | 方法 | 说明 |

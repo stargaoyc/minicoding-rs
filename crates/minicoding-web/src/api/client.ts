@@ -100,6 +100,8 @@ export interface CreateSessionBody {
   api_base?: string;
   model?: string;
   permission_mode?: PermissionMode;
+  /** 安全预设：`auto`（默认）/ `read-only` / `external-sandbox` / `full-access`（沙箱外全自动，仅受信容器内）。 */
+  preset?: "auto" | "read-only" | "external-sandbox" | "full-access";
 }
 
 export interface CreateSessionResponse {
