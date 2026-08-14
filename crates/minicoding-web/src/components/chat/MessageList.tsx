@@ -4,6 +4,8 @@ import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
 import type { Message } from "../../api/generated";
 import type { ActiveTool } from "../../hooks/useChat";
+import { summarizeToolContent } from "../../lib/message";
+import type { ToolContent } from "../../api/generated";
 
 interface MessageListProps {
   messages: Message[] | undefined;
@@ -91,8 +93,19 @@ export function MessageList({
         {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
         {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
 
-        {/* 思考过程（reasoning/thinking 增量，瞬态展示；模型不支持时不出现） */}
+        {/* 思考过程（reasoning/thinking 增量，默认展开；模型不支持时不出现） */}
         {streamingReasoning.length > 0 && <ReasoningBlock text={streamingReasoning} />}
+
+        {/* 流式中暂无任何输出（模型未发文本/思考/工具）时占位，避免误以为卡死 */}
+        {isStreaming &&
+          streamingText.length === 0 &&
+          streamingReasoning.length === 0 &&
+          activeTools.length === 0 && (
+            <div className="flex items-center gap-2 px-1 text-xs text-[var(--color-text-muted)]">
+              <span className="streaming-cursor" />
+              🤔 思考中…
+            </div>
+          )}
 
         {/* 流式生成中的临时消息 */}
         {hasStreaming && (
@@ -126,15 +139,15 @@ export function MessageList({
 /**
  * 思考过程块（reasoning/thinking）。
  *
- * `details` 原生折叠：**默认闭合**（`open` 省略）——长思考（如 DeepSeek R1
- * 输出上千字推理）时逐 token 流式更新若默认展开会导致整段 `pre` 全量重渲染，
- * 页面卡顿（用户感知"思考很慢"）。闭合时内容不渲染，性能开销为零；
- * 用户点击展开查看。用户手动展开后流式更新不会强制收起（非受控，
- * React 保留 DOM 开关状态）。思考过程为瞬态数据，刷新后不保留。
+ * `details` **默认展开**（`open`）：思考过程逐 token 流式更新，用户可实时
+ * 看到 AI 推理（用户反馈"AI 输出栏没有显示思考过程"）。为防长思考（如
+ * DeepSeek R1 上千字）逐 token 全量重渲染导致页面卡顿，`pre` 限高
+ * `max-h-64` + 内部滚动——页面高度不随思考增长，无滚动抖动。
+ * 用户可点击 `summary` 手动收起。思考过程为瞬态数据，刷新后不保留。
  */
 function ReasoningBlock({ text }: { text: string }) {
   return (
-    <details className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2">
+    <details open className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2">
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
         💭 思考过程
       </summary>
@@ -157,32 +170,6 @@ function ToolCallList({ tools }: { tools: ActiveTool[] }) {
       ))}
     </div>
   );
-}
-
-/**
- * 从 `ToolResult` 提取摘要文本（`ToolContent` 联合类型的文本/JSON 分支）。
- */
-function extractToolSummary(result: unknown): string {
-  if (!result || typeof result !== "object") return "";
-  const r = result as { content?: unknown; is_error?: boolean };
-  const content = r.content;
-  if (content && typeof content === "object" && "content" in (content as object)) {
-    const c = content as { type?: string; content?: unknown };
-    if (c.type === "text" && typeof c.content === "string") return c.content;
-    if (c.type === "mixed" && Array.isArray(c.content)) {
-      return c.content
-        .map((part) => extractToolSummary({ content: part, is_error: false } as never))
-        .join("\n");
-    }
-    if (c.type === "json") {
-      try {
-        return JSON.stringify(c.content).slice(0, 200);
-      } catch {
-        return "[json]";
-      }
-    }
-  }
-  return "";
 }
 
 function ToolCallCard({ tool }: { tool: ActiveTool }) {
@@ -210,7 +197,11 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
   }
 
   // 结果摘要（截断，失败时优先展示错误）
-  const summary = extractToolSummary(result);
+  const summary = summarizeToolContent(
+    result && typeof result === "object" && "content" in result
+      ? (result as { content?: ToolContent }).content
+      : undefined,
+  );
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/60 px-3 py-2">
