@@ -35,6 +35,8 @@ impl DeltaAccumulator {
     pub fn push(&mut self, delta: Delta) {
         match delta {
             Delta::Text(s) => self.text.push_str(&s),
+            // 思考过程不进消息正文（流式已经 `Event::ReasoningDelta` 广播，见 `rt.rs`）
+            Delta::Reasoning(_) => {}
             Delta::ToolCall(tc) => self.push_tool_call(tc),
             Delta::Usage(u) => self.usage = Some(u),
             Delta::Stop(reason) => self.stop_reason = Some(reason),

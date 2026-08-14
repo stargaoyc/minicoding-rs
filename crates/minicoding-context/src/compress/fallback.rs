@@ -110,7 +110,8 @@ async fn call_llm_summary(
         match delta? {
             Delta::Text(t) => summary.push_str(&t),
             Delta::Stop(_) => break,
-            Delta::ToolCall(_) | Delta::Usage(_) => {}
+            // 思考过程不进入压缩摘要（与正文分离）
+            Delta::ToolCall(_) | Delta::Usage(_) | Delta::Reasoning(_) => {}
         }
     }
     Ok(summary)

@@ -394,6 +394,12 @@ fn parse_event(event: &Value) -> Vec<Delta> {
                             deltas.push(Delta::Text(text.to_string()));
                         }
                     }
+                    // 思考块增量（extended thinking，见 docs/design.md 提供商适配）
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                            deltas.push(Delta::Reasoning(text.to_string()));
+                        }
+                    }
                     "input_json_delta" => {
                         // 工具调用入参分片（partial_json），与 OpenAI 的 args_chunk 对齐
                         let partial = delta
@@ -1167,6 +1173,29 @@ mod tests {
             "type": "content_block_delta",
             "index": 0,
             "delta": {"type": "text_delta"}
+        });
+        assert!(parse_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn parse_thinking_delta_emits_reasoning() {
+        // extended thinking：thinking_delta 增量（与 text_delta 并行、独立字段）
+        let ev = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "先分析需求"}
+        });
+        let deltas = parse_event(&ev);
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "先分析需求"));
+    }
+
+    #[test]
+    fn parse_thinking_delta_missing_thinking_skipped() {
+        let ev = json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta"}
         });
         assert!(parse_event(&ev).is_empty());
     }

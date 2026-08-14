@@ -57,6 +57,8 @@ pub struct ChatRequest {
 pub enum Delta {
     /// 文本增量。
     Text(String),
+    /// 思考过程增量（reasoning/thinking，与正文分开下发；不进消息正文，仅流式展示）。
+    Reasoning(String),
     /// 工具调用增量（分片聚合）。
     ToolCall(ToolCallDelta),
     /// token 用量统计。
