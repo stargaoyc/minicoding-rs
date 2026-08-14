@@ -3,7 +3,7 @@ import { User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall } from "../../api/generated";
 import { cn, formatTime } from "../../lib/utils";
-import { extractText } from "../../lib/message";
+import { extractText, extractToolResultSummary } from "../../lib/message";
 
 const ROLE_CONFIG = {
   user: {
@@ -77,6 +77,14 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
   const text = extractText(message);
   const toolCalls = message.tool_calls ?? [];
 
+  // 工具结果消息（role=tool）：无任何可显示内容（如纯 JSON `{}`）时不渲染
+  // 空白气泡（用户反馈"工具调用输出是空的，不如不显示"）
+  const toolResult =
+    message.role === "tool" ? extractToolResultSummary(message) : null;
+  if (message.role === "tool" && !toolResult?.text) {
+    return null;
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -124,6 +132,20 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
             >
               {text}
             </ReactMarkdown>
+          ) : message.role === "tool" && toolResult ? (
+            <div
+              className={cn(
+                "rounded-md border px-2.5 py-2 text-xs",
+                toolResult.isError
+                  ? "border-[var(--color-risk-high)]/40 bg-[var(--color-risk-high)]/5 text-[var(--color-risk-high)]"
+                  : "border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)]",
+              )}
+            >
+              <span className="mr-1.5 text-[var(--color-text-muted)]">
+                {toolResult.isError ? "✗" : "✓"}
+              </span>
+              <span className="whitespace-pre-wrap break-all">{toolResult.text}</span>
+            </div>
           ) : toolCalls.length > 0 ? (
             <ToolCallList calls={toolCalls} />
           ) : (
