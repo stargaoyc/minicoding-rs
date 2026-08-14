@@ -12,7 +12,7 @@
 //! 超时保护：默认 300s 无响应则返回 `Deny`（避免永久挂起阻塞 Runtime）。
 //! 超时时长由 `ServerConfig::permission_timeout_sec` 控制。
 
-use minicoding_core::policy::{Decision, PermissionPrompt, PermissionPrompter};
+use minicoding_core::policy::{Decision, PermissionPrompt, PermissionPrompter, Risk};
 use minicoding_core::provider::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,11 +20,23 @@ use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::timeout;
 
-/// pending 权限请求表（`permission_id` → `oneshot::Sender<Decision>`）。
+/// pending 权限请求表（`permission_id` → 请求信息 + `oneshot::Sender<Decision>`）。
 ///
 /// 每个 `ServerSession` 持有一个 `PendingPermissions`。`ServerPrompter::prompt`
 /// 注册 sender，`SessionManager::resolve_permission` 发送 decision 后移除条目。
-pub type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<Decision>>>>;
+///
+/// 额外保存 prompt 快照：SSE 断线/页面刷新后前端可经
+/// `GET /sessions/{id}/permissions/pending` 拉取未决请求并恢复弹窗
+/// （`PermissionRequested` 是瞬态事件，重连重放不可用）。
+pub struct PendingPermissionEntry {
+    pub id: String,
+    pub tool: String,
+    pub summary: String,
+    pub risk: Risk,
+    pub tx: oneshot::Sender<Decision>,
+}
+
+pub type PendingPermissions = Arc<Mutex<HashMap<String, PendingPermissionEntry>>>;
 
 /// HTTP 端权限交互器。
 ///
@@ -54,6 +66,27 @@ impl ServerPrompter {
     }
 }
 
+/// 列出当前未决的权限请求（供 `GET /sessions/{id}/permissions/pending` 快照）。
+///
+/// SSE 断线/页面刷新后前端拉取此快照恢复权限弹窗——`PermissionRequested`
+/// 是瞬态事件，重连重放不可用（见 `sse.rs`）。
+#[must_use]
+pub async fn list_pending_permissions(pending: &PendingPermissions) -> Vec<PermissionPrompt> {
+    let guard = pending.lock().await;
+    let mut out: Vec<PermissionPrompt> = guard
+        .iter()
+        .map(|(id, e)| PermissionPrompt {
+            id: id.clone(),
+            tool: e.tool.clone(),
+            summary: e.summary.clone(),
+            risk: e.risk,
+            options: Vec::new(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
 impl std::fmt::Debug for ServerPrompter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerPrompter")
@@ -71,7 +104,16 @@ impl PermissionPrompter for ServerPrompter {
             let perm_id = req.id.clone();
             {
                 let mut guard = pending.lock().await;
-                guard.insert(perm_id.clone(), tx);
+                guard.insert(
+                    perm_id.clone(),
+                    PendingPermissionEntry {
+                        id: perm_id.clone(),
+                        tool: req.tool.clone(),
+                        summary: req.summary.clone(),
+                        risk: req.risk,
+                        tx,
+                    },
+                );
             }
             // 等待客户端通过 HTTP 回传决策，或超时返回 Deny。
             // 超时保护：避免客户端断连后 turn 永久挂起。
@@ -138,7 +180,7 @@ mod tests {
             guard.remove("perm-1")
         };
         assert!(tx.is_some(), "pending permission should be registered");
-        tx.unwrap().send(Decision::Allow).expect("send decision");
+        tx.unwrap().tx.send(Decision::Allow).expect("send decision");
 
         let decision = prompt_fut.await;
         assert_eq!(decision, Decision::Allow);

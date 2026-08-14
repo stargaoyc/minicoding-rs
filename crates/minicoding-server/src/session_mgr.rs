@@ -354,8 +354,8 @@ impl SessionManager {
             .ok_or_else(|| SessionManagerError::NotFound(session_id.to_string()))?;
         let mut guard = session.pending_permissions.lock().await;
         match guard.remove(permission_id) {
-            Some(tx) => {
-                let _ = tx.send(decision);
+            Some(entry) => {
+                let _ = entry.tx.send(decision);
                 Ok(())
             }
             None => Err(SessionManagerError::PermissionNotFound(
