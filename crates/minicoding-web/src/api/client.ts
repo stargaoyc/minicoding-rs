@@ -61,6 +61,9 @@ async function http<T>(path: string, init?: RequestInit, timeoutMs?: number): Pr
     timeoutMs != null && Number.isFinite(timeoutMs)
       ? setTimeout(() => controller.abort(new Error(`请求超时（${timeoutMs}ms）`)), timeoutMs)
       : undefined;
+  const method = init?.method ?? "GET";
+  // 排查用日志（浏览器 devtools console；桌面 WebView 不可见时看后端 server.log）
+  console.debug(`[api] ${method} ${path}`);
   try {
     const resp = await fetch(`${apiBase}${path}`, {
       ...init,
@@ -69,8 +72,10 @@ async function http<T>(path: string, init?: RequestInit, timeoutMs?: number): Pr
     });
     if (!resp.ok) {
       const body = await resp.text();
+      console.debug(`[api] ${method} ${path} -> HTTP ${resp.status}`);
       throw new Error(`HTTP ${resp.status}: ${body}`);
     }
+    console.debug(`[api] ${method} ${path} -> OK`);
     return resp.json() as Promise<T>;
   } catch (e) {
     // AbortController 中止时统一为超时错误（浏览器原生抛出 AbortError/DOMException）
@@ -235,20 +240,34 @@ export function subscribeEvents(
   const url = `${apiBase}/sessions/${sessionId}/events`;
   const source = new EventSource(url);
 
+  // 排查用：SSE 事件统计（token/reasoning_delta 高频事件按计数合并输出）
+  let highFreqCount = 0;
+
   source.onmessage = (ev) => {
     try {
       const dto = JSON.parse(ev.data) as EventDto;
+      if (dto.type === "token" || dto.type === "reasoning_delta") {
+        highFreqCount += 1;
+        if (highFreqCount % 100 === 0) {
+          console.debug(`[sse] ...累计 ${highFreqCount} 个 ${dto.type} 增量`);
+        }
+      } else {
+        console.debug(`[sse] event: ${dto.type}`);
+      }
       onEvent(dto);
     } catch {
       // 忽略解析失败的事件（如 RehydrateRequired 等非 EventDto 消息）
+      console.debug("[sse] 无法解析的事件数据已忽略");
     }
   };
 
   source.onerror = (e) => {
+    console.debug("[sse] EventSource error（将自动重连）", e);
     onError?.(e);
   };
 
   source.onopen = () => {
+    console.debug("[sse] 连接已建立");
     onOpen?.();
   };
 

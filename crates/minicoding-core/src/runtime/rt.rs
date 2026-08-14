@@ -646,6 +646,8 @@ impl Runtime {
         user_input: UserInput,
     ) -> impl Future<Output = Result<TurnOutcome, RuntimeError>> + '_ {
         let span = tracing::info_span!("turn", session = %self.session.id);
+        // 详细日志：turn 总耗时（跨多次 LLM 调用 + 工具执行，见 observability.md §7.2）
+        let turn_start = std::time::Instant::now();
         // 使用 `.instrument(span)` 而非 `span.enter()`——`Entered` guard 是 `!Send`，
         // 跨 await 持有会导致 future 非 `Send`（axum / `tokio::spawn` 需要 `Send`）。
         async move {
@@ -767,7 +769,7 @@ impl Runtime {
             // turn_timeout + Ctrl-C cancel（graceful stop；已落盘消息不丢失，C-13）
             // 三路 select：cancel 优先返回 Interrupted；timeout 返回 Finished(Stopped)；
             // turn_fut 正常完成则透传其 outcome（内部已 emit TurnEnd）。
-            tokio::select! {
+            let result: Result<TurnOutcome, RuntimeError> = tokio::select! {
                 () = self.cancel_token.cancelled() => {
                     tracing::info!("turn cancelled by user");
                     let event = Event::TurnEnd {
@@ -794,7 +796,21 @@ impl Runtime {
                     )))
                 }
                 outcome = turn_fut => outcome,
+            };
+            // 详细日志：turn 结果摘要（重复工具循环/超时/取消均可从日志定位）
+            match &result {
+                Ok(o) => tracing::info!(
+                    turn.elapsed_ms = u64::try_from(turn_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    turn.outcome = ?o,
+                    "turn finished"
+                ),
+                Err(e) => tracing::warn!(
+                    turn.elapsed_ms = u64::try_from(turn_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    error = %e,
+                    "turn failed"
+                ),
             }
+            result
         }
         .instrument(span)
     }
@@ -862,15 +878,34 @@ impl Runtime {
         );
         let _enter = span.enter();
 
+        // 详细日志（排查用）：请求元信息 + 响应统计。字段不含 input 原文与凭证（C-04）。
+        tracing::info!(
+            llm.provider = %provider_id,
+            llm.model = %model_name,
+            llm.message_count = req.messages.len(),
+            phase = "request",
+            "llm_call started"
+        );
+
         let mut stream = self.provider.chat_stream(req).await?;
         let mut acc = DeltaAccumulator::new();
         self.events.emit(Event::TurnStreamingStarted);
 
+        let mut text_chars = 0usize;
+        let mut reasoning_chars = 0usize;
+        let mut tool_calls = 0usize;
         while let Some(delta) = stream.next().await {
             let delta = delta?;
-            match delta {
-                Delta::Text(ref s) => self.events.emit(Event::Token(s.clone())),
-                Delta::Reasoning(ref s) => self.events.emit(Event::ReasoningDelta(s.clone())),
+            match &delta {
+                Delta::Text(s) => {
+                    text_chars += s.chars().count();
+                    self.events.emit(Event::Token(s.clone()));
+                }
+                Delta::Reasoning(s) => {
+                    reasoning_chars += s.chars().count();
+                    self.events.emit(Event::ReasoningDelta(s.clone()));
+                }
+                Delta::ToolCall(_) => tool_calls += 1,
                 _ => {}
             }
             acc.push(delta);
@@ -883,6 +918,28 @@ impl Runtime {
             if let Some(cached) = usage.cache_read {
                 metrics::record_llm_tokens(&model_name, "cached", cached as u64);
             }
+            // 详细日志：响应统计（模型调用过程可观测，见 observability.md §7.2）
+            tracing::info!(
+                llm.elapsed_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+                llm.input_tokens = usage.input_tokens,
+                llm.output_tokens = usage.output_tokens,
+                llm.cache_read_tokens = usage.cache_read.unwrap_or(0),
+                llm.text_chars = text_chars,
+                llm.reasoning_chars = reasoning_chars,
+                llm.tool_calls = tool_calls,
+                llm.stop_reason = ?acc.stop_reason(),
+                phase = "response",
+                "llm_call finished"
+            );
+        } else {
+            tracing::info!(
+                llm.elapsed_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+                llm.text_chars = text_chars,
+                llm.reasoning_chars = reasoning_chars,
+                llm.tool_calls = tool_calls,
+                phase = "response",
+                "llm_call finished (no usage)"
+            );
         }
         // Metrics: 记录 LLM 调用延迟
         metrics::record_elapsed("llm_call_duration_ms", "model", &model_name, timer);
@@ -948,6 +1005,12 @@ impl Runtime {
                         otel.name = span_name::TOOL_CALL,
                     );
                     let _enter = span.enter();
+                    tracing::info!(
+                        tool.name = %tool_name,
+                        call_id = %call_id,
+                        phase = "start",
+                        "tool_call started"
+                    );
                     events.emit(Event::ToolCallStarted {
                         call_id: call_id.clone(),
                         tool: tool_name.clone(),
@@ -962,6 +1025,15 @@ impl Runtime {
                         call_id: call_id.clone(),
                         result: result.clone(),
                     });
+                    tracing::info!(
+                        tool.name = %tool_name,
+                        call_id = %call_id,
+                        tool.elapsed_ms = u64::try_from(tool_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        tool.is_error = result.is_error,
+                        tool.output_bytes = result.metadata.bytes,
+                        phase = "finish",
+                        "tool_call finished"
+                    );
                     // Metrics: 记录工具调用
                     let result_str = if result.is_error { "err" } else { "ok" };
                     metrics::record_tool_call(&tool_name, "none", result_str);
@@ -1021,6 +1093,7 @@ impl Runtime {
     ///
     /// `Deny`（策略/Hook/用户）返回 `Ok` 带 `is_error=true` 的结果；仅 `dispatch`
     /// 失败返回 `Err`（与原 `?` 传播语义一致）。
+    #[allow(clippy::too_many_lines)] // 权限决策 + Hook + 执行 + 审计 + 详细日志，拆分反而降低因果链可读性
     async fn execute_side_effect_call(
         &self,
         call: &ToolCall,
@@ -1043,6 +1116,12 @@ impl Runtime {
             otel.name = span_name::PERMISSION_CHECK,
         );
         let _enter = span.enter();
+        tracing::info!(
+            tool.name = %call.name,
+            call_id = %call.id,
+            phase = "start",
+            "tool_call started (side effect)"
+        );
 
         let plan_snap = self.plan_state.read().await.clone();
         let perm_ctx = PermissionContext {
@@ -1132,6 +1211,32 @@ impl Runtime {
             Ok(_) => "ok",
             Err(_) => "err",
         };
+        // 详细日志：副作用工具执行结果（含权限决策）
+        match &result {
+            Ok((_, r)) => {
+                tracing::info!(
+                    tool.name = %call.name,
+                    call_id = %call.id,
+                    tool.elapsed_ms = u64::try_from(tool_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    tool.is_error = r.is_error,
+                    tool.output_bytes = r.metadata.bytes,
+                    permission.verdict = verdict_str,
+                    phase = "finish",
+                    "tool_call finished (side effect)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tool.name = %call.name,
+                    call_id = %call.id,
+                    tool.elapsed_ms = u64::try_from(tool_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    error = %e,
+                    permission.verdict = verdict_str,
+                    phase = "finish",
+                    "tool_call failed"
+                );
+            }
+        }
         metrics::record_tool_call(&call.name, side_effect_str, result_str);
         metrics::record_elapsed("tool_call_duration_ms", "tool", &call.name, tool_timer);
         if result.is_err() {

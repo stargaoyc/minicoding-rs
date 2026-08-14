@@ -442,6 +442,17 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 minicoding --verbose
 - **凭证安全**：minicoding 上报的 span 属性含会话 id/路径/模型名（§4.2），**不含 API key**（C-04 凭证不落日志/span）
 - **镜像版本**：compose 中镜像版本经 `.env` 变量可覆盖（见 `.env.example`），升级时统一调整
 
+### 7.6 本地日志文件（桌面端排查）
+
+- **文件日志**：server/CLI 启动时除 stderr 外，额外写 `~/.minicoding/logs/server.log`（按天轮转，保留 7 份），stderr 与文件内容一致。文件层构建失败（home 不可解析/目录不可建）时降级为仅 stderr，不阻塞启动；
+- **详细事件日志（`target` 无，字段前缀区分）**：
+  - `llm.*`：`llm_call started`（provider/model/message_count，C-04 不含输入原文）与 `llm_call finished`（`elapsed_ms`/`input_tokens`/`output_tokens`/`cache_read_tokens`/`text_chars`/`reasoning_chars`/`tool_calls`/`stop_reason`）；
+  - `tool.*`：`tool_call started/finished`（name/call_id/`elapsed_ms`/`is_error`/`output_bytes`），副作用工具另带 `permission.verdict`；
+  - `turn.*`：`turn finished`（`elapsed_ms`/`outcome`），含超时/取消/重复工具循环终止；
+  - 权限决策另有 `audit.log`（见 `docs/security.md`）；
+- **前端**：Web 模式浏览器 devtools console 有 `[api]`（HTTP 请求）与 `[sse]`（事件类型，token/reasoning_delta 高频事件按 100 条计数合并）debug 日志；桌面 WebView 无 devtools，排查以 `server.log` 为准；
+- **用法**：桌面端出问题（权限弹窗未出现、无结果等）时，直接看 `~/.minicoding/logs/server.log`（Windows 为 `%USERPROFILE%\.minicoding\logs\server.log`），按 `tool_call`/`llm_call`/`turn` 时间线定位。
+
 ---
 
 ## §8 实现路线图
