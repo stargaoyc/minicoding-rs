@@ -3,15 +3,15 @@
 /**
  * 目录列表单条条目。
  */
-export type WorkspaceListEntry = {
+export type WorkspaceListEntry = { 
 /**
  * 文件/目录名（不含路径）。
  */
-name: string,
+name: string, 
 /**
  * `"file"` / `"dir"`。
  */
-kind: string,
+kind: string, 
 /**
  * 文件大小（字节，目录为 `None`）。
  */

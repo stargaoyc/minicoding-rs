@@ -108,6 +108,12 @@ pub struct ServeCommand {
     #[arg(long = "cors-origin")]
     cors_origins: Vec<String>,
 
+    /// 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见
+    /// `security.md` §2.6）。`full-access` = 沙箱外全自动（BypassPermissions +
+    /// DangerFullAccess），仅受信容器内使用（C-22 red 警告）。
+    #[arg(long, default_value = "auto")]
+    preset: String,
+
     /// 切换为 MCP stdio server 模式（T-M8-3）：把内置工具通过 MCP 协议暴露给
     /// 外部 MCP client（如 Claude Desktop），不启动 HTTP server。
     ///
@@ -264,6 +270,7 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         permission_timeout_sec: cmd.permission_timeout_sec,
         web_dir: cmd.web.as_deref().map(Utf8PathBuf::from),
         cors_origins: cmd.cors_origins.clone(),
+        preset: cmd.preset.clone(),
     };
 
     minicoding_server::serve(cfg)
@@ -355,6 +362,10 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
+        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
+            workdir: Utf8PathBuf::from(&cmd.workdir),
+            writable: Vec::new(),
+        },
     };
 
     // 3. 构造 SessionManager
@@ -397,6 +408,10 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
+        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
+            workdir: Utf8PathBuf::from(&cmd.workdir),
+            writable: Vec::new(),
+        },
     };
 
     // 3. 构造 SessionManager
@@ -440,6 +455,10 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
+        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
+            workdir: Utf8PathBuf::from(&cmd.workdir),
+            writable: Vec::new(),
+        },
     };
 
     // 3. 构造 SessionManager

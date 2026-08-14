@@ -4,7 +4,7 @@ import type { JsonValue } from "../../../../minicoding-core/bindings/serde_json/
 /**
  * 工具 schema（注册时声明，供 LLM 调用参考）。
  */
-export type ToolSchema = { name: string, description: string,
+export type ToolSchema = { name: string, description: string, 
 /**
  * JSON Schema 描述输入参数。
  */
