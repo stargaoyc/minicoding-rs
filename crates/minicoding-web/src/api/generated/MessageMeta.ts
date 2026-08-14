@@ -4,19 +4,19 @@ import type { MessageSource } from "./MessageSource";
 /**
  * 消息元数据。
  */
-export type MessageMeta = { 
+export type MessageMeta = {
 /**
  * 该消息的 token 数（LLM 返回或启发式估算）。
  */
-tokens: number | null, 
+tokens: number | null,
 /**
  * 是否固定（压缩时不裁剪）。
  */
-pinned: boolean, 
+pinned: boolean,
 /**
  * 是否已被摘要替换。
  */
-summarized: boolean, 
+summarized: boolean,
 /**
  * 消息来源。
  */

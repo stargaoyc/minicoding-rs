@@ -86,7 +86,11 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
               {text}
             </ReactMarkdown>
           ) : (
-            <span className="text-[var(--color-text-muted)] italic">（无文本内容）</span>
+            <span className="text-[var(--color-text-muted)] italic">
+              {message.role === "assistant"
+                ? "（无文本内容：工具请求被拒或模型未输出）"
+                : "（无文本内容）"}
+            </span>
           )}
           {isStreaming && <span className="streaming-cursor" />}
         </div>

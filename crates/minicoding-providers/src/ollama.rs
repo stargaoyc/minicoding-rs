@@ -348,6 +348,15 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
 
     // 文本增量
     if let Some(message) = chunk.get("message") {
+        // 思考过程（deepseek-r1 等带 reasoning 的模型；部分接口用 reasoning_content）
+        if let Some(reasoning) = message
+            .get("reasoning")
+            .or_else(|| message.get("reasoning_content"))
+            .and_then(Value::as_str)
+            && !reasoning.is_empty()
+        {
+            deltas.push(Delta::Reasoning(reasoning.to_string()));
+        }
         if let Some(content) = message.get("content").and_then(Value::as_str)
             && !content.is_empty()
         {
@@ -985,6 +994,28 @@ mod tests {
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], Delta::Text(t) if t == "final"));
         assert!(matches!(&deltas[1], Delta::Stop(StopReason::EndTurn)));
+    }
+
+    #[test]
+    fn parse_chunk_reasoning_field_emits_reasoning() {
+        // deepseek-r1 风格：message.reasoning 与 content 分离
+        let chunk = json!({
+            "message": {"role": "assistant", "reasoning": "先规划步骤", "content": "回答"}
+        });
+        let deltas = parse_chunk(&chunk);
+        assert_eq!(deltas.len(), 2);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "先规划步骤"));
+        assert!(matches!(&deltas[1], Delta::Text(t) if t == "回答"));
+    }
+
+    #[test]
+    fn parse_chunk_reasoning_content_fallback() {
+        // 部分接口用 reasoning_content 字段
+        let chunk = json!({
+            "message": {"role": "assistant", "reasoning_content": "思路"}
+        });
+        let deltas = parse_chunk(&chunk);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "思路"));
     }
 
     // --- extract_text / tool_content_to_string ---

@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle, Settings } from "lucide-react";
+import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
@@ -115,7 +115,8 @@ function AppInner() {
 
   // 消息 + SSE 流（含权限请求回调）
   const { data: messages, isLoading } = useMessages(activeSessionId);
-  const { streamingText, isStreaming, activeTools, elapsedSec } = useSSEStream(activeSessionId, {
+  const { streamingText, streamingReasoning, isStreaming, activeTools, elapsedSec, waitingPermission, permissionDeniedMsg } =
+    useSSEStream(activeSessionId, {
     onPermissionRequested: (e) => {
       if (activeSessionId) {
         permissions.requestPermission({ sessionId: activeSessionId, ...e });
@@ -193,6 +194,7 @@ function AppInner() {
             <MessageList
               messages={messages}
               streamingText={streamingText}
+              streamingReasoning={streamingReasoning}
               isStreaming={isStreaming}
               isLoading={isLoading}
               activeTools={activeTools}
@@ -201,6 +203,23 @@ function AppInner() {
             {sendMessage.isError && (
               <div className="border-t border-[var(--color-risk-high)]/30 bg-[var(--color-risk-high)]/10 px-4 py-2 text-sm text-[var(--color-risk-high)]">
                 发送失败：{sendMessage.error instanceof Error ? sendMessage.error.message : String(sendMessage.error)}
+              </div>
+            )}
+            {/* 权限等待横幅：工具正在等待用户在弹窗中确认（替代笼统的"正在思考"） */}
+            {waitingPermission && (
+              <div className="flex items-center gap-2 border-t border-[var(--color-risk-medium)]/40 bg-[var(--color-risk-medium)]/10 px-4 py-2 text-sm text-[var(--color-risk-medium)]">
+                <ShieldAlert className="h-4 w-4 shrink-0" />
+                <span>
+                  等待权限确认：<code className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-xs">{waitingPermission.tool}</code>
+                  <span className="ml-1">请在权限弹窗中选择允许或拒绝（超时将自动拒绝）</span>
+                </span>
+              </div>
+            )}
+            {/* 权限被拒提示（用户拒绝或超时自动拒绝，turn 结束时判定） */}
+            {permissionDeniedMsg && !waitingPermission && (
+              <div className="flex items-center gap-2 border-t border-[var(--color-risk-high)]/30 bg-[var(--color-risk-high)]/10 px-4 py-2 text-sm text-[var(--color-risk-high)]">
+                <ShieldX className="h-4 w-4 shrink-0" />
+                <span>{permissionDeniedMsg}</span>
               </div>
             )}
             {/* "运行中" 指示器：POST 请求进行中但 SSE 还未开始流式输出 */}

@@ -8,12 +8,20 @@ import type { ActiveTool } from "../../hooks/useChat";
 interface MessageListProps {
   messages: Message[] | undefined;
   streamingText: string;
+  streamingReasoning: string;
   isStreaming: boolean;
   isLoading: boolean;
   activeTools: ActiveTool[];
 }
 
-export function MessageList({ messages, streamingText, isStreaming, isLoading, activeTools }: MessageListProps) {
+export function MessageList({
+  messages,
+  streamingText,
+  streamingReasoning,
+  isStreaming,
+  isLoading,
+  activeTools,
+}: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // 新消息或流式增量时自动滚动到底部
@@ -60,6 +68,9 @@ export function MessageList({ messages, streamingText, isStreaming, isLoading, a
         {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
         {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
 
+        {/* 思考过程（reasoning/thinking 增量，瞬态展示；模型不支持时不出现） */}
+        {streamingReasoning.length > 0 && <ReasoningBlock text={streamingReasoning} />}
+
         {/* 流式生成中的临时消息 */}
         {hasStreaming && (
           <MessageBubble
@@ -86,6 +97,28 @@ export function MessageList({ messages, streamingText, isStreaming, isLoading, a
         <div ref={bottomRef} />
       </div>
     </ScrollArea>
+  );
+}
+
+/**
+ * 思考过程块（reasoning/thinking）。
+ *
+ * `details` 原生折叠：默认展开（`open`），用户手动收起后流式更新不会强制展开
+ *（非受控，React 保留 DOM 开关状态）。思考过程为瞬态数据，刷新后不保留。
+ */
+function ReasoningBlock({ text }: { text: string }) {
+  return (
+    <details
+      open
+      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
+    >
+      <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
+        💭 思考过程
+      </summary>
+      <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+        {text}
+      </pre>
+    </details>
   );
 }
 

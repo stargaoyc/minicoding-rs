@@ -3,15 +3,15 @@
 /**
  * `GET /workspace/read` 响应（文件内容）。
  */
-export type WorkspaceReadResponse = { 
+export type WorkspaceReadResponse = {
 /**
  * 文件内容（≤ 64 KiB，超出截断，C-07 输出上限）。
  */
-content: string, 
+content: string,
 /**
  * 文件大小（字节）。
  */
-size: bigint, 
+size: bigint,
 /**
  * 是否被截断。
  */

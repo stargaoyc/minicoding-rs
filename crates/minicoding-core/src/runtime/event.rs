@@ -12,6 +12,11 @@ use tokio::sync::broadcast;
 pub enum Event {
     /// 流式 token 增量。
     Token(String),
+    /// 思考过程增量（reasoning/thinking，见 `provider::Delta::Reasoning`）。
+    ///
+    /// 瞬态事件：仅作流式展示，不落盘、不进 `messages`（与正文分离，避免污染
+    /// 上下文与审计）。模型不支持 reasoning 时不发出。
+    ReasoningDelta(String),
     /// 一条消息已追加（落盘 + 入上下文后）。
     MessageAppended(Message),
     /// 流式开始。

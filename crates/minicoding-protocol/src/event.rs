@@ -44,6 +44,8 @@ pub struct EventDto {
 pub enum EventKind {
     /// 流式 token 增量。
     Token { text: String },
+    /// 思考过程增量（reasoning/thinking，瞬态：仅展示，不落盘、不入 messages）。
+    ReasoningDelta { text: String },
     /// 一条消息已追加（落盘 + 入上下文后）。
     MessageAppended { message: Message },
     /// 流式开始。
@@ -94,6 +96,7 @@ impl From<&Event> for EventKind {
     fn from(e: &Event) -> Self {
         match e {
             Event::Token(text) => Self::Token { text: text.clone() },
+            Event::ReasoningDelta(text) => Self::ReasoningDelta { text: text.clone() },
             Event::MessageAppended(msg) => Self::MessageAppended {
                 message: msg.clone(),
             },
@@ -209,6 +212,32 @@ mod tests {
         let dto = EventDto::from_event(7, &event);
         match dto.kind {
             EventKind::Token { text } => assert_eq!(text, "world"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn from_core_event_reasoning_delta() {
+        let dto = EventDto::from_event(8, &Event::ReasoningDelta("思考中".into()));
+        match dto.kind {
+            EventKind::ReasoningDelta { text } => assert_eq!(text, "思考中"),
+            _ => panic!("expected ReasoningDelta"),
+        }
+    }
+
+    #[test]
+    fn reasoning_delta_roundtrip() {
+        let dto = EventDto {
+            seq: 9,
+            kind: EventKind::ReasoningDelta {
+                text: "逐步推导".into(),
+            },
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"reasoning_delta\""));
+        let back: EventDto = serde_json::from_str(&json).unwrap();
+        match back.kind {
+            EventKind::ReasoningDelta { text } => assert_eq!(text, "逐步推导"),
             _ => panic!("wrong variant"),
         }
     }

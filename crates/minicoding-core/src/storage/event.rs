@@ -264,10 +264,11 @@ pub fn try_persist(event: &crate::runtime::Event) -> Option<PersistedEvent> {
         crate::runtime::Event::TurnEnd { stop_reason } => Some(PersistedEvent::TurnEnd {
             stop_reason: stop_reason.clone(),
         }),
-        // 瞬态事件：Token / TurnStreamingStarted / ToolCallStarted /
+        // 瞬态事件：Token / ReasoningDelta / TurnStreamingStarted / ToolCallStarted /
         // ToolCallFinished / PermissionRequested / ConfigChanged / SessionCreated
         // SessionCreated 由 Runtime 显式构造完整 PersistedEvent（携带 workdir 等）
         crate::runtime::Event::Token(_)
+        | crate::runtime::Event::ReasoningDelta(_)
         | crate::runtime::Event::TurnStreamingStarted
         | crate::runtime::Event::ToolCallStarted { .. }
         | crate::runtime::Event::ToolCallFinished { .. }

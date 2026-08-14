@@ -355,6 +355,15 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
         && let Some(choice) = choices.first()
     {
         if let Some(delta) = choice.get("delta") {
+            // 思考过程：DeepSeek 用 `reasoning_content`，OpenAI o 系列用 `reasoning`
+            if let Some(reasoning) = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+                .and_then(Value::as_str)
+                && !reasoning.is_empty()
+            {
+                deltas.push(Delta::Reasoning(reasoning.to_string()));
+            }
             if let Some(content) = delta.get("content").and_then(Value::as_str)
                 && !content.is_empty()
             {
@@ -1248,6 +1257,37 @@ mod tests {
     }
 
     // --- parse_usage 补充 ---
+
+    #[test]
+    fn parse_chunk_reasoning_content_deepseek() {
+        // DeepSeek：delta.reasoning_content 与正文分离下发
+        let chunk = json!({
+            "choices": [{"delta": {"reasoning_content": "逐步分析中"}}]
+        });
+        let deltas = parse_chunk(&chunk);
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "逐步分析中"));
+    }
+
+    #[test]
+    fn parse_chunk_reasoning_openai_o_series() {
+        // OpenAI o 系列：delta.reasoning
+        let chunk = json!({
+            "choices": [{"delta": {"reasoning": "let me think"}}]
+        });
+        let deltas = parse_chunk(&chunk);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "let me think"));
+    }
+
+    #[test]
+    fn parse_chunk_reasoning_prioritizes_reasoning_content() {
+        // 两者同时出现时以 reasoning_content 为准（DeepSeek 风格优先）
+        let chunk = json!({
+            "choices": [{"delta": {"reasoning": "o-style", "reasoning_content": "ds-style"}}]
+        });
+        let deltas = parse_chunk(&chunk);
+        assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "ds-style"));
+    }
 
     #[test]
     fn parse_usage_with_cached_tokens() {

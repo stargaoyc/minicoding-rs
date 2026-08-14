@@ -868,8 +868,10 @@ impl Runtime {
 
         while let Some(delta) = stream.next().await {
             let delta = delta?;
-            if let Delta::Text(ref s) = delta {
-                self.events.emit(Event::Token(s.clone()));
+            match delta {
+                Delta::Text(ref s) => self.events.emit(Event::Token(s.clone())),
+                Delta::Reasoning(ref s) => self.events.emit(Event::ReasoningDelta(s.clone())),
+                _ => {}
             }
             acc.push(delta);
         }
