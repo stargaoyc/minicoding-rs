@@ -230,8 +230,9 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
 
   useEffect(() => {
     if (!sessionId) return;
-    // 连接建立/重连成功后拉取未决权限快照，恢复断线期间丢失的弹窗
-    // （`PermissionRequested` 是瞬态事件，重连重放不可用，见 server `sse.rs`）。
+    // 拉取未决权限快照，恢复丢失的弹窗（`PermissionRequested` 是瞬态事件，
+    // SSE 断线/事件丢失时重放不可用，见 server `sse.rs`）。幂等：同 pid
+    // 重复设置 waitingPermission 无副作用；已决请求会从快照消失。
     const refreshPending = () => {
       getPendingPermissions(sessionId)
         .then(({ pending }) => {
@@ -258,6 +259,31 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
     );
     return () => subRef.current?.close();
   }, [sessionId, handleEvent, handlePermissionRequested]);
+
+  // 权限弹窗兜底轮询：即使 SSE 事件流整体丢失（断线/异常/事件被吞），
+  // 每 5s 拉一次 pending 快照，未决权限请求的弹窗仍会出现——否则
+  // 300s 超时静默 Deny，任务失败且无提示。请求极小（本地 server），
+  // 无未决请求时返回空数组即无开销。
+  useEffect(() => {
+    if (!sessionId) return;
+    const pollTimer = setInterval(() => {
+      getPendingPermissions(sessionId)
+        .then(({ pending }) => {
+          for (const p of pending) {
+            handlePermissionRequested({
+              id: p.id,
+              tool: p.tool,
+              summary: p.summary,
+              risk: p.risk,
+            });
+          }
+        })
+        .catch(() => {
+          // 快照拉取失败静默（下次轮询重试）
+        });
+    }, 5_000);
+    return () => clearInterval(pollTimer);
+  }, [sessionId, handlePermissionRequested]);
 
   // turn 进行中 elapsed 秒数（1s tick；无事件期间用户可感知"还在运行"而非"卡死"）
   const [elapsedSec, setElapsedSec] = useState(0);
