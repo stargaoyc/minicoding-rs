@@ -11,6 +11,11 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+// `app.state::<T>()` / `app.manage(...)` 来自 `tauri::Manager`（main.rs 已导入，
+// 本文件独立使用需显式引入；CI 的 desktop feature build 会因缺失而失败）。
+#[cfg(feature = "desktop")]
+use tauri::Manager;
+
 /// sidecar 启动后等待端口输出的超时时间。
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -118,7 +123,7 @@ fn parse_port(line: &str) -> Option<u16> {
 
 /// 全局 sidecar 进程句柄（Tauri 版 sidecar 的 `CommandChild`）。
 ///
-/// `tauri-plugin-shell` 的 `CommandChild` **没有 Drop 清理**（无 kill_on_drop），
+/// `tauri-plugin-shell` 的 `CommandChild` **没有 Drop 清理**（无 `kill_on_drop`），
 /// 若退出时不显式 kill，sidecar 变孤儿进程继续存活（用户反馈
 /// "minicoding-server-sidecar.exe 不随 desktop 退出停止"）。句柄存入 managed
 /// state，应用 `RunEvent::Exit` 时由 [`kill_sidecar`] 取出并终止。
