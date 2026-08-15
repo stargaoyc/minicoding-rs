@@ -93,7 +93,8 @@ mod tests {
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/home/user/project"));
         let s = c.build(&ctx).await.expect("build");
         assert!(s.content.contains("/home/user/project"));
-        assert!(s.content.contains("sh -c"));
+        // 命令语义提示两平台都输出（内容随平台不同：sh -c / cmd /C）
+        assert!(s.content.contains("命令语义"));
         assert!(s.cacheable);
     }
 
