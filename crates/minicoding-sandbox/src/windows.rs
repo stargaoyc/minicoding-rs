@@ -230,7 +230,30 @@ fn open_process_handle(pid: u32) -> Result<HANDLE, SandboxError> {
 }
 
 /// 恢复子进程主线程（解除 CREATE_SUSPENDED 挂起）。
+///
+/// toolhelp 线程快照对刚创建（CREATE_SUSPENDED）的进程存在已知竞态：进程创建后
+/// 立即枚举快照，其线程条目可能尚未出现（表现为 `no suspendable thread found`）。
+/// 故短重试数次（同步路径：`SandboxDriver::apply/post_spawn` 为同步 trait，
+/// spawn 后立即调用，20ms 级等待可接受）。
 fn resume_thread(pid: u32) -> Result<(), SandboxError> {
+    for attempt in 0..3 {
+        match try_resume_thread(pid) {
+            Ok(true) => return Ok(()),
+            // 未找到且未耗尽重试：稍等再枚举（快照竞态）
+            Ok(false) if attempt < 2 => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(false) => {
+                return Err(SandboxError::Sandbox(format!(
+                    "no suspendable thread found for pid {pid}"
+                )));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("resume_thread loop always returns")
+}
+
+/// 单次枚举线程快照，尝试恢复目标 PID 的主线程。返回是否成功恢复。
+fn try_resume_thread(pid: u32) -> Result<bool, SandboxError> {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
@@ -269,12 +292,7 @@ fn resume_thread(pid: u32) -> Result<(), SandboxError> {
     // SAFETY: 关闭快照句柄。
     unsafe { CloseHandle(snapshot) };
 
-    if !resumed {
-        return Err(SandboxError::Sandbox(format!(
-            "no suspendable thread found for pid {pid}"
-        )));
-    }
-    Ok(())
+    Ok(resumed)
 }
 
 #[cfg(test)]
