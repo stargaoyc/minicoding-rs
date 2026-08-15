@@ -250,6 +250,7 @@ impl JsonlStorage {
             created_at: first.created_at,
             message_count: messages.len(),
             last_message_at: last.created_at,
+            summary: None,
         };
         Ok(match format {
             ExportFormat::Markdown => export_session_md(&messages, &meta),

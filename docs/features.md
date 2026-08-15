@@ -241,6 +241,9 @@
 | W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 已实现（禁用 `dangerouslySetInnerHTML`、Markdown 经 React 转义、权限后端强制 C-01） |
 | W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 已实现（package.json 内置 `lint`/`format` 脚本） |
 | W-11 | 项目工作区 | 文件树浏览 + 文件预览 + workdir 展示（只读，C-03 后端强制）+ 会话内 diff + 工作区切换（Ask 审批）+ 桌面端系统编辑器打开 + 新建会话先选目录 + 权限模式选择（默认/编辑自动/全自动·沙箱外，C-22 二次确认）+ 切换护栏（目录校验/锁等待/前端超时） | M9 | 已实现（后端 5 端点 §26.9/`docs/api.md` §9.2；前端文件树/预览/diff 弹窗，切换走权限弹窗，diff 依赖 journal，桌面端 `open_workspace_file` 命令；新建会话 `POST /sessions` 携 `workdir`/`permission_mode`/`preset`，`switch_workdir` canonical 校验 + turn 锁 60s 超时 409，SSE 首连不回放历史） |
+| W-12 | 会话持久化与懒恢复 | server 重启后历史会话保留：`list_sessions` 合并磁盘 `index.json`（计数/摘要实时，`append` 时 upsert）+ 内存活跃；点击历史会话经 `get_or_load` 懒恢复（snapshot + 事件流重放优先，消息日志回退，与 CLI `--resume` 同构）；侧边栏显示首条用户消息摘要而非会话代号，消息计数真实（见 `design.md` §25.8） | M9 | 已实现（`SessionManager.disk` 磁盘访问 + `restore_session` 预加载 Runtime；`SessionMeta.summary`；前端侧边栏摘要 + 计数） |
+| W-13 | Plan 模式新建会话 | 新建会话可选"先规划"：`CreateSessionBody.plan_mode` → 初始 `PermissionMode::Plan`（C-25：先写 `plan.md` 拆分子任务，`plan.exit` 批准后执行） | M9 | 已实现（后端 `http.rs` 映射 + 前端 NewSessionDialog 第四选项） |
+| W-14 | 输入框运行中可输入 | 运行中输入框不禁用（可提前输入下一条消息），仅发送按钮禁用；输入自动增高至上限后滚动 | M9 | 已实现（`ChatInput` `sendDisabled`/`disabled` 分离 + scrollHeight 自适应） |
 
 ## 13. 工程与质量
 
@@ -292,10 +295,10 @@
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 11 |
-| **合计** | **185** |
+| Web 与桌面（M9） | 14 |
+| **合计** | **188** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-11）11 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-11）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-14）14 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-14）是参考 CC/Codex 后的核心增强。
 
 ---
 

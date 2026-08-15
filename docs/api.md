@@ -481,6 +481,8 @@ pub struct SessionMeta {
     pub created_at: time::OffsetDateTime,
     pub message_count: usize,
     pub last_message_at: time::OffsetDateTime,
+    /// 会话摘要（首条用户消息 80 字符截断或 LLM 生成摘要，可能为空）。
+    pub summary: Option<String>,
 }
 ```
 
@@ -1441,9 +1443,10 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()>;
 
 /// 多会话管理器（HTTP handler 通过此管理会话生命周期）。
 ///
-/// `create_session`/`cancel`/`get`/`list_sessions`/`delete` 为同步方法
-/// （内部仅操作 `std::sync::Mutex<HashMap>`，无 IO），避免 `async fn(&self, ..)`
-/// 与 axum `Handler` trait HRTB 冲突（见 `design.md` §24）。
+/// 会话表在内存，但消息/事件已落盘 `~/.minicoding/sessions/`；`list_sessions`
+/// 合并磁盘 `index.json` meta（重启后历史会话仍列出），访问未加载的会话时
+/// `get_or_load` 懒恢复（snapshot + 事件流重放优先，消息日志回退，见
+/// `design.md` §25.10）。
 pub struct SessionManager { /* opaque */ }
 
 impl SessionManager {
@@ -1458,17 +1461,23 @@ impl SessionManager {
         params_override: Option<ServerRuntimeParams>,
     ) -> Result<Arc<ServerSession>, SessionManagerError>;
 
-    /// 查找会话（同步）。
+    /// 查找会话（同步，仅内存表）。
     pub fn get(&self, session_id: &str) -> Option<Arc<ServerSession>>;
 
-    /// 列出所有会话（同步）。
+    /// 查找会话；内存未加载时从磁盘懒恢复（所有访问入口应走此方法）。
+    pub async fn get_or_load(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<ServerSession>, SessionManagerError>;
+
+    /// 列出所有会话（内存活跃 + 磁盘历史合并，按最后消息时间倒序）。
     pub fn list_sessions(&self) -> Vec<SessionMeta>;
 
     /// 删除会话（同步）。
     pub fn delete(&self, session_id: &str) -> bool;
 
-    /// 取消当前 turn（同步——`Runtime::cancel` 仅触发 `CancellationToken`，无 await）。
-    pub fn cancel(&self, session_id: &str) -> Result<(), SessionManagerError>;
+    /// 取消当前 turn（async——可能触发磁盘懒恢复）。
+    pub async fn cancel(&self, session_id: &str) -> Result<(), SessionManagerError>;
 
     /// 解析权限请求（async——涉及 `TokioMutex` await）。
     pub async fn resolve_permission(
@@ -1568,8 +1577,10 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 
 **会话快照与取消端点**（`minicoding-server/src/http.rs` / `session_mgr.rs`）：
 
-- `GET /sessions/{id}` 响应体含 `tasks: Vec<Task>`——由 `ServerSession::task_state` 返回
+- `GET /sessions` 返回 `SessionMeta` 列表（含 `summary`/`message_count`，**合并磁盘历史**——server 重启后旧会话仍列出，见 `design.md` §25.10）；
+- `GET /sessions/{id}` 触发懒恢复（`get_or_load`），重启前的会话按需从磁盘重建 Runtime，响应体含 `messages` 与 `tasks: Vec<Task>`——由 `ServerSession::task_state` 返回
   （常驻订阅 `Event::TaskUpdated` 的镜像快照，任务权威源是 `TaskStore`）。前端据此渲染任务面板；
+- `POST /sessions` 的 `plan_mode: true` 使会话初始 `PermissionMode::Plan`（C-25：先写 `plan.md` 拆分子任务，`plan.exit` 批准后执行）；
 - `POST /sessions/{id}/cancel` → `SessionManager::cancel` → `Runtime::cancel()`（CancellationToken），
   中断当前 turn，SSE 推 `TurnEnd { stop_reason: interrupted }`，`POST /sessions/{id}/messages`
   返回 `final_text = "[已取消]"`；

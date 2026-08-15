@@ -24,6 +24,9 @@ pub struct SessionMeta {
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     #[serde(with = "time::serde::rfc3339")]
     pub last_message_at: OffsetDateTime,
+    /// 会话摘要（首条用户消息或 LLM 生成摘要，供侧边栏展示；可能为空）。
+    #[serde(default)]
+    pub summary: Option<String>,
     /// 任务列表（跨压缩保留，见 `design.md` §18.5、C-31）。
     ///
     /// 任务列表存 `SessionMeta` 而非 `messages`，不受上下文压缩管道影响；

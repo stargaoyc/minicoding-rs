@@ -139,6 +139,11 @@ struct CreateSessionBody {
     /// `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。
     #[serde(default)]
     preset: Option<String>,
+    /// Plan 模式（C-25：先规划后执行，写 `plan.md` + 子任务拆分，仅只读工具可用）。
+    /// `true` 时会话初始 `PermissionMode` 为 `Plan`（客户端显式 `body.permission_mode`
+    /// 优先于本开关）。
+    #[serde(default)]
+    plan_mode: bool,
 }
 
 /// `CreateSession` 响应。
@@ -351,6 +356,10 @@ async fn create_session(
             tracing::warn!("{w}");
         }
     }
+    // Plan 模式（C-25：先规划后执行）：`plan_mode` 请求且未显式指定模式时生效
+    if body.plan_mode && params.permission_mode == PermissionMode::Default {
+        params.permission_mode = PermissionMode::Plan;
+    }
 
     let session = state.mgr.create_session(Some(params))?;
     let session_id = session.session_id().clone();
@@ -401,7 +410,7 @@ fn build_preset_policy(
     }
 }
 
-/// `GET /sessions` — 列出所有会话。
+/// `GET /sessions` — 列出所有会话（内存活跃 + 磁盘历史合并）。
 async fn list_sessions(State(state): State<AppState>) -> Json<ListSessionsResponse> {
     let sessions = state.mgr.list_sessions();
     Json(ListSessionsResponse { sessions })
@@ -413,10 +422,7 @@ async fn get_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<GetSessionResponse>, HttpError> {
     let messages = state.mgr.get_messages(&session_id).await?;
-    let session = state
-        .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+    let session = state.mgr.get_or_load(&session_id).await?;
     let tasks = session
         .task_state
         .lock()
@@ -461,7 +467,7 @@ async fn cancel_turn(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    state.mgr.cancel(&session_id)?;
+    state.mgr.cancel(&session_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -471,10 +477,7 @@ async fn sse_events(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, HttpError> {
-    let session = state
-        .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+    let session = state.mgr.get_or_load(&session_id).await?;
 
     let headers = headers.clone();
     let header = headers.get("last-event-id").and_then(|v| v.to_str().ok());
@@ -516,10 +519,7 @@ async fn pending_permissions(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    let session = state
-        .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+    let session = state.mgr.get_or_load(&session_id).await?;
     let pending = crate::prompter::list_pending_permissions(&session.pending_permissions).await;
     Ok(Json(serde_json::json!({"pending": pending})))
 }

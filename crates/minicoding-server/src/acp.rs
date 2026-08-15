@@ -309,7 +309,7 @@ async fn dispatch_message(
             tracing::warn!(method = %method, error = %e, "request handler errored");
         }
     } else {
-        dispatch_notification(&mgr, stdout, method, params);
+        dispatch_notification(&mgr, stdout, method, params).await;
     }
     Ok(())
 }
@@ -359,7 +359,7 @@ async fn dispatch_request(
 }
 
 /// 分派 JSON-RPC Notification（无 id，不需响应）。
-fn dispatch_notification(
+async fn dispatch_notification(
     mgr: &Arc<SessionManager>,
     _stdout: &SharedStdout,
     method: &str,
@@ -370,7 +370,7 @@ fn dispatch_notification(
             let p: CancelParams = serde_json::from_value(params).unwrap_or(CancelParams {
                 conversation_id: String::new(),
             });
-            if let Err(e) = mgr.cancel(&p.conversation_id) {
+            if let Err(e) = mgr.cancel(&p.conversation_id).await {
                 tracing::warn!(
                     conversation_id = %p.conversation_id,
                     error = %e,
@@ -456,8 +456,8 @@ async fn handle_load_conversation(
         conversation_id: String,
     }
     let p: LoadParams = serde_json::from_value(params)?;
-    match mgr.get(&p.conversation_id) {
-        Some(_) => {
+    match mgr.get_or_load(&p.conversation_id).await {
+        Ok(_) => {
             write_ok_response(
                 stdout,
                 id,
@@ -465,7 +465,7 @@ async fn handle_load_conversation(
             )
             .await
         }
-        None => {
+        Err(_) => {
             write_error_response(
                 stdout,
                 id,
@@ -488,7 +488,7 @@ async fn handle_prompt(
     params: serde_json::Value,
 ) -> Result<(), AcpError> {
     let p: PromptParams = serde_json::from_value(params)?;
-    let Some(session) = mgr.get(&p.conversation_id) else {
+    let Ok(session) = mgr.get_or_load(&p.conversation_id).await else {
         write_error_response(
             stdout,
             id,

@@ -15,6 +15,7 @@ use camino::Utf8PathBuf;
 use minicoding_context::ContextManagerImpl;
 use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
 use minicoding_core::memory::SessionSummarizer;
+use minicoding_core::model::Session;
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
 use minicoding_core::provider::LlmProvider;
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
@@ -63,6 +64,9 @@ pub struct ServerRuntimeParams {
 /// 构造 server 端 `Runtime`。
 ///
 /// `prompter` 由 `SessionManager` 提供（`ServerPrompter`，共享 pending map）。
+/// `preloaded` 为 `Some` 时构造的 Runtime 使用该会话（恢复历史会话用，
+/// `SessionManager::restore_session`），其消息已落盘，后续 `storage.append`
+/// 写入同一会话文件；调用方需另行调用 `Runtime::restore_history` 回填上下文。
 /// 沙箱策略默认 `WorkspaceWrite { workdir, [] }`。
 ///
 /// # Errors
@@ -71,6 +75,7 @@ pub struct ServerRuntimeParams {
 pub fn build_runtime(
     params: &ServerRuntimeParams,
     prompter: Arc<dyn PermissionPrompter>,
+    preloaded: Option<Session>,
 ) -> Result<Runtime> {
     let ServerRuntimeParams {
         provider_kind,
@@ -239,6 +244,13 @@ pub fn build_runtime(
         minicoding_journal::FileChangeJournal::new(Some(workdir.clone())),
     );
     builder = builder.journal(journal);
+
+    // 11c. 预加载会话（恢复历史会话用，见 `SessionManager::restore_session`）。
+    //      `RuntimeBuilder::session` 设置会话 id 与已落盘消息，后续 `storage.append`
+    //      写入同一会话文件；上下文回填由调用方 `restore_history` 完成。
+    if let Some(s) = preloaded {
+        builder = builder.session(s);
+    }
 
     // 12. 注入沙箱驱动（与 CLI 一致，Linux Landlock / 降级 NoopDriver）
     //     策略来自 `--preset`（http.rs `CreateSessionBody.preset` 可会话级覆盖）；

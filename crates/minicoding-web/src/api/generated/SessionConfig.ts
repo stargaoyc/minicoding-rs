@@ -4,23 +4,23 @@ import type { PermissionMode } from "./PermissionMode";
 /**
  * 会话配置（创建会话时传入）。
  */
-export type SessionConfig = { 
+export type SessionConfig = {
 /**
  * 工作目录（默认当前目录）。
  */
-workdir: string | null, 
+workdir: string | null,
 /**
  * 系统 prompt 覆盖。
  */
-system: string | null, 
+system: string | null,
 /**
  * Provider 覆盖（如 `"openai"`/`"anthropic"`/`"ollama"`）。
  */
-provider: string | null, 
+provider: string | null,
 /**
  * 模型覆盖。
  */
-model: string | null, 
+model: string | null,
 /**
  * 初始权限模式（默认 `Default`）。
  */

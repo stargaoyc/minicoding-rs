@@ -34,9 +34,12 @@ export function Sidebar() {
         model: settings.model,
       };
     }
-    // 权限模式 → CreateSessionBody（accept_edits 走 permission_mode；full-access 走 preset）
+    // 权限模式 → CreateSessionBody（accept_edits 走 permission_mode；plan 走 plan_mode；
+    // full-access 走 preset）
     if (mode === "accept_edits") {
       body = { ...body, permission_mode: "accept_edits" };
+    } else if (mode === "plan") {
+      body = { ...body, plan_mode: true };
     } else if (mode === "full_access") {
       body = { ...body, preset: "full-access" };
     }
@@ -178,7 +181,9 @@ function SessionItem({
           )}
         />
         <span className={cn("flex-1 truncate text-sm", active && "text-[var(--color-text)]")}>
-          {session.id.slice(-6)}
+          {session.summary && session.summary.trim().length > 0
+            ? session.summary
+            : `会话 ${session.id.slice(-6)}`}
         </span>
         <span className="text-[10px] text-[var(--color-text-muted)]">
           {formatTime(session.last_message_at)}

@@ -173,7 +173,7 @@ async fn dispatch_command(
             attachments: _,
         } => handle_send_user_message(mgr, stdout, session_id, text).await,
         Command::Cancel { session_id } => {
-            mgr.cancel(&session_id)?;
+            mgr.cancel(&session_id).await?;
             // Runtime 会自动发 TurnEnd 事件（stop_reason=interrupted），
             // 由 handle_send_user_message 的事件 forwarder 转发到 stdout。
             // 若无在执行的 turn，Cancel 是 no-op（不发送任何事件）。
@@ -197,8 +197,9 @@ async fn dispatch_command(
         }
         Command::SetPermissionMode { session_id, mode } => {
             let session = mgr
-                .get(&session_id)
-                .ok_or_else(|| NdjsonError::SessionNotFound(session_id.clone()))?;
+                .get_or_load(&session_id)
+                .await
+                .map_err(|_| NdjsonError::SessionNotFound(session_id.clone()))?;
             let controller = session.runtime.plan_controller();
             controller.set_mode(mode).await;
             // Runtime 会自动发 PermissionModeChanged 事件（若有 active turn 的事件 forwarder，
@@ -259,8 +260,9 @@ async fn handle_send_user_message(
     text: String,
 ) -> Result<(), NdjsonError> {
     let session = mgr
-        .get(&session_id)
-        .ok_or_else(|| NdjsonError::SessionNotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| NdjsonError::SessionNotFound(session_id.clone()))?;
 
     // 先订阅 EventBus，避免 spawn turn task 后错过早期事件
     let runtime = session.runtime.clone();

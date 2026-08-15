@@ -2824,6 +2824,34 @@ CLI `load_session_by_mode` 对 `Resume`/`Replay` 模式优先走事件重放路�
 
 **与 §24 前后端协议的协作**：§24 的 `seq` cursor 恢复在事件溯源下天然实现——EventStore 本身是 seq 单调递增的事件流，SSE cursor 直接对应 EventStore seq，`durable_seq` 即 EventStore 的持久化进度。
 
+### 25.10 服务端会话持久化与懒恢复（M9）
+
+`minicoding-server` 的 `SessionManager` 持有**内存会话表**（`HashMap<SessionId, Arc<ServerSession>>`），但消息/事件已由 `build_runtime` 内部构造的 `JsonlStorage`/`JsonlEventStore` 落盘 `~/.minicoding/sessions/`。重启后内存表清空，需从磁盘恢复：
+
+```
+list_sessions() ──► 磁盘 index.json meta（count/summary 实时）
+                    │        （append 时 upsert，见 storage `jsonl.rs`）
+                    ▼
+            内存活跃会话（task_state 覆盖）+ 磁盘历史合并
+                    │
+get_or_load(id) ──► 内存命中？──否──► restore_session(id)
+                                          │
+        snapshot + events.jsonl ──► replay_session_state（§25.4）
+        ──失败/旧会话──► 消息日志 {id}.jsonl 回退（session_from_messages）
+                                          │
+        build_runtime(params, preloaded=Some(session))  # 会话原 workdir 覆盖
+        restore_history()（回填上下文）→ init_event_stream()（幂等）
+        → insert_session()（内部查重，并发恢复安全）
+```
+
+要点：
+
+- **计数/摘要以磁盘 `index.json` 为准**：`Runtime.session().messages` 是上下文快照，不随 `run_turn` 更新（消息写 storage + 广播 `MessageAppended`）；`JsonlStorage::append` 同步 upsert index（首条用户消息 80 字符截断为 `summary`），重启后侧边栏摘要/计数仍正确。
+- **懒恢复**：仅在访问时恢复（HTTP/NDJSON/ACP/workspace 全入口经 `get_or_load`），避免启动时全量构造 Runtime 的成本。
+- **workdir 保留会话原值**：事件流重放出的 `Session.workdir` 覆盖 `default_params.workdir`，使 sandbox/journal/文件工具与创建时一致；消息日志回退路径无 workdir 信息，用 server 默认目录（与 CLI 回退路径一致）。
+- **Plan 模式入口**：`POST /sessions` 的 `plan_mode: true` 映射初始 `PermissionMode::Plan`（C-25），前端新建会话可选"先规划"。
+- **事件流优先**：与 CLI `--resume` 同构（§25.4/25.6），重放失败（schema 不兼容）回退消息日志，保证旧会话始终可恢复。
+
 ---
 
 ## 26. Web 与桌面应用架构（M9，低优先级）
