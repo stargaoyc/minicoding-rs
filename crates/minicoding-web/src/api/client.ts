@@ -102,6 +102,8 @@ export interface CreateSessionBody {
   permission_mode?: PermissionMode;
   /** 安全预设：`auto`（默认）/ `read-only` / `external-sandbox` / `full-access`（沙箱外全自动，仅受信容器内）。 */
   preset?: "auto" | "read-only" | "external-sandbox" | "full-access";
+  /** Plan 模式（C-25：先写 plan.md 拆分任务，批准后执行，仅只读工具可用）。 */
+  plan_mode?: boolean;
 }
 
 export interface CreateSessionResponse {

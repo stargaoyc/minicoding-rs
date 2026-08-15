@@ -57,6 +57,7 @@ impl SessionIndexEntry {
             created_at: self.created_at,
             message_count: self.message_count,
             last_message_at: self.updated_at,
+            summary: self.summary.clone(),
         }
     }
 }

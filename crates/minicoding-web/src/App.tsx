@@ -239,7 +239,8 @@ function AppInner() {
               onSend={handleSend}
               onCancel={handleCancel}
               isStreaming={turnBusy}
-              disabled={sendMessage.isPending}
+              // 运行中不禁用输入框（可提前输入），仅禁止发送（turn 完成后发送）
+              sendDisabled={turnBusy}
             />
           </>
         ) : (

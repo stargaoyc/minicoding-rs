@@ -4,7 +4,11 @@ import type { Task } from "./Task";
 /**
  * 会话元数据（轻量列出，不加载消息）。
  */
-export type SessionMeta = { id: string, created_at: string, message_count: number, last_message_at: string, 
+export type SessionMeta = { id: string, created_at: string, message_count: number, last_message_at: string,
+/**
+ * 会话摘要（首条用户消息或 LLM 生成摘要，供侧边栏展示；可能为空）。
+ */
+summary: string | null,
 /**
  * 任务列表（跨压缩保留，见 `design.md` §18.5、C-31）。
  *

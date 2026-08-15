@@ -272,7 +272,7 @@ impl LanguageServer for MinicodingLspServer {
                 let guard = self.session.lock().await;
                 if let Some(session) = guard.as_ref() {
                     let session_id = session.session_id();
-                    if let Err(e) = self.mgr.cancel(session_id) {
+                    if let Err(e) = self.mgr.cancel(session_id).await {
                         tracing::warn!(session_id = %session_id, error = %e, "LSP cancel failed");
                     }
                 }

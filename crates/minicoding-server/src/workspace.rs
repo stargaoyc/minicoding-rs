@@ -72,8 +72,9 @@ pub async fn workspace_root(
 ) -> Result<Json<WorkspaceRoot>, HttpError> {
     let session = state
         .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| SessionManagerError::NotFound(session_id.clone()))?;
     let path = session.runtime.workdir().await;
     let name = path
         .file_name()
@@ -95,8 +96,9 @@ pub async fn workspace_list(
 ) -> Result<Json<WorkspaceListResponse>, HttpError> {
     let session = state
         .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| SessionManagerError::NotFound(session_id.clone()))?;
     let workdir = session.runtime.workdir().await;
     let dir = match &query.path {
         Some(rel) => resolve_path(&workdir, rel).map_err(|e| http_err_from_tool(&e))?,
@@ -154,8 +156,9 @@ pub async fn workspace_read(
 ) -> Result<Json<WorkspaceReadResponse>, HttpError> {
     let session = state
         .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| SessionManagerError::NotFound(session_id.clone()))?;
     let workdir = session.runtime.workdir().await;
     let path = resolve_path(&workdir, &query.path).map_err(|e| http_err_from_tool(&e))?;
 
@@ -193,8 +196,9 @@ pub async fn workspace_diff(
 ) -> Result<Json<WorkspaceDiffResponse>, HttpError> {
     let session = state
         .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| SessionManagerError::NotFound(session_id.clone()))?;
     let runtime = session.runtime.clone();
     let journal = runtime.journal().ok_or_else(|| HttpError {
         status: StatusCode::NOT_IMPLEMENTED,
@@ -234,8 +238,9 @@ pub async fn workspace_switch(
 ) -> Result<Json<WorkspaceSwitchResponse>, HttpError> {
     let session = state
         .mgr
-        .get(&session_id)
-        .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        .get_or_load(&session_id)
+        .await
+        .map_err(|_| SessionManagerError::NotFound(session_id.clone()))?;
 
     // turn 串行锁：切换与进行中的 turn 互斥（C-31 上下文一致性）。等待设
     // 60s 上限——turn 最长 600s，若先前消息仍在跑（LLM 卡住等），切换应立即

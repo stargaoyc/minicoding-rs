@@ -5,7 +5,7 @@ import type { ToolContent } from "./ToolContent";
 /**
  * 消息内容块。一条消息可含多个块（如文本 + 工具调用）。
  */
-export type ContentBlock = { "type": "text", text: string, } | { "type": "image", mime: string, 
+export type ContentBlock = { "type": "text", text: string, } | { "type": "image", mime: string,
 /**
  * base64 编码（传输态），运行态可解为 `Vec<u8>`。
  */

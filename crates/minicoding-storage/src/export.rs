@@ -98,6 +98,7 @@ mod tests {
             created_at: OffsetDateTime::now_utc(),
             message_count: 2,
             last_message_at: OffsetDateTime::now_utc(),
+            summary: None,
         }
     }
 

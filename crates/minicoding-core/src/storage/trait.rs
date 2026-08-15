@@ -16,6 +16,9 @@ pub struct SessionMeta {
     pub created_at: OffsetDateTime,
     pub message_count: usize,
     pub last_message_at: OffsetDateTime,
+    /// 会话摘要（首条用户消息或 LLM 生成摘要；可能为空）。
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// 存储错误已在 `model::error` 定义，此处复用。
@@ -96,6 +99,7 @@ mod tests {
             created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
             message_count: 5,
             last_message_at: OffsetDateTime::from_unix_timestamp(1_700_000_100).unwrap(),
+            summary: None,
         }
     }
 

@@ -77,6 +77,7 @@ impl Storage for InMemoryStorage {
                         created_at: first,
                         message_count: msgs.len(),
                         last_message_at: last,
+                        summary: None,
                     }
                 })
                 .collect();

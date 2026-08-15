@@ -5,8 +5,8 @@ import { Button } from "../ui/button";
 import { isTauri, selectWorkspaceDir } from "../../api/tauri";
 import { cn } from "../../lib/utils";
 
-/** 会话安全模式（新建会话时选定，映射到 `permission_mode`/`preset`）。 */
-export type SessionModeKey = "default" | "accept_edits" | "full_access";
+/** 会话安全模式（新建会话时选定，映射到 `permission_mode`/`preset`/`plan_mode`）。 */
+export type SessionModeKey = "default" | "accept_edits" | "plan" | "full_access";
 
 const MODE_OPTIONS: {
   key: SessionModeKey;
@@ -23,6 +23,11 @@ const MODE_OPTIONS: {
     key: "accept_edits",
     label: "编辑自动",
     desc: "工作区内文件编辑自动执行，命令仍确认（推荐）",
+  },
+  {
+    key: "plan",
+    label: "先规划",
+    desc: "先写 plan.md 拆分任务，批准后执行（适合大任务）",
   },
   {
     key: "full_access",
@@ -133,7 +138,7 @@ export function NewSessionDialog({
 
         <div className="flex flex-col gap-1">
           <label className="text-xs text-[var(--color-text-muted)]">权限模式</label>
-          <div className="grid grid-cols-3 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
             {MODE_OPTIONS.map((opt) => (
               <button
                 key={opt.key}

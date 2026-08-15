@@ -13,14 +13,19 @@
 use crate::prompter::{PendingPermissions, ServerPrompter};
 use crate::runtime_builder::{ServerRuntimeParams, build_runtime};
 use minicoding_core::metrics;
-use minicoding_core::model::{Message, SessionId, SessionMeta, Task, TurnOutcome, UserInput};
+use minicoding_core::model::{
+    Message, Session, SessionId, SessionMeta, Task, TurnOutcome, UserInput,
+};
 use minicoding_core::policy::Decision;
 use minicoding_core::runtime::{Event, Runtime};
+use minicoding_core::storage::{Storage, replay_session_state};
 use minicoding_protocol::cursor::EventCursor;
+use minicoding_storage::{JsonlEventStore, JsonlSnapshotStore, JsonlStorage};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::sync::Mutex as TokioMutex;
 
 /// Server 端会话错误。
@@ -155,6 +160,20 @@ pub struct SessionManager {
     default_params: ServerRuntimeParams,
     /// 权限交互超时（默认 300s）。
     permission_timeout: Duration,
+    /// 磁盘会话访问（`~/.minicoding/sessions/`，与 `build_runtime` 共用目录）。
+    /// `None` 表示会话目录不可用（降级为纯内存会话，不持久化不恢复）。
+    disk: Option<DiskSessionStore>,
+}
+
+/// 磁盘会话存储访问（列表合并 + 懒恢复用）。
+///
+/// 与 `runtime_builder::build_runtime` 内部构造的 `JsonlStorage`/`JsonlEventStore`/
+/// `JsonlSnapshotStore` 共用同一 `sessions_dir`，因此此处只读访问即看到
+/// 所有会话（含重启前的历史会话）的持久化状态。
+struct DiskSessionStore {
+    storage: JsonlStorage,
+    event_store: JsonlEventStore,
+    snapshot_store: JsonlSnapshotStore,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -169,12 +188,22 @@ impl SessionManager {
     /// 创建 `SessionManager`。
     ///
     /// `default_params` 是 `CreateSession` 未指定 provider/model 时的默认参数。
+    /// 磁盘会话目录不可用时降级为纯内存会话（不持久化、不恢复），
+    /// 避免 `sessions_dir` 失败（如 HOME 未设置）导致 server 无法启动。
     #[must_use]
     pub fn new(default_params: ServerRuntimeParams, permission_timeout: Duration) -> Self {
+        let disk = minicoding_core::paths::sessions_dir()
+            .ok()
+            .map(|dir| DiskSessionStore {
+                storage: JsonlStorage::new(dir.clone()),
+                event_store: JsonlEventStore::new(dir.clone()),
+                snapshot_store: JsonlSnapshotStore::new(dir),
+            });
         Self {
             sessions: std::sync::Mutex::new(HashMap::new()),
             default_params,
             permission_timeout,
+            disk,
         }
     }
 
@@ -205,7 +234,7 @@ impl SessionManager {
         let prompter: Arc<dyn minicoding_core::policy::PermissionPrompter> = Arc::new(
             ServerPrompter::new(pending.clone(), self.permission_timeout),
         );
-        self.insert_session(&params, prompter, pending)
+        self.build_and_insert(&params, prompter, pending, None)
     }
 
     /// 创建新会话并注入自定义 `PermissionPrompter`（T-M8-9，LSP 端用 `LspPrompter`）。
@@ -229,26 +258,54 @@ impl SessionManager {
         // LSP 端 `pending_permissions` 不使用（权限交互走 showMessageRequest，
         // 不经 HTTP `resolve_permission` 路径），但 `ServerSession` 结构需要此字段。
         let pending: PendingPermissions = Arc::new(TokioMutex::new(HashMap::new()));
-        self.insert_session(&params, prompter, pending)
+        self.build_and_insert(&params, prompter, pending, None)
     }
 
-    /// 内部：构造 Runtime + `ServerSession` 并注册到 sessions map。
-    fn insert_session(
+    /// 构造 Runtime 并注册到会话表（`create_session`/`restore_session` 共用）。
+    ///
+    /// `preloaded` 为 `Some` 时构造的 Runtime 使用该会话（恢复历史会话用，
+    /// 见 `restore_session`）。调用方需在恢复路径另行调用 `restore_history`/
+    /// `init_event_stream`。
+    ///
+    /// # Errors
+    /// Runtime 构造失败时返回 `SessionManagerError::BuildFailed`。
+    fn build_and_insert(
         &self,
         params: &ServerRuntimeParams,
         prompter: Arc<dyn minicoding_core::policy::PermissionPrompter>,
         pending: PendingPermissions,
+        preloaded: Option<Session>,
     ) -> Result<Arc<ServerSession>, SessionManagerError> {
-        let runtime = build_runtime(params, prompter)
+        let runtime = build_runtime(params, prompter, preloaded)
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
-        let runtime = Arc::new(runtime);
-        let session = Arc::new(ServerSession::new(runtime, pending));
+        Ok(self.insert_session(Arc::new(runtime), pending))
+    }
 
-        // 常驻订阅 `Event::TaskUpdated`，把任务快照写入 `task_state`（供 HTTP 查询）。
-        // 任务权威源是 `TaskStore`（task.create/update 工具），此处仅镜像其变更；
-        // 会话删除后广播 sender drop，receiver 收到 closed，task 自然退出。
-        // `Lagged` 必须续跑：总线承载大量 `Token` 事件，订阅者必然周期性落后
-        //（`broadcast` 容量耗尽时丢历史事件），若退出则任务快照永久停更。
+    /// 内部：把构造好的 Runtime 注册到会话表（含 `TaskUpdated` 订阅镜像）。
+    ///
+    /// 先查重（并发恢复竞争时复用已注册会话，避免重复 spawn 订阅循环），
+    /// 再 spawn 常驻 `Event::TaskUpdated` 订阅，把任务快照写入 `task_state`
+    /// （供 HTTP 查询）。任务权威源是 `TaskStore`（task.create/update 工具），
+    /// 此处仅镜像其变更；会话删除后广播 sender drop，receiver 收到 closed，
+    /// task 自然退出。
+    /// `Lagged` 必须续跑：总线承载大量 `Token` 事件，订阅者必然周期性落后
+    ///（`broadcast` 容量耗尽时丢历史事件），若退出则任务快照永久停更。
+    ///
+    /// # Panics
+    /// 内部 `sessions` Mutex poisoned 时 panic。
+    fn insert_session(
+        &self,
+        runtime: Arc<Runtime>,
+        pending: PendingPermissions,
+    ) -> Arc<ServerSession> {
+        let session_id = runtime.session().id.clone();
+        {
+            let guard = self.sessions.lock().expect("sessions mutex poisoned");
+            if let Some(existing) = guard.get(&session_id) {
+                return existing.clone();
+            }
+        }
+        let session = Arc::new(ServerSession::new(runtime, pending));
         let subscriber = session.clone();
         tokio::spawn(async move {
             let mut rx = subscriber.runtime.events().subscribe();
@@ -273,12 +330,11 @@ impl SessionManager {
             }
         });
 
-        let session_id = session.session_id().clone();
         let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
         guard.insert(session_id, session.clone());
         // Metrics：活跃会话数 gauge
         metrics::set_active_sessions(guard.len() as u64);
-        Ok(session)
+        session
     }
 
     /// 查找会话（同步——`std::sync::Mutex` 的 `HashMap` 查找不需 await）。
@@ -294,24 +350,35 @@ impl SessionManager {
         guard.get(session_id).cloned()
     }
 
-    /// 列出所有会话（同步——仅读 `HashMap`）。
+    /// 列出所有会话（内存活跃 + 磁盘历史合并）。
+    ///
+    /// **计数/摘要以磁盘 `index.json` 为准**：`Runtime.session().messages` 是
+    /// 上下文快照，不随 `run_turn` 更新（消息写 storage + 广播 `MessageAppended`），
+    /// 而 `JsonlStorage::append` 会同步 upsert index（含 summary/计数）。
+    /// 磁盘历史会话（重启前的）也在此列出，点击时经 `get_or_load` 懒恢复。
     ///
     /// # Panics
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn list_sessions(&self) -> Vec<SessionMeta> {
-        let guard = self.sessions.lock().expect("sessions mutex poisoned");
+        // 磁盘历史会话 meta（count/summary 实时，`append` 时更新 index）
+        let disk_metas = self
+            .disk
+            .as_ref()
+            .and_then(|d| d.storage.list_sessions_sync().ok())
+            .unwrap_or_default();
+
         let mut metas = Vec::new();
+        let guard = self.sessions.lock().expect("sessions mutex poisoned");
         for session in guard.values() {
             let runtime = &session.runtime;
             let session_model = runtime.session();
+            let disk = disk_metas.iter().find(|m| m.id == session_model.id);
             metas.push(SessionMeta {
                 id: session_model.id.clone(),
                 created_at: session_model.created_at,
-                message_count: session_model.messages.len(),
-                last_message_at: session_model
-                    .messages
-                    .last()
-                    .map_or(session_model.created_at, |m| m.created_at),
+                message_count: disk.map_or(0, |m| m.message_count),
+                last_message_at: disk.map_or(session_model.created_at, |m| m.last_message_at),
+                summary: disk.and_then(|m| m.summary.clone()),
                 // 任务快照来自 `task_state`（TaskUpdated 订阅镜像，见 `ServerSession`）
                 tasks: session
                     .task_state
@@ -320,7 +387,143 @@ impl SessionManager {
                     .clone(),
             });
         }
+        drop(guard);
+
+        // 磁盘历史会话（内存未加载）
+        for m in disk_metas {
+            if !metas.iter().any(|x| x.id == m.id) {
+                metas.push(SessionMeta {
+                    id: m.id,
+                    created_at: m.created_at,
+                    message_count: m.message_count,
+                    last_message_at: m.last_message_at,
+                    summary: m.summary,
+                    tasks: Vec::new(),
+                });
+            }
+        }
+
+        // 按最后消息时间倒序（与 CLI `session list` 一致）
+        metas.sort_by_key(|m| std::cmp::Reverse(m.last_message_at));
         metas
+    }
+
+    /// 获取会话；内存未加载时从磁盘懒恢复（重启后历史会话可见）。
+    ///
+    /// 所有会话访问入口（HTTP/NDJSON/ACP/workspace）应走此方法而非 `get`，
+    /// 否则重启前的会话将 404。
+    ///
+    /// # Errors
+    /// 会话不存在（内存 + 磁盘均无）时返回 `NotFound`；恢复失败时返回
+    /// `BuildFailed`（磁盘数据损坏、Runtime 构造失败等）。
+    pub async fn get_or_load(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<ServerSession>, SessionManagerError> {
+        if let Some(session) = self.get(session_id) {
+            return Ok(session);
+        }
+        self.restore_session(session_id).await
+    }
+
+    /// 从磁盘恢复历史会话（懒加载，见 `design.md` §25 事件流重放）。
+    ///
+    /// 流程：磁盘加载 `Session`（snapshot + 事件流重放优先，消息日志回退）→
+    /// `build_runtime` 预加载该会话 → `restore_history` 回填上下文 →
+    /// `init_event_stream`（幂等，新/旧会话均安全）→ 注册到会话表。
+    /// 恢复后 `Runtime` 的 `workdir` 为会话原工作目录（事件流/Snapshot 中的值），
+    /// 使文件工具/sandbox/journal 与创建时一致。
+    ///
+    /// # Errors
+    /// 会话不存在时返回 `NotFound`；磁盘加载或 Runtime 构造失败时返回
+    /// `BuildFailed`。
+    async fn restore_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<ServerSession>, SessionManagerError> {
+        let Some(disk) = &self.disk else {
+            return Err(SessionManagerError::NotFound(session_id.to_string()));
+        };
+        // 1. 从磁盘加载会话（事件流重放优先，消息日志回退）
+        let session = self.load_session_from_disk(disk, session_id).await?;
+        // 2. 构造 Runtime（预加载会话；workdir 覆盖为会话原工作目录）
+        let mut params = self.default_params.clone();
+        params.workdir = session.workdir.clone();
+        let pending: PendingPermissions = Arc::new(TokioMutex::new(HashMap::new()));
+        let prompter: Arc<dyn minicoding_core::policy::PermissionPrompter> = Arc::new(
+            ServerPrompter::new(pending.clone(), self.permission_timeout),
+        );
+        let runtime = build_runtime(&params, prompter, Some(session))
+            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
+        let runtime = Arc::new(runtime);
+        // 3. 回填上下文 + 初始化事件流（幂等：新/旧会话路径见 `init_event_stream`）
+        runtime
+            .restore_history()
+            .await
+            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
+        runtime
+            .init_event_stream()
+            .await
+            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
+        // 4. 注册（insert_session 内部查重，并发恢复安全）
+        Ok(self.insert_session(runtime, pending))
+    }
+
+    /// 从磁盘加载 `Session`（snapshot + 事件流重放优先，消息日志回退）。
+    ///
+    /// 与 CLI `--resume` 的 `load_session_via_event_sourcing` 同构
+    /// （见 `docs/design.md` §25.4）；事件重放失败（schema 不兼容等）时回退
+    /// 消息日志路径，保证旧会话始终可恢复。
+    ///
+    /// # Errors
+    /// 会话不存在（无事件流且无消息）时返回 `NotFound`；读取失败时返回
+    /// `BuildFailed`。
+    async fn load_session_from_disk(
+        &self,
+        disk: &DiskSessionStore,
+        session_id: &str,
+    ) -> Result<Session, SessionManagerError> {
+        // 1. Event Sourcing 路径：snapshot + 事件流重放
+        let snapshot = disk
+            .snapshot_store
+            .load_sync(&session_id.to_string())
+            .map_err(|e| SessionManagerError::BuildFailed(format!("snapshot 加载失败: {e}")))?;
+        let events = disk
+            .event_store
+            .load_events_sync(&session_id.to_string())
+            .map_err(|e| SessionManagerError::BuildFailed(format!("事件流加载失败: {e}")))?;
+        if !events.is_empty() || snapshot.is_some() {
+            match replay_session_state(snapshot.as_ref(), events) {
+                Ok(replayed) => return Ok(replayed.session),
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session_id,
+                        error = %e,
+                        "事件重放失败，回退消息日志路径"
+                    );
+                }
+            }
+        }
+        // 2. 回退：消息日志路径（旧会话无事件流）
+        let messages = disk
+            .storage
+            .load(&session_id.to_string())
+            .await
+            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
+        if messages.is_empty() {
+            return Err(SessionManagerError::NotFound(session_id.to_string()));
+        }
+        let created_at = messages
+            .first()
+            .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
+        // 消息日志无 workdir 信息，用 server 默认工作目录（与 CLI 回退路径一致）
+        Ok(Session {
+            id: session_id.to_string(),
+            created_at,
+            workdir: self.default_params.workdir.clone(),
+            config_hash: 0,
+            messages,
+        })
     }
 
     /// 删除会话（同步——仅从 `HashMap` 移除）。
@@ -349,9 +552,7 @@ impl SessionManager {
         permission_id: &str,
         decision: Decision,
     ) -> Result<(), SessionManagerError> {
-        let session = self
-            .get(session_id)
-            .ok_or_else(|| SessionManagerError::NotFound(session_id.to_string()))?;
+        let session = self.get_or_load(session_id).await?;
         let mut guard = session.pending_permissions.lock().await;
         match guard.remove(permission_id) {
             Some(entry) => {
@@ -381,9 +582,7 @@ impl SessionManager {
         session_id: String,
         text: String,
     ) -> Result<TurnOutcome, SessionManagerError> {
-        let session = mgr
-            .get(&session_id)
-            .ok_or_else(|| SessionManagerError::NotFound(session_id.clone()))?;
+        let session = mgr.get_or_load(&session_id).await?;
 
         // 获取 turn 锁（串行化：同一 session 同时只有一个 turn）
         let _turn_guard = session.turn_lock.lock().await;
@@ -436,14 +635,12 @@ impl SessionManager {
         }
     }
 
-    /// 取消当前 turn（同步——`Runtime::cancel` 仅触发 `CancellationToken`，无 await）。
+    /// 取消当前 turn（`Runtime::cancel` 仅触发 `CancellationToken`，无 await）。
     ///
     /// # Errors
     /// 会话不存在时返回 `NotFound`。
-    pub fn cancel(&self, session_id: &str) -> Result<(), SessionManagerError> {
-        let session = self
-            .get(session_id)
-            .ok_or_else(|| SessionManagerError::NotFound(session_id.to_string()))?;
+    pub async fn cancel(&self, session_id: &str) -> Result<(), SessionManagerError> {
+        let session = self.get_or_load(session_id).await?;
         session.runtime.cancel();
         Ok(())
     }
@@ -457,9 +654,7 @@ impl SessionManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<Message>, SessionManagerError> {
-        let session = self
-            .get(session_id)
-            .ok_or_else(|| SessionManagerError::NotFound(session_id.to_string()))?;
+        let session = self.get_or_load(session_id).await?;
         // 从 storage 加载完整消息历史
         let storage = session.runtime.storage();
         let messages = storage
@@ -513,8 +708,142 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_returns_empty() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
         let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
         let list = mgr.list_sessions();
         assert!(list.is_empty(), "expected empty: list");
+    }
+
+    // ── 磁盘会话列表合并 + 懒恢复 ────────────────────────────────────────────
+
+    /// 串行化所有依赖 `MINICODING_HOME` 的测试（与 core `paths.rs` 同模式，
+    /// 避免并行运行时环境变量竞争）。`tokio::sync::Mutex`：guard 跨 await
+    /// 持有（seed 磁盘会话是 async），std Mutex 会触发 clippy::await_holding_lock。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 测试期间临时设置 `MINICODING_HOME`，`Drop` 时恢复原值。
+    struct EnvGuard {
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(value: &str) -> Self {
+            let original = std::env::var("MINICODING_HOME").ok();
+            // SAFETY: ENV_LOCK 串行化所有 MINICODING_HOME 访问，无并发 set/remove。
+            unsafe { std::env::set_var("MINICODING_HOME", value) };
+            Self { original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: 同 set()，ENV_LOCK 保证串行访问；Drop 在测试 scope 结束时同步调用。
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var("MINICODING_HOME", v) },
+                None => unsafe { std::env::remove_var("MINICODING_HOME") },
+            }
+        }
+    }
+
+    /// 预写一个磁盘会话（模拟重启前的历史会话：仅有消息日志，无事件流）。
+    async fn seed_disk_session(dir: &Utf8PathBuf, id: &str, texts: &[&str]) {
+        let storage = JsonlStorage::new(dir.clone());
+        for t in texts {
+            storage
+                .append(&id.to_string(), &Message::user_text(*t))
+                .await
+                .expect("append 应成功");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_merges_disk_history() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        // 预写磁盘会话（重启前的历史）
+        let disk_id = "01DISKLIST".to_string();
+        seed_disk_session(
+            &Utf8PathBuf::from(&dir_str).join("sessions"),
+            &disk_id,
+            &["创建计算器项目"],
+        )
+        .await;
+
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        let list = mgr.list_sessions();
+        // 磁盘会话出现在列表中（无需内存注册）
+        let meta = list
+            .iter()
+            .find(|m| m.id == disk_id)
+            .expect("磁盘会话应被列出");
+        assert_eq!(meta.message_count, 1);
+        assert_eq!(meta.summary.as_deref(), Some("创建计算器项目"));
+        assert!(meta.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_or_load_restores_disk_session() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        let disk_id = "01DISKRESTORE".to_string();
+        seed_disk_session(
+            &Utf8PathBuf::from(&dir_str).join("sessions"),
+            &disk_id,
+            &["第一条消息", "第二条消息"],
+        )
+        .await;
+
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        // 懒恢复：内存未注册，get_or_load 从磁盘恢复
+        let session = mgr.get_or_load(&disk_id).await.expect("应恢复成功");
+        assert_eq!(session.session_id(), &disk_id);
+        // 消息可读（存储文件）
+        let messages = mgr.get_messages(&disk_id).await.expect("消息应可读");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text(), "第一条消息");
+        // 恢复后列表计数来自磁盘 index
+        let list = mgr.list_sessions();
+        let meta = list
+            .iter()
+            .find(|m| m.id == disk_id)
+            .expect("恢复后仍应列出");
+        assert_eq!(meta.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn get_or_load_missing_returns_notfound() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        let result = mgr.get_or_load("01MISSING").await;
+        assert!(matches!(result, Err(SessionManagerError::NotFound(_))));
     }
 }
