@@ -497,6 +497,29 @@ Auto-Review 子代理（独立小模型，如 Haiku 级）
 
 启用方式：`[permission] auto_review = "on"`（默认 `off`，阶段 6+ 交付）。该机制据 Codex 数据可捕获约 96% 恶意行为、减少约 200× 人类中断，但需额外的 LLM 调用成本，适合长时自动化任务场景。
 
+### 8.10 沙箱初始化失败询问回退（C-22）
+
+沙箱**机制本身**故障（`apply`/`post_spawn` 失败，如 Windows Job Object 恢复线程的 toolhelp 快照竞态）与沙箱**拒绝**（EPERM/EACCES，§8.7）不同：前者不是被拦下的行为，命令根本没进入沙箱保护。若直接报错，用户每次命令都会失败（Windows 上 `cmd /C` 常见）。
+
+处理：Runtime 在工具报 `sandbox apply failed`/`sandbox post_spawn failed` 时发起 **High risk 权限询问**（复用 §2.1 的 Prompter 点对点链路，前端弹窗展示"沙箱外运行"警告）：
+
+```
+工具返回 sandbox apply/post_spawn failed
+   │  （非 denial，熔断器不计数）
+   ▼
+High risk 询问（C-22 用户显式选定）：
+   "OS 沙箱初始化失败（<err>）。是否在沙箱外运行此命令？
+    ⚠ 沙箱外运行 = 放弃 OS 级隔离（C-22），仅限受信环境！"
+   │
+   ├─ Allow → 以 DangerFullAccess 策略重试一次（同一驱动，该策略下 apply/post_spawn no-op）
+   ├─ Deny  → 原错误回灌 LLM 自我修正
+   └─ 仅询问一次，重试再失败不回退循环
+```
+
+- 决策经 `PermissionRequested`/`PermissionResolved` 事件广播（Web/桌面前端自动弹窗）并落 `audit.log`（source=tool，detail 含 `sandbox-fallback` 标记，AGENTS.md §5.5）；
+- 与 `full-access` 预设同语义（`DangerFullAccess`），但**仅对当前调用生效**，不改变会话策略；
+- 该回退**不可被 LLM 触发**：询问只在工具执行返回沙箱初始化错误时由 Runtime 发起，LLM 无法通过文本声明跳过沙箱（C-30 精神一致）。
+
 ---
 
 ## 9. exec 模式与信任边界（参考 Codex）

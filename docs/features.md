@@ -122,6 +122,7 @@
 | P-23 | `doctor --security` 自检 | 沙箱驱动/权限/VCS 保护检查 | M4 | 已实现 |
 | P-24 | AGENTS.md 写保护 | fs.write/edit 对 AGENTS.md 默认 Ask | M3 | 已实现 |
 | P-25 | PermissionMode 模式生效 | `AcceptEdits`（工作区内文件编辑自动 Allow，shell 仍 Ask）/ `BypassPermissions`（全自动，C-03 越界与 C-23 仍硬拦）；server `--preset` 与会话级 `CreateSessionBody.preset`（auto/read-only/external-sandbox/full-access，C-22 警告） | M2 | 已实现 |
+| P-26 | 沙箱初始化失败询问回退 | `apply`/`post_spawn` 失败（如 Windows Job Object 恢复线程快照竞态）→ High risk 询问是否沙箱外运行（C-22 用户显式选定）→ `DangerFullAccess` 重试一次，决策落 audit.log；仅询问一次不回退循环 | M4 | 已实现 |
 
 ## 7. Hooks 系统（参考 Claude Code）
 
@@ -281,7 +282,7 @@
 | 工具系统 | 22 |
 | 上下文管理 | 9 |
 | 记忆 | 8 |
-| 权限与安全 | 25 |
+| 权限与安全 | 26 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
@@ -292,7 +293,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 11 |
-| **合计** | **184** |
+| **合计** | **185** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-11）11 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-11）是参考 CC/Codex 后的核心增强。
 

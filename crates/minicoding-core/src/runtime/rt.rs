@@ -1404,11 +1404,28 @@ impl Runtime {
                 {
                     return Ok(denial_result);
                 }
-                // PostToolUseFailure Hook（非 denial 错误）
-                self.run_post_failure_hook(effective_call, side_effect, &e)
-                    .await;
-                // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，不中止 turn。
-                ToolResult::err_text(format!("tool error: {e}"))
+                // 沙箱初始化失败（apply/post_spawn，如 Windows Job Object 恢复线程
+                // 竞态）：询问用户是否在沙箱外重试一次（C-22 用户显式选定）。
+                if let Some(fallback_ctx) =
+                    self.maybe_sandbox_fallback(original_call, &e, ctx).await
+                {
+                    // 沙箱外重试：仅重试一次，不再二次询问（避免询问循环）
+                    match self.tools.dispatch(effective_call, &fallback_ctx).await {
+                        Ok(r) => r,
+                        Err(e2) => {
+                            // PostToolUseFailure Hook（重试仍失败，非 denial 错误）
+                            self.run_post_failure_hook(effective_call, side_effect, &e2)
+                                .await;
+                            ToolResult::err_text(format!("tool error: {e2}"))
+                        }
+                    }
+                } else {
+                    // PostToolUseFailure Hook（非 denial 错误）
+                    self.run_post_failure_hook(effective_call, side_effect, &e)
+                        .await;
+                    // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，不中止 turn。
+                    ToolResult::err_text(format!("tool error: {e}"))
+                }
             }
         };
         // PostToolUse Hook（执行成功后）
@@ -1419,6 +1436,86 @@ impl Runtime {
             result: result.clone(),
         });
         Ok((original_call.id.clone(), result))
+    }
+
+    /// 判断工具错误是否为"沙箱初始化失败"（`apply`/`post_spawn`）。
+    ///
+    /// 与沙箱拒绝（EPERM/EACCES，`handle_sandbox_denial`）区分：初始化失败是沙箱
+    /// 机制本身故障（如 Windows Job Object 恢复线程快照竞态），不是被沙箱拦下的
+    /// 行为，可通过沙箱外重试规避。
+    fn is_sandbox_setup_failure(error: &crate::model::ToolError) -> bool {
+        match error {
+            crate::model::ToolError::Exec(msg) => {
+                msg.starts_with("sandbox apply failed")
+                    || msg.starts_with("sandbox post_spawn failed")
+            }
+            _ => false,
+        }
+    }
+
+    /// 沙箱初始化失败时询问用户是否在沙箱外重试（C-22：用户显式选定 + High risk 警告）。
+    ///
+    /// 允许 → 返回以 `DangerFullAccess` 策略构造的重试上下文（同一 driver，该策略下
+    /// `apply`/`post_spawn` 均为 no-op）；拒绝或非沙箱初始化错误 → `None`（调用方按原
+    /// 错误处理）。询问与决策经 `PermissionRequested`/`PermissionResolved` 事件广播
+    /// （前端弹窗复用 W-03 权限链路）并落 `audit.log`（AGENTS.md §5.5）。
+    async fn maybe_sandbox_fallback(
+        &self,
+        call: &ToolCall,
+        error: &crate::model::ToolError,
+        ctx: &ToolContext,
+    ) -> Option<ToolContext> {
+        if !Self::is_sandbox_setup_failure(error) {
+            return None;
+        }
+        tracing::warn!(
+            tool = %call.name,
+            call_id = %call.id,
+            error = %error,
+            "sandbox setup failed, prompting user for out-of-sandbox retry"
+        );
+        let prompt = PermissionPrompt {
+            id: format!("sbx-{}", uuid::Uuid::new_v4()),
+            tool: call.name.clone(),
+            summary: format!(
+                "OS 沙箱初始化失败（{error}）。\n是否在沙箱外运行此命令？\n\
+                 ⚠ 沙箱外运行 = 放弃 OS 级隔离（C-22），仅限受信环境！"
+            ),
+            risk: crate::policy::Risk::High,
+            options: vec![
+                crate::policy::PromptOption::AllowOnce,
+                crate::policy::PromptOption::DenyOnce,
+            ],
+        };
+        let prompt_id = prompt.id.clone();
+        self.events.emit(Event::PermissionRequested {
+            id: prompt.id.clone(),
+            tool: prompt.tool.clone(),
+            summary: prompt.summary.clone(),
+            risk: prompt.risk,
+        });
+        let decision = self.prompter.prompt(prompt.clone()).await;
+        let event = Event::PermissionResolved {
+            id: prompt_id.clone(),
+            decision: decision.clone(),
+        };
+        self.persist_event(&event).await;
+        self.events.emit(event);
+        // 审计：沙箱外回退决策必须落盘（与普通权限决策同等对待，AGENTS.md §5.5）
+        self.record_permission_audit(
+            &format!("{} sandbox-fallback", call.name),
+            &decision,
+            Some(prompt_id),
+        )
+        .await;
+        match decision {
+            Decision::Allow => {
+                let mut fallback = ctx.clone();
+                fallback.sandbox_policy = Some(SandboxPolicy::DangerFullAccess);
+                Some(fallback)
+            }
+            Decision::Deny(_) => None,
+        }
     }
 
     /// 构造 `HookInput`（工具相关事件通用）。

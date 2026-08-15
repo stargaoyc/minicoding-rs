@@ -1226,6 +1226,8 @@ web.fetch 内网/元数据接口                             → Deny（SSRF 防
 
 **Plan 模式**（§16）作为 `PermissionMode::Plan`，在 L0 与 L1 之间插入一条 specificity=∞ 的"所有 `side_effect != None` → Deny"硬规则（不可被 L1 覆盖，但受 L0 黑名单约束一致）——本质是 L0 的扩展，而非新层级。
 
+**沙箱初始化失败询问回退**（`features.md` P-26）：工具返回 `sandbox apply/post_spawn failed`（沙箱机制故障，如 Windows Job Object 恢复线程快照竞态）时，Runtime 发起 High risk 询问（C-22 用户显式选定）是否在沙箱外运行；用户 Allow 则以 `DangerFullAccess` 策略重试一次（仅当前调用，不改变会话策略），Deny 则原错误回灌。决策经 `PermissionRequested`/`PermissionResolved` 事件广播并落 audit.log。该回退仅由 Runtime 在执行错误后发起，LLM 无法主动触发（`security.md` §8.10）。
+
 ### 9.6 命令风险解释（参考 CC `Ctrl+E`）
 
 当 `InteractivePrompter` 弹出权限确认时，仅显示命令文本不够——用户难以快速判断风险。参考 CC 的 `Ctrl+E` 命令解释，在确认弹窗中附加风险评估：
