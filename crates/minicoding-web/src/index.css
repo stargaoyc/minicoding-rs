@@ -107,18 +107,10 @@ body {
 
 /* 渐变 accent */
 .gradient-accent {
-  background: linear-gradient(
-    135deg,
-    var(--color-accent-grad-from),
-    var(--color-accent-grad-to)
-  );
+  background: linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-to));
 }
 .gradient-text {
-  background: linear-gradient(
-    135deg,
-    var(--color-accent-grad-from),
-    var(--color-accent-grad-to)
-  );
+  background: linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-to));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;

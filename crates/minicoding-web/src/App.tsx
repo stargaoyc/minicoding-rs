@@ -115,8 +115,15 @@ function AppInner() {
 
   // 消息 + SSE 流（含权限请求回调）
   const { data: messages, isLoading } = useMessages(activeSessionId);
-  const { streamingText, streamingReasoning, isStreaming, activeTools, elapsedSec, waitingPermission, permissionDeniedMsg } =
-    useSSEStream(activeSessionId, {
+  const {
+    streamingText,
+    streamingReasoning,
+    isStreaming,
+    activeTools,
+    elapsedSec,
+    waitingPermission,
+    permissionDeniedMsg,
+  } = useSSEStream(activeSessionId, {
     onPermissionRequested: (e) => {
       if (activeSessionId) {
         permissions.requestPermission({ sessionId: activeSessionId, ...e });
@@ -154,13 +161,9 @@ function AppInner() {
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
           <div className="flex items-center gap-2">
             {activeSessionId ? (
-              <span className="text-sm font-medium">
-                会话 {activeSessionId.slice(-8)}
-              </span>
+              <span className="text-sm font-medium">会话 {activeSessionId.slice(-8)}</span>
             ) : (
-              <span className="text-sm text-[var(--color-text-muted)]">
-                选择或创建一个会话
-              </span>
+              <span className="text-sm text-[var(--color-text-muted)]">选择或创建一个会话</span>
             )}
           </div>
           <Button
@@ -172,18 +175,11 @@ function AppInner() {
             <ListTodo className="h-4 w-4" />
             任务
             {tasks.length > 0 && (
-              <span className="ml-1 text-xs text-[var(--color-accent-hover)]">
-                {tasks.length}
-              </span>
+              <span className="ml-1 text-xs text-[var(--color-accent-hover)]">{tasks.length}</span>
             )}
           </Button>
           {/* 设置按钮：Tauri 模式修改 config.toml + keyring；Web 模式修改 localStorage */}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setSettingsOpen(true)}
-            title="设置"
-          >
+          <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title="设置">
             <Settings className="h-4 w-4" />
           </Button>
         </div>
@@ -202,7 +198,10 @@ function AppInner() {
             {/* 发送错误提示 */}
             {sendMessage.isError && (
               <div className="border-t border-[var(--color-risk-high)]/30 bg-[var(--color-risk-high)]/10 px-4 py-2 text-sm text-[var(--color-risk-high)]">
-                发送失败：{sendMessage.error instanceof Error ? sendMessage.error.message : String(sendMessage.error)}
+                发送失败：
+                {sendMessage.error instanceof Error
+                  ? sendMessage.error.message
+                  : String(sendMessage.error)}
               </div>
             )}
             {/* 权限等待横幅：工具正在等待用户在弹窗中确认（替代笼统的"正在思考"） */}
@@ -210,7 +209,10 @@ function AppInner() {
               <div className="flex items-center gap-2 border-t border-[var(--color-risk-medium)]/40 bg-[var(--color-risk-medium)]/10 px-4 py-2 text-sm text-[var(--color-risk-medium)]">
                 <ShieldAlert className="h-4 w-4 shrink-0" />
                 <span>
-                  等待权限确认：<code className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-xs">{waitingPermission.tool}</code>
+                  等待权限确认：
+                  <code className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-xs">
+                    {waitingPermission.tool}
+                  </code>
                   <span className="ml-1">请在权限弹窗中选择允许或拒绝（超时将自动拒绝）</span>
                 </span>
               </div>

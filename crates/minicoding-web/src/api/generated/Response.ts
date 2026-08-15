@@ -7,4 +7,4 @@ import type { Version } from "./Version";
 /**
  * JSON-RPC 响应。
  */
-export type Response = { jsonrpc: Version, id: Id, result: JsonValue | null, error: Error | null, };
+export type Response = { jsonrpc: Version; id: Id; result: JsonValue | null; error: Error | null };

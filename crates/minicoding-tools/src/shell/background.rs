@@ -94,9 +94,16 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
         env: HashMap<String, String>,
     ) -> BoxFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            // 1. 构造命令（与 shell.run 一致：sh -c "command"）
-            let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg(&command);
+            // 1. 构造命令（与 shell.run 一致：Unix 用 sh -c，Windows 用 cmd /C）
+            let mut cmd = if cfg!(windows) {
+                let mut c = tokio::process::Command::new("cmd");
+                c.arg("/C").arg(&command);
+                c
+            } else {
+                let mut c = tokio::process::Command::new("sh");
+                c.arg("-c").arg(&command);
+                c
+            };
             cmd.current_dir(workdir);
             cmd.env_clear();
             cmd.envs(env);
@@ -242,7 +249,7 @@ impl ShellBackground {
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "要执行的 shell 命令（sh -c 语义）"
+                        "description": "要执行的 shell 命令（Unix 用 sh -c 语义，Windows 用 cmd /C 语义）"
                     }
                 },
                 "required": ["command"]

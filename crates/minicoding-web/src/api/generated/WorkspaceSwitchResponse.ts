@@ -4,11 +4,12 @@
  * `POST /workspace` 切换响应。
  */
 export type WorkspaceSwitchResponse = {
-/**
- * 切换是否成功（`false` = 用户拒绝审批）。
- */
-switched: boolean,
-/**
- * 当前工作目录（切换后）。
- */
-path: string, };
+  /**
+   * 切换是否成功（`false` = 用户拒绝审批）。
+   */
+  switched: boolean;
+  /**
+   * 当前工作目录（切换后）。
+   */
+  path: string;
+};

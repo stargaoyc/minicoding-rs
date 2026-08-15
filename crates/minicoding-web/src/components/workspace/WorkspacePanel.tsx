@@ -46,14 +46,12 @@ export function WorkspacePanel({ sessionId }: { sessionId: string | null }) {
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-xs font-medium text-[var(--color-text-muted)] hover:bg-[var(--color-surface-2)] transition-colors"
       >
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5" />
-        )}
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         <FolderGit2 className="h-3.5 w-3.5" />
         项目工作区
-        {root && <span className="truncate text-[10px] text-[var(--color-text-muted)]">{root.name}</span>}
+        {root && (
+          <span className="truncate text-[10px] text-[var(--color-text-muted)]">{root.name}</span>
+        )}
       </button>
 
       {open && (
@@ -103,7 +101,10 @@ function WorkspaceBody({ sessionId }: { sessionId: string }) {
         <p className="px-1 py-2 text-xs text-[var(--color-text-muted)]">加载中…</p>
       ) : root ? (
         <div className="flex items-center gap-1 px-1">
-          <span className="flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]" title={root.path}>
+          <span
+            className="flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]"
+            title={root.path}
+          >
             {root.path}
           </span>
           <Button
@@ -134,7 +135,11 @@ function WorkspaceBody({ sessionId }: { sessionId: string }) {
           disabled={switching || !target.trim()}
           onClick={() => void handleSwitch()}
         >
-          {switching ? <RefreshCw className="h-3 w-3 animate-spin" /> : <ArrowRight className="h-3 w-3" />}
+          {switching ? (
+            <RefreshCw className="h-3 w-3 animate-spin" />
+          ) : (
+            <ArrowRight className="h-3 w-3" />
+          )}
           切换
         </Button>
       </div>
@@ -180,8 +185,10 @@ function FileTree({
     if (previewPath) setPreview(previewPath);
   }, [previewPath, setPreview]);
 
-  if (isLoading) return <p className="py-1 pl-2 text-[10px] text-[var(--color-text-muted)]">加载中…</p>;
-  if (isError) return <p className="py-1 pl-2 text-[10px] text-[var(--color-risk-high)]">加载失败</p>;
+  if (isLoading)
+    return <p className="py-1 pl-2 text-[10px] text-[var(--color-text-muted)]">加载中…</p>;
+  if (isError)
+    return <p className="py-1 pl-2 text-[10px] text-[var(--color-risk-high)]">加载失败</p>;
   if (!data || data.entries.length === 0) {
     return <p className="py-1 pl-2 text-[10px] text-[var(--color-text-muted)]">（空目录）</p>;
   }
@@ -196,9 +203,7 @@ function FileTree({
           parentPath={path}
           depth={depth}
           expanded={expanded}
-          onToggle={(name) =>
-            setExpanded((e) => ({ ...e, [name]: !e[name] }))
-          }
+          onToggle={(name) => setExpanded((e) => ({ ...e, [name]: !e[name] }))}
           onOpenFile={(rel) => {
             setPreviewPath(rel);
           }}
@@ -256,12 +261,12 @@ function TreeNode({
         )}
         <span className="truncate">{entry.name}</span>
         {!isDir && entry.size != null && (
-          <span className="ml-auto text-[9px] text-[var(--color-text-muted)]">{formatSize(entry.size)}</span>
+          <span className="ml-auto text-[9px] text-[var(--color-text-muted)]">
+            {formatSize(entry.size)}
+          </span>
         )}
       </button>
-      {isDir && isExpanded && (
-        <FileTree sessionId={sessionId} path={rel} depth={depth + 1} />
-      )}
+      {isDir && isExpanded && <FileTree sessionId={sessionId} path={rel} depth={depth + 1} />}
     </div>
   );
 }
@@ -277,7 +282,11 @@ function DiffDialog({
   onClose: () => void;
 }) {
   const { data, isLoading } = useWorkspaceDiff(sessionId);
-  const [selected, setSelected] = useState<{ before: string | null; after: string | null; name: string } | null>(null);
+  const [selected, setSelected] = useState<{
+    before: string | null;
+    after: string | null;
+    name: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!open) setSelected(null);
@@ -288,7 +297,10 @@ function DiffDialog({
   const changes = data?.entries.flatMap((e) => e.files) ?? [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
       <motion.div
         initial={{ scale: 0.95, opacity: 0, y: 10 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
@@ -296,11 +308,18 @@ function DiffDialog({
       >
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
           <span className="text-sm font-medium">文件改动（会话内）</span>
-          <button onClick={onClose} className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]">关闭</button>
+          <button
+            onClick={onClose}
+            className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          >
+            关闭
+          </button>
         </div>
 
         {isLoading ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-[var(--color-text-muted)]">加载中…</div>
+          <div className="flex flex-1 items-center justify-center text-sm text-[var(--color-text-muted)]">
+            加载中…
+          </div>
         ) : changes.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-sm text-[var(--color-text-muted)]">
             本会话暂无文件改动
@@ -333,7 +352,9 @@ function DiffDialog({
                   <span className="text-[var(--color-risk-low)]">{selected.after}</span>
                 </pre>
               ) : (
-                <p className="text-xs text-[var(--color-text-muted)]">点击左侧改动查看内容对比（红=改动前，绿=改动后）</p>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  点击左侧改动查看内容对比（红=改动前，绿=改动后）
+                </p>
               )}
             </div>
           </div>
@@ -350,9 +371,19 @@ function ChangeBadge({ kind }: { kind: string }) {
     edited: "bg-[var(--color-accent)]/15 text-[var(--color-accent-hover)]",
     deleted: "bg-[var(--color-risk-high)]/15 text-[var(--color-risk-high)]",
   };
-  const label: Record<string, string> = { created: "新建", written: "写入", edited: "编辑", deleted: "删除" };
+  const label: Record<string, string> = {
+    created: "新建",
+    written: "写入",
+    edited: "编辑",
+    deleted: "删除",
+  };
   return (
-    <span className={cn("rounded px-1 py-0.5 text-[9px] font-medium", map[kind] ?? "bg-[var(--color-surface-2)] text-[var(--color-text-muted)]")}>
+    <span
+      className={cn(
+        "rounded px-1 py-0.5 text-[9px] font-medium",
+        map[kind] ?? "bg-[var(--color-surface-2)] text-[var(--color-text-muted)]",
+      )}
+    >
       {label[kind] ?? kind}
     </span>
   );
@@ -363,7 +394,11 @@ function fileShortName(c: WorkspaceFileChange): string {
   return path.split("/").pop() ?? path;
 }
 
-function changeToPair(c: WorkspaceFileChange): { before: string | null; after: string | null; name: string } {
+function changeToPair(c: WorkspaceFileChange): {
+  before: string | null;
+  after: string | null;
+  name: string;
+} {
   switch (c.kind) {
     case "created":
       return { before: null, after: c.content, name: c.path };

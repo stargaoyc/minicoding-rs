@@ -1362,6 +1362,16 @@ pub enum RuntimeError {
 | 写盘失败 | 内存消息保留，告警并尝试备份到临时文件 |
 | Ctrl-C | graceful stop，已生成消息入库 |
 
+### 10.2.1 取消语义（`CancellationToken` 每轮重建）
+
+`tokio_util::sync::CancellationToken` **取消后永久 cancelled，无法复位**。若取消对会话永久生效，一次手动终止后所有后续 turn 都会秒取消（会话被"砖化"，`POST /messages` 返回 `[已取消]`）。因此：
+
+- **每轮重建**：`run_turn` 结束（含取消/超时/正常/错误路径）时 `*cancel_token = CancellationToken::new()`，下一轮使用全新 token。CLI/TUI 的 Ctrl-C handler 每轮经 `Runtime::cancel_token()` 重新获取当前 token，不受重建影响；
+- **仅运行中生效**：`Runtime.turn_active`（原子标记，RAII guard 复位，覆盖 `?` 早退/panic）使 `cancel()` 仅在 turn 运行中取消 token——turn 间隙的取消调用（如用户点取消但 turn 已结束）不毒化下一轮；
+- **前端残留清理**：`turn_end`（含 `interrupted`）时清空流式文本/思考增量/工具卡片——被终止的 turn 的瞬态渲染不会残留在列表底部。
+
+回归测试：`cancel_then_next_turn_still_works`（运行中取消后下一轮正常）、`cancel_between_turns_is_ignored`（间隙取消不生效）。
+
 ### 10.3 会话存储结构（Parent-UUID 链，参考 Claude Code）
 
 原先 JSONL 是纯顺序追加，无法表达"从某点分叉"或"压缩边界"。参考 CC 的 Parent-UUID 链结构，每条消息记录 `uuid` 与 `parent_uuid`，形成链表而非纯数组。
@@ -3009,6 +3019,12 @@ async fn start_session(app: tauri::AppHandle) -> Result<SessionInfo, String> {
 ```
 
 前端通过 Tauri IPC `invoke('start_session')` 获取 sidecar 端口，然后用 `fetch` + `EventSource` 连接 `http://127.0.0.1:PORT`。凭证存储复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04），前端不接触凭证明文。
+
+**sidecar 生命周期（防孤儿进程）**：`tauri-plugin-shell` 的 `CommandChild` **没有 Drop 清理**（无 kill_on_drop 等价物），若应用退出时不显式终止，sidecar 会残留为孤儿进程继续监听端口。方案：
+
+- `SidecarProcess`（managed state）持有 `CommandChild` 句柄，`spawn_sidecar` 存入、`kill_sidecar` 取出并 `kill()`（`CommandChild::kill` 消费自身，幂等）；
+- 应用以 `Builder::build` + `App::run(callback)` 形式启动，`RunEvent::Exit`（托盘"退出"、`restart_app` 重启）时调用 `kill_sidecar`；
+- 窗口关闭仅隐藏到托盘（`prevent_close`，设计意图：后台保持服务），不触发 Exit，sidecar 继续运行。
 
 ### 26.6 安全考量（前端）
 

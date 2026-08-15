@@ -116,6 +116,43 @@ fn parse_port(line: &str) -> Option<u16> {
 
 // ─── Tauri 集成（feature gate `desktop`）────────────────────────────────────
 
+/// 全局 sidecar 进程句柄（Tauri 版 sidecar 的 `CommandChild`）。
+///
+/// `tauri-plugin-shell` 的 `CommandChild` **没有 Drop 清理**（无 kill_on_drop），
+/// 若退出时不显式 kill，sidecar 变孤儿进程继续存活（用户反馈
+/// "minicoding-server-sidecar.exe 不随 desktop 退出停止"）。句柄存入 managed
+/// state，应用 `RunEvent::Exit` 时由 [`kill_sidecar`] 取出并终止。
+#[cfg(feature = "desktop")]
+pub struct SidecarProcess(pub std::sync::Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
+
+#[cfg(feature = "desktop")]
+impl Default for SidecarProcess {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+}
+
+/// 终止 sidecar 进程（应用退出/重启时调用）。
+///
+/// `CommandChild::kill` 消费自身（从 state 中 `take` 后调用），幂等：未启动过
+/// sidecar 或已 kill 过时无操作。
+#[cfg(feature = "desktop")]
+pub fn kill_sidecar(app: &tauri::AppHandle) {
+    let state = app.state::<SidecarProcess>();
+    let Some(child) = state
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return;
+    };
+    match child.kill() {
+        Ok(()) => log::info!("sidecar 已终止（应用退出清理）"),
+        Err(e) => log::warn!("sidecar 终止失败: {e}"),
+    }
+}
+
 /// 启动 sidecar（Tauri 版本，通过 `tauri-plugin-shell` sidecar API）。
 ///
 /// 仅 `desktop` feature 启用时可用。生产模式下 sidecar 二进制通过
@@ -150,6 +187,16 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         .spawn()
         .map_err(|e| anyhow::anyhow!("sidecar 启动失败: {e}"))?;
     let pid = child.pid();
+
+    // 保存 child 句柄到 managed state：`CommandChild` 无 Drop 清理，退出时
+    // 由 `RunEvent::Exit` → `kill_sidecar` 显式终止（防孤儿进程）。
+    {
+        let state = app.state::<SidecarProcess>();
+        *state
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
+    }
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {
         while let Some(event) = rx.recv().await {

@@ -148,14 +148,18 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
           break;
         case "turn_end":
           setIsStreaming(false);
+          // 清空本 turn 的瞬态渲染：interrupted（用户终止）时后端不会补发
+          // message_appended 之外的清理事件，残留的流式文本/工具卡片会一直
+          // 停在列表最底部（用户反馈"终止后残留渲染"）。无条件清空最安全。
+          setStreamingText("");
+          setStreamingReasoning("");
+          setActiveTools([]);
           // 权限请求未获响应（后端默认 300s 超时自动 Deny，不发 resolved 事件）：
           // 在 turn 结束时提示原因，避免"静默失败"（工具卡片空 + 无文本内容）
           if (event.stop_reason !== "interrupted") {
             const w = waitingRef.current;
             if (w) {
-              setPermissionDeniedMsg(
-                `权限请求未及时确认，已自动拒绝：${w.tool}（超过响应时限）`,
-              );
+              setPermissionDeniedMsg(`权限请求未及时确认，已自动拒绝：${w.tool}（超过响应时限）`);
               waitingRef.current = null;
               setWaitingPermission(null);
             }

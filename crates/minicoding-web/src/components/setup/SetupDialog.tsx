@@ -31,8 +31,18 @@ const PROVIDER_OPTIONS: {
   model: string;
 }[] = [
   { value: "openai", label: "OpenAI", api_base: "https://api.openai.com/v1", model: "gpt-4o" },
-  { value: "anthropic", label: "Anthropic", api_base: "https://api.anthropic.com", model: "claude-sonnet-4-5-20250929" },
-  { value: "ollama", label: "Ollama（本地）", api_base: "http://localhost:11434/v1", model: "llama3" },
+  {
+    value: "anthropic",
+    label: "Anthropic",
+    api_base: "https://api.anthropic.com",
+    model: "claude-sonnet-4-5-20250929",
+  },
+  {
+    value: "ollama",
+    label: "Ollama（本地）",
+    api_base: "http://localhost:11434/v1",
+    model: "llama3",
+  },
 ];
 
 const DEFAULTS = PROVIDER_OPTIONS[0];
@@ -331,12 +341,12 @@ export function SetupDialog() {
                           <Loader2 className="h-4 w-4 animate-spin" />
                           正在保存…
                         </>
+                      ) : webMode && isEditMode ? (
+                        "保存"
+                      ) : isEditMode ? (
+                        "保存并重启 sidecar"
                       ) : (
-                        webMode && isEditMode
-                          ? "保存"
-                          : isEditMode
-                            ? "保存并重启 sidecar"
-                            : "保存并启动"
+                        "保存并启动"
                       )}
                     </Button>
                   </div>

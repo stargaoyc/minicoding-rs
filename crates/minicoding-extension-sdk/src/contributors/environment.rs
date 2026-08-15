@@ -4,7 +4,7 @@
 
 use minicoding_core::model::PromptError;
 use minicoding_core::prompt::{
-    PromptContext, PromptContributor, PromptSection, PromptSectionOrder,
+    Platform, PromptContext, PromptContributor, PromptSection, PromptSectionOrder,
 };
 use minicoding_core::provider::BoxFuture;
 
@@ -43,6 +43,20 @@ fn format_environment(ctx: &PromptContext) -> String {
     buf.push_str("## 环境\n\n");
     let _ = writeln!(buf, "- 工作目录: `{}`", ctx.workdir);
     let _ = writeln!(buf, "- 平台: {}", ctx.platform);
+    // 平台命令语义提示：LLM 常默认输出 Unix 命令（ls/mkdir -p 等），在 Windows
+    // 上必然失败。显式声明当前平台的 shell 语义，引导生成对应命令。
+    let _ = match ctx.platform {
+        Platform::Windows => writeln!(
+            buf,
+            "- 命令语义: 当前是 Windows，`shell.run`/`shell.background` 用 `cmd /C` 执行。\
+              请使用 Windows 命令（`dir`/`mkdir`/`type`/`copy`/`del` 等），\
+              不要使用 Unix 命令（`ls`/`mkdir -p`/`cat`/`rm`/`grep` 等）"
+        ),
+        _ => writeln!(
+            buf,
+            "- 命令语义: 当前是 Unix（sh），`shell.run`/`shell.background` 用 `sh -c` 执行"
+        ),
+    };
 
     if let Some(ref git) = ctx.git_info {
         buf.push_str("- Git: ");
@@ -79,7 +93,18 @@ mod tests {
         let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("/home/user/project"));
         let s = c.build(&ctx).await.expect("build");
         assert!(s.content.contains("/home/user/project"));
+        assert!(s.content.contains("sh -c"));
         assert!(s.cacheable);
+    }
+
+    #[tokio::test]
+    async fn environment_windows_advises_windows_commands() {
+        let c = EnvironmentContributor;
+        let ctx = PromptContext::new(SessionId::new(), Utf8PathBuf::from("C:\\proj"))
+            .with_platform(minicoding_core::prompt::Platform::Windows);
+        let s = c.build(&ctx).await.expect("build");
+        assert!(s.content.contains("cmd /C"));
+        assert!(s.content.contains("不要使用 Unix 命令"));
     }
 
     #[tokio::test]

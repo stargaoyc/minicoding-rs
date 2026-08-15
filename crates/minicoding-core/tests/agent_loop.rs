@@ -251,3 +251,117 @@ async fn switch_workdir_allowed_updates_workdir() {
         "workdir 应为 canonical 路径"
     );
 }
+
+/// 场景 9（回归，v0.2.27→0.2.28）：cancel 后会话不"砖化"。
+///
+/// 历史 bug：`CancellationToken` 一旦 cancel 永久 cancelled，一次手动终止后
+/// 后续所有 turn 全部秒取消（Interrupted），用户无法再与 AI 对话。修复：
+/// 每轮 `run_turn` 结束（含取消）重建 token。
+#[tokio::test]
+async fn cancel_then_next_turn_still_works() {
+    use minicoding_core::model::{ContentBlock, Role};
+    use minicoding_core::model::{ToolError, ToolResult, ToolSchema};
+    use minicoding_core::tool::{Tool, ToolContext};
+
+    /// 挂起工具：execute 阻塞直到超时（cancel 时 future 被 drop，无副作用）。
+    struct HangingTool;
+    impl Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn schema(&self) -> &ToolSchema {
+            static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| ToolSchema {
+                name: "hang".into(),
+                description: "hang".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            })
+        }
+        fn side_effect(&self) -> minicoding_core::model::SideEffect {
+            minicoding_core::model::SideEffect::None
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> minicoding_core::provider::BoxFuture<'_, Result<ToolResult, ToolError>> {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                Ok(ToolResult::ok_text("done"))
+            })
+        }
+    }
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(HangingTool));
+    // turn 1：工具调用（挂起等待取消）；turn 2：正常文本回复。
+    let provider = ScriptedProvider::new(vec![
+        tool_call_deltas("c1", "hang", "{}"),
+        text_deltas("第二次对话正常回复"),
+    ]);
+    let rt = Arc::new(build_runtime(provider, tools));
+
+    // turn 1：spawn 后等工具进入挂起，再取消
+    let rt2 = Arc::clone(&rt);
+    let turn1 = tokio::spawn(async move {
+        rt2.run_turn(UserInput::from_text("第一次：开始任务")).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    rt.cancel();
+    let outcome1 = turn1.await.expect("turn1 join");
+    let TurnOutcome::Interrupted(_) = outcome1.expect("turn1 ok") else {
+        panic!("cancel 后应返回 Interrupted");
+    };
+
+    // turn 2：若 token 未重建（旧 bug），立即秒取消；修复后应正常完成
+    let outcome2 = rt
+        .run_turn(UserInput::from_text("第二次：继续"))
+        .await
+        .expect("turn2 ok");
+    match outcome2 {
+        TurnOutcome::Finished(msg) => {
+            assert!(matches!(msg.role, Role::Assistant));
+            let has_reply = msg.content.iter().any(|c| match c {
+                ContentBlock::Text { text } => text.contains("第二次对话正常回复"),
+                _ => false,
+            });
+            assert!(has_reply, "第二次 turn 应正常完成而非被取消: {msg:?}");
+        }
+        TurnOutcome::Interrupted(_) => {
+            panic!("第二次 turn 不应被取消（cancel token 应已重建）")
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+/// 场景 10（回归）：turn 间隙调用 `cancel()`（无 turn 运行）不毒化下一轮。
+///
+/// `cancel()` 仅对运行中的 turn 生效（`turn_active` 检查）；否则"取消按钮
+/// 在 turn 已结束后被点击"会取消掉下一轮的开场 token，导致下一条消息
+/// 秒取消。
+#[tokio::test]
+async fn cancel_between_turns_is_ignored() {
+    let provider = ScriptedProvider::new(vec![
+        text_deltas("第一轮正常回复"),
+        text_deltas("第二轮正常回复"),
+    ]);
+    let rt = build_runtime(provider, ToolRegistry::new());
+
+    let outcome1 = rt
+        .run_turn(UserInput::from_text("第一轮"))
+        .await
+        .expect("turn1 ok");
+    assert!(matches!(outcome1, TurnOutcome::Finished(_)));
+
+    // turn 间隙取消：不应影响下一轮
+    rt.cancel();
+
+    let outcome2 = rt
+        .run_turn(UserInput::from_text("第二轮"))
+        .await
+        .expect("turn2 ok");
+    assert!(
+        matches!(outcome2, TurnOutcome::Finished(_)),
+        "间隙 cancel 不应取消下一轮: {outcome2:?}"
+    );
+}

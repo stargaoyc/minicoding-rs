@@ -37,19 +37,32 @@ export function FilePreview({ sessionId }: { sessionId: string | null }) {
     >
       {/* 头部：文件名 + 操作 */}
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-4 py-2">
-        <span className="flex-1 truncate font-mono text-xs text-[var(--color-text)]">{previewPath}</span>
+        <span className="flex-1 truncate font-mono text-xs text-[var(--color-text)]">
+          {previewPath}
+        </span>
         {data && (
           <span className="text-[10px] text-[var(--color-text-muted)]">
             {data.size} B{data.truncated ? " · 已截断（≤ 64 KiB）" : ""}
           </span>
         )}
         {isTauri() && (
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-[10px]" onClick={handleOpenExternal}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-[10px]"
+            onClick={handleOpenExternal}
+          >
             <ExternalLink className="h-3 w-3" />
             系统编辑器打开
           </Button>
         )}
-        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setPreview(null)} title="关闭预览">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          onClick={() => setPreview(null)}
+          title="关闭预览"
+        >
           <Trash2 className="h-3 w-3" />
         </Button>
       </div>

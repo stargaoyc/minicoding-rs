@@ -81,7 +81,7 @@ fn main() {
     }));
 
     // 启动 Tauri 应用，失败时弹出错误对话框（Windows 下 stderr 不可见）
-    let run_result = tauri::Builder::default()
+    let app_builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 // 过滤 DEBUG 噪音（tao event loop / keyring / tauri::manager 的
@@ -116,6 +116,8 @@ fn main() {
                 "minicoding-desktop 启动中… (version: {})",
                 env!("CARGO_PKG_VERSION")
             );
+            // sidecar 进程句柄 state（退出时 kill 用，见 `RunEvent::Exit` 处理）
+            app.manage(sidecar::SidecarProcess::default());
             // W-07：初始化系统托盘 + 全局快捷键（失败非致命，不阻塞启动）
             if let Err(e) = tray::init(app.handle()) {
                 log::warn!("系统托盘/全局快捷键初始化失败（非致命）: {e}");
@@ -131,21 +133,32 @@ fn main() {
                 let _ = main_window.hide();
                 api.prevent_close();
             }
-        })
-        .run(tauri::generate_context!());
+        });
 
-    if let Err(e) = run_result {
-        let msg = format!("Tauri 应用启动失败: {e}");
-        eprintln!("{msg}");
-        log::error!("{msg}");
-
-        // 写入 panic 日志文件（确保 stderr 不可见时也能诊断）
-        write_panic_to_file("tauri::Builder::run", &msg);
-
-        // 尝试弹出 native 错误对话框（Windows 下用户双击启动时 stderr 不可见）
-        // 若对话框也失败，至少文件已写入，用户可查看 %TEMP%\minicoding-panic.log
-        show_error_dialog("minicoding 启动失败", &msg);
-    }
+    // 用 `build` + `App::run(callback)` 而非 `Builder::run` 的简写形式：
+    // 需要在 `RunEvent::Exit` 时终止 sidecar 进程（tauri-plugin-shell 的
+    // `CommandChild` 无 Drop 清理，退出不 kill 则 sidecar 变孤儿进程）。
+    let app_result = app_builder.build(tauri::generate_context!());
+    let app = match app_result {
+        Ok(app) => app,
+        Err(e) => {
+            let msg = format!("Tauri 应用启动失败: {e}");
+            eprintln!("{msg}");
+            log::error!("{msg}");
+            // 写入 panic 日志文件（确保 stderr 不可见时也能诊断）
+            write_panic_to_file("tauri::Builder::build", &msg);
+            // 尝试弹出 native 错误对话框（Windows 下用户双击启动时 stderr 不可见）
+            show_error_dialog("minicoding 启动失败", &msg);
+            return;
+        }
+    };
+    app.run(|handle, event| {
+        // 应用退出（托盘"退出"、`restart_app` 重启）时清理 sidecar 进程。
+        // 窗口关闭只是隐藏到托盘（prevent_close），不触发 Exit，sidecar 保持运行。
+        if let tauri::RunEvent::Exit = event {
+            sidecar::kill_sidecar(handle);
+        }
+    });
 }
 
 /// 跨平台弹出 native 错误对话框（阻塞直到用户关闭）。
@@ -307,8 +320,9 @@ async fn select_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, S
 }
 
 /// `restart_app`：重启应用（编辑模式保存配置后调用）。///
-/// Tauri `AppHandle::restart()` 会重启当前进程，`kill_on_drop` 确保
-/// 旧 sidecar 子进程在进程退出时被杀死，新进程启动后读取新配置。
+/// Tauri `AppHandle::restart()` 会重启当前进程；`RunEvent::Exit` 处理中
+/// 会 kill 旧 sidecar（见 `app.run` 回调），新进程启动后由前端重新
+/// `start_session` 拉起新 sidecar。
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
 fn restart_app(app: tauri::AppHandle) {

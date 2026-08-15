@@ -193,9 +193,7 @@ function SessionItem({
         <Badge variant={session.message_count > 0 ? "accent" : "default"}>
           {session.message_count} 条
         </Badge>
-        {session.tasks.length > 0 && (
-          <Badge variant="default">{session.tasks.length} 任务</Badge>
-        )}
+        {session.tasks.length > 0 && <Badge variant="default">{session.tasks.length} 任务</Badge>}
       </div>
     </motion.button>
   );

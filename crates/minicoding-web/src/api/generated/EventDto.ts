@@ -12,9 +12,27 @@ import type { ToolResult } from "./ToolResult";
  * 事件 DTO（携带 `seq`，用于 SSE cursor 恢复）。
  */
 export type EventDto = {
-/**
- * 单调递增序列号（每会话独立计数）。
- *
- * TS 端用 `number`（实际值远小于 2^53，无需 `bigint`）。
- */
-seq: number, } & ({ "type": "token", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "message_appended", message: Message, } | { "type": "turn_streaming_started" } | { "type": "turn_end", stop_reason: StopReason, } | { "type": "tool_call_started", call_id: string, tool: string, } | { "type": "tool_call_finished", call_id: string, result: ToolResult, } | { "type": "session_created", id: string, } | { "type": "permission_requested", id: string, tool: string, summary: string, risk: Risk, } | { "type": "permission_resolved", id: string, decision: Decision, } | { "type": "permission_mode_changed", from: PermissionMode, to: PermissionMode, } | { "type": "task_updated", task: Task, } | { "type": "config_changed" } | { "type": "sessions_listed", sessions: Array<SessionMeta>, } | { "type": "session_retrieved", session_id: string, messages: Array<Message>, } | { "type": "command_error", message: string, });
+  /**
+   * 单调递增序列号（每会话独立计数）。
+   *
+   * TS 端用 `number`（实际值远小于 2^53，无需 `bigint`）。
+   */
+  seq: number;
+} & (
+  | { type: "token"; text: string }
+  | { type: "reasoning_delta"; text: string }
+  | { type: "message_appended"; message: Message }
+  | { type: "turn_streaming_started" }
+  | { type: "turn_end"; stop_reason: StopReason }
+  | { type: "tool_call_started"; call_id: string; tool: string }
+  | { type: "tool_call_finished"; call_id: string; result: ToolResult }
+  | { type: "session_created"; id: string }
+  | { type: "permission_requested"; id: string; tool: string; summary: string; risk: Risk }
+  | { type: "permission_resolved"; id: string; decision: Decision }
+  | { type: "permission_mode_changed"; from: PermissionMode; to: PermissionMode }
+  | { type: "task_updated"; task: Task }
+  | { type: "config_changed" }
+  | { type: "sessions_listed"; sessions: Array<SessionMeta> }
+  | { type: "session_retrieved"; session_id: string; messages: Array<Message> }
+  | { type: "command_error"; message: string }
+);

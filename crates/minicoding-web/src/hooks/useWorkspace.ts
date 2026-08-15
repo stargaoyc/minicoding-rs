@@ -69,7 +69,10 @@ export function useSwitchWorkspace(sessionId: string | null) {
  * 工具执行后刷新工作区缓存（由 `useChat.ts` 的 SSE `tool_call_finished`
  * 分支调用——文件改动后文件树/预览/diff 需重新拉取）。
  */
-export function invalidateWorkspace(qc: ReturnType<typeof useQueryClient>, sessionId: string | null) {
+export function invalidateWorkspace(
+  qc: ReturnType<typeof useQueryClient>,
+  sessionId: string | null,
+) {
   if (!sessionId) return;
   qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
   qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });

@@ -71,7 +71,13 @@ function ToolCallList({ calls }: { calls: ToolCall[] }) {
   );
 }
 
-export function MessageBubble({ message, isStreaming }: { message: Message; isStreaming?: boolean }) {
+export function MessageBubble({
+  message,
+  isStreaming,
+}: {
+  message: Message;
+  isStreaming?: boolean;
+}) {
   const config = ROLE_CONFIG[message.role] ?? ROLE_CONFIG.assistant;
   const Icon = config.icon;
   const text = extractText(message);
@@ -79,8 +85,7 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
 
   // 工具结果消息（role=tool）：无任何可显示内容（如纯 JSON `{}`）时不渲染
   // 空白气泡（用户反馈"工具调用输出是空的，不如不显示"）
-  const toolResult =
-    message.role === "tool" ? extractToolResultSummary(message) : null;
+  const toolResult = message.role === "tool" ? extractToolResultSummary(message) : null;
   if (message.role === "tool" && !toolResult?.text) {
     return null;
   }
@@ -105,9 +110,7 @@ export function MessageBubble({ message, isStreaming }: { message: Message; isSt
       {/* Content */}
       <div className="flex-1 space-y-1 overflow-hidden">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-[var(--color-text-muted)]">
-            {config.label}
-          </span>
+          <span className="text-xs font-medium text-[var(--color-text-muted)]">{config.label}</span>
           <span className="text-[10px] text-[var(--color-text-muted)]/60">
             {formatTime(message.created_at)}
           </span>

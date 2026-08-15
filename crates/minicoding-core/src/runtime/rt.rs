@@ -55,6 +55,15 @@ use tracing::Instrument;
 type ToolFuture =
     std::pin::Pin<Box<dyn Future<Output = Result<(ToolCallId, ToolResult), RuntimeError>> + Send>>;
 
+/// turn 运行标记 guard：drop 时复位 `turn_active`（覆盖 `?` 早退与 panic 路径）。
+struct TurnActiveGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for TurnActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Runtime 聚合根（所有可替换能力的持有者）。
 ///
 /// 由 `RuntimeBuilder` 构造，frontend 长期持有。
@@ -78,7 +87,15 @@ pub struct Runtime {
     pub(crate) prompter: Arc<dyn PermissionPrompter>,
     pub(crate) audit: Arc<dyn AuditSink>,
     /// Ctrl-C 取消 token（graceful stop，C-13：已落盘消息不丢失）。
-    pub(crate) cancel_token: CancellationToken,
+    ///
+    /// `CancellationToken` 取消后**永久 cancelled**，无法复位；若一次取消
+    /// 永久生效，会话会被"砖化"（之后所有 turn 秒取消）。故每次 `run_turn`
+    /// 结束（含取消/超时）时重建 token；`turn_active` 标记使 `cancel()` 仅
+    /// 对**运行中的 turn** 生效——turn 间隙的取消调用不毒化下一轮。
+    /// （std Mutex 临界区无 await；`turn_active` 用原子避免锁。）
+    pub(crate) cancel_token: std::sync::Mutex<CancellationToken>,
+    /// 当前是否有 turn 在运行（`cancel()` 的生效条件，原子读写）。
+    pub(crate) turn_active: std::sync::atomic::AtomicBool,
     /// 会话摘要生成器（可选，T-M3-6）。
     ///
     /// `None` 时 `summarize_session` 为 no-op；`Some` 时由 CLI 在会话退出前
@@ -289,15 +306,26 @@ impl Runtime {
     /// 返回取消 token 的克隆（供 frontend 在 `select!` 中组合等待，如 Ctrl-C handler）。
     #[must_use]
     pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel_token.clone()
+        self.cancel_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// 触发取消（CLI 的 Ctrl-C handler 调用）。
     ///
     /// 取消是 graceful 的：当前 in-flight 的迭代被丢弃，已落盘的消息保留
     /// （C-13：Ctrl-C 不丢已生成消息），`run_turn` 返回 `TurnOutcome::Interrupted`。
+    /// **仅当有 turn 正在运行时生效**：turn 间隙调用（如用户点取消但 turn
+    /// 已结束）不取消任何 token，避免毒化下一轮（turn 结束时 token 会重建）。
     pub fn cancel(&self) {
-        self.cancel_token.cancel();
+        if !self.turn_active.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.cancel_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel();
     }
 
     /// 返回 `PlanModeController` 引用（`plan.exit` 工具注入用，M5 T-M5-6）。
@@ -651,6 +679,11 @@ impl Runtime {
         // 使用 `.instrument(span)` 而非 `span.enter()`——`Entered` guard 是 `!Send`，
         // 跨 await 持有会导致 future 非 `Send`（axum / `tokio::spawn` 需要 `Send`）。
         async move {
+            // turn 开始：标记运行中（`cancel()` 仅在 turn 运行时生效，
+            // 见字段注释）；guard drop 时复位（含 `?` 早退/panic 路径）。
+            self.turn_active.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _turn_guard = TurnActiveGuard(&self.turn_active);
+
             // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
             self.sandbox_breaker.reset();
             metrics::set_circuit_breaker("sandbox", "closed");
@@ -769,8 +802,16 @@ impl Runtime {
             // turn_timeout + Ctrl-C cancel（graceful stop；已落盘消息不丢失，C-13）
             // 三路 select：cancel 优先返回 Interrupted；timeout 返回 Finished(Stopped)；
             // turn_fut 正常完成则透传其 outcome（内部已 emit TurnEnd）。
+            // 取消 future：锁内克隆当前 token（guard 即刻释放，无锁跨 await），
+            // 克隆体绑定为具名局部变量，随 `cancelled()` future 存活。
+            let cancel_token_now = self
+                .cancel_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let cancel_fut = cancel_token_now.cancelled();
             let result: Result<TurnOutcome, RuntimeError> = tokio::select! {
-                () = self.cancel_token.cancelled() => {
+                () = cancel_fut => {
                     tracing::info!("turn cancelled by user");
                     let event = Event::TurnEnd {
                         stop_reason: StopReason::Interrupted,
@@ -810,6 +851,14 @@ impl Runtime {
                     "turn failed"
                 ),
             }
+            // 每次 `run_turn` 结束时重建取消 token：`CancellationToken` 一旦 cancel
+            // 永久 cancelled，不重建则后续 turn 全部秒取消（会话被砖化，用户
+            // 反馈"手动终止后无法再回复"）。重建对 CLI Ctrl-C 无影响——handler
+            // 每轮经 `cancel_token()` 重新获取当前 token。
+            *self
+                .cancel_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = CancellationToken::new();
             result
         }
         .instrument(span)

@@ -123,7 +123,11 @@ export function NewSessionDialog({
                 onClick={() => void handlePick()}
                 title="打开系统目录选择器"
               >
-                {picking ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderOpen className="h-3 w-3" />}
+                {picking ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <FolderOpen className="h-3 w-3" />
+                )}
                 选择目录…
               </Button>
             )}
@@ -156,9 +160,7 @@ export function NewSessionDialog({
                 <span
                   className={cn(
                     "flex items-center gap-1 text-[11px] font-medium",
-                    opt.danger
-                      ? "text-[var(--color-risk-high)]"
-                      : "text-[var(--color-text)]",
+                    opt.danger ? "text-[var(--color-risk-high)]" : "text-[var(--color-text)]",
                   )}
                 >
                   {opt.danger ? (
@@ -180,7 +182,8 @@ export function NewSessionDialog({
                 ⚠ 沙箱外全自动运行：AI 可直接修改文件、执行命令、访问网络，不弹任何确认。
               </p>
               <p className="text-[10px] text-[var(--color-text-muted)]">
-                请仅在受信任的隔离容器（如专用 VM/Docker）内启用（C-22）。桌面应用请使用"编辑自动"模式。
+                请仅在受信任的隔离容器（如专用
+                VM/Docker）内启用（C-22）。桌面应用请使用"编辑自动"模式。
               </p>
               <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-text)]">
                 <input
@@ -199,7 +202,11 @@ export function NewSessionDialog({
           <Button variant="ghost" size="sm" disabled={creating} onClick={onClose}>
             取消
           </Button>
-          <Button size="sm" disabled={creating || (dangerMode && !ackDanger)} onClick={handleConfirm}>
+          <Button
+            size="sm"
+            disabled={creating || (dangerMode && !ackDanger)}
+            onClick={handleConfirm}
+          >
             {creating ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
             {dangerMode ? "启用全自动并创建" : "创建"}
           </Button>

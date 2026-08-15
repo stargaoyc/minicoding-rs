@@ -6,13 +6,40 @@ import type { PendingPermission, PermissionChoice } from "../../hooks/usePermiss
 import type { Risk } from "../../api/generated";
 import { cn } from "../../lib/utils";
 
-const RISK_CONFIG: Record<Risk, { icon: typeof ShieldCheck; variant: "success" | "warning" | "danger"; label: string; color: string }> = {
-  low: { icon: ShieldCheck, variant: "success", label: "低风险", color: "text-[var(--color-risk-low)]" },
-  medium: { icon: ShieldAlert, variant: "warning", label: "中风险", color: "text-[var(--color-risk-medium)]" },
-  high: { icon: ShieldX, variant: "danger", label: "高风险", color: "text-[var(--color-risk-high)]" },
+const RISK_CONFIG: Record<
+  Risk,
+  {
+    icon: typeof ShieldCheck;
+    variant: "success" | "warning" | "danger";
+    label: string;
+    color: string;
+  }
+> = {
+  low: {
+    icon: ShieldCheck,
+    variant: "success",
+    label: "低风险",
+    color: "text-[var(--color-risk-low)]",
+  },
+  medium: {
+    icon: ShieldAlert,
+    variant: "warning",
+    label: "中风险",
+    color: "text-[var(--color-risk-medium)]",
+  },
+  high: {
+    icon: ShieldX,
+    variant: "danger",
+    label: "高风险",
+    color: "text-[var(--color-risk-high)]",
+  },
 };
 
-const CHOICES: { value: PermissionChoice; label: string; variant: "default" | "secondary" | "danger" }[] = [
+const CHOICES: {
+  value: PermissionChoice;
+  label: string;
+  variant: "default" | "secondary" | "danger";
+}[] = [
   { value: "allow", label: "允许", variant: "default" },
   { value: "allow_always", label: "始终允许", variant: "secondary" },
   { value: "deny", label: "拒绝", variant: "danger" },
@@ -64,7 +91,11 @@ function PermissionContent({
     <>
       {/* Header */}
       <div className="mb-4 flex items-center gap-3">
-        <div className={cn("flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-surface-2)]")}>
+        <div
+          className={cn(
+            "flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-surface-2)]",
+          )}
+        >
           <RiskIcon className={cn("h-5 w-5", riskConfig.color)} />
         </div>
         <div>

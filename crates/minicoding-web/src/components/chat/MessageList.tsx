@@ -28,7 +28,8 @@ export function MessageList({
 
   // 自动滚动到底部；仅当用户本来就接近底部（<120px）时跟随，
   // 否则会强制把阅读历史中的用户拉到底部（也是"抖动"的一种来源）。
-  const scrollToBottom = useCallback((smooth: boolean) => {
+  // `force`（用户刚发送消息）时无视 nearBottom，必定跳转到底部。
+  const scrollToBottom = useCallback((smooth: boolean, force = false) => {
     const bottom = bottomRef.current;
     if (!bottom) return;
     const viewport = bottom.closest(".overflow-y-auto");
@@ -36,16 +37,19 @@ export function MessageList({
       bottom.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
       return;
     }
-    const nearBottom =
-      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
-    if (nearBottom) {
+    const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+    if (force || nearBottom) {
       bottom.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
     }
   }, []);
 
-  // 新消息/工具卡片变化时平滑滚动到底部（频率低，动画不被打断）
+  // 新消息/工具卡片变化时平滑滚动到底部（频率低，动画不被打断）。
+  // 最后一条是 user 消息 = 用户刚发送（乐观更新已插入），强制跳转到底部
+  // （用户反馈"新输入对话后页面不跳转到最下面"）。
   useEffect(() => {
-    scrollToBottom(true);
+    const last = messages?.[messages.length - 1];
+    const force = last?.role === "user";
+    scrollToBottom(true, force);
   }, [messages, activeTools, scrollToBottom]);
 
   // 流式 token 增量时**瞬时**滚动（无动画）——每 token 触发 smooth 滚动
@@ -73,9 +77,7 @@ export function MessageList({
         </div>
         <div className="space-y-1">
           <h2 className="text-lg font-semibold">开始新对话</h2>
-          <p className="text-sm text-[var(--color-text-muted)]">
-            输入消息开始与 AI 编程助手对话
-          </p>
+          <p className="text-sm text-[var(--color-text-muted)]">输入消息开始与 AI 编程助手对话</p>
         </div>
       </div>
     );
@@ -102,8 +104,7 @@ export function MessageList({
           streamingReasoning.length === 0 &&
           activeTools.length === 0 && (
             <div className="flex items-center gap-2 px-1 text-xs text-[var(--color-text-muted)]">
-              <span className="streaming-cursor" />
-              🤔 思考中…
+              <span className="streaming-cursor" />🤔 思考中…
             </div>
           )}
 
@@ -147,7 +148,10 @@ export function MessageList({
  */
 function ReasoningBlock({ text }: { text: string }) {
   return (
-    <details open className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2">
+    <details
+      open
+      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
+    >
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
         💭 思考过程
       </summary>
@@ -212,9 +216,7 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
         <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">{statusLabel}</span>
       </div>
       {summary && (
-        <p className="mt-1 line-clamp-2 text-[11px] text-[var(--color-text-muted)]">
-          {summary}
-        </p>
+        <p className="mt-1 line-clamp-2 text-[11px] text-[var(--color-text-muted)]">{summary}</p>
       )}
     </div>
   );

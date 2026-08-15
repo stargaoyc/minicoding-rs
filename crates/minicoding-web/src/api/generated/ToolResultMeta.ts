@@ -4,7 +4,10 @@
  * 工具执行结果元数据。
  */
 export type ToolResultMeta = {
-/**
- * serde 序列化为 `{ secs, nanos }`（`std::time::Duration` 默认 impl）。
- */
-elapsed: { secs: number; nanos: number }, bytes: number, truncated: boolean, };
+  /**
+   * serde 序列化为 `{ secs, nanos }`（`std::time::Duration` 默认 impl）。
+   */
+  elapsed: { secs: number; nanos: number };
+  bytes: number;
+  truncated: boolean;
+};

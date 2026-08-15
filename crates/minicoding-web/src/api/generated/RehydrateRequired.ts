@@ -4,15 +4,16 @@
  * Rehydrate 信号（作为特殊事件推送给客户端）。
  */
 export type RehydrateRequired = {
-/**
- * 会话 ID。
- */
-session_id: string,
-/**
- * 最后可确认的 seq（客户端重连时不应使用此 seq 之后的本地状态）。
- */
-last_known_seq: number,
-/**
- * 原因说明。
- */
-reason: string, };
+  /**
+   * 会话 ID。
+   */
+  session_id: string;
+  /**
+   * 最后可确认的 seq（客户端重连时不应使用此 seq 之后的本地状态）。
+   */
+  last_known_seq: number;
+  /**
+   * 原因说明。
+   */
+  reason: string;
+};
