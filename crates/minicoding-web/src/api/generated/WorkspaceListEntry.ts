@@ -4,15 +4,16 @@
  * 目录列表单条条目。
  */
 export type WorkspaceListEntry = {
-/**
- * 文件/目录名（不含路径）。
- */
-name: string,
-/**
- * `"file"` / `"dir"`。
- */
-kind: string,
-/**
- * 文件大小（字节，目录为 `None`）。
- */
-size: bigint | null, };
+  /**
+   * 文件/目录名（不含路径）。
+   */
+  name: string;
+  /**
+   * `"file"` / `"dir"`。
+   */
+  kind: string;
+  /**
+   * 文件大小（字节，目录为 `None`）。
+   */
+  size: bigint | null;
+};

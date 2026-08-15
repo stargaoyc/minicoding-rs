@@ -7,11 +7,12 @@
  * `"cargo build"` 匹配 `"cargo build --release"`）。
  */
 export type PreApprovedPrompt = {
-/**
- * 工具名（如 `"shell.run"`）。
- */
-tool: string,
-/**
- * 命令前缀（如 `"cargo build"`、`"git add"`）。
- */
-prompt: string, };
+  /**
+   * 工具名（如 `"shell.run"`）。
+   */
+  tool: string;
+  /**
+   * 命令前缀（如 `"cargo build"`、`"git add"`）。
+   */
+  prompt: string;
+};

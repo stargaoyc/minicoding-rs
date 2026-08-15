@@ -6,4 +6,4 @@ import type { Version } from "./Version";
 /**
  * JSON-RPC 请求（含 ID，需响应）。
  */
-export type Request = { jsonrpc: Version, id: Id, method: string, params: JsonValue | null, };
+export type Request = { jsonrpc: Version; id: Id; method: string; params: JsonValue | null };

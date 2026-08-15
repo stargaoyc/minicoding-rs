@@ -149,7 +149,11 @@ export function cancelTurn(sessionId: string): Promise<void> {
   return http<void>(`/sessions/${sessionId}/cancel`, { method: "POST" });
 }
 
-export function resolvePermission(sessionId: string, pid: string, decision: Decision): Promise<void> {
+export function resolvePermission(
+  sessionId: string,
+  pid: string,
+  decision: Decision,
+): Promise<void> {
   return http<void>(`/sessions/${sessionId}/permissions/${pid}`, {
     method: "POST",
     body: JSON.stringify({ decision }),
@@ -165,9 +169,7 @@ export function resolvePermission(sessionId: string, pid: string, decision: Deci
 export function getPendingPermissions(
   sessionId: string,
 ): Promise<{ pending: PendingPermissionDto[] }> {
-  return http<{ pending: PendingPermissionDto[] }>(
-    `/sessions/${sessionId}/permissions/pending`,
-  );
+  return http<{ pending: PendingPermissionDto[] }>(`/sessions/${sessionId}/permissions/pending`);
 }
 
 /** 未决权限请求（与 SSE `PermissionRequested` 事件结构一致）。 */

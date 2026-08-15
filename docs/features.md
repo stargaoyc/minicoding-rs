@@ -244,6 +244,10 @@
 | W-12 | 会话持久化与懒恢复 | server 重启后历史会话保留：`list_sessions` 合并磁盘 `index.json`（计数/摘要实时，`append` 时 upsert）+ 内存活跃；点击历史会话经 `get_or_load` 懒恢复（snapshot + 事件流重放优先，消息日志回退，与 CLI `--resume` 同构）；侧边栏显示首条用户消息摘要而非会话代号，消息计数真实（见 `design.md` §25.8） | M9 | 已实现（`SessionManager.disk` 磁盘访问 + `restore_session` 预加载 Runtime；`SessionMeta.summary`；前端侧边栏摘要 + 计数） |
 | W-13 | Plan 模式新建会话 | 新建会话可选"先规划"：`CreateSessionBody.plan_mode` → 初始 `PermissionMode::Plan`（C-25：先写 `plan.md` 拆分子任务，`plan.exit` 批准后执行） | M9 | 已实现（后端 `http.rs` 映射 + 前端 NewSessionDialog 第四选项） |
 | W-14 | 输入框运行中可输入 | 运行中输入框不禁用（可提前输入下一条消息），仅发送按钮禁用；输入自动增高至上限后滚动 | M9 | 已实现（`ChatInput` `sendDisabled`/`disabled` 分离 + scrollHeight 自适应） |
+| W-15 | 平台感知命令执行 | `shell.background` 按平台选 shell（Unix `sh -c` / Windows `cmd /C`，与 `shell.run` 一致）；环境 prompt 段显式声明平台命令语义（Windows 提示勿用 `ls`/`mkdir -p`/`cat` 等 Unix 命令） | M9 | 已实现（`background.rs` cfg!(windows) 分支 + `EnvironmentContributor` 平台命令提示） |
+| W-16 | 取消后会话可继续 | 手动终止（cancel）后下一轮对话正常执行：`CancellationToken` 每轮 turn 结束重建（取消一次不再砖化会话）；`cancel()` 仅对运行中 turn 生效（turn 间隙点击不毒化下一轮）；前端 `turn_end` 清空被终止 turn 的流式文本/工具卡片残留渲染 | M9 | 已实现（`Runtime.cancel_token` 重建 + `turn_active` 标记；`useChat` `turn_end` 清理；回归测试 `cancel_then_next_turn_still_works`/`cancel_between_turns_is_ignored`） |
+| W-17 | 发送消息强制滚动到底部 | 用户发送消息后（乐观 user 消息出现）无视"接近底部"保护，必定滚动到最新对话位置；AI 回复期间仍保持"接近底部才跟随" | M9 | 已实现（`MessageList` `scrollToBottom(force)`，末条 user 消息触发） |
+| W-18 | 退出时终止 sidecar | desktop 应用退出/重启（托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar`，窗口关闭隐藏到托盘不杀 sidecar） |
 
 ## 13. 工程与质量
 
@@ -295,10 +299,10 @@
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 14 |
-| **合计** | **188** |
+| Web 与桌面（M9） | 18 |
+| **合计** | **192** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-14）14 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-14）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-18）18 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-18）是参考 CC/Codex 后的核心增强。
 
 ---
 

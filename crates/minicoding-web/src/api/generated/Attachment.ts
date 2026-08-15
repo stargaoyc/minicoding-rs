@@ -3,4 +3,6 @@
 /**
  * 附件（文件或图片）。
  */
-export type Attachment = { "type": "file" } & string | { "type": "image", data: Array<number>, mime: string, };
+export type Attachment =
+  | ({ type: "file" } & string)
+  | { type: "image"; data: Array<number>; mime: string };

@@ -57,8 +57,7 @@ export const useUIStore = create<UIState>((set) => ({
   toggleTaskPanel: () => set((s) => ({ taskPanelOpen: !s.taskPanelOpen })),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
-  setPreview: (path, open) =>
-    set(() => ({ previewPath: path, previewOpen: open ?? path != null })),
+  setPreview: (path, open) => set(() => ({ previewPath: path, previewOpen: open ?? path != null })),
   setTheme: (theme) => {
     applyTheme(theme);
     if (typeof window !== "undefined") {

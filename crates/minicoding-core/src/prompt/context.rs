@@ -153,6 +153,13 @@ impl PromptContext {
         self
     }
 
+    /// 链式覆盖平台信息（测试注入用；生产路径用 `Platform::from_env`）。
+    #[must_use]
+    pub fn with_platform(mut self, platform: Platform) -> Self {
+        self.platform = platform;
+        self
+    }
+
     /// 链式注入工具 schema 列表。
     #[must_use]
     pub fn with_tools(mut self, tools: Vec<ToolSchema>) -> Self {

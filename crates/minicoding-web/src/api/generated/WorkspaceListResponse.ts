@@ -5,11 +5,12 @@ import type { WorkspaceListEntry } from "./WorkspaceListEntry";
  * `GET /workspace/list` 响应。
  */
 export type WorkspaceListResponse = {
-/**
- * 请求的目录（绝对路径）。
- */
-path: string,
-/**
- * 单层条目（已应用 ignore 列表与隐藏文件过滤）。
- */
-entries: Array<WorkspaceListEntry>, };
+  /**
+   * 请求的目录（绝对路径）。
+   */
+  path: string;
+  /**
+   * 单层条目（已应用 ignore 列表与隐藏文件过滤）。
+   */
+  entries: Array<WorkspaceListEntry>;
+};

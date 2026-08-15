@@ -17,7 +17,13 @@ interface ChatInputProps {
 /** 输入框最大高度（与 `max-h-32` 一致，超出滚动）。 */
 const MAX_HEIGHT = 128;
 
-export function ChatInput({ onSend, onCancel, isStreaming, sendDisabled, disabled }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  onCancel,
+  isStreaming,
+  sendDisabled,
+  disabled,
+}: ChatInputProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 

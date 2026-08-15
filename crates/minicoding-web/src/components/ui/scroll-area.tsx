@@ -9,11 +9,7 @@ import { cn } from "../../lib/utils";
  */
 export const ScrollArea = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
   ({ className, children, ...props }, ref) => (
-    <div
-      ref={ref}
-      className={cn("overflow-y-auto overflow-x-hidden", className)}
-      {...props}
-    >
+    <div ref={ref} className={cn("overflow-y-auto overflow-x-hidden", className)} {...props}>
       {children}
     </div>
   ),
