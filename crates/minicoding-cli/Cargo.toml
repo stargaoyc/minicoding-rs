@@ -63,7 +63,7 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 
 [features]
-default = ["memory", "sandbox"]
+default = ["memory", "sandbox", "serve", "mcp"]
 memory = ["dep:minicoding-memory"]
 hooks = ["dep:minicoding-hooks"]
 file-undo = ["dep:minicoding-journal"]

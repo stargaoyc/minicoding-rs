@@ -213,7 +213,7 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | TLS | `rustls` | 全平台 | 避免系统 OpenSSL，便于静态编译 |
 | 凭证存储 | OS keychain（`keyring`） / 文件 0600 | 全平台 | 不把密钥写进配置明文 |
 | 应用层路径沙箱 | `std::path::canonicalize` + `camino` | 全平台 | 防目录穿越（第一道防线，`security.md` §3） |
-| 跨平台沙箱统一 API | `sandbox-run` | Linux+macOS | systemd 风格 API（`ProtectSystem`/`ReadWritePaths`/`PrivateNetwork`），原生支持 `apply_sandbox` 在子进程 fork 后 exec 前调用，与 `tokio::process` 兼容；内部封装 Landlock ruleset 与 macOS sandbox profile 生成，**不自研胶水** |
+| 跨平台沙箱统一 API | ~~`sandbox-run`~~（**已弃用**） | Linux+macOS | systemd 风格 API（`ProtectSystem`/`ReadWritePaths`/`PrivateNetwork`），原生支持 `apply_sandbox` 在子进程 fork 后 exec 前调用，与 `tokio::process` 兼容；内部封装 Landlock ruleset 与 macOS sandbox profile 生成。**弃用原因**：EUPL-1.2 许可证不合规（AGENTS.md §2.7），已由自研轻量驱动替代（Linux landlock `pre_exec` / macOS `sandbox_init` / Windows Job Object，见 `minicoding-sandbox/src/lib.rs` 顶部注释） |
 | Linux 文件系统沙箱 | `landlock` | Linux 5.13+ | 官方 rust-landlock，内核 LSM 限制可写范围；纯 Rust 绑定无 C 依赖，由 `sandbox-run` 底层调用 |
 | Linux 系统调用过滤 | `libseccomp` | Linux | seccomp-bpf 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load`），与 `sandbox-run` 叠加 |
 | macOS 沙箱 | `sandbox-run`（封装原生 sandbox 框架） | macOS 12+ | Seatbelt 框架，由 `sandbox-run` 生成 profile 并应用，无需手写 profile 字符串 |

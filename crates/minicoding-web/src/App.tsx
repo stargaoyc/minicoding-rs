@@ -188,6 +188,7 @@ function AppInner() {
         {activeSessionId ? (
           <>
             <MessageList
+              sessionId={activeSessionId}
               messages={messages}
               streamingText={streamingText}
               streamingReasoning={streamingReasoning}
