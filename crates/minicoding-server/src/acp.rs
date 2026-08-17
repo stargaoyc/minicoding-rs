@@ -146,43 +146,61 @@ struct CancelParams {
 /// - **复用 wire types**：`EventDto` 直接序列化为 `session/update` 的 `params.update` 字段，
 ///   不重复定义。
 pub async fn serve_acp(mgr: Arc<SessionManager>) -> Result<(), AcpError> {
-    let stdin = tokio::io::stdin();
     let stdout: Box<dyn AsyncWrite + Send + Unpin> = Box::new(tokio::io::stdout());
     let stdout: SharedStdout = Arc::new(Mutex::new(stdout));
-    let mut reader = BufReader::new(stdin);
 
-    loop {
-        match read_message(&mut reader).await {
-            Ok(payload) => {
-                if payload.is_empty() {
-                    continue;
-                }
-                // 解析为通用 JSON-RPC 消息（Request 或 Notification）
-                let msg: serde_json::Value = match serde_json::from_slice(&payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        write_parse_error(&stdout, e).await?;
+    // 读 stdin 的 task 与消息消费循环分离：`prompt` 在 turn 期间阻塞，但仍须
+    // 消费后续 `resolvePermission` 请求与 `cancel` 通知，否则权限交互死锁
+    // （turn 等待决策而决策消息躺在 stdin 缓冲区无人读）。
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(16);
+    let reader_stdout = stdout.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(tokio::io::stdin());
+        loop {
+            match read_message(&mut reader).await {
+                Ok(payload) => {
+                    if payload.is_empty() {
                         continue;
                     }
-                };
-                if let Err(e) = dispatch_message(mgr.clone(), &stdout, &msg).await {
-                    if matches!(e, AcpError::Shutdown) {
-                        tracing::info!("ACP client requested shutdown, exiting main loop");
-                        return Ok(());
+                    // 解析为通用 JSON-RPC 消息（Request 或 Notification）
+                    let msg: serde_json::Value = match serde_json::from_slice(&payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            write_parse_error(&reader_stdout, e).await?;
+                            continue;
+                        }
+                    };
+                    if msg_tx.send(msg).await.is_err() {
+                        // 消费端已退出（stdout EOF 等），终止 reader
+                        break;
                     }
-                    tracing::warn!(error = %e, "ACP dispatch failed");
+                }
+                Err(AcpError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    tracing::info!("ACP stdin EOF, exiting");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ACP read_message failed");
+                    break;
                 }
             }
-            Err(AcpError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                tracing::info!("ACP stdin EOF, exiting");
+        }
+        Ok::<(), AcpError>(())
+    });
+
+    while let Some(msg) = msg_rx.recv().await {
+        if let Err(e) = dispatch_message(mgr.clone(), &stdout, &mut msg_rx, &msg).await {
+            if matches!(e, AcpError::Shutdown) {
+                tracing::info!("ACP client requested shutdown, exiting main loop");
                 return Ok(());
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "ACP read_message failed");
-                return Err(e);
-            }
+            tracing::warn!(error = %e, "ACP dispatch failed");
         }
     }
+
+    // stdin EOF：reader task 应已结束；join 回收（不传播错误，进程将退出）
+    let _ = reader_task.await;
+    Ok(())
 }
 
 /// 读一条 ACP 消息（Content-Length 帧）。
@@ -285,6 +303,7 @@ async fn write_ok_response(
 async fn dispatch_message(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
     msg: &serde_json::Value,
 ) -> Result<(), AcpError> {
     // 区分 Request（有 id）与 Notification（无 id）
@@ -300,7 +319,7 @@ async fn dispatch_message(
 
     if has_id {
         let id = parse_id(msg.get("id"))?;
-        if let Err(e) = dispatch_request(mgr.clone(), stdout, method, id, params).await {
+        if let Err(e) = dispatch_request(mgr.clone(), stdout, msg_rx, method, id, params).await {
             // Shutdown 是控制流信号，向上传递
             if matches!(e, AcpError::Shutdown) {
                 return Err(e);
@@ -333,6 +352,7 @@ fn parse_id(id: Option<&serde_json::Value>) -> Result<Id, AcpError> {
 async fn dispatch_request(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
     method: &str,
     id: Id,
     params: serde_json::Value,
@@ -341,7 +361,7 @@ async fn dispatch_request(
         "initialize" => handle_initialize(stdout, id).await,
         "newConversation" => handle_new_conversation(mgr, stdout, id, params).await,
         "loadConversation" => handle_load_conversation(mgr, stdout, id, params).await,
-        "prompt" => handle_prompt(mgr, stdout, id, params).await,
+        "prompt" => handle_prompt(mgr, stdout, msg_rx, id, params).await,
         "shutdown" => {
             write_ok_response(stdout, id, serde_json::json!({})).await?;
             Err(AcpError::Shutdown)
@@ -484,6 +504,7 @@ async fn handle_load_conversation(
 async fn handle_prompt(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
+    msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
     id: Id,
     params: serde_json::Value,
 ) -> Result<(), AcpError> {
@@ -556,6 +577,73 @@ async fn handle_prompt(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            next_msg = msg_rx.recv() => {
+                if let Some(m) = next_msg {
+                    handle_turn_message(mgr.clone(), stdout, m).await?;
+                } else {
+                    // stdin EOF：客户端断连，取消当前 turn 并结束
+                    tracing::info!(conversation_id = %conv_id, "ACP stdin EOF during turn");
+                    let _ = mgr.cancel(&conv_id).await;
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// turn 期间收到的消息处理：`resolvePermission` 请求应答权限、`cancel` 通知
+/// 中断 turn、其余请求回 `method_not_found`（turn 进行中不可用）。
+async fn handle_turn_message(
+    mgr: Arc<SessionManager>,
+    stdout: &SharedStdout,
+    m: serde_json::Value,
+) -> Result<(), AcpError> {
+    let method = m.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    match method {
+        "resolvePermission" => {
+            // turn 期间应答权限（否则 turn 等待决策而死锁）
+            if m.get("id").is_some() {
+                let rid = parse_id(m.get("id"))?;
+                let params = m.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                if let Err(e) = handle_resolve_permission(mgr.clone(), stdout, rid, params).await {
+                    // handle_resolve_permission 已写 error response，继续循环
+                    tracing::warn!(error = %e, "ACP resolvePermission failed");
+                }
+            }
+        }
+        "cancel" => {
+            let p: CancelParams =
+                serde_json::from_value(m.get("params").cloned().unwrap_or(serde_json::Value::Null))
+                    .unwrap_or(CancelParams {
+                        conversation_id: String::new(),
+                    });
+            if let Err(e) = mgr.cancel(&p.conversation_id).await {
+                tracing::warn!(
+                    conversation_id = %p.conversation_id,
+                    error = %e,
+                    "ACP cancel failed"
+                );
+            }
+        }
+        other => {
+            // turn 进行中不支持的命令：Request 回错误，Notification 忽略
+            if m.get("id").is_some() {
+                let rid = parse_id(m.get("id"))?;
+                write_error_response(
+                    stdout,
+                    rid,
+                    RpcError::method_not_found(format!(
+                        "turn in progress, method not supported: {other}"
+                    )),
+                )
+                .await?;
+            } else {
+                tracing::debug!(
+                    method = %other,
+                    "ignoring ACP notification during turn"
+                );
+            }
         }
     }
     Ok(())
@@ -627,6 +715,13 @@ mod tests {
                 writable: Vec::new(),
             },
         }
+    }
+
+    /// 测试 helper：新建空 channel 传给 `dispatch_message`（无 turn 阻塞的测试用）。
+    fn empty_msg_rx() -> tokio::sync::mpsc::Receiver<serde_json::Value> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        std::mem::drop(tx);
+        rx
     }
 
     /// 用 `tokio::io::duplex` 捕获 stdout 写入的字节。
@@ -709,7 +804,9 @@ mod tests {
             "method": "totally/unknown",
             "params": {},
         });
-        dispatch_message(mgr, &stdout, &msg).await.unwrap();
+        dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg)
+            .await
+            .unwrap();
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
         let raw = String::from_utf8_lossy(&captured);
@@ -725,7 +822,7 @@ mod tests {
             "method": "cancel",
             "params": {"conversation_id": "nonexistent"},
         });
-        let result = dispatch_message(mgr, &stdout, &msg).await;
+        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
         assert!(result.is_ok());
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
@@ -742,7 +839,7 @@ mod tests {
             "id": 1,
             "method": "shutdown",
         });
-        let result = dispatch_message(mgr, &stdout, &msg).await;
+        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
         assert!(matches!(result, Err(AcpError::Shutdown)));
     }
 

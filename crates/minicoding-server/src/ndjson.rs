@@ -86,36 +86,48 @@ type SharedStdout = Arc<Mutex<tokio::io::BufWriter<Box<dyn AsyncWrite + Send + U
 /// - **多会话**：`SessionManager` 支持多会话，但 NDJSON 客户端通常单会话；
 /// - **事件 seq**：`SendUserMessage` 期间事件 seq 单调递增；其它命令响应 `seq=0`。
 pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
-    let stdin = tokio::io::stdin();
     let stdout: Box<dyn AsyncWrite + Send + Unpin> = Box::new(tokio::io::stdout());
-    let reader = BufReader::new(stdin);
     let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::BufWriter::new(stdout)));
 
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        // 空行跳过（编辑器可能发送心跳/空行）
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // 解析 Command
-        let cmd: Command = match serde_json::from_str(&line) {
-            Ok(c) => c,
-            Err(e) => {
-                write_event(
-                    &stdout,
-                    0,
-                    &EventKind::CommandError {
-                        message: format!("invalid command JSON: {e}"),
-                    },
-                )
-                .await?;
+    // 读 stdin 的 task 与命令消费循环分离：`SendUserMessage` 在 turn 期间阻塞，
+    // 但仍须消费后续 `ResolvePermission`/`Cancel` 命令，否则权限交互死锁
+    // （turn 等待决策而决策命令躺在 stdin 缓冲区无人读）。
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(16);
+    let reader_stdout = stdout.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Some(line) = lines.next_line().await? {
+            // 空行跳过（编辑器可能发送心跳/空行）
+            if line.trim().is_empty() {
                 continue;
             }
-        };
 
-        // 分派命令
-        if let Err(e) = dispatch_command(mgr.clone(), &stdout, cmd).await {
+            // 解析 Command
+            let cmd: Command = match serde_json::from_str(&line) {
+                Ok(c) => c,
+                Err(e) => {
+                    write_event(
+                        &reader_stdout,
+                        0,
+                        &EventKind::CommandError {
+                            message: format!("invalid command JSON: {e}"),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            if cmd_tx.send(cmd).await.is_err() {
+                // 消费端已退出（stdout EOF 等），终止 reader
+                break;
+            }
+        }
+        Ok::<(), NdjsonError>(())
+    });
+
+    // 消费循环：`SendUserMessage` 阻塞于 turn，其余命令顺序处理
+    while let Some(cmd) = cmd_rx.recv().await {
+        if let Err(e) = dispatch_command(mgr.clone(), &stdout, &mut cmd_rx, cmd).await {
             tracing::warn!(error = %e, "NDJSON command dispatch failed");
             write_event(
                 &stdout,
@@ -128,6 +140,8 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
         }
     }
 
+    // stdin EOF：reader task 应已结束；join 回收（不传播错误，进程将退出）
+    let _ = reader_task.await;
     Ok(())
 }
 
@@ -145,10 +159,81 @@ async fn write_event(stdout: &SharedStdout, seq: u64, kind: &EventKind) -> Resul
     Ok(())
 }
 
-/// 分派 `Command` 到对应的 handler。
+/// 命令名（用于 turn 进行中拒绝命令时的错误提示）。
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::CreateSession { .. } => "create_session",
+        Command::SendUserMessage { .. } => "send_user_message",
+        Command::Cancel { .. } => "cancel",
+        Command::Undo { .. } => "undo",
+        Command::ListSessions => "list_sessions",
+        Command::GetSession { .. } => "get_session",
+        Command::SetPermissionMode { .. } => "set_permission_mode",
+        Command::ResolvePermission { .. } => "resolve_permission",
+    }
+}
+
+/// turn 期间收到的命令处理：`ResolvePermission` 唤醒权限等待、`Cancel` 中断
+/// turn、其余命令报错（turn 进行中不可用）。
+async fn handle_turn_command(
+    mgr: Arc<SessionManager>,
+    stdout: &SharedStdout,
+    cmd: Command,
+) -> Result<(), NdjsonError> {
+    match cmd {
+        Command::ResolvePermission { id, decision } => {
+            // NDJSON 通常单会话，遍历所有会话查找 pending permission
+            let mut resolved = false;
+            for meta in mgr.list_sessions() {
+                if mgr
+                    .resolve_permission(&meta.id, &id, decision.clone())
+                    .await
+                    .is_ok()
+                {
+                    resolved = true;
+                    break;
+                }
+            }
+            if !resolved {
+                write_event(
+                    stdout,
+                    0,
+                    &EventKind::CommandError {
+                        message: format!("permission {id} not found in any session"),
+                    },
+                )
+                .await?;
+            }
+        }
+        Command::Cancel { session_id: sid } => {
+            // Cancel 可能针对任意会话（主循环语义），turn 期间同样放行
+            if let Err(e) = mgr.cancel(&sid).await {
+                tracing::warn!(session_id = %sid, error = %e, "NDJSON cancel failed");
+            }
+        }
+        other => {
+            write_event(
+                stdout,
+                0,
+                &EventKind::CommandError {
+                    message: format!(
+                        "turn in progress, command not accepted: {}",
+                        command_name(&other)
+                    ),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// 分派 `Command` 到对应的 handler。`SendUserMessage` 需要 `cmd_rx`：turn 期间
+/// 继续消费命令（`ResolvePermission`/`Cancel`），避免权限交互死锁。
 async fn dispatch_command(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
     cmd: Command,
 ) -> Result<(), NdjsonError> {
     match cmd {
@@ -171,7 +256,7 @@ async fn dispatch_command(
             session_id,
             text,
             attachments: _,
-        } => handle_send_user_message(mgr, stdout, session_id, text).await,
+        } => handle_send_user_message(mgr, stdout, cmd_rx, session_id, text).await,
         Command::Cancel { session_id } => {
             mgr.cancel(&session_id).await?;
             // Runtime 会自动发 TurnEnd 事件（stop_reason=interrupted），
@@ -256,6 +341,7 @@ async fn dispatch_command(
 async fn handle_send_user_message(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
     session_id: String,
     text: String,
 ) -> Result<(), NdjsonError> {
@@ -276,7 +362,9 @@ async fn handle_send_user_message(
         SessionManager::send_message_boxed(mgr_clone, sid_clone, text_clone).await
     });
 
-    // 转发事件，直到 turn_task 完成
+    // 转发事件，直到 turn_task 完成；turn 期间继续消费 stdin 命令
+    // （`ResolvePermission` 唤醒权限等待、`Cancel` 中断 turn），
+    // 否则客户端无法在 turn 进行中应答权限（死锁）。
     let mut seq: u64 = 0;
     loop {
         tokio::select! {
@@ -309,6 +397,16 @@ async fn handle_send_user_message(
                     }
                 }
                 break;
+            }
+            next_cmd = cmd_rx.recv() => {
+                if let Some(cmd) = next_cmd {
+                    handle_turn_command(mgr.clone(), stdout, cmd).await?;
+                } else {
+                    // stdin EOF：客户端断连，取消当前 turn 并结束
+                    tracing::info!(session_id = %session_id, "NDJSON stdin EOF during turn");
+                    let _ = mgr.cancel(&session_id).await;
+                    break;
+                }
             }
             event_result = rx.recv() => {
                 match event_result {
@@ -420,6 +518,16 @@ mod tests {
         assert_eq!(params.system.as_deref(), Some("custom system prompt"));
     }
 
+    /// 测试 helper：新建空 channel 并调用 `dispatch_command`。
+    async fn dispatch_with(
+        mgr: &Arc<SessionManager>,
+        stdout: &SharedStdout,
+        cmd: Command,
+    ) -> Result<(), NdjsonError> {
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Command>(16);
+        dispatch_command(mgr.clone(), stdout, &mut rx, cmd).await
+    }
+
     #[tokio::test]
     async fn dispatch_list_sessions_emits_sessions_listed() {
         let mgr = Arc::new(SessionManager::new(test_params(), Duration::from_secs(5)));
@@ -428,7 +536,7 @@ mod tests {
             tokio::io::sink(),
         ))));
 
-        let result = dispatch_command(mgr, &stdout, Command::ListSessions).await;
+        let result = dispatch_with(&mgr, &stdout, Command::ListSessions).await;
         assert!(result.is_ok());
     }
 
@@ -439,8 +547,8 @@ mod tests {
             tokio::io::sink(),
         ))));
 
-        let result = dispatch_command(
-            mgr,
+        let result = dispatch_with(
+            &mgr,
             &stdout,
             Command::GetSession {
                 session_id: "nonexistent".to_string(),
@@ -461,8 +569,8 @@ mod tests {
             tokio::io::sink(),
         ))));
 
-        let result = dispatch_command(
-            mgr,
+        let result = dispatch_with(
+            &mgr,
             &stdout,
             Command::Cancel {
                 session_id: "nonexistent".to_string(),
@@ -480,8 +588,8 @@ mod tests {
         ))));
 
         // Undo 应返回 Ok（已发 CommandError 事件），不返回 Err
-        let result = dispatch_command(
-            mgr,
+        let result = dispatch_with(
+            &mgr,
             &stdout,
             Command::Undo {
                 session_id: "test".to_string(),
@@ -500,8 +608,8 @@ mod tests {
             tokio::io::sink(),
         ))));
 
-        let result = dispatch_command(
-            mgr,
+        let result = dispatch_with(
+            &mgr,
             &stdout,
             Command::ResolvePermission {
                 id: "nonexistent".to_string(),

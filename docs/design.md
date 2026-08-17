@@ -2671,6 +2671,10 @@ SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼
 
 **ACP stdio 适配器**：`minicoding serve --acp` 启动 ACP（Agent Client Protocol）stdio 模式，可被 Zed 等编辑器嵌入。ACP 是 stdio 上的 JSON-RPC，与 HTTP server 共享 protocol crate 的 wire types，仅传输层不同（stdio 替代 HTTP/SSE）。这使 minicoding 既能作为独立服务（HTTP），又能作为嵌入式 Agent（ACP）。
 
+**NDJSON stdio 适配器**：`minicoding serve --ndjson` 启动 NDJSON 模式（编辑器插件驱动）：stdin 每行一个 `Command` JSON，stdout 每行一个 `EventDto` JSON（`seq` 单调递增）。命令映射：`CreateSession`→`SessionCreated`、`SendUserMessage`→流式事件尾 `TurnEnd`、`Cancel`→`TurnEnd(interrupted)`、`ListSessions`/`GetSession`/`SetPermissionMode`/`ResolvePermission` 各对应响应事件（协议细节见 `minicoding-server/src/ndjson.rs` 模块注释）。
+
+**turn 期间继续消费输入（NDJSON/ACP 共用设计）**：`SendUserMessage`/`prompt` 的 turn 执行期间，适配器主循环阻塞于事件转发，但**必须继续读取 stdin**——否则客户端在 turn 进行中回传的 `ResolvePermission`/`resolvePermission`/`cancel` 会躺在 stdin 缓冲区无人消费，权限交互死锁（turn 等待决策、决策命令无人读）。实现：读 stdin 的 task 与命令消费循环分离（mpsc channel），事件转发 `select!` 增加命令接收分支；turn 期间收到其他命令回 `command_error`/`method_not_found`（NDJSON）或忽略（ACP 通知）。
+
 **LSP stdio 适配器**：`minicoding serve --lsp` 启动 LSP（Language Server Protocol）server 模式，可被任何支持 LSP 的编辑器（VS Code、Neovim、Emacs、Helix 等）嵌入。LSP 同样是 JSON-RPC 2.0 over stdio，与 ACP 共享 `minicoding-protocol` 的 wire types，但 LSP 拥有标准化的方法集（`textDocument/*`/`workspace/*`/`window/*`），需要把 minicoding 的对话/工具/权限能力映射到 LSP 标准方法。LSP 比 ACP 更通用（几乎所有现代编辑器原生支持），是 IDE 集成的主推路径。
 
 LSP 语义映射（minicoding 能力 → LSP 方法）：
