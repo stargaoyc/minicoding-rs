@@ -8,6 +8,8 @@ import { summarizeToolContent } from "../../lib/message";
 import type { ToolContent } from "../../api/generated";
 
 interface MessageListProps {
+  /** 当前会话 ID（用于"打开会话默认跳到底部"的一次性标记）。 */
+  sessionId: string;
   messages: Message[] | undefined;
   streamingText: string;
   streamingReasoning: string;
@@ -17,6 +19,7 @@ interface MessageListProps {
 }
 
 export function MessageList({
+  sessionId,
   messages,
   streamingText,
   streamingReasoning,
@@ -25,6 +28,8 @@ export function MessageList({
   activeTools,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  // 记录已做过"打开即跳底"的会话：切换会话/重新挂载时重置并再次跳底
+  const scrolledSessionRef = useRef<string | null>(null);
 
   // 自动滚动到底部；仅当用户本来就接近底部（<120px）时跟随，
   // 否则会强制把阅读历史中的用户拉到底部（也是"抖动"的一种来源）。
@@ -47,10 +52,17 @@ export function MessageList({
   // 最后一条是 user 消息 = 用户刚发送（乐观更新已插入），强制跳转到底部
   // （用户反馈"新输入对话后页面不跳转到最下面"）。
   useEffect(() => {
-    const last = messages?.[messages.length - 1];
+    if (!messages?.length) return;
+    if (scrolledSessionRef.current !== sessionId) {
+      // 打开会话：默认跳到最新消息（用户反馈"打开对话停在开头"），无动画直跳
+      scrolledSessionRef.current = sessionId;
+      scrollToBottom(false, true);
+      return;
+    }
+    const last = messages[messages.length - 1];
     const force = last?.role === "user";
     scrollToBottom(true, force);
-  }, [messages, activeTools, scrollToBottom]);
+  }, [messages, activeTools, sessionId, scrollToBottom]);
 
   // 流式 token 增量时**瞬时**滚动（无动画）——每 token 触发 smooth 滚动
   // 会导致滚动动画持续被打断重启，视觉上"一抖一抖"（用户反馈）
