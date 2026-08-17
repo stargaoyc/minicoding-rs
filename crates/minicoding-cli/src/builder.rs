@@ -227,9 +227,25 @@ pub fn build_runtime(
         .map_or_else(|| main_provider_view.clone(), |p| p);
 
     // 4. 解析 workdir（提前到 context manager 之前，供 ProjectDocLoader 使用）
-    let workdir_path = Utf8PathBuf::from(workdir)
-        .canonicalize_utf8()
-        .unwrap_or_else(|_| Utf8PathBuf::from(workdir));
+    //    canonicalize 失败时（目录不存在或相对路径无法规范化）回退到
+    //    `current_dir().join(workdir)`——不能保留原始相对值：后续权限层
+    //    `resolve_under` 依赖绝对路径做越界判定，相对路径会与进程 cwd 隐式
+    //    绑定，导致"工作目录内的写入被判越界"（见 CLI 单次验证发现）。
+    let workdir_path = match Utf8PathBuf::from(workdir).canonicalize_utf8() {
+        Ok(p) => p,
+        Err(_) => std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                // 目录可能尚不存在（如 `--workdir new-dir` 首次运行）：退化为绝对路径拼接
+                let joined = cwd.join(workdir);
+                if joined.is_absolute() {
+                    Utf8PathBuf::from_path_buf(joined).ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| Utf8PathBuf::from(workdir)),
+    };
 
     // 4b. 加载项目文档（AGENTS.md 分层加载，T-M3-7）
     //     从 repo_root 到 cwd 逐级加载，注入 system 段包裹 <project_doc> 边界（C-05）。

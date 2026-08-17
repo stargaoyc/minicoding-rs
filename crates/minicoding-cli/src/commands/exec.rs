@@ -14,6 +14,8 @@ use minicoding_core::model::{TurnOutcome, UserInput};
 use minicoding_core::runtime::Event;
 
 use crate::builder::SessionLoadMode;
+use minicoding_policy::AutoApprovePrompter;
+use std::sync::Arc;
 
 /// 沙箱策略字符串（CLI 解析用）。
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -112,7 +114,10 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
         &SessionLoadMode::None,
         Some(sandbox_policy),
         false, // exec 子命令不支持 --plan（非交互场景 Plan 模式无意义）
-        None,
+        // exec 显式声明"批量执行"：非 TTY 下不再恒 Deny（否则 exec 形同虚设），
+        // 改由 AutoApprovePrompter 自动放行；越界/黑名单仍被 BuiltinPolicy + 沙箱
+        // 策略拦截（C-03/C-02），每次决策仍落 audit.log（C-01 实现层不被绕过）。
+        Some(Arc::new(AutoApprovePrompter::new())),
     )
     .context("构建 Runtime 失败")?;
 

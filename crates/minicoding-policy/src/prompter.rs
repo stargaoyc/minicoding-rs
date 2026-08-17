@@ -1,6 +1,7 @@
 //! 权限交互器实现（`PermissionPrompter`）。
 //!
 //! - [`NonInteractivePrompter`]：始终 `Deny`，CI/脚本的安全默认；
+//! - [`AutoApprovePrompter`]：始终 `Allow`，`exec` 批量执行模式（显式意图 + 审计记录）；
 //! - [`InteractivePrompter`]：stderr 打印风险摘要后从 stdin 读 `y/n` 确认；
 //! - [`CallbackPrompter`]：闭包注入，供 M8 SDK 嵌入使用（T-M4-11）。
 //!
@@ -31,6 +32,33 @@ impl Default for NonInteractivePrompter {
 impl PermissionPrompter for NonInteractivePrompter {
     fn prompt(&self, _req: PermissionPrompt) -> BoxFuture<'_, Decision> {
         Box::pin(async move { Decision::Deny("non-interactive mode".to_string()) })
+    }
+}
+
+/// 批量执行交互器：始终允许。
+///
+/// 供 `minicoding exec` 使用——用户显式声明"非交互批量执行"，策略层
+/// （`BuiltinPolicy` + 沙箱策略）仍校验越界/黑名单（C-03），每次决策仍由
+/// Runtime 落 `audit.log`（C-01 在实现层不被绕过）。
+pub struct AutoApprovePrompter;
+
+impl AutoApprovePrompter {
+    /// 创建批量执行交互器。
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AutoApprovePrompter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PermissionPrompter for AutoApprovePrompter {
+    fn prompt(&self, _req: PermissionPrompt) -> BoxFuture<'_, Decision> {
+        Box::pin(async move { Decision::Allow })
     }
 }
 

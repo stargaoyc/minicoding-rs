@@ -27,7 +27,9 @@ mod tui;
 pub use builtin::BuiltinPolicy;
 pub use mode::{ApprovalMode, Preset};
 pub use path_sandbox::{PathSandboxError, resolve_under};
-pub use prompter::{CallbackPrompter, InteractivePrompter, NonInteractivePrompter};
+pub use prompter::{
+    AutoApprovePrompter, CallbackPrompter, InteractivePrompter, NonInteractivePrompter,
+};
 pub use redact::redact;
 pub use replay::ReplayPolicy;
 pub use ssrf::{SsrfError, SsrfOptions, check_host, check_ip, check_url};
