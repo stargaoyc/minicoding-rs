@@ -44,6 +44,30 @@ impl SessionLock {
         Ok(Self { file, path })
     }
 
+    /// 对 `{session_id}.lock` 加排他锁（**阻塞式**）。
+    ///
+    /// 与 [`Self::acquire`] 的区别：锁被其他进程持有时**阻塞等待**直到获得
+    /// 而非立即失败。用于 `append` 热路径（M-01，修 S1-2）——同会话并发追加
+    /// 时后者等待前者完成，避免两次 `write_all` 之间交错把两条消息并成一行
+    /// 不可解析的 JSON。`--resume` 的单点检测仍走 [`Self::acquire`]（非阻塞，
+    /// 检测到占用即报 `StorageError::Locked`）。
+    ///
+    /// fs2 的 `lock_exclusive` 是同步阻塞 API，调用方应在
+    /// `tokio::task::spawn_blocking` 中执行，避免阻塞 async reactor。
+    ///
+    /// # Errors
+    /// - `StorageError::Io`：文件创建或加锁时 IO 错误。
+    pub fn acquire_blocking(path: impl Into<Utf8PathBuf>) -> Result<Self, StorageError> {
+        let path = path.into();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path.as_std_path())?;
+        file.lock_exclusive()?;
+        Ok(Self { file, path })
+    }
+
     /// 显式释放锁（等价于 drop，便于语义明确处调用）。
     ///
     /// 实际解锁由 `Drop` 完成以避免 fd 泄漏——`fs2::unlock` 在 fd 关闭前调用即可，

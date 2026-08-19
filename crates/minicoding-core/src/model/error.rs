@@ -139,6 +139,9 @@ pub enum StorageError {
     /// 会话被跨进程文件锁占用（见 `rules.md` C-22、`SessionLock::acquire`）。
     #[error("session locked: {0}")]
     Locked(String),
+    /// 会话文件由更新版本写入，当前版本不支持（M-02，对齐 dsh 格式版本拒绝）。
+    #[error("session format unsupported: {0}")]
+    FormatUnsupported(String),
 }
 
 /// 权限决策错误。

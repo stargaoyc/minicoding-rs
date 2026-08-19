@@ -4,9 +4,20 @@
 //! - `list_sessions` 优先走索引缓存，索引不存在时回退扫描并落盘；
 //! - `append` / `delete` 同步更新索引（best effort，不阻塞主路径）；
 //! - `export` 按 `ExportFormat` 导出会话为 Markdown / JSONL。
+//!
+//! 写入安全（M-01，修 S1-2）：`append` 在 `{session_id}.lock` 阻塞式排他锁内
+//! 完成「单次 `write_all`（消息行 + 换行）+ `fsync` + 索引更新」，消除两次
+//! syscall 之间的交错窗口——两个进程并发追加同一会话时后者等待前者，不会把
+//! 两条消息并成一行不可解析的 JSON。
+//!
+//! 格式版本（M-02，修 S2-1）：新会话首行写 `{"_header":{...}}` 头；`load` 校验
+//! `format_version`，更新版本写入的文件显式报 `StorageError::FormatUnsupported`
+//!（防静默丢事件）。旧文件（无 header）按 v1 处理。`load` 跳过坏行（部分损坏
+//! 可恢复），仅全坏时返回 `Corrupted`（与 `scan` 行为一致）。
 
 use crate::export::{ExportFormat, export_session_jsonl, export_session_md};
 use crate::index::{SessionIndex, SessionIndexEntry};
+use crate::lock::SessionLock;
 use camino::Utf8PathBuf;
 use minicoding_core::model::{Message, Role, SessionId};
 use minicoding_core::otel::span_name;
@@ -16,10 +27,16 @@ use std::sync::Mutex;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 
+/// 消息流格式版本（M-02）。旧文件（无 header）视为 v1。
+const MESSAGE_FORMAT_VERSION: u32 = 1;
+
+/// 消息流 header 行的 JSON 前缀（用于 load/scan 跳过 header 行）。
+const HEADER_PREFIX: &str = "{\"_header\"";
+
 /// `JSONL` 会话存储。
 ///
-/// 文件布局：`{base_dir}/{session_id}.jsonl`，每行一条 `Message`（JSON）。追加写，
-/// 每条消息后 `fsync` 保证崩溃安全。空会话不产生文件（首条消息时才创建）。
+/// 文件布局：`{base_dir}/{session_id}.jsonl`，首行可选 `{"_header":...}`（M-02），
+/// 每行一条 `Message`（JSON）。追加写，每条消息后 `fsync` 保证崩溃安全。
 /// 会话索引 `{base_dir}/index.json` 缓存元数据，`list_sessions` 优先读索引。
 pub struct JsonlStorage {
     base_dir: Utf8PathBuf,
@@ -55,7 +72,8 @@ impl JsonlStorage {
     ///
     /// # Errors
     /// - `StorageError::Io`：读取失败（除 `NotFound`）；
-    /// - `StorageError::Corrupted`：消息行 JSON 解析失败。
+    /// - `StorageError::Corrupted`：消息行全部损坏（M-02：部分损坏跳过坏行）；
+    /// - `StorageError::FormatUnsupported`：文件由更新版本写入（M-02）。
     #[tracing::instrument(skip(self), fields(otel.name = "storage.load"))]
     pub fn load_messages_sync(&self, session: &SessionId) -> Result<Vec<Message>, StorageError> {
         let path = self.session_path(session);
@@ -64,17 +82,7 @@ impl JsonlStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
-        let mut messages = Vec::new();
-        for (idx, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let msg: Message = serde_json::from_str(line)
-                .map_err(|e| StorageError::Corrupted(format!("line {}: {e}", idx + 1)))?;
-            messages.push(msg);
-        }
-        Ok(messages)
+        parse_session_lines(&content)
     }
 
     /// 同步列出会话元数据（`session list` 子命令用，T-M3-10c）。
@@ -127,7 +135,14 @@ impl JsonlStorage {
                     continue;
                 }
             };
-            let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+            let (lines, unsupported) = extract_message_lines(&content);
+            if unsupported {
+                tracing::warn!(
+                    "skip session file {}: format_version too new",
+                    path.display()
+                );
+                continue;
+            }
             if lines.is_empty() {
                 continue;
             }
@@ -205,6 +220,14 @@ impl JsonlStorage {
                 .append(true)
                 .create(true)
                 .open(path.as_std_path())?;
+            if file.metadata()?.len() == 0 {
+                // 新文件写格式头（M-02），与 append 路径一致
+                let header = format!(
+                    "{{\"_header\":{{\"format_version\":{MESSAGE_FORMAT_VERSION},\"app\":\"minicoding\",\"app_version\":\"{}\"}}}}\n",
+                    env!("CARGO_PKG_VERSION")
+                );
+                file.write_all(header.as_bytes())?;
+            }
             for msg in messages {
                 let line = serde_json::to_string(msg)
                     .map_err(|e| StorageError::Serialize(e.to_string()))?;
@@ -373,7 +396,14 @@ impl JsonlStorage {
                     continue;
                 }
             };
-            let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+            let (lines, unsupported) = extract_message_lines(&content);
+            if unsupported {
+                tracing::warn!(
+                    "skip session file {}: format_version too new",
+                    path.display()
+                );
+                continue;
+            }
             if lines.is_empty() {
                 continue;
             }
@@ -421,6 +451,94 @@ fn find_first_user_summary(lines: &[&str]) -> Option<String> {
     None
 }
 
+/// 会话文件头（M-02）。JSON 布局 `{"_header":{"format_version":1,...}}`，
+/// 由 `append` 在创建空会话文件时写入；旧文件无此头，按 v1 处理。
+#[derive(serde::Deserialize)]
+struct HeaderLine {
+    #[serde(rename = "_header")]
+    header: Header,
+}
+
+#[derive(serde::Deserialize)]
+struct Header {
+    format_version: u32,
+}
+
+/// 判断一行是否为会话文件头（以 `{"_header"` 前缀判定，避免全量解析开销）。
+fn is_header_line(line: &str) -> bool {
+    line.starts_with(HEADER_PREFIX)
+}
+
+/// 提取消息行并校验 header 版本（M-02，scan 路径共用）。
+///
+/// 返回 `(消息行列表, 版本过高)`：header 行被跳过；header 的 `format_version`
+/// 大于当前支持版本时置 `true`，调用方应跳过整个会话（与 `load` 的
+/// `FormatUnsupported` 拒绝行为一致，防止把新版文件当旧数据索引）。
+fn extract_message_lines(content: &str) -> (Vec<&str>, bool) {
+    let mut lines = Vec::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if is_header_line(line) {
+            if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
+                && header.header.format_version > MESSAGE_FORMAT_VERSION
+            {
+                return (lines, true);
+            }
+            continue;
+        }
+        lines.push(line);
+    }
+    (lines, false)
+}
+
+/// 解析会话文件内容（M-02）：跳过 header 行与坏行，校验格式版本。
+///
+/// 容错规则（S2-1）：单行 JSON 解析失败仅跳过并记 warn，不使整个会话不可读；
+/// 全部消息行均损坏时返回 `StorageError::Corrupted`（与 scan 跳过该会话的行为
+/// 呼应，load 需显式报错而非静默返回空列表，避免 `--resume` 悄悄丢失数据）。
+/// header 的 `format_version` 大于当前支持版本时返回
+/// `StorageError::FormatUnsupported`（防静默丢事件，S2-1）。
+fn parse_session_lines(content: &str) -> Result<Vec<Message>, StorageError> {
+    let mut messages = Vec::new();
+    let mut saw_bad = false;
+    let mut non_empty = 0usize;
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        non_empty += 1;
+        if is_header_line(line) {
+            if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
+                && header.header.format_version > MESSAGE_FORMAT_VERSION
+            {
+                return Err(StorageError::FormatUnsupported(format!(
+                    "line {}: format_version {} > supported {MESSAGE_FORMAT_VERSION}",
+                    idx + 1,
+                    header.header.format_version
+                )));
+            }
+            continue;
+        }
+        match serde_json::from_str::<Message>(line) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => {
+                saw_bad = true;
+                tracing::warn!("skip corrupted message line {}: {e}", idx + 1);
+            }
+        }
+    }
+    if messages.is_empty() && saw_bad {
+        return Err(StorageError::Corrupted(format!(
+            "all {non_empty} non-empty lines failed to parse"
+        )));
+    }
+    Ok(messages)
+}
+
 impl Storage for JsonlStorage {
     #[tracing::instrument(skip(self, session, msg), fields(otel.name = span_name::STORAGE_APPEND))]
     fn append(
@@ -429,22 +547,47 @@ impl Storage for JsonlStorage {
         msg: &Message,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
         let path = self.session_path(session);
+        let lock_path = self.base_dir.join(format!("{session}.lock"));
         let msg = msg.clone();
         let session_id = session.clone();
         Box::pin(async move {
             let line =
                 serde_json::to_string(&msg).map_err(|e| StorageError::Serialize(e.to_string()))?;
+
+            // 阻塞式排他锁（M-01）：同会话并发追加串行化，避免两次 write 交错。
+            // fs2 是同步 API，经 spawn_blocking 执行避免阻塞 async reactor。
+            // `_lock` 名称前缀非"未使用"：RAII guard 持有排他锁至作用域结束
+            // （unlock 由 Drop 完成），代码不直接引用它。
+            let _lock = tokio::task::spawn_blocking({
+                let lock_path = lock_path.clone();
+                move || SessionLock::acquire_blocking(lock_path)
+            })
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
+
             let mut file = tokio::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
                 .open(&path)
                 .await?;
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-            file.flush().await?;
+            // 首次创建（空文件）时先写格式头（M-02）。
+            if file.metadata().await?.len() == 0 {
+                let header = format!(
+                    "{{\"_header\":{{\"format_version\":{MESSAGE_FORMAT_VERSION},\"app\":\"minicoding\",\"app_version\":\"{}\"}}}}\n",
+                    env!("CARGO_PKG_VERSION")
+                );
+                file.write_all(header.as_bytes()).await?;
+            }
+            // 单次 write_all（消息行 + 换行）：原子追加，消除两 syscall 间交错窗口。
+            let mut buf = line.into_bytes();
+            buf.push(b'\n');
+            file.write_all(&buf).await?;
             file.sync_all().await?;
-            // 索引更新为 best effort：消息已安全落盘，索引失败不回滚主路径
+            drop(file);
+
+            // 索引更新在会话锁临界区内（M-01）：同会话并发 append 的索引一致。
             self.update_index_on_append(&session_id, &msg);
+            // `lock` 在此 drop → 释放排他锁
             Ok(())
         })
     }
@@ -459,17 +602,7 @@ impl Storage for JsonlStorage {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let mut messages = Vec::new();
-            for (idx, line) in content.lines().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let msg: Message = serde_json::from_str(line)
-                    .map_err(|e| StorageError::Corrupted(format!("line {}: {e}", idx + 1)))?;
-                messages.push(msg);
-            }
-            Ok(messages)
+            parse_session_lines(&content)
         })
     }
 
@@ -745,6 +878,133 @@ mod tests {
             .unwrap();
         let path = st.session_path(&id.to_string());
         assert!(path.as_std_path().exists(), "session file should exist");
+    }
+
+    #[tokio::test]
+    async fn append_writes_format_header_on_first_message() {
+        // M-02：新会话文件首行应为 `{"_header":...}` 格式头
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01HEADER";
+        st.append(&id.to_string(), &Message::user_text("hi"))
+            .await
+            .unwrap();
+        let path = st.session_path(&id.to_string());
+        let content = std::fs::read_to_string(path.as_std_path()).unwrap();
+        let first_line = content.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("{\"_header\""),
+            "first line should be header, got: {first_line}"
+        );
+        // header 不参与 load：只返回消息
+        let msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_skips_single_corrupted_line_keeps_rest() {
+        // M-02（S2-1）：单坏行跳过，其余消息完整返回（部分损坏可恢复）
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01BADLINE";
+        let path = st.session_path(&id.to_string());
+        let m1 = serde_json::to_string(&Message::user_text("first")).unwrap();
+        let m2 = serde_json::to_string(&Message::assistant_text("second")).unwrap();
+        let content = format!("{m1}\nnot valid json\n{m2}\n");
+        tokio::fs::write(path.as_std_path(), content).await.unwrap();
+        let msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(msgs.len(), 2, "bad line skipped, good lines kept");
+        assert_eq!(msgs[0].text(), "first");
+        assert_eq!(msgs[1].text(), "second");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_future_format_version() {
+        // M-02（S2-1）：更新版本写入的文件显式拒绝，防静默丢事件
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01FUTURE";
+        let path = st.session_path(&id.to_string());
+        let header = "{\"_header\":{\"format_version\":9999}}\n";
+        let m = serde_json::to_string(&Message::user_text("msg")).unwrap();
+        tokio::fs::write(path.as_std_path(), format!("{header}{m}\n"))
+            .await
+            .unwrap();
+        let result = st.load(&id.to_string()).await;
+        assert!(matches!(result, Err(StorageError::FormatUnsupported(_))));
+        // sync 路径行为一致
+        assert!(matches!(
+            st.load_messages_sync(&id.to_string()),
+            Err(StorageError::FormatUnsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn scan_skips_session_with_future_format_version() {
+        // M-02：scan 索引路径对版本过高的会话跳过而非当旧数据索引
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01SCANFUTURE";
+        let path = st.session_path(&id.to_string());
+        let header = "{\"_header\":{\"format_version\":9999}}\n";
+        let m = serde_json::to_string(&Message::user_text("msg")).unwrap();
+        tokio::fs::write(path.as_std_path(), format!("{header}{m}\n"))
+            .await
+            .unwrap();
+        // 直接 scan（无索引缓存路径）
+        let metas = st.list_sessions_sync().unwrap();
+        assert!(metas.is_empty(), "future-version session should be skipped");
+    }
+
+    #[tokio::test]
+    async fn append_parallel_same_session_no_interleaving() {
+        // M-01（S1-2）：并发 append 同一会话，行不交错——每行可解析且消息数正确。
+        // 进程内并发模拟跨进程竞争：阻塞排他锁保证同会话追加串行化。
+        let dir = tempdir().unwrap();
+        let st = std::sync::Arc::new(storage(&dir));
+        let id = "01CONCUR";
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let st = std::sync::Arc::clone(&st);
+            let id = id.to_string();
+            handles.push(tokio::spawn(async move {
+                st.append(&id, &Message::user_text(format!("msg-{i}")))
+                    .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        let msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(msgs.len(), 16, "all messages appended exactly once");
+        let texts: Vec<String> = msgs.iter().map(Message::text).collect();
+        for i in 0..16 {
+            assert!(texts.contains(&format!("msg-{i}")), "missing msg-{i}");
+        }
+    }
+
+    #[tokio::test]
+    async fn append_and_sync_load_agree_on_parallel_writes() {
+        // M-01 补充：并发 append 后 sync load 与 async load 一致（index 与文件一致）
+        let dir = tempdir().unwrap();
+        let st = std::sync::Arc::new(storage(&dir));
+        let id = "01CONCUR2";
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let st = std::sync::Arc::clone(&st);
+            let id = id.to_string();
+            handles.push(tokio::spawn(async move {
+                st.append(&id, &Message::assistant_text(format!("a-{i}")))
+                    .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        let sync_msgs = st.load_messages_sync(&id.to_string()).unwrap();
+        let async_msgs = st.load(&id.to_string()).await.unwrap();
+        assert_eq!(sync_msgs.len(), 8);
+        assert_eq!(async_msgs.len(), 8);
     }
 
     #[tokio::test]
