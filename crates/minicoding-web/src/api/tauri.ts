@@ -73,6 +73,22 @@ export function saveProviderConfig(provider: ProviderConfig): Promise<void> {
   return invoke<void>("save_provider_config", { provider });
 }
 
+/** 上下文配置（对应 Rust `ContextConfig` 子集，`[context]` 段）。 */
+export interface ContextConfig {
+  turn_timeout_sec: number;
+  compress: boolean;
+}
+
+/** 读取 `config.toml` 中的上下文配置（`[context]` 段，无配置文件时返回默认值）。 */
+export function getContextConfig(): Promise<ContextConfig> {
+  return invoke<ContextConfig>("get_context_config");
+}
+
+/** 保存上下文配置到 `config.toml`（原子写入，保留 provider/tools/hooks 等其他段）。 */
+export function saveContextConfig(context: ContextConfig): Promise<void> {
+  return invoke<void>("save_context_config", { context });
+}
+
 /** 写入 API key 到 OS keyring（与 CLI 共享 entry，C-04）。 */
 export function storeApiKey(apiKey: string): Promise<void> {
   return invoke<void>("store_api_key", { apiKey });

@@ -686,6 +686,11 @@ mod tests {
                 workdir: Utf8PathBuf::from("."),
                 writable: Vec::new(),
             },
+            timeout_sec: 120,
+            max_retries: 3,
+            small_model: None,
+            turn_timeout_sec: 600,
+            compress: true,
         }
     }
 

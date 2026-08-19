@@ -4,7 +4,14 @@ import { Settings, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "../ui/button";
 import { useDesktopStore, type ProviderInput } from "../../stores/desktop";
 import { useUIStore } from "../../stores/ui";
-import { getProviderConfig, loadApiKey, isTauri, restartApp } from "../../api/tauri";
+import {
+  getProviderConfig,
+  getContextConfig,
+  loadApiKey,
+  isTauri,
+  restartApp,
+} from "../../api/tauri";
+import { getServerConfig } from "../../api/client";
 import { loadWebSettings } from "../../stores/webSettings";
 import { cn } from "../../lib/utils";
 
@@ -15,8 +22,13 @@ import { cn } from "../../lib/utils";
  * 1. **首次启动**（`phase === 'needs-config'`）：desktop store 检测到缺少配置时自动弹出
  * 2. **手动修改**（`settingsOpen === true`）：用户点击顶栏"设置"按钮手动打开
  *
- * 收集 provider / api_base / model / api_key，提交后由 desktop store 保存
- * 配置（`config.toml` + OS keyring）。
+ * 设置项分三组（W-19，见 features.md）：
+ * - **模型**：provider / api_base / model / api_key（Tauri 模式）
+ * - **模型参数**：请求超时 / 最大重试 / 小 LLM（摘要压缩降本）
+ * - **上下文**：turn 超时 / 压缩开关
+ *
+ * 保存落点：Web 模式 → localStorage（新建会话经 `CreateSessionBody` 注入）；
+ * Tauri 模式 → `config.toml`（`[provider]` + `[context]` 段）+ OS keyring。
  *
  * 编辑模式下会加载当前配置作为初始值；首次启动用 PROVIDER_OPTIONS 默认值。
  *
@@ -45,7 +57,24 @@ const PROVIDER_OPTIONS: {
   },
 ];
 
+/** 模型/上下文参数默认值（与 `RuntimeConfig::default()` 对齐）。 */
+const PARAM_DEFAULTS = {
+  timeout_sec: 120,
+  max_retries: 3,
+  turn_timeout_sec: 600,
+  compress: true,
+};
+
 const DEFAULTS = PROVIDER_OPTIONS[0];
+
+/** 分组标题（表单分区，W-19）。 */
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+      {children}
+    </div>
+  );
+}
 
 export function SetupDialog() {
   const phase = useDesktopStore((s) => s.phase);
@@ -64,6 +93,12 @@ export function SetupDialog() {
   const [apiBase, setApiBase] = useState(DEFAULTS.api_base);
   const [model, setModel] = useState(DEFAULTS.model);
   const [apiKey, setApiKey] = useState("");
+  // 模型参数 / 上下文参数（W-19，见 features.md）
+  const [timeoutSec, setTimeoutSec] = useState(PARAM_DEFAULTS.timeout_sec);
+  const [maxRetries, setMaxRetries] = useState(PARAM_DEFAULTS.max_retries);
+  const [smallModel, setSmallModel] = useState("");
+  const [turnTimeoutSec, setTurnTimeoutSec] = useState(PARAM_DEFAULTS.turn_timeout_sec);
+  const [compress, setCompress] = useState(PARAM_DEFAULTS.compress);
 
   // 显示条件：首次启动（needs-config）或手动打开（settingsOpen）
   const visible = phase === "needs-config" || settingsOpen;
@@ -93,23 +128,45 @@ export function SetupDialog() {
   useEffect(() => {
     if (!settingsOpen) return;
 
-    // Web 模式：从 localStorage 加载
+    // Web 模式：localStorage 为主，参数缺失时用 server 默认兜底
     if (!isTauri()) {
       const settings = loadWebSettings();
       setProvider(settings.default || DEFAULTS.value);
       setApiBase(settings.api_base || DEFAULTS.api_base);
       setModel(settings.model || DEFAULTS.model);
       setApiKey(""); // Web 模式无 API key 字段
+      setTimeoutSec(settings.timeout_sec ?? PARAM_DEFAULTS.timeout_sec);
+      setMaxRetries(settings.max_retries ?? PARAM_DEFAULTS.max_retries);
+      setSmallModel(settings.small_model ?? "");
+      setTurnTimeoutSec(settings.turn_timeout_sec ?? PARAM_DEFAULTS.turn_timeout_sec);
+      setCompress(settings.compress ?? PARAM_DEFAULTS.compress);
+      // server 兜底：localStorage 缺失时读取 server 真实默认值
+      getServerConfig()
+        .then((cfg) => {
+          setTimeoutSec((prev) => (settings.timeout_sec ? prev : cfg.timeout_sec));
+          setMaxRetries((prev) => (settings.max_retries ? prev : cfg.max_retries));
+          setSmallModel((prev) => (prev || cfg.small_model) ?? "");
+          setTurnTimeoutSec((prev) => (settings.turn_timeout_sec ? prev : cfg.turn_timeout_sec));
+          setCompress((prev) => (settings.compress !== undefined ? prev : cfg.compress));
+        })
+        .catch(() => {
+          // server 不可达时保持 localStorage/默认值（设置面板仍可编辑）
+        });
       return;
     }
 
-    // Tauri 模式：从 config.toml + keyring 加载
+    // Tauri 模式：config.toml（provider + context）+ keyring 加载
     setLoading(true);
-    Promise.all([getProviderConfig(), loadApiKey()])
-      .then(([cfg, key]) => {
+    Promise.all([getProviderConfig(), getContextConfig(), loadApiKey()])
+      .then(([cfg, ctx, key]) => {
         setProvider(cfg.default || DEFAULTS.value);
         setApiBase(cfg.api_base || DEFAULTS.api_base);
         setModel(cfg.model || DEFAULTS.model);
+        setTimeoutSec(cfg.timeout_sec || PARAM_DEFAULTS.timeout_sec);
+        setMaxRetries(cfg.max_retries || PARAM_DEFAULTS.max_retries);
+        setSmallModel(cfg.small?.model ?? "");
+        setTurnTimeoutSec(ctx.turn_timeout_sec || PARAM_DEFAULTS.turn_timeout_sec);
+        setCompress(ctx.compress);
         setApiKey(key ?? "");
       })
       .catch((e) => {
@@ -150,6 +207,11 @@ export function SetupDialog() {
       api_base: apiBase.trim(),
       model: model.trim(),
       apiKey: webMode ? "" : apiKey.trim(),
+      timeout_sec: timeoutSec,
+      max_retries: maxRetries,
+      small_model: smallModel,
+      turn_timeout_sec: turnTimeoutSec,
+      compress: compress,
     };
     try {
       await saveConfig(input);
@@ -182,7 +244,7 @@ export function SetupDialog() {
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 10 }}
             transition={{ type: "spring", damping: 20, stiffness: 300 }}
-            className="glass w-full max-w-md rounded-2xl p-6 shadow-2xl"
+            className="glass w-full max-w-lg rounded-2xl p-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <form onSubmit={handleSubmit} className="space-y-4">
@@ -314,6 +376,83 @@ export function SetupDialog() {
                       />
                     </Field>
                   )}
+
+                  {/* 模型参数（W-19：请求超时 / 最大重试 / 小 LLM） */}
+                  <SectionTitle>模型参数</SectionTitle>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field
+                      label="请求超时（秒）"
+                      hint="LLM 请求超时上限（默认 120s，C-07）"
+                    >
+                      <input
+                        type="number"
+                        min={10}
+                        max={3600}
+                        value={timeoutSec}
+                        onChange={(e) => setTimeoutSec(Number(e.target.value))}
+                        disabled={saving}
+                        className={INPUT_CLASS}
+                      />
+                    </Field>
+                    <Field label="最大重试" hint="LLM 请求失败重试次数（默认 3，C-13）">
+                      <input
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={maxRetries}
+                        onChange={(e) => setMaxRetries(Number(e.target.value))}
+                        disabled={saving}
+                        className={INPUT_CLASS}
+                      />
+                    </Field>
+                  </div>
+                  <Field
+                    label="小 LLM 模型（可选）"
+                    hint="摘要/压缩降本（design.md §3.8）。留空表示不启用；Tauri 模式另需对应 API Base"
+                  >
+                    <input
+                      type="text"
+                      value={smallModel}
+                      onChange={(e) => setSmallModel(e.target.value)}
+                      disabled={saving}
+                      placeholder={webMode ? "gpt-4o-mini" : "不启用（留空）"}
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+
+                  {/* 上下文参数（W-19：turn 超时 / 压缩开关） */}
+                  <SectionTitle>上下文</SectionTitle>
+                  <div className="grid grid-cols-2 gap-3 items-start">
+                    <Field label="Turn 超时（秒）" hint="单轮任务超时（默认 600s）">
+                      <input
+                        type="number"
+                        min={30}
+                        max={7200}
+                        value={turnTimeoutSec}
+                        onChange={(e) => setTurnTimeoutSec(Number(e.target.value))}
+                        disabled={saving}
+                        className={INPUT_CLASS}
+                      />
+                    </Field>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-[var(--color-text-muted)]">
+                        上下文压缩
+                      </label>
+                      <label className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+                        <span className="text-sm">启用</span>
+                        <input
+                          type="checkbox"
+                          checked={compress}
+                          onChange={(e) => setCompress(e.target.checked)}
+                          disabled={saving}
+                          className="h-4 w-4 accent-[var(--color-accent)]"
+                        />
+                      </label>
+                      <p className="text-[10px] text-[var(--color-text-muted)]">
+                        超窗时自动压缩历史（C-18）
+                      </p>
+                    </div>
+                  </div>
 
                   {/* Error */}
                   {formError && (

@@ -59,6 +59,16 @@ pub struct ServerRuntimeParams {
     pub permission_mode: PermissionMode,
     /// 沙箱策略（`--preset` 解析结果，见 `minicoding_policy::Preset`）。
     pub sandbox_policy: SandboxPolicy,
+    /// LLM 请求超时（秒，默认 120）。
+    pub timeout_sec: u64,
+    /// LLM 请求最大重试（默认 3，C-13 bounded retries）。
+    pub max_retries: u32,
+    /// 小 LLM 模型名（`None` 不启用：摘要/压缩用主 provider，见 `design.md` §3.8）。
+    pub small_model: Option<String>,
+    /// 单 turn 超时（秒，默认 600）。
+    pub turn_timeout_sec: u64,
+    /// 上下文压缩开关（默认开启）。
+    pub compress: bool,
 }
 
 /// 构造 server 端 `Runtime`。
@@ -87,6 +97,11 @@ pub fn build_runtime(
         system,
         permission_mode,
         sandbox_policy,
+        timeout_sec,
+        max_retries,
+        small_model,
+        turn_timeout_sec,
+        compress,
     } = params.clone();
 
     // 1. 构造 config
@@ -96,6 +111,16 @@ pub fn build_runtime(
     config.provider.api_base = api_base;
     config.provider.api_key = api_key;
     config.provider.model = model;
+    config.provider.timeout_sec = timeout_sec;
+    config.provider.max_retries = max_retries;
+    // 小 LLM（摘要/压缩降本，`design.md` §3.8）：api_base/api_key 继承主 provider
+    config.provider.small = small_model.map(|m| SmallProviderConfig {
+        model: m,
+        api_base: None,
+        api_key: None,
+    });
+    config.context.turn_timeout_sec = turn_timeout_sec;
+    config.context.compress = compress;
 
     // 2. 校验 API key（Ollama 免鉴权）
     //    C-04：sidecar 模式下 API key 不通过参数/env 传递，从 OS keyring fallback 读取。

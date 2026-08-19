@@ -121,6 +121,45 @@ pub fn config_file_path() -> Result<camino::Utf8PathBuf> {
     paths::config_path().context("无法确定配置文件路径")
 }
 
+/// 读取上下文配置（`[context]` 段：turn 超时 / 压缩开关）。
+///
+/// 配置文件不存在时返回默认值（`ContextConfig::default()`，turn 超时 600s、
+/// 压缩开启）。
+///
+/// # Errors
+/// 配置文件存在但解析失败且无 last-known-good 回退时返回错误。
+pub fn get_context_config() -> Result<minicoding_core::config::ContextConfig> {
+    let config = load_config().map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))?;
+    Ok(config.context)
+}
+
+/// 保存上下文配置（`[context]` 段）到 `~/.minicoding/config.toml`。
+///
+/// 读取现有完整配置（保留 `provider`/`tools`/`hooks` 等其他段），替换 `[context]` 段，
+/// 原子写入（tmp + rename）。sidecar 启动时 `minicoding serve` 会读取本段生效。
+///
+/// # Errors
+/// 配置文件序列化失败、IO 错误时返回错误。
+pub fn save_context_config(context: minicoding_core::config::ContextConfig) -> Result<()> {
+    let mut config = load_config()
+        .map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))
+        .unwrap_or_default();
+    config.context = context;
+
+    let config_path = paths::config_path().context("无法确定配置文件路径")?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("创建配置目录失败: {parent}"))?;
+    }
+    let serialized = toml::to_string_pretty(&config).context("序列化配置失败")?;
+    let tmp = config_path.with_extension("toml.tmp");
+    std::fs::write(&tmp, serialized.as_bytes())
+        .with_context(|| format!("写入配置临时文件失败: {tmp}"))?;
+    std::fs::rename(&tmp, &config_path)
+        .with_context(|| format!("rename 配置文件失败: {tmp} -> {config_path}"))?;
+    log::info!("context 配置已保存: {config_path}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]

@@ -87,9 +87,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid bind address `{}`: {e}", cli.bind))?;
 
     // 解析 provider 配置（CLI > env > config.toml > 默认，与 `minicoding serve` 一致）
-    let file_provider = minicoding_core::config::load_config()
-        .map(|c| c.provider)
-        .unwrap_or_default();
+    let file_config = minicoding_core::config::load_config().unwrap_or_default();
+    let file_provider = &file_config.provider;
 
     let provider_kind = cli
         .provider
@@ -124,6 +123,12 @@ async fn main() -> Result<()> {
         web_dir: cli.web.map(Utf8PathBuf::from),
         cors_origins: cli.cors_origins,
         preset: cli.preset,
+        // 模型参数/上下文默认值：config.toml > 内置默认（`RuntimeConfig::default()`）
+        timeout_sec: file_provider.timeout_sec,
+        max_retries: file_provider.max_retries,
+        small_model: file_provider.small.as_ref().map(|s| s.model.clone()),
+        turn_timeout_sec: file_config.context.turn_timeout_sec,
+        compress: file_config.context.compress,
     };
 
     serve(cfg).await

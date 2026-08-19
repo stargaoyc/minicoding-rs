@@ -32,6 +32,11 @@ export function Sidebar() {
         provider: settings.default,
         api_base: settings.api_base,
         model: settings.model,
+        timeout_sec: settings.timeout_sec,
+        max_retries: settings.max_retries,
+        small_model: settings.small_model,
+        turn_timeout_sec: settings.turn_timeout_sec,
+        compress: settings.compress,
       };
     }
     // 权限模式 → CreateSessionBody（accept_edits 走 permission_mode；plan 走 plan_mode；

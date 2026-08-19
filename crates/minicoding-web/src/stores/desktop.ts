@@ -6,6 +6,7 @@ import {
   saveProviderConfig,
   storeApiKey,
   loadApiKey,
+  saveContextConfig,
   type ProviderConfig,
 } from "../api/tauri";
 import { setApiBase } from "../api/client";
@@ -31,6 +32,16 @@ export interface ProviderInput {
   model: string;
   /** API key（明文，仅用于写入 keyring，不落 config.toml）。 */
   apiKey: string;
+  /** LLM 请求超时（秒，默认 120）。 */
+  timeout_sec: number;
+  /** LLM 请求最大重试（默认 3，C-13）。 */
+  max_retries: number;
+  /** 小 LLM 模型名（摘要/压缩降本，空串 = 不启用，见 design.md §3.8）。 */
+  small_model: string;
+  /** 单 turn 超时（秒，默认 600）。 */
+  turn_timeout_sec: number;
+  /** 上下文压缩开关（默认开启，C-18 软约束）。 */
+  compress: boolean;
 }
 
 /** 桌面端状态（客户端状态，不进 TanStack Query，见 AGENTS.md §8.5）。 */
@@ -129,6 +140,11 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           default: input.default,
           api_base: input.api_base,
           model: input.model,
+          timeout_sec: input.timeout_sec,
+          max_retries: input.max_retries,
+          small_model: input.small_model.trim() || undefined,
+          turn_timeout_sec: input.turn_timeout_sec,
+          compress: input.compress,
         };
         saveWebSettings(settings);
         // Web 模式无需重启，直接关闭弹窗
@@ -144,15 +160,25 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
     const wasReady = get().phase === "ready";
 
     try {
-      // 构造完整 ProviderConfig（保留默认 timeout/retries，C-04：api_key 留空）
+      // 构造完整 ProviderConfig（C-04：api_key 留空，凭证走 keyring）
       const provider: ProviderConfig = {
         ...DEFAULT_PROVIDER,
         default: input.default,
         api_base: input.api_base,
         model: input.model,
         api_key: "",
+        timeout_sec: input.timeout_sec,
+        max_retries: input.max_retries,
+        small: input.small_model.trim()
+          ? { model: input.small_model.trim(), api_base: null, api_key: null }
+          : null,
       };
       await saveProviderConfig(provider);
+      // [context] 段：turn 超时 / 压缩开关（sidecar 启动时 `minicoding serve` 读取生效）
+      await saveContextConfig({
+        turn_timeout_sec: input.turn_timeout_sec,
+        compress: input.compress,
+      });
 
       // API key 单独走 keyring（ollama 无 key 时跳过）
       if (input.apiKey.length > 0) {
