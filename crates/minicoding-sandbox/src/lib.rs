@@ -25,6 +25,7 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+mod denial;
 mod driver;
 mod external;
 mod hardening;
@@ -38,9 +39,13 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+pub use denial::{DenialDetector, PLATFORM_SIGNATURES, SandboxCircuitBreaker};
 pub use driver::{DriverKind, detect_driver, detect_driver_kind};
 pub use external::ExternalSandboxDriver;
 pub use hardening::{harden_process, vcs_protected_dirs};
 
 /// re-export core 的 trait 与类型，便于调用方单点导入。
-pub use minicoding_core::sandbox::{NoopDriver, SandboxDriver, SandboxError, SandboxPolicy};
+pub use minicoding_core::sandbox::{
+    BreakerState, DenialMatch, DenialSignature, NoopDriver, SandboxDenialDetector,
+    SandboxDenialTracker, SandboxDriver, SandboxError, SandboxPolicy,
+};

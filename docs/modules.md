@@ -166,7 +166,7 @@ minicoding-core/src/
 │   └── mod.rs             # PermissionMode 枚举（Default/AcceptEdits/Plan/Auto/BypassPermissions）
 ├── sandbox/
 │   ├── trait.rs           # SandboxDriver trait + SandboxPolicy 枚举 + NoopDriver 兜底（见 api.md §3.9）
-│   ├── denial.rs          # SandboxDenial（EPERM/Seatbelt 拒绝检测，C-30）
+│   ├── breaker.rs         # SandboxDenialDetector/SandboxDenialTracker trait + BreakerState + Noop 兜底（C-30，见 security.md §8.7/§8.8）
 │   └── mod.rs
 ├── hooks/
 │   ├── trait_def.rs       # Hook trait + HookEvent + HookDecision + HookOutput + AsyncRewakeSpec + dispatch 默认实现（见 api.md §3.8）
@@ -185,7 +185,6 @@ minicoding-core/src/
 │   ├── trait.rs           # Storage trait + AuditSink trait
 │   ├── event.rs           # EventStore/EventRecord/PersistedEvent trait + NoopEventStore（Event Sourcing，见 design.md §25）
 │   ├── snapshot.rs        # SnapshotStore/SessionSnapshot/SessionState trait + NoopSnapshotStore
-│   ├── replay.rs          # replay_session_state + ReplayError + ReplayedSession + session_from_messages
 │   └── mod.rs
 ├── prompt/
 │   ├── mod.rs             # prelude 再导出
@@ -200,7 +199,9 @@ minicoding-core/src/
 ├── config/
 │   └── watcher.rs         # ConfigWatcher（S-22 配置热更新，notify 8 + 500ms debounce + best-effort）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
-└── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
+├── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
+└── util/
+    └── circuit_breaker.rs # 通用熔断器骨架（单计数 + 双阈值，M-05 熔断去重：沙箱 C-30 与压缩 C-29 共用）
 ```
 
 > **已实现（M5 范围）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/`（ExtensionHost/Extension/Registrar，X-20..X-22）已实现。trait 定义在 `minicoding-core`，9 个内置 contributor 与 `BundledExtensionHost`/`BundleRegistrar` 实现在 `minicoding-extension-sdk`。详见 `api.md` §3.12/§3.13 与 `design.md` §22/§23。
@@ -216,7 +217,10 @@ pub mod prelude {
     pub use crate::provider::LlmProvider;
     pub use crate::tool::{Tool, ToolRegistry, ToolContext, SideEffect};
     pub use crate::policy::{PermissionPolicy, PermissionPrompter, Verdict, Decision};
-    pub use crate::sandbox::{SandboxDriver, SandboxPolicy};
+    pub use crate::sandbox::{
+        NoopDenialDetector, NoopDenialTracker, SandboxDenialDetector, SandboxDenialTracker,
+        SandboxDriver, SandboxPolicy,
+    };
     pub use crate::hooks::{Hook, HookEvent, HookDecision, HookOutput, AsyncRewakeSpec};
     pub use crate::context::{ContextManager, ChatRequest, ContextSnapshot};
     pub use crate::memory::ProjectDocLoader;
@@ -224,9 +228,8 @@ pub mod prelude {
     pub use crate::mcp::{McpClient, McpServerConfig, McpTransport, McpScope};
     pub use crate::storage::{
         AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
-        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
-        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
-        replay_session_state, session_from_messages, try_persist,
+        NoopSnapshotStore, PersistedEvent, SCHEMA_VERSION, SNAPSHOT_INTERVAL, SessionSnapshot,
+        SessionState, SnapshotStore, Storage, try_persist,
     };
     pub use crate::prompt::{PromptContributor, PromptSection, PromptSectionOrder};
     pub use crate::extension::{ExtensionHost, Extension, ExtensionManifest, Registrar};
@@ -241,6 +244,8 @@ pub mod prelude {
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
 - **轻量依赖**：core 只依赖 `tokio`/`serde`/`serde_json`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`。无 `reqwest`/`landlock`/`rmcp`/`libseccomp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
+- **Denial 抽象（M-05）**：`SandboxDenialDetector`/`SandboxDenialTracker` trait 与 `BreakerState`/`DenialMatch` 数据在 core（`sandbox/breaker.rs`），平台签名库与熔断实现在 `minicoding-sandbox`（`denial.rs`），core 默认注入 `NoopDenialDetector`/`NoopDenialTracker` 兜底（与 NoopDriver 同哲学）。事件重放（`replay_session_state` 等）M-05 后位于 `minicoding-storage`，core 不再导出。
+- **熔断去重（M-05）**：沙箱拒绝熔断（C-30）与压缩熔断（C-29）共享 `util::CircuitBreaker` 通用骨架（单计数器 + 双阈值 + Closed/SoftTripped/HardTripped 状态）；压缩侧在骨架之上另维护 thrash 计数器（`consecutive_oversize`）表达其特有失效模式，两者状态语义各自映射，不互相耦合。
 - **Prompt 管道**：`prompt/` 模块定义 `PromptContributor` trait，9 个 contributor 按固定顺序拼接（稳定段在前利于 prompt cache），扩展通过 `Registrar::register_prompt_contributor` 注入 section（见 `design.md` §22）。
 
 ---
@@ -407,7 +412,7 @@ minicoding-journal/src/
 
 ### 7.1 职责
 
-实现 `SandboxDriver` trait（定义在 core）：基于 `sandbox-run` + `landlock` + `libseccomp` 主流库提供跨平台内核级隔离，**不自研**沙箱胶水代码。
+实现 `SandboxDriver` trait（定义在 core）：基于 `sandbox-run` + `landlock` + `libseccomp` 主流库提供跨平台内核级隔离，**不自研**沙箱胶水代码。另实现 `SandboxDenialDetector`/`SandboxDenialTracker` trait（定义在 core，M-05 下沉）：平台 denial 签名库 + 单 turn 熔断（C-30）。
 
 ### 7.2 模块树
 
@@ -415,6 +420,7 @@ minicoding-journal/src/
 minicoding-sandbox/src/
 ├── lib.rs                 # detect_driver() 工厂：按 cfg!(target_os) 选实现
 ├── driver.rs              # SandboxDriverImpl 实现 trait
+├── denial.rs              # DenialDetector + PLATFORM_SIGNATURES + SandboxCircuitBreaker（C-30，M-05 从 core 下沉）
 ├── linux.rs               # Linux: sandbox-run (Landlock) + libseccomp（syscall 过滤）
 ├── macos.rs               # macOS: sandbox-run（原生 sandbox 框架，Seatbelt）
 ├── windows.rs             # Windows: windows crate（受限令牌 + Job Object）
@@ -439,6 +445,7 @@ minicoding-sandbox/src/
 - **VCS 目录保护**：通过 `sandbox-run` 的 `ReadOnlyPaths` 把 `.git`/`.hg`/`.svn` 设为只读（P-20）。
 - **pre-exec apply**：`sandbox_run::apply_sandbox()` 在子进程 fork 后 exec 前调用，子进程启动即受限，无窗口期（参考 Codex，见 security.md §8.3）。
 - **依赖隔离**：`landlock`/`libseccomp` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译。
+- **denial 领域实现（M-05）**：`DenialDetector`（子串匹配 `PLATFORM_SIGNATURES`，覆盖 EPERM/EACCES/Landlock/seccomp/Seatbelt/Windows）与 `SandboxCircuitBreaker`（计数熔断，阈值 3/5）实现 core 的 trait 抽象；未启用本 crate 时 core 兜底 `NoopDenialDetector`/`NoopDenialTracker`（不识别沙箱拒绝，与 NoopDriver 语义一致）。CLI（`sandbox` feature）/server 在注入 `SandboxDriver` 的同时注入 denial 实现。
 - **依赖**：`minicoding-core` + `sandbox-run` + `landlock`（Linux）+ `libseccomp`（Linux）+ `windows`（Windows）+ `libc`。
 
 ---
@@ -494,7 +501,7 @@ minicoding-mcp/src/
 
 ### 9.1 职责
 
-实现 `Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志、事件流持久化与 snapshot（Event Sourcing，见 `design.md` §25）。
+实现 `Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait（定义在 core）：JSONL 会话日志、会话索引、跨进程文件锁、审计日志、事件流持久化与 snapshot（Event Sourcing，见 `design.md` §25）。另实现事件重放 `replay_session_state`/`session_from_messages`（M-05 从 core 下沉，含悬空 `tool_calls` 修复防御，见 M-03）。
 
 ### 9.2 模块树
 
@@ -507,6 +514,7 @@ minicoding-storage/src/
 ├── index.rs               # 会话索引 index.json（轻量元数据列出）
 ├── lock.rs                # 跨进程文件锁（fs2）
 ├── audit.rs               # AuditSink 实现（audit.log JSONL，0600 权限）
+├── replay.rs              # replay_session_state + ReplayError + ReplayedSession + session_from_messages（M-05 下沉）
 └── export.rs              # 会话导出（md / jsonl）
 ```
 
@@ -598,6 +606,7 @@ minicoding-tools/src/
 │   ├── create.rs          # TaskCreate（增量模型，见 design.md §18）
 │   ├── update.rs          # TaskUpdate（增量 + 依赖 + 状态机）
 │   └── list.rs            # TaskList 快照
+├── worktree.rs            # WorktreeSubagentRunner（git worktree 隔离装饰器，M-05 从 core 下沉）
 ├── plan/
 │   └── exit.rs            # ExitPlanMode（见 design.md §16.4）
 ├── mcp/
@@ -618,6 +627,7 @@ minicoding-tools/src/
 - **task.spawn（T-M5-7，T-13）**：启动类型化子 Agent（`SubagentType::Explore/Plan/GeneralPurpose/Custom`），隔离上下文（独立 ContextManager），Plan 模式下被硬门拒绝（`SideEffect::None` 仍受 `PermissionMode::Plan` 约束）。OTel `subagent` span 挂在父 turn span 下（O-04）。子 Agent env 不含凭证（C-04）。
 - **plan.exit（T-M5-6，T-15）**：退出 Plan 模式并提交计划，切回 Default 模式并缓存 `allowed_prompts`（预批准），避免 ExitPlanMode 后逐条重新确认。Plan 模式硬门用 `is_read_only()` 判断（C-25）。
 - **mcp::wrapper**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
+- **worktree.rs（M-05）**：`WorktreeSubagentRunner` 装饰器实现 `SubagentRunner`（trait 在 core），`Isolation::Worktree` 时 `git worktree add` 建隔离目录、按 `merge_back` 合并、`auto_cleanup` 清理，非 git 仓库降级 `Shared`（A-15）。
 - **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）+ 按需依赖 context/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。
 
 ---

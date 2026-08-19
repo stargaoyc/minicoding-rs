@@ -230,7 +230,7 @@ pub trait SubagentRunner: Send + Sync {
 /// 兜底实现（未注入时 `task.spawn` 直接返回 `RuntimeError::Config`）。
 pub struct NoopSubagentRunner;
 
-/// Worktree 隔离装饰器（A-15，design.md §7.5）。
+/// Worktree 隔离装饰器（A-15，design.md §7.5；M-05 后位于 `minicoding-tools`）。
 /// 包裹内部 runner，spawn 前后处理 git worktree 创建/合并/清理。
 /// 非 git 仓库时降级为 Shared（记 warn，继续委托）。
 pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: Utf8PathBuf */ }
@@ -238,7 +238,7 @@ pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: 
 
 `SubagentSpec::default_for(ty)` 按类型给出默认配置（`Explore`/`Plan` 跳过 AGENTS.md、`max_iters` 与 `timeout` 按 `design.md` §7.2 表格）。`isolation` 默认 `Shared`。`RuntimeBuilder::subagent_runner(r)` 注入实现；`Runtime::subagent_runner()` 返回 `Arc<dyn SubagentRunner>` 供 `task.spawn` 工具持有（与 `plan.exit` 持有 `Arc<dyn PlanModeController>` 同构）。
 
-`WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。
+`WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。M-05 将该实现下沉到 `minicoding-tools`（core 仅保留 `SubagentRunner` trait 与 `NoopSubagentRunner` 兜底）。
 
 ```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
@@ -601,7 +601,8 @@ pub trait SnapshotStore: Send + Sync {
 pub struct NoopSnapshotStore;
 pub const SNAPSHOT_INTERVAL: usize = 50;   // 每 N 条 MessageAppended 触发 snapshot
 
-/// 事件重放入口（见 `design.md` §25.4）。
+/// 事件重放入口（见 `design.md` §25.4）。M-05 后位于 `minicoding-storage`
+/// （`minicoding_storage::replay_session_state`），core 不再导出。
 ///
 /// 从 snapshot + 事件流重建 `Session` 状态。无 snapshot 时从首事件
 /// （必须为 `SessionCreated`）开始；事件 seq 必须连续，跳跃返回 `SeqGap`；

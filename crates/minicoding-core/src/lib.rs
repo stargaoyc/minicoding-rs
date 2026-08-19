@@ -32,10 +32,11 @@ pub mod runtime;
 pub mod sandbox;
 pub mod storage;
 pub mod tool;
+pub mod util;
 
 /// 常用类型 re-export。
 pub mod prelude {
-    pub use crate::agent::{NoopSubagentRunner, SubagentRunner, WorktreeSubagentRunner};
+    pub use crate::agent::{NoopSubagentRunner, SubagentRunner};
     pub use crate::config::{HookEntry, HooksConfig, RuntimeConfig};
     pub use crate::context::{ContextManager, ContextSnapshot};
     pub use crate::extension::{
@@ -75,15 +76,15 @@ pub mod prelude {
     };
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::sandbox::{
-        BreakerState, DenialDetector, DenialMatch, DenialSignature, NoopDriver,
-        SandboxCircuitBreaker, SandboxDriver, SandboxError, SandboxPolicy, hard_trip_summary,
-        soft_trip_reminder,
+        BreakerState, DenialMatch, DenialSignature, NoopDenialDetector, NoopDenialTracker,
+        NoopDriver, SandboxDenialDetector, SandboxDenialTracker, SandboxDriver, SandboxError,
+        SandboxPolicy, hard_trip_summary, soft_trip_reminder,
     };
     pub use crate::storage::{
         AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
-        NoopSnapshotStore, PersistedEvent, ReplayError, ReplayedSession, SCHEMA_VERSION,
-        SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore, Storage,
-        replay_session_state, session_from_messages, try_persist,
+        NoopSnapshotStore, PersistedEvent, SCHEMA_VERSION, SNAPSHOT_INTERVAL, SessionSnapshot,
+        SessionState, SnapshotStore, Storage, try_persist,
     };
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
+    pub use crate::util::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 }
