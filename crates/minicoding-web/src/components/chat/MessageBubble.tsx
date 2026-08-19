@@ -9,14 +9,14 @@ const ROLE_CONFIG = {
   user: {
     icon: User,
     label: "你",
-    bg: "bg-[var(--color-accent)]/8",
+    bg: "bg-[var(--color-accent)]/10",
     iconBg: "gradient-accent",
   },
   assistant: {
     icon: Bot,
     label: "AI",
-    bg: "bg-[var(--color-surface-2)]/50",
-    iconBg: "bg-[var(--color-surface)]",
+    bg: "bubble-ai",
+    iconBg: "gradient-accent",
   },
   system: {
     icon: Wrench,
@@ -104,7 +104,7 @@ export function MessageBubble({
           config.iconBg,
         )}
       >
-        <Icon className="h-4 w-4 text-[var(--color-text)]" />
+        <Icon className="h-4 w-4 text-[var(--color-text)] dark:text-[#141418]" />
       </div>
 
       {/* Content */}

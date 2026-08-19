@@ -100,8 +100,9 @@ export function ChatInput({
     <div className="border-t border-[var(--color-border)] p-4">
       <div
         className={cn(
-          "flex items-end gap-2 rounded-xl border bg-[var(--color-surface)] px-3 py-2 transition-colors",
-          "border-[var(--color-border)] focus-within:border-[var(--color-accent)]/50",
+          "glass flex items-end gap-2 rounded-2xl px-3 py-2 transition-all",
+          "focus-within:border-[var(--color-accent)]/60",
+          "focus-within:shadow-[0_0_20px_color-mix(in_srgb,var(--color-accent-grad-from)_18%,transparent)]",
         )}
       >
         <textarea
@@ -133,6 +134,7 @@ export function ChatInput({
             onClick={handleSend}
             disabled={!canSend}
             title={sendDisabled ? "运行中，完成后可发送" : "发送"}
+            className="anime-glow"
           >
             <Send className="h-4 w-4" />
           </Button>

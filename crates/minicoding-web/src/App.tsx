@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
 import { ChatInput } from "./components/chat/ChatInput";
@@ -27,6 +28,7 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <DesktopGate />
+      <AnimeBackground />
     </QueryClientProvider>
   );
 }
@@ -266,7 +268,7 @@ function AppInner() {
 function EmptyState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6">
-      <div className="gradient-accent flex h-20 w-20 items-center justify-center rounded-3xl text-3xl font-bold text-white shadow-2xl shadow-indigo-500/20">
+      <div className="gradient-accent anime-glow flex h-20 w-20 items-center justify-center rounded-3xl text-3xl font-bold text-white dark:text-[#141418]">
         m
       </div>
       <div className="space-y-2 text-center">

@@ -78,7 +78,7 @@ export function Sidebar() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2">
-          <div className="gradient-accent flex h-7 w-7 items-center justify-center rounded-lg text-xs font-bold text-white">
+          <div className="gradient-accent anime-glow flex h-7 w-7 items-center justify-center rounded-lg text-xs font-bold text-white dark:text-[#141418]">
             m
           </div>
           <span className="gradient-text text-sm font-semibold">minicoding</span>
@@ -169,7 +169,7 @@ function SessionItem({
       className={cn(
         "group flex w-full flex-col gap-1 rounded-lg px-3 py-2.5 text-left transition-all",
         active
-          ? "bg-[var(--color-accent)]/10 ring-1 ring-[var(--color-accent)]/30"
+          ? "bg-[var(--color-accent)]/15 ring-1 ring-[var(--color-accent)]/40 shadow-[0_0_16px_color-mix(in_srgb,var(--color-accent-grad-mid)_15%,transparent)]"
           : "hover:bg-[var(--color-surface-2)]",
       )}
     >

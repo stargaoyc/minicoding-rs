@@ -2,47 +2,96 @@
 
 /*
  * Tailwind v4 主题（Oxide 引擎，CSS-first config）
- * 双主题：暗色（默认）+ 亮色，通过 `html.light` 切换
+ * 双主题：浅色默认（奶白 + 樱花粉二次元）+ 科技感深色（蓝黑底 + 青蓝霓虹）
+ * `dark:` 变体基于 `html.dark` class（见下方 @custom-variant）
  * 见 AGENTS.md §8.2、design.md §26.2、features.md W-05
  */
+@custom-variant dark (&:where(.dark, .dark *));
 @theme {
+  /* 樱花色系 */
+  --color-sakura-50: #fff5f8;
+  --color-sakura-100: #ffe8ef;
+  --color-sakura-200: #ffcdd9;
+  --color-sakura-300: #ffa3b5;
+  --color-sakura-400: #ff7a94;
+  --color-sakura-500: #ff8fab;
+  --color-sakura-600: #f06680;
+  --color-sakura-700: #d94968;
+  --color-sakura-800: #be3b54;
+  --color-sakura-900: #a33146;
+
+  /* 天空色系 */
+  --color-sky-soft-50: #f0faff;
+  --color-sky-soft-100: #e0f5ff;
+  --color-sky-soft-200: #baeaff;
+  --color-sky-soft-300: #7ec8e3;
+  --color-sky-soft-400: #5db8d5;
+  --color-sky-soft-500: #3ba8c7;
+  --color-sky-soft-600: #2a8fb0;
+  --color-sky-soft-700: #1f7491;
+  --color-sky-soft-800: #185d75;
+  --color-sky-soft-900: #124d60;
+
+  /* 暮光色系 */
+  --color-twilight-50: #f8f5ff;
+  --color-twilight-100: #ede7ff;
+  --color-twilight-200: #dcd0ff;
+  --color-twilight-300: #b19cd9;
+  --color-twilight-400: #9b7fd1;
+  --color-twilight-500: #7a5fc3;
+  --color-twilight-600: #6649ab;
+  --color-twilight-700: #543a8d;
+  --color-twilight-800: #442f71;
+  --color-twilight-900: #37265c;
+
   --color-risk-low: #22c55e;
   --color-risk-medium: #f59e0b;
   --color-risk-high: #ef4444;
 
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: "Inter", "HarmonyOS Sans", "Source Han Sans CN", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  --shadow-soft: 0 4px 20px rgba(255, 143, 171, 0.12);
+  --shadow-soft-lg: 0 12px 40px rgba(255, 143, 171, 0.18);
+  --shadow-card: 0 20px 60px rgba(255, 143, 171, 0.2);
 }
 
-/* 暗色主题（默认）：深底 + indigo/violet 渐变 accent + glassmorphism */
+/* ── 浅色默认主题（奶白底 + 樱花粉 accent，去紫） ── */
 :root,
-html.dark {
-  --color-bg: #0a0a0f;
-  --color-surface: #12121a;
-  --color-surface-2: #1a1a25;
-  --color-border: #252533;
-  --color-text: #e4e4e7;
-  --color-text-muted: #71717a;
-  --color-accent: #6366f1;
-  --color-accent-hover: #818cf8;
-  --color-accent-grad-from: #6366f1;
-  --color-accent-grad-to: #a855f7;
-  color-scheme: dark;
+html.light {
+  --color-bg: #fffaf5;
+  --color-surface: #ffffff;
+  --color-surface-2: #fff1f4;
+  --color-border: #ffdde4;
+  --color-text: #3d2f3a;
+  --color-text-muted: #b48a9e;
+  --color-accent: #ff7a94;
+  --color-accent-hover: #f06680;
+  --color-accent-grad-from: #ff8fab;
+  --color-accent-grad-mid: #ffa3b5;
+  --color-accent-grad-to: #ffb3c1;
+  --glass-bg: rgba(255, 255, 255, 0.65);
+  --glass-border: rgba(255, 255, 255, 0.55);
+  color-scheme: light;
 }
 
-/* 亮色主题：浅底 + indigo accent，保持视觉一致性 */
-html.light {
-  --color-bg: #fafafa;
-  --color-surface: #ffffff;
-  --color-surface-2: #f4f4f5;
-  --color-border: #e4e4e7;
-  --color-text: #18181b;
-  --color-text-muted: #71717a;
-  --color-accent: #6366f1;
-  --color-accent-hover: #4f46e5;
-  --color-accent-grad-from: #6366f1;
-  --color-accent-grad-to: #8b5cf6;
-  color-scheme: light;
+/* ── 暗色主题（星夜：纯黑底 + 星光白点缀 + 闪烁星点背景） ── */
+html.dark {
+  --color-bg: #050507;
+  --color-surface: #0d0d13;
+  --color-surface-2: #14141c;
+  --color-border: #22222c;
+  --color-text: #ffffff;
+  --color-text-muted: #9c9caa;
+  --color-accent: #ffffff;
+  --color-accent-hover: #ffffff;
+  --color-accent-grad-from: #ffffff;
+  --color-accent-grad-mid: #f4f4f8;
+  --color-accent-grad-to: #e2e2ec;
+  --glass-bg: rgba(8, 8, 12, 0.8);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  color-scheme: dark;
 }
 
 html,
@@ -53,30 +102,95 @@ body,
 }
 
 body {
-  background: var(--color-bg);
-  color: var(--color-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
-/* 自定义滚动条 */
+/* ── 主题渐变底（浅色：奶白→淡粉；深色：暖紫黑） ── */
+html.light body {
+  background: linear-gradient(135deg, #fffaf5 0%, #fff3f6 55%, #ffedf3 100%);
+  background-attachment: fixed;
+  color: var(--color-text);
+}
+
+html.dark body {
+  background: linear-gradient(160deg, #050507 0%, #09090f 55%, #050507 100%);
+  color: var(--color-text);
+}
+
+/* ── 深色星光层：点状亮点（少量大星 + 小星），无雾状光晕 ── */
+html.dark body::before {
+  background-image:
+    radial-gradient(2px 2px at 8% 22%, rgba(255, 255, 255, 0.95) 50%, transparent 51%),
+    radial-gradient(1px 1px at 18% 68%, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 27% 12%, rgba(255, 255, 255, 0.45) 50%, transparent 51%),
+    radial-gradient(2px 2px at 36% 84%, rgba(255, 255, 255, 0.9) 50%, transparent 51%),
+    radial-gradient(1px 1px at 44% 38%, rgba(255, 255, 255, 0.45) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 53% 8%, rgba(255, 255, 255, 0.6) 50%, transparent 51%),
+    radial-gradient(1px 1px at 61% 52%, rgba(255, 255, 255, 0.4) 50%, transparent 51%),
+    radial-gradient(2.5px 2.5px at 70% 30%, rgba(255, 255, 255, 0.95) 50%, transparent 51%),
+    radial-gradient(1px 1px at 78% 76%, rgba(255, 255, 255, 0.45) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 86% 15%, rgba(255, 255, 255, 0.6) 50%, transparent 51%),
+    radial-gradient(1px 1px at 92% 62%, rgba(255, 255, 255, 0.4) 50%, transparent 51%),
+    radial-gradient(1px 1px at 14% 92%, rgba(255, 255, 255, 0.5) 50%, transparent 51%),
+    radial-gradient(1px 1px at 65% 88%, rgba(255, 255, 255, 0.35) 50%, transparent 51%),
+    radial-gradient(2px 2px at 46% 6%, rgba(255, 255, 255, 0.85) 50%, transparent 51%);
+  animation: star-twinkle 5s ease-in-out infinite alternate;
+}
+
+@keyframes star-twinkle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* ── 全局装饰层：三色柔和光晕 ── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    radial-gradient(circle at 20% 20%, rgba(255, 143, 171, 0.1) 0%, transparent 45%),
+    radial-gradient(circle at 80% 30%, rgba(255, 179, 193, 0.1) 0%, transparent 45%),
+    radial-gradient(circle at 40% 80%, rgba(255, 237, 243, 0.12) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+/* ── 渐变滚动条（粉→紫） ── */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 3px;
+  background: linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-to));
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-grad-to));
 }
 
-/* 流式光标动画 */
+/* 选中文本：樱花粉底 */
+::selection {
+  background: rgba(255, 143, 171, 0.35);
+  color: var(--color-accent);
+}
+html.dark ::selection {
+  background: rgba(255, 255, 255, 0.35);
+  color: #ffffff;
+}
+
+/* ── 动画关键帧 ── */
+
 @keyframes blink {
   0%,
   50% {
@@ -87,31 +201,218 @@ body {
     opacity: 0;
   }
 }
+
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes petal-fall {
+  0% {
+    transform: translateY(-10vh) rotate(0deg);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(110vh) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+/* 流式光标动画 */
 .streaming-cursor {
   display: inline-block;
   width: 8px;
   height: 1.1em;
-  background: var(--color-accent-hover);
+  background: linear-gradient(180deg, var(--color-accent-grad-from), var(--color-accent-grad-mid));
   margin-left: 2px;
   vertical-align: text-bottom;
-  border-radius: 1px;
+  border-radius: 2px;
   animation: blink 1s infinite;
 }
 
-/* glassmorphism 面板 */
+/* ── 玻璃拟态（ai_town glass-card：白玻璃 + 柔和粉色阴影） ── */
 .glass {
-  background: color-mix(in srgb, var(--color-surface) 70%, transparent);
-  backdrop-filter: blur(12px);
-  border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-soft);
 }
 
-/* 渐变 accent */
+/* ── 三色渐变（樱花粉→天蓝→暮紫，渐变位移动画） ── */
 .gradient-accent {
-  background: linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-to));
+  background: linear-gradient(
+    135deg,
+    var(--color-accent-grad-from),
+    var(--color-accent-grad-mid) 55%,
+    var(--color-accent-grad-to)
+  );
+  background-size: 180% 180%;
+  animation: gradient-shift 8s ease-in-out infinite alternate;
 }
 .gradient-text {
-  background: linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-to));
+  background: linear-gradient(
+    135deg,
+    var(--color-accent-grad-from),
+    var(--color-accent-grad-mid) 55%,
+    var(--color-accent-grad-to)
+  );
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+/* ── 樱花霓虹 glow ── */
+.anime-glow {
+  box-shadow: 0 0 18px rgba(255, 143, 171, 0.35), 0 0 36px rgba(255, 163, 181, 0.25);
+}
+.anime-glow:hover {
+  box-shadow: 0 0 24px rgba(255, 143, 171, 0.5), 0 0 48px rgba(255, 163, 181, 0.35);
+}
+
+/* ── 渐变描边（AI 气泡）：border-box 方案，内容直填无需包装层 ── */
+.bubble-ai {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    linear-gradient(135deg, var(--color-accent-grad-from), var(--color-accent-grad-mid) 55%, var(--color-accent-grad-to))
+      border-box;
+  box-shadow:
+    0 0 20px rgba(255, 143, 171, 0.14),
+    inset 0 0 24px color-mix(in srgb, var(--color-accent-grad-mid) 5%, transparent);
+}
+
+/* ── 网格点阵（浅色：樱花粉点；深色：白色星点） ── */
+.dot-grid {
+  background-image: radial-gradient(circle, #ff8fab 1px, transparent 1px);
+}
+html.dark .dot-grid {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
+  opacity: 0.03;
+}
+
+/* ── 花瓣飘落（CSS 多层，仅浅色二次元主题；深色科技感下隐藏） ── */
+.petal {
+  position: fixed;
+  top: -10vh;
+  width: 10px;
+  height: 10px;
+  border-radius: 50% 0 50% 50%;
+  background: linear-gradient(135deg, rgba(255, 163, 181, 0.8), rgba(255, 122, 148, 0.55));
+  pointer-events: none;
+  z-index: -1;
+  animation: petal-fall linear infinite;
+  filter: blur(0.5px);
+}
+.petal::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50% 0 50% 50%;
+  background: linear-gradient(135deg, rgba(255, 232, 239, 0.6), transparent);
+}
+
+.petal:nth-child(1) {
+  left: 5%;
+  animation-duration: 16s;
+  animation-delay: 0s;
+  transform: scale(0.8);
+}
+.petal:nth-child(2) {
+  left: 14%;
+  animation-duration: 20s;
+  animation-delay: 3s;
+  transform: scale(1.1);
+  background: linear-gradient(135deg, rgba(255, 163, 181, 0.8), rgba(255, 122, 148, 0.55));
+}
+.petal:nth-child(3) {
+  left: 24%;
+  animation-duration: 18s;
+  animation-delay: 6s;
+  transform: scale(0.9);
+}
+.petal:nth-child(4) {
+  left: 34%;
+  animation-duration: 22s;
+  animation-delay: 1.5s;
+  transform: scale(1.15);
+  background: linear-gradient(135deg, rgba(255, 179, 193, 0.8), rgba(255, 122, 148, 0.55));
+}
+.petal:nth-child(5) {
+  left: 44%;
+  animation-duration: 17s;
+  animation-delay: 8s;
+  transform: scale(0.7);
+}
+.petal:nth-child(6) {
+  left: 54%;
+  animation-duration: 21s;
+  animation-delay: 4.5s;
+  transform: scale(1);
+}
+.petal:nth-child(7) {
+  left: 64%;
+  animation-duration: 19s;
+  animation-delay: 7s;
+  transform: scale(0.85);
+  background: linear-gradient(135deg, rgba(255, 179, 193, 0.8), rgba(255, 163, 181, 0.55));
+}
+.petal:nth-child(8) {
+  left: 74%;
+  animation-duration: 23s;
+  animation-delay: 5.5s;
+  transform: scale(1.1);
+}
+.petal:nth-child(9) {
+  left: 84%;
+  animation-duration: 15s;
+  animation-delay: 9s;
+  transform: scale(0.75);
+  background: linear-gradient(135deg, rgba(255, 237, 243, 0.8), rgba(255, 122, 148, 0.5));
+}
+.petal:nth-child(10) {
+  left: 93%;
+  animation-duration: 20s;
+  animation-delay: 2.5s;
+  transform: scale(1.05);
+}
+
+/* 深色星光主题：隐藏花瓣，glow / 气泡光晕切换为星光白 */
+html.dark .petal {
+  display: none;
+}
+html.dark .anime-glow {
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.18), 0 0 32px rgba(226, 226, 236, 0.1);
+}
+html.dark .anime-glow:hover {
+  box-shadow: 0 0 22px rgba(255, 255, 255, 0.28), 0 0 44px rgba(226, 226, 236, 0.16);
+}
+html.dark .bubble-ai {
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.07),
+    inset 0 0 24px color-mix(in srgb, var(--color-accent-grad-mid) 5%, transparent);
+}
+
+/* 柔和浮动（弹窗卡片等） */
+.animate-float {
+  animation: float-soft 3s ease-in-out infinite;
 }
