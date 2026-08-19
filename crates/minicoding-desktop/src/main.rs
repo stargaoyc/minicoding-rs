@@ -103,6 +103,8 @@ fn main() {
             start_session,
             get_provider_config,
             save_provider_config,
+            get_context_config,
+            save_context_config,
             store_api_key,
             load_api_key,
             delete_api_key,
@@ -239,6 +241,18 @@ fn get_provider_config() -> Result<ProviderConfig, String> {
 #[tauri::command]
 fn save_provider_config(provider: ProviderConfig) -> Result<(), String> {
     config::save_provider_config(provider).map_err(|e| e.to_string())
+}
+
+/// `get_context_config`：读取上下文配置（`[context]` 段，turn 超时/压缩开关）。
+#[tauri::command]
+fn get_context_config() -> Result<minicoding_core::config::ContextConfig, String> {
+    config::get_context_config().map_err(|e| e.to_string())
+}
+
+/// `save_context_config`：保存上下文配置到 `config.toml`（原子写入，保留其他段）。
+#[tauri::command]
+fn save_context_config(context: minicoding_core::config::ContextConfig) -> Result<(), String> {
+    config::save_context_config(context).map_err(|e| e.to_string())
 }
 
 /// `store_api_key`：写入 API key 到 OS keyring（与 CLI `cred store` 共享 entry）。

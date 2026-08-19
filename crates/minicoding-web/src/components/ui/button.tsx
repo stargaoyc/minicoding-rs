@@ -8,7 +8,8 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "gradient-accent text-white shadow-lg shadow-indigo-500/20 hover:opacity-90",
+        default:
+          "gradient-accent anime-glow text-white hover:opacity-90 dark:text-[#141418]",
         secondary:
           "bg-[var(--color-surface-2)] text-[var(--color-text)] hover:bg-[var(--color-border)]",
         ghost:

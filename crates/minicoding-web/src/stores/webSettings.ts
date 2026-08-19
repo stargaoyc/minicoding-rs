@@ -5,12 +5,14 @@
  * 创建会话时通过 `CreateSessionBody` 传递给 `minicoding-server`（C-04：API key
  * 由 server 端持有，不经前端传）。
  *
- * 仅存储非敏感配置：`provider` / `api_base` / `model`。
+ * 仅存储非敏感配置：`provider` / `api_base` / `model` / 模型参数 / 上下文参数。
+ * 各字段可选——缺失时新建会话不传对应 body 字段，由 server 端默认值兜底
+ * （与 `GET /config` 返回的 server 默认一致）。
  */
 
 const STORAGE_KEY = "minicoding-web-settings";
 
-/** Web 模式 provider 配置（子集，不含 api_key/timeout 等服务端字段）。 */
+/** Web 模式 provider + 模型/上下文参数（子集，不含 api_key，C-04）。 */
 export interface WebProviderSettings {
   /** Provider 标识：`openai` / `anthropic` / `ollama`。 */
   default: string;
@@ -18,6 +20,16 @@ export interface WebProviderSettings {
   api_base: string;
   /** 模型名。 */
   model: string;
+  /** LLM 请求超时（秒，默认 120）。 */
+  timeout_sec?: number;
+  /** LLM 请求最大重试（默认 3，C-13）。 */
+  max_retries?: number;
+  /** 小 LLM 模型名（摘要/压缩降本，`undefined` 不启用，见 design.md §3.8）。 */
+  small_model?: string;
+  /** 单 turn 超时（秒，默认 600）。 */
+  turn_timeout_sec?: number;
+  /** 上下文压缩开关（默认开启，C-18 软约束）。 */
+  compress?: boolean;
 }
 
 /** 默认值（与 `PROVIDER_OPTIONS[0]` 对齐）。 */
@@ -25,6 +37,11 @@ const DEFAULTS: WebProviderSettings = {
   default: "openai",
   api_base: "https://api.openai.com/v1",
   model: "gpt-4o",
+  timeout_sec: 120,
+  max_retries: 3,
+  small_model: undefined,
+  turn_timeout_sec: 600,
+  compress: true,
 };
 
 /** 从 localStorage 读取 Web 模式设置（无配置时返回默认值）。 */
@@ -37,6 +54,11 @@ export function loadWebSettings(): WebProviderSettings {
       default: parsed.default ?? DEFAULTS.default,
       api_base: parsed.api_base ?? DEFAULTS.api_base,
       model: parsed.model ?? DEFAULTS.model,
+      timeout_sec: parsed.timeout_sec ?? DEFAULTS.timeout_sec,
+      max_retries: parsed.max_retries ?? DEFAULTS.max_retries,
+      small_model: parsed.small_model ?? DEFAULTS.small_model,
+      turn_timeout_sec: parsed.turn_timeout_sec ?? DEFAULTS.turn_timeout_sec,
+      compress: parsed.compress ?? DEFAULTS.compress,
     };
   } catch {
     return { ...DEFAULTS };

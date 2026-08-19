@@ -1429,6 +1429,12 @@ pub struct ServerConfig {
     pub permission_timeout_sec: u64,  // 权限交互超时（默认 300）
     pub web_dir: Option<camino::Utf8PathBuf>,  // M9 --web 静态资源目录
     pub cors_origins: Vec<String>,             // M9 --cors-origin 允许的来源
+    // 以下 5 字段为会话默认值（W-19 设置面板扩展，可被 `POST /sessions` 覆盖）：
+    pub timeout_sec: u64,          // LLM 请求超时（默认 120，C-07）
+    pub max_retries: u32,          // LLM 请求最大重试（默认 3，C-13）
+    pub small_model: Option<String>, // 小 LLM 模型名（None = 不启用，见 design.md §3.8）
+    pub turn_timeout_sec: u64,     // 单 turn 超时（默认 600）
+    pub compress: bool,            // 上下文压缩开关（默认 true，C-18 软约束）
 }
 
 /// 启动 HTTP/SSE server（阻塞当前 task 直到 server 关闭）。
@@ -1581,6 +1587,12 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 - `GET /sessions/{id}` 触发懒恢复（`get_or_load`），重启前的会话按需从磁盘重建 Runtime，响应体含 `messages` 与 `tasks: Vec<Task>`——由 `ServerSession::task_state` 返回
   （常驻订阅 `Event::TaskUpdated` 的镜像快照，任务权威源是 `TaskStore`）。前端据此渲染任务面板；
 - `POST /sessions` 的 `plan_mode: true` 使会话初始 `PermissionMode::Plan`（C-25：先写 `plan.md` 拆分子任务，`plan.exit` 批准后执行）；
+- `POST /sessions` 的 `timeout_sec` / `max_retries` / `small_model` / `turn_timeout_sec` / `compress`
+  五个可选字段覆盖 server 默认值（W-19 设置面板：Web 模式前端设置存储经此注入，
+  Tauri 模式写 `config.toml` 后由 `serve` 读取为默认值，两类来源都无需新建端点）；
+- `GET /config` 返回 server 当前默认配置（`ServerConfigResponse`：provider/api_base/model/
+  timeout_sec/max_retries/small_model/turn_timeout_sec/compress/permission_timeout_sec/preset，
+  **不含 API key**，C-04）。只读（无 PUT），设置面板用它兜底显示真实默认值；
 - `POST /sessions/{id}/cancel` → `SessionManager::cancel` → `Runtime::cancel()`（CancellationToken），
   中断当前 turn，SSE 推 `TurnEnd { stop_reason: interrupted }`，`POST /sessions/{id}/messages`
   返回 `final_text = "[已取消]"`；

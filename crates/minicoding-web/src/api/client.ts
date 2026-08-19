@@ -104,6 +104,31 @@ export interface CreateSessionBody {
   preset?: "auto" | "read-only" | "external-sandbox" | "full-access";
   /** Plan 模式（C-25：先写 plan.md 拆分任务，批准后执行，仅只读工具可用）。 */
   plan_mode?: boolean;
+  /** LLM 请求超时（秒，覆盖 server 默认 120）。 */
+  timeout_sec?: number;
+  /** LLM 请求最大重试（覆盖 server 默认 3，C-13）。 */
+  max_retries?: number;
+  /** 小 LLM 模型名（摘要/压缩降本，见 design.md §3.8；`undefined` 继承 server 默认）。 */
+  small_model?: string;
+  /** 单 turn 超时（秒，覆盖 server 默认 600）。 */
+  turn_timeout_sec?: number;
+  /** 上下文压缩开关（覆盖 server 默认，C-18 软约束）。 */
+  compress?: boolean;
+}
+
+/** `GET /config` 响应（server 当前默认配置，不含 API key，C-04）。 */
+export interface ServerConfigResponse {
+  provider_kind: string;
+  provider_name: string | null;
+  api_base: string;
+  model: string;
+  timeout_sec: number;
+  max_retries: number;
+  small_model: string | null;
+  turn_timeout_sec: number;
+  compress: boolean;
+  permission_timeout_sec: number;
+  preset: string;
 }
 
 export interface CreateSessionResponse {
@@ -115,6 +140,11 @@ export function createSession(config?: CreateSessionBody): Promise<CreateSession
     method: "POST",
     body: JSON.stringify(config ?? {}),
   });
+}
+
+/** 读取 server 当前默认配置（`GET /config`，设置面板编辑模式加载真实默认值用）。 */
+export function getServerConfig(): Promise<ServerConfigResponse> {
+  return http<ServerConfigResponse>("/config");
 }
 
 export function listSessions(): Promise<{ sessions: SessionMeta[] }> {

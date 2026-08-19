@@ -176,12 +176,23 @@ pub struct ServeCommand {
 ///
 /// `serve` 子命令的 4 种模式（HTTP/NDJSON/ACP/LSP）共用此解析逻辑，确保配置一致。
 /// 与 CLI 单次/交互模式的 `builder::build_runtime` 优先级对齐：CLI 参数覆盖配置文件。
-///
-/// 返回 `(provider_kind, provider_name, api_base, api_key, model)`。
-fn resolve_provider_config(cmd: &ServeCommand) -> (String, Option<String>, String, String, String) {
-    let file_provider = minicoding_core::config::load_config()
-        .map(|c| c.provider)
-        .unwrap_or_default();
+struct ResolvedServeConfig {
+    provider_kind: String,
+    provider_name: Option<String>,
+    api_base: String,
+    api_key: String,
+    model: String,
+    /// 模型参数/上下文默认值：config.toml > 内置默认
+    timeout_sec: u64,
+    max_retries: u32,
+    small_model: Option<String>,
+    turn_timeout_sec: u64,
+    compress: bool,
+}
+
+fn resolve_provider_config(cmd: &ServeCommand) -> ResolvedServeConfig {
+    let file_config = minicoding_core::config::load_config().unwrap_or_default();
+    let file_provider = &file_config.provider;
 
     let provider_kind = cmd
         .provider
@@ -210,7 +221,18 @@ fn resolve_provider_config(cmd: &ServeCommand) -> (String, Option<String>, Strin
         }
     });
 
-    (provider_kind, provider_name, api_base, api_key, model)
+    ResolvedServeConfig {
+        provider_kind,
+        provider_name,
+        api_base,
+        api_key,
+        model,
+        timeout_sec: file_provider.timeout_sec,
+        max_retries: file_provider.max_retries,
+        small_model: file_provider.small.as_ref().map(|s| s.model.clone()),
+        turn_timeout_sec: file_config.context.turn_timeout_sec,
+        compress: file_config.context.compress,
+    }
 }
 
 /// 运行 `serve` 子命令：根据 `--as-mcp-server`/`--ndjson`/`--acp`/`--lsp` 分派到对应模式。
@@ -256,21 +278,26 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid bind address `{bind_str}`: {e}"))?;
 
     // 解析 provider 配置（CLI > env > config.toml > 默认）
-    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
+    let resolved = resolve_provider_config(cmd);
 
     let cfg = minicoding_server::ServerConfig {
         bind,
-        provider_kind,
-        provider_name,
-        api_base,
-        api_key,
-        model,
+        provider_kind: resolved.provider_kind,
+        provider_name: resolved.provider_name,
+        api_base: resolved.api_base,
+        api_key: resolved.api_key,
+        model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_timeout_sec: cmd.permission_timeout_sec,
         web_dir: cmd.web.as_deref().map(Utf8PathBuf::from),
         cors_origins: cmd.cors_origins.clone(),
         preset: cmd.preset.clone(),
+        timeout_sec: resolved.timeout_sec,
+        max_retries: resolved.max_retries,
+        small_model: resolved.small_model,
+        turn_timeout_sec: resolved.turn_timeout_sec,
+        compress: resolved.compress,
     };
 
     minicoding_server::serve(cfg)
@@ -350,15 +377,15 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP 模式一致）
-    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
+    let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（CreateSession 命令未指定覆盖时用此默认）
     let params = ServerRuntimeParams {
-        provider_kind,
-        provider_name,
-        api_base,
-        api_key,
-        model,
+        provider_kind: resolved.provider_kind,
+        provider_name: resolved.provider_name,
+        api_base: resolved.api_base,
+        api_key: resolved.api_key,
+        model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
@@ -366,6 +393,11 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
             workdir: Utf8PathBuf::from(&cmd.workdir),
             writable: Vec::new(),
         },
+        timeout_sec: resolved.timeout_sec,
+        max_retries: resolved.max_retries,
+        small_model: resolved.small_model,
+        turn_timeout_sec: resolved.turn_timeout_sec,
+        compress: resolved.compress,
     };
 
     // 3. 构造 SessionManager
@@ -396,15 +428,15 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON 模式一致）
-    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
+    let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（newConversation 未指定覆盖时用此默认）
     let params = ServerRuntimeParams {
-        provider_kind,
-        provider_name,
-        api_base,
-        api_key,
-        model,
+        provider_kind: resolved.provider_kind,
+        provider_name: resolved.provider_name,
+        api_base: resolved.api_base,
+        api_key: resolved.api_key,
+        model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
@@ -412,6 +444,11 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
             workdir: Utf8PathBuf::from(&cmd.workdir),
             writable: Vec::new(),
         },
+        timeout_sec: resolved.timeout_sec,
+        max_retries: resolved.max_retries,
+        small_model: resolved.small_model,
+        turn_timeout_sec: resolved.turn_timeout_sec,
+        compress: resolved.compress,
     };
 
     // 3. 构造 SessionManager
@@ -443,15 +480,15 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON/ACP 模式一致）
-    let (provider_kind, provider_name, api_base, api_key, model) = resolve_provider_config(cmd);
+    let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（executeCommand 创建会话时用）
     let params = ServerRuntimeParams {
-        provider_kind,
-        provider_name,
-        api_base,
-        api_key,
-        model,
+        provider_kind: resolved.provider_kind,
+        provider_name: resolved.provider_name,
+        api_base: resolved.api_base,
+        api_key: resolved.api_key,
+        model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
         permission_mode: PermissionMode::Default,
@@ -459,6 +496,11 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
             workdir: Utf8PathBuf::from(&cmd.workdir),
             writable: Vec::new(),
         },
+        timeout_sec: resolved.timeout_sec,
+        max_retries: resolved.max_retries,
+        small_model: resolved.small_model,
+        turn_timeout_sec: resolved.turn_timeout_sec,
+        compress: resolved.compress,
     };
 
     // 3. 构造 SessionManager

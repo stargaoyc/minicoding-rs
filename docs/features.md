@@ -230,7 +230,7 @@
 
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
-| W-01 | Web 前端 | React 19 + TS + Vite 6 + Tailwind v4，对话/工具/权限 UI（`crates/minicoding-web`） | M9 | 已实现（现代暗色主题 + glassmorphism + 渐变 accent） |
+| W-01 | Web 前端 | React 19 + TS + Vite 6 + Tailwind v4，对话/工具/权限 UI（`crates/minicoding-web`） | M9 | 已实现（现代风格，樱花粉/天蓝/暮紫三色系 + 浅色默认 + 白玻璃拟态 + 花瓣飘落/动态光晕/网格点阵 + 渐变滚动条） |
 | W-02 | 流式 SSE 渲染 | `Event::Token`/`ToolCall`/`PermissionRequest` 实时渲染，TanStack Query 增量更新 + 流式光标；快照气泡渲染 `tool_calls` 工具名+参数摘要（无文本不空白） | M9 | 已实现 |
 | W-03 | 权限确认弹窗 | shadcn/ui Dialog 接收 `PermissionPrompt` → JSON-RPC `permission.resolve` 回传，含风险等级可视化 | M9 | 已实现（low/medium/high 三色徽章 + 4 种决策按钮） |
 | W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Query 缓存管理 | M9 | 已实现（可折叠侧栏 + 会话元数据展示） |
@@ -248,6 +248,7 @@
 | W-16 | 取消后会话可继续 | 手动终止（cancel）后下一轮对话正常执行：`CancellationToken` 每轮 turn 结束重建（取消一次不再砖化会话）；`cancel()` 仅对运行中 turn 生效（turn 间隙点击不毒化下一轮）；前端 `turn_end` 清空被终止 turn 的流式文本/工具卡片残留渲染 | M9 | 已实现（`Runtime.cancel_token` 重建 + `turn_active` 标记；`useChat` `turn_end` 清理；回归测试 `cancel_then_next_turn_still_works`/`cancel_between_turns_is_ignored`） |
 | W-17 | 发送消息强制滚动到底部 | 用户发送消息后（乐观 user 消息出现）无视"接近底部"保护，必定滚动到最新对话位置；AI 回复期间仍保持"接近底部才跟随" | M9 | 已实现（`MessageList` `scrollToBottom(force)`，末条 user 消息触发） |
 | W-18 | 退出时终止 sidecar | desktop 应用退出/重启（托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar`，窗口关闭隐藏到托盘不杀 sidecar） |
+| W-19 | 设置面板扩展 | 设置弹窗除模型信息外新增三组配置（Tauri 写 `config.toml` `[provider]`+`[context]` 段并重启 sidecar；Web 存 localStorage 经 `POST /sessions` 覆盖注入，参数缺失时 `GET /config` 兜底）：模型参数（LLM 请求超时 C-07 / 最大重试 C-13 / 小 LLM 模型 design.md §3.8）+ 上下文（turn 超时 / 压缩开关 C-18） | M9 | 已实现（`ServerConfig`/`ServerRuntimeParams`/`CreateSessionBody` 扩 5 字段；`GET /config` 只读响应不含 API key C-04；desktop `get/save_context_config` invoke；SetupDialog 分组表单） |
 
 ## 13. 工程与质量
 
@@ -299,10 +300,10 @@
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 18 |
-| **合计** | **192** |
+| Web 与桌面（M9） | 19 |
+| **合计** | **193** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-18）18 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-18）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 
 ---
 

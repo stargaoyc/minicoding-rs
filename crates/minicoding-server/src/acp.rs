@@ -449,6 +449,11 @@ async fn handle_new_conversation(
         system: p.system.or(default.system),
         permission_mode: p.permission_mode.unwrap_or(default.permission_mode),
         sandbox_policy: default.sandbox_policy,
+        timeout_sec: default.timeout_sec,
+        max_retries: default.max_retries,
+        small_model: default.small_model,
+        turn_timeout_sec: default.turn_timeout_sec,
+        compress: default.compress,
     };
     match mgr.create_session(Some(params)) {
         Ok(session) => {
@@ -714,6 +719,11 @@ mod tests {
                 workdir: Utf8PathBuf::from("."),
                 writable: Vec::new(),
             },
+            timeout_sec: 120,
+            max_retries: 3,
+            small_model: None,
+            turn_timeout_sec: 600,
+            compress: true,
         }
     }
 

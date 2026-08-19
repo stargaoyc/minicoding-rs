@@ -80,6 +80,16 @@ pub struct ServerConfig {
     pub cors_origins: Vec<String>,
     /// 默认安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`）。
     pub preset: String,
+    /// LLM 请求超时（秒，默认 120）。
+    pub timeout_sec: u64,
+    /// LLM 请求最大重试（默认 3，C-13 bounded retries）。
+    pub max_retries: u32,
+    /// 小 LLM 模型名（摘要/压缩降本，`None` 不启用，见 `design.md` §3.8）。
+    pub small_model: Option<String>,
+    /// 单 turn 超时（秒，默认 600）。
+    pub turn_timeout_sec: u64,
+    /// 上下文压缩开关（默认开启，C-18 软约束）。
+    pub compress: bool,
 }
 
 /// 构造默认 `ServerRuntimeParams`（从 `ServerConfig` 派生）。
@@ -97,6 +107,11 @@ fn default_params(cfg: &ServerConfig) -> ServerRuntimeParams {
             workdir: cfg.workdir.clone(),
             writable: Vec::new(),
         },
+        timeout_sec: cfg.timeout_sec,
+        max_retries: cfg.max_retries,
+        small_model: cfg.small_model.clone(),
+        turn_timeout_sec: cfg.turn_timeout_sec,
+        compress: cfg.compress,
     };
     // `--preset` 覆盖默认模式与沙箱策略（C-22：full-access 打印 red 警告）
     if let Ok((mode, policy, warning)) = build_preset_policy(&cfg.preset, &cfg.workdir) {
@@ -113,6 +128,24 @@ fn default_params(cfg: &ServerConfig) -> ServerRuntimeParams {
 #[derive(Clone)]
 pub struct AppState {
     pub mgr: Arc<SessionManager>,
+    /// server 默认配置快照（`GET /config` 返回，供前端设置面板加载真实默认值）。
+    pub cfg: ServerConfig,
+}
+
+/// `GET /config` 响应（server 当前默认配置，不含 API key，C-04）。
+#[derive(Debug, Serialize)]
+pub struct ServerConfigResponse {
+    provider_kind: String,
+    provider_name: Option<String>,
+    api_base: String,
+    model: String,
+    timeout_sec: u64,
+    max_retries: u32,
+    small_model: Option<String>,
+    turn_timeout_sec: u64,
+    compress: bool,
+    permission_timeout_sec: u64,
+    preset: String,
 }
 
 /// `CreateSession` 请求 body。
@@ -144,6 +177,21 @@ struct CreateSessionBody {
     /// 优先于本开关）。
     #[serde(default)]
     plan_mode: bool,
+    /// LLM 请求超时（秒，覆盖 server 默认）。
+    #[serde(default)]
+    timeout_sec: Option<u64>,
+    /// LLM 请求最大重试（覆盖 server 默认）。
+    #[serde(default)]
+    max_retries: Option<u32>,
+    /// 小 LLM 模型名（摘要/压缩降本，`None` 继承 server 默认，见 `design.md` §3.8）。
+    #[serde(default)]
+    small_model: Option<String>,
+    /// 单 turn 超时（秒，覆盖 server 默认）。
+    #[serde(default)]
+    turn_timeout_sec: Option<u64>,
+    /// 上下文压缩开关（覆盖 server 默认，C-18 软约束）。
+    #[serde(default)]
+    compress: Option<bool>,
 }
 
 /// `CreateSession` 响应。
@@ -275,6 +323,7 @@ fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[
             "/sessions/{id}/workspace/diff",
             get(crate::workspace::workspace_diff),
         )
+        .route("/config", get(server_config))
         .route("/health", get(health));
 
     let app = if let Some(dir) = web_dir {
@@ -298,7 +347,10 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()> {
     let params = default_params(&cfg);
     let permission_timeout = Duration::from_secs(cfg.permission_timeout_sec);
     let mgr = Arc::new(SessionManager::new(params, permission_timeout));
-    let state = AppState { mgr };
+    let state = AppState {
+        mgr,
+        cfg: cfg.clone(),
+    };
 
     let app = build_router(state, cfg.web_dir.as_ref(), &cfg.cors_origins);
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
@@ -322,6 +374,27 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// `GET /config` — 返回 server 当前默认配置（不含 API key，C-04）。
+///
+/// 供前端设置面板加载真实默认值（Web 模式编辑设置时兜底，Tauri 模式
+/// 与 `config.toml` 交叉核对）。新会话可通过 `CreateSessionBody` 会话级覆盖。
+async fn server_config(State(state): State<AppState>) -> Json<ServerConfigResponse> {
+    let c = &state.cfg;
+    Json(ServerConfigResponse {
+        provider_kind: c.provider_kind.clone(),
+        provider_name: c.provider_name.clone(),
+        api_base: c.api_base.clone(),
+        model: c.model.clone(),
+        timeout_sec: c.timeout_sec,
+        max_retries: c.max_retries,
+        small_model: c.small_model.clone(),
+        turn_timeout_sec: c.turn_timeout_sec,
+        compress: c.compress,
+        permission_timeout_sec: c.permission_timeout_sec,
+        preset: c.preset.clone(),
+    })
+}
+
 /// `POST /sessions` — 创建新会话。
 async fn create_session(
     State(state): State<AppState>,
@@ -342,6 +415,11 @@ async fn create_session(
         system: body.system.or(default.system.clone()),
         permission_mode: body.permission_mode.unwrap_or(default.permission_mode),
         sandbox_policy: default.sandbox_policy.clone(),
+        timeout_sec: body.timeout_sec.unwrap_or(default.timeout_sec),
+        max_retries: body.max_retries.unwrap_or(default.max_retries),
+        small_model: body.small_model.or(default.small_model.clone()),
+        turn_timeout_sec: body.turn_timeout_sec.unwrap_or(default.turn_timeout_sec),
+        compress: body.compress.unwrap_or(default.compress),
     };
     // preset 解析（会话级覆盖）：`full-access` 强制 `BypassPermissions` 全自动 +
     // `DangerFullAccess` 沙箱外运行（C-22：显式选定 + red 警告，见 build_preset_policy）
