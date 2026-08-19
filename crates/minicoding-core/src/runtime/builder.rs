@@ -19,9 +19,7 @@ use crate::policy::{
 use crate::provider::LlmProvider;
 use crate::runtime::EventBus;
 use crate::runtime::Runtime;
-use crate::sandbox::{
-    DenialDetector, NoopDriver, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
-};
+use crate::sandbox::{NoopDriver, SandboxDriver, SandboxPolicy};
 use crate::storage::{
     AuditSink, EventStore, NoopAudit, NoopEventStore, NoopSnapshotStore, SnapshotStore, Storage,
 };
@@ -56,6 +54,10 @@ pub struct RuntimeBuilder {
     sandbox_policy: Option<SandboxPolicy>,
     /// 文件改动 journal（默认 `None`，仅 `file-undo` feature 启用时注入）。
     journal: Option<Arc<dyn Journal>>,
+    /// 沙箱拒绝检测器（默认 `NoopDenialDetector`，M-05 由 sandbox 注入）。
+    denial_detector: Option<Arc<dyn crate::sandbox::SandboxDenialDetector>>,
+    /// 沙箱拒绝熔断器（默认 `NoopDenialTracker`，M-05 由 sandbox 注入）。
+    sandbox_breaker: Option<Arc<dyn crate::sandbox::SandboxDenialTracker>>,
     /// Hook 注册表（默认 `NoopHookRegistry`，M5 由 CLI 注入 `HookRegistryImpl`）。
     hook_registry: Option<Arc<dyn HookRegistry>>,
     /// 初始权限模式（默认 `Default`，`--plan` 启动时设为 `Plan`）。
@@ -113,6 +115,8 @@ impl RuntimeBuilder {
             sandbox_driver: None,
             sandbox_policy: None,
             journal: None,
+            denial_detector: None,
+            sandbox_breaker: None,
             hook_registry: None,
             permission_mode: PermissionMode::Default,
             subagent_runner: None,
@@ -245,6 +249,33 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn sandbox_policy(mut self, p: SandboxPolicy) -> Self {
         self.sandbox_policy = Some(p);
+        self
+    }
+
+    /// 设置沙箱拒绝检测器（默认 `NoopDenialDetector` 兜底，M-05）。
+    ///
+    /// 由 `minicoding-sandbox` 的 `DenialDetector`（平台签名库）注入；未注入时
+    /// 不识别沙箱拒绝（与未启用 OS 沙箱的语义一致）。core 依赖 trait 抽象，
+    /// 不接触领域实现（AGENTS.md §3.3）。
+    #[must_use]
+    pub fn sandbox_denial_detector(
+        mut self,
+        d: Arc<dyn crate::sandbox::SandboxDenialDetector>,
+    ) -> Self {
+        self.denial_detector = Some(d);
+        self
+    }
+
+    /// 设置沙箱拒绝熔断器（默认 `NoopDenialTracker` 兜底，M-05）。
+    ///
+    /// 由 `minicoding-sandbox` 的 `SandboxCircuitBreaker` 注入（C-30 语义）；
+    /// 未注入时仅计数熔断、无领域签名库。
+    #[must_use]
+    pub fn sandbox_denial_breaker(
+        mut self,
+        b: Arc<dyn crate::sandbox::SandboxDenialTracker>,
+    ) -> Self {
+        self.sandbox_breaker = Some(b);
         self
     }
 
@@ -382,8 +413,12 @@ impl RuntimeBuilder {
             sandbox_driver: self.sandbox_driver.unwrap_or_else(|| Arc::new(NoopDriver)),
             sandbox_policy,
             journal: self.journal,
-            denial_detector: DenialDetector::new(),
-            sandbox_breaker: SandboxCircuitBreaker::default_thresholds(),
+            denial_detector: self
+                .denial_detector
+                .unwrap_or_else(|| Arc::new(crate::sandbox::NoopDenialDetector)),
+            sandbox_breaker: self.sandbox_breaker.unwrap_or_else(|| {
+                Arc::new(crate::sandbox::NoopDenialTracker::default_thresholds())
+            }),
             hook_registry: self
                 .hook_registry
                 .unwrap_or_else(|| Arc::new(NoopHookRegistry)),

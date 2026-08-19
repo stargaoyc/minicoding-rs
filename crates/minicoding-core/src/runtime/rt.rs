@@ -21,8 +21,8 @@ use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
 use crate::metrics;
 use crate::model::{
-    Message, PolicyError, RuntimeError, Session, SessionId, SideEffect, StopReason, ToolCall,
-    ToolCallId, ToolResult, TurnOutcome, UserInput,
+    ContentBlock, Message, PolicyError, Role, RuntimeError, Session, SessionId, SideEffect,
+    StopReason, ToolCall, ToolCallId, ToolResult, TurnOutcome, UserInput,
 };
 use crate::otel::span_name;
 use crate::policy::{
@@ -32,9 +32,7 @@ use crate::policy::{
 use crate::provider::{BoxFuture, ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
 use crate::runtime::{Event, EventBus};
-use crate::sandbox::{
-    BreakerState, DenialDetector, SandboxCircuitBreaker, SandboxDriver, SandboxPolicy,
-};
+use crate::sandbox::{BreakerState, SandboxDriver, SandboxPolicy};
 use crate::storage::{
     AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, PersistedEvent, SNAPSHOT_INTERVAL,
     SessionSnapshot, SessionState, SnapshotStore, Storage, try_persist,
@@ -107,10 +105,10 @@ pub struct Runtime {
     pub(crate) sandbox_policy: SandboxPolicy,
     /// 文件改动 journal（M4，可选，`fs.write/edit/delete` 成功后 `record`，C-28）。
     pub(crate) journal: Option<Arc<dyn Journal>>,
-    /// 沙箱拒绝检测器（无状态，T-M4-5）。
-    pub(crate) denial_detector: DenialDetector,
-    /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过）。
-    pub(crate) sandbox_breaker: SandboxCircuitBreaker,
+    /// 沙箱拒绝检测器（M-05 抽象注入，默认 `NoopDenialDetector` 兜底）。
+    pub(crate) denial_detector: Arc<dyn crate::sandbox::SandboxDenialDetector>,
+    /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过；M-05 抽象注入）。
+    pub(crate) sandbox_breaker: Arc<dyn crate::sandbox::SandboxDenialTracker>,
     /// Hook 注册表（M5，默认 `NoopHookRegistry` 兜底）。
     ///
     /// PreToolUse/PostToolUse/PermissionRequest Hook 在 `execute_side_effect_call`
@@ -403,7 +401,11 @@ impl Runtime {
     /// 压缩管道在回填时触发熔断）预留。
     pub async fn restore_history(&self) -> Result<(), RuntimeError> {
         let count = self.session.messages.len();
-        for msg in &self.session.messages {
+        // 防御修复（M-03，D-05）：历史中仍悬空的 tool_calls 补合成错误结果
+        // （防"崩溃发生在 persist 之前"的极端情况）。磁盘消息不动，仅在 ctx 层
+        // 修复——每次 resume 幂等重建，保证发给 provider 的历史对严格 provider 合法。
+        let repaired = crate::model::repair_dangling_tool_calls(self.session.messages.clone());
+        for msg in &repaired {
             self.ctx.append(msg.clone()).await;
         }
         if count > 0 {
@@ -813,6 +815,9 @@ impl Runtime {
             let result: Result<TurnOutcome, RuntimeError> = tokio::select! {
                 () = cancel_fut => {
                     tracing::info!("turn cancelled by user");
+                    // M-03（D-05）：取消可能发生在工具执行中途，回填悬空 tool_calls
+                    // 的合成错误结果，保证 resume 后历史对严格 provider 合法。
+                    self.backfill_missing_tool_results().await;
                     let event = Event::TurnEnd {
                         stop_reason: StopReason::Interrupted,
                     };
@@ -827,6 +832,8 @@ impl Runtime {
                         timeout_sec = self.config.context.turn_timeout_sec,
                         "turn timed out"
                     );
+                    // M-03（D-05）：超时同样可能留下悬空 tool_calls，回填合成结果。
+                    self.backfill_missing_tool_results().await;
                     let event = Event::TurnEnd {
                         stop_reason: StopReason::Stopped,
                     };
@@ -907,6 +914,61 @@ impl Runtime {
         }
         let last = &signatures[n - 1];
         signatures[n - 3..].iter().all(|s| s == last)
+    }
+
+    /// 为会话中"有 `tool_calls` 但缺 `tool_result`"的 assistant 消息补合成错误结果
+    /// （M-03，D-05）。
+    ///
+    /// cancel/timeout 可能发生在工具执行中途：assistant 消息（含 `tool_calls`）已
+    /// 落盘，但部分/全部 `tool_result` 未落盘，留下悬空调用——严格 provider（如
+    /// Anthropic）要求每个 `tool_use` 必有 `tool_result`，resume 后请求会 400。
+    /// 本方法对最后一个含 `tool_calls` 的 assistant 消息中**尚无结果**的调用补一条
+    /// `is_error=true` 的合成 Tool 消息（落盘 + 入上下文 + 广播）。幂等：已齐的
+    /// 调用跳过。
+    ///
+    /// 注意：事实源是 `storage` 而非 `self.session.messages`——后者仅含预加载
+    /// 历史，运行期新增消息只写 storage/ctx，不更新 `session.messages`。
+    async fn backfill_missing_tool_results(&self) {
+        let Ok(msgs) = self.storage.load(&self.session.id).await else {
+            return;
+        };
+        let Some(asst) = msgs
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        else {
+            return;
+        };
+        // 收集本 turn 已落盘（含 before-history）的 tool_result call_id
+        let answered: std::collections::HashSet<&str> = msgs
+            .iter()
+            .filter_map(|m| {
+                m.content.iter().find_map(|b| {
+                    if let ContentBlock::ToolResult { call_id, .. } = b {
+                        Some(call_id.as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        for call in &asst.tool_calls {
+            if answered.contains(call.id.as_str()) {
+                continue;
+            }
+            let msg = Self::tool_result_message(
+                call.id.clone(),
+                ToolResult::err_text("[interrupted] 工具调用未执行（turn 被取消/超时）"),
+            );
+            if self.storage.append(&self.session.id, &msg).await.is_err() {
+                // 回填失败不阻塞中断返回（已尽力；防御层 restore 时会再修）
+                continue;
+            }
+            self.ctx.append(msg.clone()).await;
+            let event = Event::MessageAppended(msg);
+            self.persist_event(&event).await;
+            self.events.emit(event);
+        }
     }
 
     /// 流式调用 LLM 并聚合为 assistant 消息。

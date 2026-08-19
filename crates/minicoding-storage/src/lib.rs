@@ -1,11 +1,12 @@
 //! # minicoding-storage
 //!
-//! 存储与审计：实现 `core::storage::Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait。
+//! 存储与审计：实现 `core::storage::Storage`/`AuditSink`/`EventStore`/`SnapshotStore` trait，
+//! 并提供事件重放算法（`replay_session_state`，M-05 从 core 下沉，避免 core 含领域算法）。
 //!
 //! 职责：
 //! - `JSONL` 会话日志（追加写、崩溃安全）；
 //! - 审计日志（`audit.log` `JSONL`，Unix 下 0600 权限）；
-//! - Event Sourcing（事件持久化 + snapshot，见 `design.md` §25）。
+//! - Event Sourcing（事件持久化 + snapshot + 重放，见 `design.md` §25）。
 //!
 //! ## 设计要点
 //!
@@ -26,6 +27,7 @@ mod export;
 mod index;
 mod jsonl;
 mod lock;
+mod replay;
 mod snapshot_store;
 
 pub use audit::FileAuditSink;
@@ -34,4 +36,5 @@ pub use export::{ExportFormat, export_session_jsonl, export_session_md};
 pub use index::{SessionIndex, SessionIndexEntry};
 pub use jsonl::JsonlStorage;
 pub use lock::SessionLock;
+pub use replay::{ReplayError, ReplayedSession, replay_session_state, session_from_messages};
 pub use snapshot_store::JsonlSnapshotStore;

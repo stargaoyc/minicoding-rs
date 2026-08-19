@@ -22,6 +22,13 @@
 //! ```
 //!
 //! Thrash 检测：连续 `thrash_threshold` 次"压缩完即超阈值"→ 熔断。
+//!
+//! **熔断去重（M-05）**：失败计数 + 双阈值复用 `minicoding_core::util::CircuitBreaker`
+//! 通用骨架（与沙箱熔断 C-30 同构）；本模块仅保留压缩特有的 thrash 计数器。
+
+use minicoding_core::util::BreakerState as CountState;
+use minicoding_core::util::CircuitBreaker as CountBreaker;
+use minicoding_core::util::CircuitBreakerConfig as CountBreakerConfig;
 
 /// 熔断器配置（阈值可配，见 `docs/design.md` §3.6）。
 #[derive(Debug, Clone, Copy)]
@@ -47,16 +54,17 @@ impl Default for CircuitBreakerConfig {
 /// 压缩熔断状态机（C-29：状态机在 Runtime 层，非 LLM 控制）。
 ///
 /// 跟踪两个独立计数器：
-/// - `fail_count`：压缩管道返回错误（降级链全失败）的累计次数；
+/// - `fail_count`（复用 `util::CircuitBreaker` 通用骨架）：压缩管道返回错误
+///   （降级链全失败）的累计次数；
 /// - `consecutive_oversize`：连续"压缩成功但 token 仍超阈值"的次数（Thrash 检测）。
 ///
 /// `record_success` 重置两个计数器；`record_failure` 仅递增 `fail_count`；
 /// `record_oversize` 仅递增 `consecutive_oversize`。
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
-    fail_count: usize,
+    fail: CountBreaker,
     consecutive_oversize: usize,
-    config: CircuitBreakerConfig,
+    thrash_threshold: usize,
 }
 
 impl Default for CircuitBreaker {
@@ -76,21 +84,24 @@ impl CircuitBreaker {
     #[must_use]
     pub fn with_config(config: CircuitBreakerConfig) -> Self {
         Self {
-            fail_count: 0,
+            fail: CountBreaker::with_config(CountBreakerConfig {
+                soft_threshold: config.fail_threshold,
+                hard_threshold: config.force_end_threshold,
+            }),
             consecutive_oversize: 0,
-            config,
+            thrash_threshold: config.thrash_threshold,
         }
     }
 
     /// 压缩成功（token 降到阈值下）：重置 `fail_count` 与 `consecutive_oversize`。
     pub fn record_success(&mut self) {
-        self.fail_count = 0;
+        self.fail.reset();
         self.consecutive_oversize = 0;
     }
 
     /// 压缩失败（降级链全失败）：`fail_count += 1`。
     pub fn record_failure(&mut self) {
-        self.fail_count = self.fail_count.saturating_add(1);
+        let _ = self.fail.record();
     }
 
     /// 压缩成功但 token 仍超阈值（Thrash 前兆）：`consecutive_oversize += 1`。
@@ -101,7 +112,7 @@ impl CircuitBreaker {
     /// 当前失败计数。
     #[must_use]
     pub fn fail_count(&self) -> usize {
-        self.fail_count
+        self.fail.count()
     }
 
     /// 当前连续超阈值计数。
@@ -115,7 +126,10 @@ impl CircuitBreaker {
     /// 满足后 `build_chat_request` 返回 `RuntimeError` 中止本轮（见 §3.6）。
     #[must_use]
     pub fn should_trip(&self) -> bool {
-        self.fail_count >= self.config.fail_threshold
+        matches!(
+            self.fail.state(),
+            CountState::SoftTripped | CountState::HardTripped
+        )
     }
 
     /// 是否应强制 `TurnEnd`（`fail_count >= force_end_threshold`）。
@@ -123,7 +137,7 @@ impl CircuitBreaker {
     /// 比熔断更严重：保留现场供 `/resume`（见 §3.6）。
     #[must_use]
     pub fn should_force_end(&self) -> bool {
-        self.fail_count >= self.config.force_end_threshold
+        self.fail.state() == CountState::HardTripped
     }
 
     /// 是否检测到 Thrash（`consecutive_oversize >= thrash_threshold`）。
@@ -132,7 +146,7 @@ impl CircuitBreaker {
     /// 触发后熔断，同 `should_trip` 处理（见 §3.6）。
     #[must_use]
     pub fn is_thrashing(&self) -> bool {
-        self.consecutive_oversize >= self.config.thrash_threshold
+        self.consecutive_oversize >= self.thrash_threshold
     }
 }
 

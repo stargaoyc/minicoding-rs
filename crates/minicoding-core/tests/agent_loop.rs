@@ -334,6 +334,88 @@ async fn cancel_then_next_turn_still_works() {
     }
 }
 
+/// M-03（D-05）：cancel 中断时悬空 tool_calls 被回填合成错误结果。
+///
+/// assistant 消息（含 tool_calls）落盘后、tool_result 落盘前 cancel → 每个
+/// tool_call 都应有对应 Tool 消息（合成 is_error=true）。resume 后历史对严格
+/// provider（Anthropic 要求 tool_use 必有 tool_result）合法。
+#[tokio::test]
+async fn cancel_mid_tool_backfills_synthetic_results() {
+    use minicoding_core::model::{ContentBlock, Role, ToolError, ToolResult, ToolSchema};
+    use minicoding_core::tool::{Tool, ToolContext};
+
+    struct HangingTool;
+    impl Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn schema(&self) -> &ToolSchema {
+            static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| ToolSchema {
+                name: "hang".into(),
+                description: "hang".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            })
+        }
+        fn side_effect(&self) -> minicoding_core::model::SideEffect {
+            minicoding_core::model::SideEffect::None
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> minicoding_core::provider::BoxFuture<'_, Result<ToolResult, ToolError>> {
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                Ok(ToolResult::ok_text("done"))
+            })
+        }
+    }
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(HangingTool));
+    // 唯一脚本：assistant 请求 hang 工具。第二迭代脚本耗尽会 Err，但 cancel
+    // 在工具挂起期间触发，不会走到第二迭代。
+    let provider = ScriptedProvider::new(vec![tool_call_deltas("c1", "hang", "{}")]);
+    let rt = Arc::new(build_runtime(provider, tools));
+
+    let rt2 = Arc::clone(&rt);
+    let turn = tokio::spawn(async move { rt2.run_turn(UserInput::from_text("开始")).await });
+    // 等 assistant（含 tool_calls）落盘 + 工具挂起
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    rt.cancel();
+    let outcome = turn.await.expect("turn join").expect("turn ok");
+    assert!(matches!(outcome, TurnOutcome::Interrupted(_)));
+
+    // 校验：历史中 assistant 的每个 tool_call 都有对应 Tool 结果（合成）
+    // 运行期消息只在 storage/ctx（session.messages 仅含预加载历史）
+    let msgs = rt.storage().load(&rt.session().id.clone()).await.unwrap();
+    let asst = msgs
+        .iter()
+        .find(|m| matches!(m.role, Role::Assistant) && !m.tool_calls.is_empty())
+        .expect("assistant with tool_calls should exist");
+    let answered: Vec<String> = msgs
+        .iter()
+        .filter(|m| matches!(m.role, Role::Tool))
+        .filter_map(|m| {
+            m.content.iter().find_map(|b| {
+                if let ContentBlock::ToolResult { call_id, .. } = b {
+                    Some(call_id.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    for call in &asst.tool_calls {
+        assert!(
+            answered.contains(&call.id),
+            "tool_call {} 缺 tool_result（M-03 应回填）",
+            call.id
+        );
+    }
+}
+
 /// 场景 10（回归）：turn 间隙调用 `cancel()`（无 turn 运行）不毒化下一轮。
 ///
 /// `cancel()` 仅对运行中的 turn 生效（`turn_active` 检查）；否则"取消按钮

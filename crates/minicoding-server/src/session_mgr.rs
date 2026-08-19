@@ -18,9 +18,9 @@ use minicoding_core::model::{
 };
 use minicoding_core::policy::Decision;
 use minicoding_core::runtime::{Event, Runtime};
-use minicoding_core::storage::{Storage, replay_session_state};
+use minicoding_core::storage::Storage;
 use minicoding_protocol::cursor::EventCursor;
-use minicoding_storage::{JsonlEventStore, JsonlSnapshotStore, JsonlStorage};
+use minicoding_storage::{JsonlEventStore, JsonlSnapshotStore, JsonlStorage, replay_session_state};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;

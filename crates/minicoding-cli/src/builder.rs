@@ -481,7 +481,12 @@ pub fn build_runtime(
         let driver: Arc<dyn SandboxDriver> = Arc::from(minicoding_sandbox::detect_driver());
         builder = builder
             .sandbox_driver(driver)
-            .sandbox_policy(sandbox_policy);
+            .sandbox_policy(sandbox_policy)
+            // M-05：注入领域级 denial 检测与熔断（sandbox 签名库 + C-30 熔断）
+            .sandbox_denial_detector(Arc::new(minicoding_sandbox::DenialDetector::new()))
+            .sandbox_denial_breaker(Arc::new(
+                minicoding_sandbox::SandboxCircuitBreaker::default_thresholds(),
+            ));
     }
     #[cfg(not(feature = "sandbox"))]
     {
@@ -733,7 +738,7 @@ fn load_session_via_event_sourcing(
     workdir: Utf8PathBuf,
     config_hash_val: u64,
 ) -> Result<Option<Session>> {
-    use minicoding_core::storage::{replay_session_state, session_from_messages};
+    use minicoding_storage::{replay_session_state, session_from_messages};
 
     // 加载 snapshot（如有）
     let snapshot = snapshot_store

@@ -14,9 +14,11 @@
 //!
 //! 非 git 仓库时降级为 `Shared` 隔离（记 warn），继续委托内部 runner。
 
-use crate::agent::SubagentRunner;
-use crate::model::{Isolation, MergeStrategy, RuntimeError, SubagentResult, SubagentSpec};
-use crate::provider::BoxFuture;
+use minicoding_core::agent::SubagentRunner;
+use minicoding_core::model::{
+    Isolation, MergeStrategy, RuntimeError, SubagentResult, SubagentSpec,
+};
+use minicoding_core::provider::BoxFuture;
 use std::sync::Arc;
 
 /// Worktree 隔离子 Agent runner（装饰器，A-15）。
@@ -231,8 +233,8 @@ mod tests {
     //! `WorktreeSubagentRunner` 降级与隔离类型默认值测试。
 
     use super::*;
-    use crate::agent::SubagentRunner;
-    use crate::model::{SubagentResult, SubagentType, WorktreeSpec};
+    use minicoding_core::agent::SubagentRunner;
+    use minicoding_core::model::{SubagentResult, SubagentType, WorktreeSpec};
     use std::sync::Mutex;
 
     #[test]
@@ -267,7 +269,8 @@ mod tests {
         // 非 git 目录中，worktree runner 应降级为 Shared 后委托内部 runner。
         let tmp = tempfile::tempdir().unwrap();
         let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
-        let inner: Arc<dyn SubagentRunner> = Arc::new(crate::agent::NoopSubagentRunner::new());
+        let inner: Arc<dyn SubagentRunner> =
+            Arc::new(minicoding_core::agent::NoopSubagentRunner::new());
         let runner = WorktreeSubagentRunner::new(inner, workdir);
         let mut spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
         spec.isolation = Isolation::Worktree(WorktreeSpec::new());
@@ -535,7 +538,8 @@ mod tests {
         // 内部 runner 返回错误时，spawn 应传播（worktree 流程不影响错误传播）。
         let tmp = tempfile::tempdir().unwrap();
         let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
-        let inner: Arc<dyn SubagentRunner> = Arc::new(crate::agent::NoopSubagentRunner::new());
+        let inner: Arc<dyn SubagentRunner> =
+            Arc::new(minicoding_core::agent::NoopSubagentRunner::new());
         let runner = WorktreeSubagentRunner::new(inner, workdir);
         let spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
         let result = runner.spawn(spec, "test".to_string()).await;

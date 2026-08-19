@@ -36,6 +36,7 @@ mod plan;
 mod shell;
 mod task;
 mod util;
+mod worktree;
 
 #[cfg(feature = "web")]
 mod web;
@@ -59,6 +60,7 @@ pub use task::{
     register_spawn_tool, register_task_tools,
 };
 pub use util::{ensure_dir, resolve_path, truncate_output};
+pub use worktree::WorktreeSubagentRunner;
 
 #[cfg(feature = "web")]
 pub use web::{WebFetch, WebSearch, register_web_tools};
