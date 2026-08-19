@@ -322,7 +322,7 @@ build_chat_request
              └─ 连续 2 次"压缩完即超" → 熔断，同上错误
 ```
 
-熔断阈值可配（`[context] compress_fail_threshold = 3`，`thrash_threshold = 2`）。熔断事件打 OTel span event（`compress.circuit_breaker`），属性 `fail_count`/`thrash_count`，便于诊断。该机制与 §2.4 的 `max_tool_iters`、`security.md` §8.8 的沙箱拒绝熔断器三者互补：分别防"工具死循环""沙箱拒绝死循环""压缩死循环"。
+熔断阈值可配（`[context] compress_fail_threshold = 3`，`thrash_threshold = 2`）。熔断事件打 OTel span event（`compress.circuit_breaker`），属性 `fail_count`/`thrash_count`，便于诊断。该机制与 §2.4 的 `max_tool_iters`、`security.md` §8.8 的沙箱拒绝熔断器三者互补：分别防"工具死循环""沙箱拒绝死循环""压缩死循环"。熔断器失败计数 + 双阈值复用 `core::util::CircuitBreaker` 通用骨架（M-05 熔断去重，见 `modules.md` §1.4），本机制仅保留 thrash 计数器表达压缩特有失效模式。
 
 ### 3.7 压缩后状态保留清单（参考 Claude Code）
 
@@ -919,7 +919,7 @@ pub enum MergeStrategy {
 - 需仓库是 git 仓库（非 git 仓库降级为 `Shared` 并 warn）；
 - worktree 路径在 `.minicoding/worktrees/`（已加入 `.gitignore` 默认模板）。
 
-**实现状态（A-15）**：`Isolation`/`WorktreeSpec`/`MergeStrategy` 定义在 `model/subagent.rs`，`SubagentSpec.isolation` 默认 `Shared`。`WorktreeSubagentRunner`（`agent/worktree.rs`）是装饰器，包裹内部 `Arc<dyn SubagentRunner>`：`Worktree` 模式下 `git worktree add` 创建隔离目录 → 委托内部 runner → 按 `merge_back` 合并 → `auto_cleanup` 清理。非 git 仓库降级为 `Shared`。
+**实现状态（A-15）**：`Isolation`/`WorktreeSpec`/`MergeStrategy` 定义在 `model/subagent.rs`，`SubagentSpec.isolation` 默认 `Shared`。`WorktreeSubagentRunner`（M-05 后位于 `minicoding-tools`，见 `modules.md` §7.2）是装饰器，包裹内部 `Arc<dyn SubagentRunner>`：`Worktree` 模式下 `git worktree add` 创建隔离目录 → 委托内部 runner → 按 `merge_back` 合并 → `auto_cleanup` 清理。非 git 仓库降级为 `Shared`。core 仅保留 `SubagentRunner` trait 抽象（M-05 下沉，`agent/mod.rs` 模块注释）。
 
 ---
 
@@ -2767,6 +2767,8 @@ snapshot 触发条件：每 `SNAPSHOT_INTERVAL`（50）条 `MessageAppended` 事
 `SessionSnapshot` 字段：`seq`（snapshot 对应的事件 seq）、`schema_version`（与 `SCHEMA_VERSION` 一致）、`session_id`、`state: SessionState`（`id`/`created_at`/`workdir`/`config_hash`/`messages`）。
 
 ### 25.4 事件重放（`replay_session_state`）
+
+> **位置（M-05 下沉）**：`replay_session_state`/`session_from_messages` 实现位于 `minicoding-storage`（`replay.rs`），core 仅通过 `Storage` trait 编排，不再导出（见 `modules.md` §9.2）。
 
 从 snapshot + 事件流重建 `Session` 状态：
 

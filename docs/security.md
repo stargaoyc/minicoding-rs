@@ -429,7 +429,7 @@ OS 沙箱显著强于纯应用层，但**不是万能**：
 
 ### 8.7 沙箱拒绝检测与升级流（参考 Codex）
 
-命令在沙箱内失败时，错误可能来自"业务逻辑"或"沙箱拒绝"，二者处理方式不同。Runtime 维护一份 **denial 签名库**，把沙箱拒绝从普通错误中识别出来，升级为权限请求而非裸失败：
+命令在沙箱内失败时，错误可能来自"业务逻辑"或"沙箱拒绝"，二者处理方式不同。Runtime 经注入的 **denial 签名库**（M-05 后位于 `minicoding-sandbox` 的 `PLATFORM_SIGNATURES`，core 仅依赖 `SandboxDenialDetector` trait），把沙箱拒绝从普通错误中识别出来，升级为权限请求而非裸失败：
 
 ```
 shell.run / fs.write 执行
@@ -462,7 +462,7 @@ shell.run / fs.write 执行
 
 ### 8.8 沙箱拒绝熔断器（Circuit Breaker，参考 Codex）
 
-若 Agent 在沙箱内反复触发拒绝并请求升级，会陷入"拒绝→升级→再拒绝"的 token 烧损循环。参考 Codex 的 auto-review 熔断器，Runtime 维护单 turn 内的拒绝计数器，达阈值即中止：
+若 Agent 在沙箱内反复触发拒绝并请求升级，会陷入"拒绝→升级→再拒绝"的 token 烧损循环。参考 Codex 的 auto-review 熔断器，Runtime 维护单 turn 内的拒绝计数器（`SandboxDenialTracker` trait，M-05 后实现位于 `minicoding-sandbox` 的 `SandboxCircuitBreaker`，core 兜底 `NoopDenialTracker`），达阈值即中止：
 
 ```
 单 turn 内累计 sandbox_denied 计数

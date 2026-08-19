@@ -183,6 +183,8 @@ core  ◄──  领域 crate (context/policy/memory/hooks/journal/sandbox/mcp/s
 | `ContextManager` | `core::context` | `minicoding-context` |
 | `PermissionPolicy` / `PermissionPrompter` | `core::policy` | `minicoding-policy` |
 | `SandboxDriver` | `core::sandbox` | `minicoding-sandbox`（核心 `NoopDriver` 在 core 兜底） |
+| `SandboxDenialDetector` / `SandboxDenialTracker` | `core::sandbox` | `minicoding-sandbox`（M-05，`NoopDenialDetector`/`NoopDenialTracker` 在 core 兜底） |
+| `SubagentRunner` | `core::agent` | `minicoding-tools`（`WorktreeSubagentRunner`，M-05 下沉） |
 | `Hook` / `HookRegistry` | `core::hooks` | `minicoding-hooks` |
 | `Storage` / `AuditSink` | `core::storage` | `minicoding-storage` |
 | `Journal` | `core::journal` | `minicoding-journal` |
@@ -202,8 +204,9 @@ core  ◄──  领域 crate (context/policy/memory/hooks/journal/sandbox/mcp/s
 - OTel 初始化与 span 辅助
 - 路径约定（`paths.rs`）
 - `NoopDriver`（`SandboxDriver` 兜底实现，供未启用 sandbox feature 时使用）
+- `NoopDenialDetector`/`NoopDenialTracker`（`SandboxDenialDetector`/`SandboxDenialTracker` 兜底实现，M-05）
 
-**禁止** 在 core 出现：压缩算法、黑名单正则、landlock ruleset、rmcp 调用、JSONL 写入、HTTP 客户端、Hook 子进程协议解析等任何领域实现。
+**禁止** 在 core 出现：压缩算法、黑名单正则、landlock ruleset、rmcp 调用、JSONL 写入、HTTP 客户端、Hook 子进程协议解析、平台 denial 签名库、git worktree 命令胶水、事件重放算法等任何领域实现（M-05 已下沉：replay→`minicoding-storage`、worktree→`minicoding-tools`、denial 签名库/熔断→`minicoding-sandbox`；core 的架构守卫测试 `tests/architecture.rs` 强制依赖白名单）。
 
 ### 3.5 平台/网络隔离
 
