@@ -10,6 +10,7 @@
 
 use minicoding_core::sandbox::{
     BreakerState, DenialMatch, DenialSignature, SandboxDenialDetector, SandboxDenialTracker,
+    SandboxDenyKind,
 };
 
 /// 跨平台 denial 签名库（按 `security.md` §8.7）。
@@ -24,49 +25,58 @@ pub const PLATFORM_SIGNATURES: &[DenialSignature] = &[
         platform: "any",
         pattern: "Operation not permitted",
         reason: "EPERM",
+        kind_label: "syscall_blocked",
     },
     DenialSignature {
         platform: "any",
         pattern: "Permission denied",
         reason: "EACCES",
+        kind_label: "write_forbidden",
     },
     // Linux Landlock / seccomp
     DenialSignature {
         platform: "linux",
         pattern: "landlock",
         reason: "landlock_denied",
+        kind_label: "write_forbidden",
     },
     DenialSignature {
         platform: "linux",
         pattern: "Bad system call",
         reason: "seccomp_sigsys",
+        kind_label: "syscall_blocked",
     },
     DenialSignature {
         platform: "linux",
         pattern: "SIGSYS",
         reason: "seccomp_sigsys",
+        kind_label: "syscall_blocked",
     },
     // macOS Seatbelt
     DenialSignature {
         platform: "macos",
         pattern: "sandbox-exec",
         reason: "seatbelt_denied",
+        kind_label: "external",
     },
     DenialSignature {
         platform: "macos",
         pattern: "Sandbox violation",
         reason: "seatbelt_violation",
+        kind_label: "write_forbidden",
     },
     // Windows
     DenialSignature {
         platform: "windows",
         pattern: "Access is denied",
         reason: "windows_access_denied",
+        kind_label: "write_forbidden",
     },
     DenialSignature {
         platform: "windows",
         pattern: "privilege not held",
         reason: "windows_privilege_not_held",
+        kind_label: "external",
     },
 ];
 
@@ -92,10 +102,39 @@ impl SandboxDenialDetector for DenialDetector {
                 return Some(DenialMatch {
                     signature: *sig,
                     tool: tool.to_string(),
+                    kind: deny_kind_from_label(sig.kind_label, sig.reason, error_text),
                 });
             }
         }
         None
+    }
+}
+
+/// 把签名表标签映射为结构化 `SandboxDenyKind`（M-09）。
+///
+/// payload 尽力提取：`syscall_blocked` 取 stderr 首行（如 `Bad system call`），
+/// 其余无法从文本可靠解析的字段留空——完整原文在 `ToolResultMeta.sandbox_denied.detail`。
+fn deny_kind_from_label(label: &str, reason: &str, error_text: &str) -> SandboxDenyKind {
+    let first_line = || {
+        error_text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(120)
+            .collect::<String>()
+    };
+    match label {
+        "syscall_blocked" => SandboxDenyKind::SyscallBlocked {
+            syscall: first_line(),
+        },
+        "write_forbidden" => SandboxDenyKind::WriteForbidden {
+            path: String::new(),
+        },
+        "resource_limit" => SandboxDenyKind::ResourceLimit {
+            limit: reason.to_string(),
+        },
+        _ => SandboxDenyKind::External,
     }
 }
 
@@ -205,6 +244,32 @@ mod tests {
     fn detect_windows() {
         let d = DenialDetector::new();
         assert!(d.detect("fs.write", "Error: Access is denied").is_some());
+    }
+
+    #[test]
+    fn detect_returns_structured_kind() {
+        // M-09：detect 产出结构化 SandboxDenyKind（透传 ToolResultMeta.sandbox_denied）
+        let d = DenialDetector::new();
+        let m = d
+            .detect("shell.run", "Bad system call (core dumped)")
+            .unwrap();
+        assert_eq!(
+            m.kind,
+            SandboxDenyKind::SyscallBlocked {
+                syscall: "Bad system call (core dumped)".into()
+            }
+        );
+        let m = d
+            .detect("shell.run", "landlock: operation not permitted")
+            .unwrap();
+        assert_eq!(
+            m.kind,
+            SandboxDenyKind::WriteForbidden {
+                path: String::new()
+            }
+        );
+        let m = d.detect("shell.run", "sandbox-exec: fatal error").unwrap();
+        assert_eq!(m.kind, SandboxDenyKind::External);
     }
 
     #[test]
