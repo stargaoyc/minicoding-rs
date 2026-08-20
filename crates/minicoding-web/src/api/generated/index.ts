@@ -38,3 +38,6 @@ export type { WorkspaceListResponse } from "./WorkspaceListResponse";
 export type { WorkspaceReadResponse } from "./WorkspaceReadResponse";
 export type { WorkspaceRoot } from "./WorkspaceRoot";
 export type { WorkspaceSwitchResponse } from "./WorkspaceSwitchResponse";
+export type { SandboxDenyInfo } from "./SandboxDenyInfo";
+export type { SandboxDenyKind } from "./SandboxDenyKind";
+export type { CompressedRange } from "./CompressedRange";

@@ -194,13 +194,14 @@
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M4 | 已实现 |
 | S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 已实现 |
 | S-21 | env: 环境变量语法 | 统一使用 `env:VAR_NAME` 语法引用环境变量，支持 `env:VAR:-fallback` 回退（见 `tech-stack.md` §12） | M1 | 已实现 |
-| S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更（见 `design.md` §11、`modules.md` §1.2） | M6+ | 已实现 |
+| S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更；Runtime 侧白名单热更新（M-12）：`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads` 在 turn 边界经 `reload_safe_config` 应用（仅当文件中显式声明该 key），非白名单变更 warn 提示重启、不做全量热重载（见 `design.md` §11/§12、`tech-stack.md` §13） | M6+ | 已实现 |
 | S-23 | Event Sourcing 事件流 | `EventStore`（`{id}.events.jsonl`）持久化状态变更事件，`seq` 单调递增，支持事件重放重建 `Session`（见 `design.md` §25） | M8+ | 已实现 |
 | S-24 | Snapshot 重放 | `SnapshotStore`（`{id}.snapshot.json`）每 50 条 `MessageAppended` 落盘 snapshot，加速 replay（见 `design.md` §25.3） | M8+ | 已实现 |
 | S-25 | SSE durable recovery | `Last-Event-ID` cursor 三级回退：内存 ring buffer → `EventStore::load_after` → `RehydrateRequired`（见 `design.md` §25.5） | M8+ | 已实现 |
 | S-26 | `--replay` 事件重放 | `--replay`/`--resume` 优先走 snapshot + 事件流重放，旧会话回退到消息日志（见 `design.md` §25.6） | M8+ | 已实现 |
 | S-27 | 事件 schema 版本化 | `SCHEMA_VERSION` + `EventRecord.schema_version`，旧版会话 migration 适配（见 `design.md` §25.7） | M8+ | 已实现 |
 | S-27b | 会话 step 边界事件（M-06） | `StepStarted`/`StepEnded` 持久化（SCHEMA_VERSION=2，log-only 不进 transcript），重放跳过，cancel/timeout 可定位中断点（见 `design.md` §25.2） | M8+ | 已实现 |
+| S-28 | 存储契约测试 + 版本拒绝（M-13） | `testing::storage_contract` 契约断言（append/load/list/delete/summary/M-01 并发）由内存与 JSONL 后端共享运行；更高 `format_version` 显式 `FormatUnsupported` 拒绝、scan 跳过、单坏行容错 trait 级覆盖；fsync 策略评估结论落 `tech-stack.md` §13.2 | M8+ | 已实现 |
 
 ## 11. 前端
 
@@ -257,6 +258,7 @@
 | W-17 | 发送消息强制滚动到底部 | 用户发送消息后（乐观 user 消息出现）无视"接近底部"保护，必定滚动到最新对话位置；AI 回复期间仍保持"接近底部才跟随" | M9 | 已实现（`MessageList` `scrollToBottom(force)`，末条 user 消息触发） |
 | W-18 | 退出时终止 sidecar | desktop 应用退出/重启（托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar`，窗口关闭隐藏到托盘不杀 sidecar） |
 | W-19 | 设置面板扩展 | 设置弹窗除模型信息外新增三组配置（Tauri 写 `config.toml` `[provider]`+`[context]` 段并重启 sidecar；Web 存 localStorage 经 `POST /sessions` 覆盖注入，参数缺失时 `GET /config` 兜底）：模型参数（LLM 请求超时 C-07 / 最大重试 C-13 / 小 LLM 模型 design.md §3.8）+ 上下文（turn 超时 / 压缩开关 C-18） | M9 | 已实现（`ServerConfig`/`ServerRuntimeParams`/`CreateSessionBody` 扩 5 字段；`GET /config` 只读响应不含 API key C-04；desktop `get/save_context_config` invoke；SetupDialog 分组表单） |
+| W-20 | 前端回放/单测基建（M-14） | Vitest + MSW（REST 拦截 + mock EventSource 重放 SSE fixture，不连真实后端）；SSE 事件流 record/replay 快照三态（`SNAPSHOT_MODE`=replay/record/off，对齐 dsh `DSH_SNAPSHOT`）覆盖"发消息→流式渲染→权限确认→沙箱拒绝卡片"；chatReducer 纯函数抽取（`useSSEStream` 行为不变重构）；MessageBubble/ToolCallCard 沙箱拒绝卡片（M-09 前端补齐）；CI `web` job（oxlint+tsc+vitest+build）（见 AGENTS.md §8.8） | M9 | 已实现 |
 
 ## 13. 工程与质量
 
@@ -309,7 +311,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **201** |
+| **合计** | **203** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 

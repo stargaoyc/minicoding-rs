@@ -543,9 +543,13 @@ pub struct SessionMeta {
 }
 ```
 
-`JsonlStorage` 实现 `Storage` trait，并扩展以下能力（见 `features.md` S-02/S-03/S-04）：
+**M-13 存储契约测试**（`feature = "test-util"`）：`minicoding_core::testing::storage_contract`
+提供全部 `Storage` 后端必须满足的共享断言（append/load 往返、list 元数据、summary 可见、
+delete 幂等、并发 append 不丢消息），内存 mock 与 `JsonlStorage`（`tests/storage_contract_jsonl.rs`，
+另含更高 `format_version` 显式拒绝与单坏行容错的 trait 级覆盖）运行同一套断言；未来 SQLite
+后端接入时零成本复用。fsync 策略评估结论见 `tech-stack.md` §13.2。
 
-```rust
+`JsonlStorage` 实现 `Storage` trait，并扩展以下能力（见 `features.md` S-02/S-03/S-04）：```rust
 // 会话索引（index.json）：轻量元数据列出，无需逐个打开 .jsonl
 pub struct SessionIndex { /* Vec<SessionIndexEntry> */ }
 pub struct SessionIndexEntry {
@@ -1216,6 +1220,13 @@ impl RuntimeBuilder {
     /// 存活，drop 时自动停止监听并结束后台线程。监听失败由 `start` 内部
     /// best-effort 处理（记 warn，返回空壳）。
     pub fn with_config_watcher(mut self, w: ConfigWatcher) -> Self;
+    /// config.toml 路径（M-12 白名单热更新，默认 `None` → 不启用文件重载）。
+    /// 与 `with_config_watcher` 配合：watcher 探测变更广播 `Event::ConfigChanged`，
+    /// Runtime 每次 `run_turn` 开头经 `reload_safe_config` 应用白名单字段
+    /// （`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）；
+    /// 非白名单变更仅 warn 提示重启。CLI 注入 `paths::config_path()`；
+    /// 不设置时（server）不启用。
+    pub fn with_config_path(mut self, p: Utf8PathBuf) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
@@ -1357,6 +1368,7 @@ turn_timeout_sec = 600
 [tools]
 enabled_groups = ["core", "fs", "shell", "web"]
 repeat_guard_thresholds = [3, 5, 8]   # M-08: 单工具指纹逐级软提醒阈值；空数组 = 仅硬停止
+parallel_reads = 8                      # M-12: 只读工具并行度；0 = 串行
 [tools.fs]
 max_read_bytes = 1048576
 [tools.shell]

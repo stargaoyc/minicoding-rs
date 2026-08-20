@@ -200,6 +200,8 @@ minicoding-core/src/
 │   └── watcher.rs         # ConfigWatcher（S-22 配置热更新，notify 8 + 500ms debounce + best-effort）
 ├── paths.rs               # 路径约定（见 data-model.md §3.0）
 ├── otel.rs                # OpenTelemetry 初始化 / span 辅助 / 资源属性
+├── testing/               # `#[cfg(feature = "test-util")]` 共享测试基建（M-13，非领域实现）
+│   └── storage_contract.rs # Storage 契约断言（内存/JSONL/未来 SQLite 后端共享，见 api.md §3.5）
 └── util/
     └── circuit_breaker.rs # 通用熔断器骨架（单计数 + 双阈值，M-05 熔断去重：沙箱 C-30 与压缩 C-29 共用）
 ```

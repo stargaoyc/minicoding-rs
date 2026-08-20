@@ -281,6 +281,7 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | MCP 客户端 | `rmcp` 2.2（官方，M4 一步到位） | 自实现 http/stdio | 官方 SDK 协议跟进快、对齐 2025-11-25 spec、含 `#[tool]` 宏与 schemars；自实现易落后、维护成本高 |
 | LSP server | `tower-lsp`（M8） | 自研 JSON-RPC stdio 薄封装 | LSP 协议方法集庞大（`textDocument/*`/`workspace/*`/`window/*`），`tower-lsp` 提供类型安全派发与生命周期管理；自研易出错且落后 LSP spec；与 ACP 共享 `minicoding-protocol` wire types，仅语义映射层不同 |
 | 文件锁 | `fs2` | `flock` 裸调 | 跨平台封装、API 稳定 |
+| 配置热更新策略（M-12） | **白名单 + turn 边界生效**：`ConfigWatcher` 仅探测变更并广播 `Event::ConfigChanged`；`Runtime` 在每次 `run_turn` 开头读 config.toml，**仅当文件中显式存在**白名单 key（`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）时才覆盖运行期配置；非白名单字段变更仅 warn 提示重启 | 全量热重载 / 完全不做热更新 | **不做全量热重载**：C-29 压缩熔断状态机与 provider 重建依赖构造时配置，热换不安全；白名单 presence 判断避免 serde default（文件缺字段补默认值）覆盖 CLI/env 覆盖值。`provider.model` 热生效依赖 `build_request_body` 改用 `req.params.model`（tokenizer 仍为构造时快照，接受此限制）。`Runtime.config` 用 `std::sync::RwLock` 锁保护（`build_dispatch_config` 是同步 fn 无法 `read().await`），读取点均为短临界区、guard 不跨 await |
 
 ### 13.1 `trait-variant` 宏的风险管理
 
@@ -312,6 +313,20 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | 不用 `dyn` 全用泛型 | 编译时间长、二进制体积大、Runtime 无法运行时装配实现 crate（feature gate 失效） |
 
 **决策**：M0-M5 使用 `trait-variant`；在 `roadmap.md` M6 评审节点检查 Rust 官方进展，若原生方案稳定则纳入 M7 迁移 task。`AGENTS.md` §2.1 已约束不引入 `async-trait`。
+
+### 13.2 消息追加 fsync 策略：保持逐条 fsync，暂不做 turn 级批量（M-13 评估）
+
+**现状**：`JsonlStorage::append` 每条消息写入后调用 `sync_all()`（fsync），保证"消息先写盘再入上下文"的崩溃安全不变量（见 `design.md` §2.2）——进程/系统崩溃后磁盘状态是已确认消息的前缀，无半行、无丢失。
+
+**备选方案**：turn 级批量 fsync（turn 结束或每 N 条消息统一刷盘）。
+
+| 维度 | 逐条 fsync（现状） | turn 级批量 |
+|------|------------------|------------|
+| 崩溃安全 | 单条消息粒度（最多丢最后 1 条未刷盘消息） | 最坏丢整个 turn 的消息（LLM 已产出但未落盘） |
+| IO 开销 | 每 append 一次 fsync（CLI 场景每秒个位数 append，实测非瓶颈） | 降低约 N 倍 fsync 调用 |
+| 实现复杂度 | 无 | 需 dirty 追踪 + turn 边界 flush 钩子 + 与 M-01 会话锁协同；跨进程崩溃语义变复杂 |
+
+**决策**：**保持逐条 fsync**。理由：(1) CLI/TUI 场景 append 频率低（人机交互节奏），fsync 不是可观测瓶颈，无 profiling 证据前不做优化（避免过早优化）；(2) 批量方案把崩溃窗口从"1 条"扩大到"1 个 turn"，与 C-28（Journal 回滚依赖 after 快照完整）和 resume 一致性语义冲突，收益/风险比不划算；(3) 未来若出现高频自动写场景（如 subagent 并发落盘、评测 harness 批量回放），以 `Storage` 后端替换方式实现批量策略（契约测试保证行为等价），不改上层。触发条件：profiling 显示 fsync 占 turn 延迟 >10% 时重评。
 
 ---
 

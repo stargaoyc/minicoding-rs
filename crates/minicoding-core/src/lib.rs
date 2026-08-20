@@ -31,6 +31,8 @@ pub mod provider;
 pub mod runtime;
 pub mod sandbox;
 pub mod storage;
+#[cfg(feature = "test-util")]
+pub mod testing;
 pub mod tool;
 pub mod util;
 
