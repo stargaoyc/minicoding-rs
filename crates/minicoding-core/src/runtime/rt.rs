@@ -1139,6 +1139,9 @@ impl Runtime {
     /// `PermissionPolicy::check` → 必要时 `PermissionPrompter::prompt` → 决策落
     /// `AuditSink`（C-01、AGENTS.md §5.5）。只读工具直接并行执行（BuiltinPolicy
     /// 对 `SideEffect::None` 返回 `Allow`，此处跳过以避免无谓 IO）。
+    /// 分桶 + 权限 + 并行/串行调度的完整循环体，行数由分支复杂度决定
+    /// （分桶、权限决策、Hook、沙箱拒绝、fallback 五层逻辑无法再安全拆分）。
+    #[allow(clippy::too_many_lines)]
     async fn execute_tool_calls(
         &self,
         calls: &[ToolCall],
@@ -1168,6 +1171,8 @@ impl Runtime {
         // future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
         let events = self.events.clone();
         let tools = self.tools.clone();
+        let denial_detector = self.denial_detector.clone();
+        let sandbox_breaker = self.sandbox_breaker.clone();
         let ro_futs: Vec<ToolFuture> = readonly
             .iter()
             .map(|call| {
@@ -1176,6 +1181,8 @@ impl Runtime {
                 let tool_name = call.name.clone();
                 let events = events.clone();
                 let tools = tools.clone();
+                let denial_detector = denial_detector.clone();
+                let sandbox_breaker = sandbox_breaker.clone();
                 // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
                 // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
                 let call: ToolCall = (**call).clone();
@@ -1204,9 +1211,21 @@ impl Runtime {
                     });
                     let result = match tools.dispatch(&call, &ctx).await {
                         Ok(r) => r,
-                        // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，
-                        // 不中止 turn（未知工具/参数不合法等模型可自行纠正）。
-                        Err(e) => ToolResult::err_text(format!("tool error: {e}")),
+                        // 沙箱拒绝检测（M-09：只读桶与副作用路径共用，C-30 不可绕过）。
+                        Err(e) => {
+                            if let Some(r) = Self::build_denial_result(
+                                denial_detector.as_ref(),
+                                sandbox_breaker.as_ref(),
+                                &tool_name,
+                                &e,
+                            ) {
+                                r
+                            } else {
+                                // design.md §4.5：工具错误以 is_error=true 回灌 LLM
+                                // 自我修正，不中止 turn（未知工具/参数不合法等模型可自行纠正）。
+                                ToolResult::err_text(format!("tool error: {e}"))
+                            }
+                        }
                     };
                     events.emit(Event::ToolCallFinished {
                         call_id: call_id.clone(),
@@ -1812,20 +1831,45 @@ impl Runtime {
         tool: &str,
         error: &crate::model::ToolError,
     ) -> Option<(ToolCallId, ToolResult)> {
+        Self::build_denial_result(
+            self.denial_detector.as_ref(),
+            self.sandbox_breaker.as_ref(),
+            tool,
+            error,
+        )
+        .map(|r| (call_id.clone(), r))
+    }
+
+    /// 沙箱拒绝检测（M-09 起为静态辅助：只读并行桶与副作用串行路径共用）。
+    ///
+    /// 检测工具错误是否为沙箱拒绝（EPERM/EACCES/landlock 等）。若是：
+    /// - 更新熔断器计数；
+    /// - 软熔断（≥3 次）：附加方向提醒返回；
+    /// - 硬熔断（≥5 次）：返回带总结的错误；
+    /// - 未熔断：返回带 denial 标识的错误，提示 LLM/用户。
+    ///
+    /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
+    /// 返回 `None` 表示非 denial，调用方原样传播错误。
+    fn build_denial_result(
+        detector: &dyn crate::sandbox::SandboxDenialDetector,
+        breaker: &dyn crate::sandbox::SandboxDenialTracker,
+        tool: &str,
+        error: &crate::model::ToolError,
+    ) -> Option<ToolResult> {
         let error_text = error.to_string();
-        let m = self.denial_detector.detect(tool, &error_text)?;
+        let m = detector.detect(tool, &error_text)?;
         tracing::warn!(
             tool = %m.tool,
             reason = m.signature.reason,
             platform = m.signature.platform,
             "sandbox denial detected"
         );
-        let state = self.sandbox_breaker.record_denial();
-        let result = match state {
+        let state = breaker.record_denial();
+        Some(match state {
             BreakerState::HardTripped => {
-                let summary = crate::sandbox::hard_trip_summary(self.sandbox_breaker.count());
+                let summary = crate::sandbox::hard_trip_summary(breaker.count());
                 tracing::warn!(
-                    count = self.sandbox_breaker.count(),
+                    count = breaker.count(),
                     "sandbox circuit breaker hard-tripped"
                 );
                 metrics::set_circuit_breaker("sandbox", "hard_tripped");
@@ -1835,13 +1879,19 @@ impl Runtime {
                         "{summary}\n原始错误：{error_text}"
                     )),
                     is_error: true,
-                    metadata: crate::model::ToolResultMeta::default(),
+                    metadata: crate::model::ToolResultMeta {
+                        sandbox_denied: Some(crate::model::SandboxDenyInfo {
+                            kind: m.kind.clone(),
+                            detail: error_text.clone(),
+                        }),
+                        ..Default::default()
+                    },
                 }
             }
             BreakerState::SoftTripped => {
-                let reminder = crate::sandbox::soft_trip_reminder(self.sandbox_breaker.count());
+                let reminder = crate::sandbox::soft_trip_reminder(breaker.count());
                 tracing::warn!(
-                    count = self.sandbox_breaker.count(),
+                    count = breaker.count(),
                     "sandbox circuit breaker soft-tripped"
                 );
                 metrics::set_circuit_breaker("sandbox", "soft_tripped");
@@ -1852,19 +1902,29 @@ impl Runtime {
                         reason = m.signature.reason
                     )),
                     is_error: true,
-                    metadata: crate::model::ToolResultMeta::default(),
+                    metadata: crate::model::ToolResultMeta {
+                        sandbox_denied: Some(crate::model::SandboxDenyInfo {
+                            kind: m.kind.clone(),
+                            detail: error_text.clone(),
+                        }),
+                        ..Default::default()
+                    },
                 }
             }
             BreakerState::Closed => {
                 metrics::record_error("sandbox");
-                ToolResult::err_text(format!(
+                let mut result = ToolResult::err_text(format!(
                     "sandbox denied ({reason}): {error_text}\n\
                      提示：可切换更宽松的沙箱预设（如 --sandbox workspace-write）重试",
                     reason = m.signature.reason
-                ))
+                ));
+                result.metadata.sandbox_denied = Some(crate::model::SandboxDenyInfo {
+                    kind: m.kind,
+                    detail: error_text,
+                });
+                result
             }
-        };
-        Some((call_id.clone(), result))
+        })
     }
 
     /// 记录权限决策审计（C-01 决策可追溯，AGENTS.md §5.5）。
@@ -1904,6 +1964,7 @@ impl Runtime {
             call_id,
             content: result.content,
             is_error: result.is_error,
+            metadata: result.metadata,
         }];
         Message {
             id: ulid::Ulid::new().to_string(),

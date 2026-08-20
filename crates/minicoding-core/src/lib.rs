@@ -77,8 +77,8 @@ pub mod prelude {
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::sandbox::{
         BreakerState, DenialMatch, DenialSignature, NoopDenialDetector, NoopDenialTracker,
-        NoopDriver, SandboxDenialDetector, SandboxDenialTracker, SandboxDriver, SandboxError,
-        SandboxPolicy, hard_trip_summary, soft_trip_reminder,
+        NoopDriver, SandboxDenialDetector, SandboxDenialTracker, SandboxDenyKind, SandboxDriver,
+        SandboxError, SandboxPolicy, hard_trip_summary, soft_trip_reminder,
     };
     pub use crate::storage::{
         AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,

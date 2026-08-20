@@ -454,13 +454,22 @@ shell.run / fs.write 执行
    │     └─ 否 → 普通错误，原样回灌 LLM
 ```
 
-**denial 签名库**（按平台）：
+**denial 签名库**（按平台；M-09 起每条签名映射结构化 `SandboxDenyKind`）：
 
-| 平台 | 签名 |
-|------|------|
-| Linux | `errno=EPERM`/`EACCES`；Landlock `denied` 关键字；seccomp `Bad system call`/`SIGSYS` |
-| macOS | `sandbox-exec: ... denied`；`Operation not permitted`；`Sandbox violation` |
-| Windows | `Access is denied`（5）；`privilege not held`（1314） |
+| 平台 | 签名 | 结构化类型 |
+|------|------|-----------|
+| Linux | `errno=EPERM`；seccomp `Bad system call`/`SIGSYS` | `syscall_blocked` |
+| Linux | `EACCES`；Landlock `denied` 关键字 | `write_forbidden` |
+| macOS | `Sandbox violation` | `write_forbidden` |
+| macOS | `sandbox-exec` 启动失败 | `external` |
+| Windows | `Access is denied`（5） | `write_forbidden` |
+| Windows | `privilege not held`（1314） | `external` |
+
+**M-09 结构化透传**：检测结果带 `SandboxDenyKind`（带 payload，如 `syscall_blocked { syscall }`），
+经 `ToolResultMeta.sandbox_denied` 写入工具结果消息（`ContentBlock::ToolResult.metadata`），
+持久化/协议层/前端拒绝卡片统一消费；只读并行桶与副作用串行路径共用同一检测函数
+（`build_denial_result`，C-30 无 `SideEffect` 检测缺口）。`SandboxError::Denied` 变体
+提供驱动层结构化拒绝的出口（payload 无法从 stderr 可靠解析的字段留空，原文在 `detail`）。
 
 升级流仅对 `WorkspaceWrite`/`ReadOnly` 生效；`ExternalSandbox`/`DangerFullAccess` 无内核拒绝，不触发。放宽操作受 §2 内置黑名单约束——即使用户批准放宽，危险命令/SSRF/敏感路径仍 `Deny`。每次放宽记审计（`reason=sandbox_escalation`），便于事后追溯。
 

@@ -24,5 +24,6 @@ pub use subagent::{
 };
 pub use task::{Task, TaskStatus};
 pub use tool::{
-    SideEffect, ToolCall, ToolCallId, ToolContent, ToolResult, ToolResultMeta, ToolSchema,
+    SandboxDenyInfo, SideEffect, ToolCall, ToolCallId, ToolContent, ToolResult, ToolResultMeta,
+    ToolSchema,
 };

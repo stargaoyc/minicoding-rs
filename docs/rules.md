@@ -90,6 +90,7 @@ Auto memory（`auto.md`，见 `design.md` §8.7）是 Agent 可写的自动学�
 - **拒绝计数硬阈值**：单 turn 内累计沙箱拒绝 ≥3 次触发熔断（注入提醒"连续 N 次沙箱拒绝，可能方向有误，请重新评估或切换更宽松沙箱预设"），≥5 次强制 TurnEnd 回灌错误总结。
 - **拒绝是内核级反馈**：沙箱拒绝来自 `EPERM`/Seatbelt denial/Landlock denial，是内核级硬反馈，**不可**被应用层 `allow` 规则覆盖（与 C-22 同源）。LLM 不得通过文本声明"沙箱已放宽""重试可成功"来跳过熔断。
 - **升级流不绕过权限**：沙箱拒绝后的"请求批准 → 放宽重试"升级流仍走 `PermissionPrompter`，用户可拒绝；用户拒绝后 LLM 不得在文本中"声称用户已同意"而重试。
+- **M-09 结构化判定**：熔断与回灌以结构化 `SandboxDenyKind`（`syscall_blocked`/`write_forbidden`/`resource_limit`/`external`，见 `api.md` §3.9）替代纯文本匹配；只读并行桶与副作用串行路径统一接入检测（无 `SideEffect` 差距），检测结果经 `ToolResultMeta.sandbox_denied` 透传到协议层与前端拒绝卡片，文本匹配仅在兜底（`External`）保留。
 
 ---
 

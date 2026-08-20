@@ -15,6 +15,7 @@
 //! 不保留领域算法，不引入 `regex`）。计数逻辑复用 `util::CircuitBreaker`
 //! 通用骨架（M-05 熔断去重，与压缩熔断共用）。
 
+use crate::sandbox::SandboxDenyKind;
 use crate::util::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 
 /// 单条 denial 签名（匹配 stderr 子串或 errno 文本）。
@@ -26,6 +27,9 @@ pub struct DenialSignature {
     pub pattern: &'static str,
     /// 简短说明（落审计用）。
     pub reason: &'static str,
+    /// 拒绝类型标签（`syscall_blocked`/`write_forbidden`/`resource_limit`/`external`），
+    /// 由检测实现映射为结构化 `SandboxDenyKind`（M-09，带 payload 的枚举无法入静态表）。
+    pub kind_label: &'static str,
 }
 
 /// 拒绝检测结果。
@@ -35,6 +39,8 @@ pub struct DenialMatch {
     pub signature: DenialSignature,
     /// 工具名（`shell.run`/`fs.write` 等）。
     pub tool: String,
+    /// 结构化拒绝类型（M-09，透传到 `ToolResultMeta.sandbox_denied`）。
+    pub kind: SandboxDenyKind,
 }
 
 /// 沙箱拒绝熔断状态（单 turn 内有效，turn 结束重置）。

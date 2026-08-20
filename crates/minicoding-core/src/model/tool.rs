@@ -83,6 +83,20 @@ impl ToolContent {
     }
 }
 
+/// 沙箱拒绝详情（M-09 结构化透传，wire 可选字段）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
+pub struct SandboxDenyInfo {
+    /// 结构化拒绝类型（前端渲染拒绝卡片）。
+    pub kind: crate::sandbox::SandboxDenyKind,
+    /// 原始错误文本（含 stderr，供审计/诊断）。
+    pub detail: String,
+}
+
 /// 工具执行结果元数据。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -96,6 +110,9 @@ pub struct ToolResultMeta {
     pub elapsed: Duration,
     pub bytes: usize,
     pub truncated: bool,
+    /// 沙箱拒绝结构化信息（M-09；非拒绝结果为 `None`，wire 省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_denied: Option<SandboxDenyInfo>,
 }
 
 /// 工具执行结果。

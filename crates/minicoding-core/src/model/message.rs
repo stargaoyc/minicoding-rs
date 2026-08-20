@@ -45,6 +45,9 @@ pub enum ContentBlock {
         call_id: super::ToolCallId,
         content: super::ToolContent,
         is_error: bool,
+        /// 工具执行元数据（M-09：含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
+        #[serde(default)]
+        metadata: super::ToolResultMeta,
     },
 }
 
@@ -239,6 +242,7 @@ pub fn repair_dangling_tool_calls(msgs: Vec<Message>) -> Vec<Message> {
                             "[interrupted] 工具调用未执行（turn 被取消/超时/崩溃）",
                         ),
                         is_error: true,
+                        metadata: crate::model::ToolResultMeta::default(),
                     }],
                     tool_calls: Vec::new(),
                     tool_call_id: None,
@@ -351,6 +355,7 @@ mod proptests {
                     call_id: call_id.to_string(),
                     content: ToolContent::text("ok"),
                     is_error: false,
+                    metadata: crate::model::ToolResultMeta::default(),
                 }],
                 tool_calls: Vec::new(),
                 tool_call_id: None,

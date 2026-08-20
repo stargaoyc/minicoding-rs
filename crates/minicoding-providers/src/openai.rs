@@ -1310,6 +1310,7 @@ mod tests {
             call_id: "call_1".to_string(),
             content: ToolContent::Text("result text".to_string()),
             is_error: false,
+            metadata: minicoding_core::model::ToolResultMeta::default(),
         }];
         assert_eq!(extract_text(&blocks), "result text");
     }

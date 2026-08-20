@@ -861,6 +861,34 @@ pub trait SandboxDriver {
 
 `.git`/`.hg`/`.svn` VCS 目录在所有写策略下默认强制只读（防破坏版本库元数据），需 `tools.sandbox.allow_vcs_write = true`（旧名 `allow_dotgit_write`，向后兼容）显式放开。详见 `security.md` §8.2。
 
+**M-09 结构化拒绝**：
+
+```rust
+/// 沙箱拒绝类型（tagged enum，wire 为 `{ "kind": "...", ...payload }`）。
+pub enum SandboxDenyKind {
+    PathEscape { attempted: String, allowed_root: String }, // C-03 路径越界
+    SyscallBlocked { syscall: String },   // seccomp/EPERM
+    WriteForbidden { path: String },      // landlock/Seatbelt/EACCES
+    ResourceLimit { limit: String },      // 资源配额
+    External,                             // macOS/Windows 兜底
+}
+
+/// 沙箱拒绝详情（挂在 `ToolResultMeta.sandbox_denied`，wire 可选字段）。
+pub struct SandboxDenyInfo { pub kind: SandboxDenyKind, pub detail: String }
+
+pub enum SandboxError {
+    Sandbox(String),
+    Denied { kind: SandboxDenyKind, detail: String, stderr_tail: String },
+    Io(#[from] std::io::Error),
+}
+```
+
+- 拒绝检测（`SandboxDenialDetector` → `DenialMatch.kind`）产出结构化类型，熔断器
+  （C-30）与协议层消费结构化结果而非纯文本；
+- `ToolResultMeta.sandbox_denied` 与 `ContentBlock::ToolResult.metadata` 为 wire 可选
+  字段（`serde default`），旧数据反序列化兼容；
+- 前端 `ToolCallCard` 按 `kind` 渲染"沙箱拒绝"卡片（类型经 ts-rs 自动导出）。
+
 ### 3.10 `ProjectDocLoader`（AGENTS.md 分层加载，见 `design.md` §8.6）
 
 ```rust

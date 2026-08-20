@@ -118,6 +118,7 @@
 | P-17 | 审批模式（ApprovalMode） | Untrusted/OnFailure/OnRequest/Never | M4 | 已实现 |
 | P-18 | 预设（Preset） | read-only/auto/external-sandbox/full-access 一键选定 | M4 | 已实现 |
 | P-19 | 沙箱拒绝检测与升级 | EPERM/Seatbelt denial → 请求批准 → 放宽重试 | M4 | 已实现 |
+| P-19b | 沙箱拒绝结构化（M-09） | `SandboxDenyKind` 结构化判定替代纯文本匹配（熔断 C-30 加强）；只读并行桶与副作用路径统一接入检测；`ToolResultMeta.sandbox_denied` 透传协议层（见 `security.md` §8.7、`api.md` §3.9） | M4 | 已实现 |
 | P-20 | VCS 目录保护 | .git/.hg/.svn 默认只读 | M4 | 已实现 |
 | P-21 | 进程硬化（pre-main） | PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_* | M4 | 已实现 |
 | P-22 | `minicoding exec` | 非交互批量执行 + 沙箱策略 | M4 | 已实现 |
@@ -304,7 +305,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **196** |
+| **合计** | **197** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 

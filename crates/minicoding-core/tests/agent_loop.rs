@@ -491,6 +491,90 @@ async fn thresholds_empty_disables_soft_only() {
     assert!(!has_reminder, "空阈值数组应关闭软提醒");
 }
 
+/// M-09：沙箱拒绝结构化透传（denial → `ToolResultMeta.sandbox_denied`）。
+#[tokio::test]
+async fn sandbox_denial_structured_metadata() {
+    use minicoding_core::sandbox::{
+        DenialMatch, DenialSignature, SandboxDenialDetector, SandboxDenyKind,
+    };
+
+    /// 测试用拒绝检测器：命中 "Operation not permitted" → `SyscallBlocked`。
+    #[derive(Debug, Clone, Copy)]
+    struct EpermDetector;
+    impl SandboxDenialDetector for EpermDetector {
+        fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
+            error_text
+                .contains("Operation not permitted")
+                .then(|| DenialMatch {
+                    signature: DenialSignature {
+                        platform: "any",
+                        pattern: "Operation not permitted",
+                        reason: "EPERM",
+                        kind_label: "syscall_blocked",
+                    },
+                    tool: tool.to_string(),
+                    kind: SandboxDenyKind::SyscallBlocked {
+                        syscall: error_text
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(120)
+                            .collect(),
+                    },
+                })
+        }
+    }
+
+    let m = EpermDetector.detect("bad", "execution: Operation not permitted");
+    assert!(m.is_some(), "detector 应命中");
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::failing(
+        "bad",
+        "Operation not permitted",
+    )));
+    let script = vec![tool_call_deltas("c1", "bad", "{}"), text_deltas("done")];
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(Arc::new(ScriptedProvider::new(script)))
+            .context(Arc::new(TestContext::new("test system prompt")))
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .prompter(Arc::new(DenyPrompter))
+            .sandbox_denial_detector(Arc::new(EpermDetector))
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
+
+    let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+
+    // 持久化消息的 tool_result 块携带 metadata.sandbox_denied（M-09 结构化透传）
+    let messages = rt.storage().load(&rt.session().id).await.unwrap();
+    let denied = messages
+        .iter()
+        .find_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                minicoding_core::model::ContentBlock::ToolResult { metadata, .. } => {
+                    metadata.sandbox_denied.as_ref()
+                }
+                _ => None,
+            })
+        })
+        .expect("应有一条带 sandbox_denied 元数据的 tool_result 消息");
+    assert_eq!(
+        denied.kind,
+        minicoding_core::sandbox::SandboxDenyKind::SyscallBlocked {
+            syscall: "execution: Operation not permitted".into()
+        }
+    );
+    assert!(
+        denied.detail.contains("Operation not permitted"),
+        "detail 应含原始错误文本"
+    );
+}
+
 /// M-06：step 边界事件持久化（StepStarted/StepEnded 一一配对）。
 ///
 /// 两次 LLM 迭代：iter0 带工具调用（有 step 对），iter1 纯文本（无 step 事件）。

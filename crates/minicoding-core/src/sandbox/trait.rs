@@ -64,11 +64,44 @@ pub trait SandboxDriver: Send + Sync {
     }
 }
 
+/// 沙箱拒绝类型（结构化事实，M-09）。
+///
+/// 由 denial 签名检测（`DenialMatch.kind`）与路径沙箱（C-03）共同产出，
+/// 经 `ToolResultMeta.sandbox_denied` 透传到各协议层，前端渲染"沙箱拒绝"卡片。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SandboxDenyKind {
+    /// 路径越界（C-03，`path_sandbox` 产出）。
+    PathEscape {
+        attempted: String,
+        allowed_root: String,
+    },
+    /// seccomp/EPERM 等系统调用被内核拒绝。
+    SyscallBlocked { syscall: String },
+    /// landlock/Seatbelt 写路径被拒。
+    WriteForbidden { path: String },
+    /// 资源配额（超时/内存/输出上限）。
+    ResourceLimit { limit: String },
+    /// macOS/Windows 兜底（签名成熟度不足，避免误判）。
+    External,
+}
+
 /// 沙箱错误。
 #[derive(thiserror::Error, Debug)]
 pub enum SandboxError {
     #[error("sandbox: {0}")]
     Sandbox(String),
+    #[error("sandbox denied ({kind:?}): {detail}")]
+    Denied {
+        kind: SandboxDenyKind,
+        detail: String,
+        stderr_tail: String,
+    },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -132,6 +132,18 @@ impl MockTool {
     pub fn take_calls(&self) -> Vec<serde_json::Value> {
         std::mem::take(&mut *self.calls.lock().expect("calls poisoned"))
     }
+
+    /// 创建执行必失败的 mock 工具（M-09 沙箱拒绝检测测试用）。
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn failing(name: &str, error_text: impl Into<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            side_effect: SideEffect::None,
+            response: format!("__FAIL__:{error_text}", error_text = error_text.into()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl std::fmt::Debug for MockTool {
@@ -166,7 +178,12 @@ impl Tool for MockTool {
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         self.calls.lock().expect("calls poisoned").push(input);
         let resp = self.response.clone();
-        Box::pin(async move { Ok(ToolResult::ok_text(resp)) })
+        Box::pin(async move {
+            if let Some(err) = resp.strip_prefix("__FAIL__:") {
+                return Err(ToolError::Exec(err.to_string()));
+            }
+            Ok(ToolResult::ok_text(resp))
+        })
     }
 }
 

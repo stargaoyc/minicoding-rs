@@ -256,6 +256,7 @@ mod tests {
                 call_id: String::new() as ToolCallId,
                 content: ToolContent::Text(text.to_string()),
                 is_error: false,
+                metadata: minicoding_core::model::ToolResultMeta::default(),
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
