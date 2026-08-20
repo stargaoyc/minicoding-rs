@@ -40,6 +40,7 @@ use crate::storage::{
 use crate::tool::{ToolContext, ToolRegistry};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -708,8 +709,13 @@ impl Runtime {
             // 使用 `async move` 避免 `async` 捕获 `&self` 的引用（产生 `&&self`），
             // 让 future 类型只借用 `&self`（单层引用），可与 SDK 的 `Box::pin` 配合。
             let turn_fut = async move {
-                // 重复检测：记录每轮工具调用签名，连续 3 轮相同 → 死循环
+                // 重复检测（M-08，R-03）：整轮签名用于硬停止（连续 ≥ 末级阈值），
+                // 单工具指纹用于软提醒（逐级阈值 [3,5,8]）。
                 let mut call_signatures: Vec<String> = Vec::new();
+                // 指纹 → 本 turn 内连续出现次数
+                let mut fingerprint_streaks: HashMap<String, u32> = HashMap::new();
+                // 指纹 → 已提醒的最高阈值级（避免同一级重复提醒）
+                let mut reminded_levels: HashMap<String, u32> = HashMap::new();
 
                 for iter in 0..max_iters {
                     // 2. 构建请求（system + tools + 压缩后的历史）
@@ -750,11 +756,56 @@ impl Runtime {
                         return Ok(TurnOutcome::Finished(assistant_msg));
                     }
 
-                    // 5.1 重复检测：连续 ≥3 轮相同工具调用集合 → 死循环，提前终止
-                    //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
+                    // 5.1 重复检测（M-08，R-03）：先软提醒，后硬停止。
+                    //     硬停止阈值 = 配置末级（非空）或默认 3（空数组 = 关闭软提醒）。
+                    let thresholds = &self.config.tools.repeat_guard_thresholds;
+                    let hard_stop_count = thresholds.last().copied().unwrap_or(3);
                     let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
+
+                    // 5.1a 单工具指纹软提醒：对每轮出现的指纹计数递增，未出现的清零
+                    //     （"连续"语义：中间隔一轮未调用即视为中断）。命中中间级阈值
+                    //     且未提醒过该级时，向上下文注入 system 级提醒（不替换工具输出、
+                    //     不 return——模型可见历史不失真）。
+                    let mut current_fingerprints: HashSet<String> = HashSet::new();
+                    for c in &assistant_msg.tool_calls {
+                        let fp = Self::tool_fingerprint(c);
+                        current_fingerprints.insert(fp.clone());
+                        let streak = fingerprint_streaks.entry(fp).or_insert(0);
+                        *streak += 1;
+                    }
+                    for fp in fingerprint_streaks.keys().cloned().collect::<Vec<_>>() {
+                        if !current_fingerprints.contains(&fp) {
+                            fingerprint_streaks.remove(&fp);
+                        }
+                    }
+                    if !thresholds.is_empty() {
+                        let mut reminder_ctx = None;
+                        for (fp, streak) in &fingerprint_streaks {
+                            if *streak > 1 {
+                                for lvl in thresholds.iter().copied() {
+                                    if *streak == lvl && lvl < hard_stop_count {
+                                        let already = reminded_levels.get(fp).copied().unwrap_or(0);
+                                        if lvl > already {
+                                            reminder_ctx = Some((fp.clone(), lvl));
+                                            reminded_levels.insert(fp.clone(), lvl);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((fp, lvl)) = reminder_ctx {
+                            let reminder = Message::system_text(format!(
+                                "[系统提醒] 检测到重复工具调用 {fp} 已达 {lvl} 次。若陷入死循环，请改变策略或调用 'stop' 结束本轮。"
+                            ));
+                            self.ctx.append(reminder).await;
+                            tracing::warn!(fingerprint = %fp, lvl, "injected soft repeat reminder");
+                        }
+                    }
+
+                    // 5.1b 硬停止：整轮签名连续 ≥ 末级阈值 → 死循环，提前终止
+                    //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
                     call_signatures.push(sig);
-                    if Self::is_repeating(&call_signatures) {
+                    if Self::is_repeating(&call_signatures, hard_stop_count) {
                         tracing::warn!("turn terminated: repeated tool calls detected");
                         let event = Event::TurnEnd {
                             stop_reason: StopReason::Stopped,
@@ -910,30 +961,35 @@ impl Runtime {
         Box::pin(async move { self.run_turn(user_input).await })
     }
 
+    /// 计算单工具调用指纹（`name|规范化 input`，M-08，R-03）。
+    ///
+    /// 与 `tool_calls_signature` 的区别：按单个调用计算而非整轮集合排序拼接，
+    /// 用于更灵敏的软提醒（同一工具反复调用即可命中，无需整轮集合完全相同）。
+    /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），跨轮比较稳定。
+    fn tool_fingerprint(call: &ToolCall) -> String {
+        let input = serde_json::to_string(&call.input).unwrap_or_else(|_| call.input.to_string());
+        format!("{}|{}", call.name, input)
+    }
+
     /// 计算一轮工具调用的签名（`name|规范化 input`，多调用排序后拼接）。
     ///
     /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），保证 input
     /// 序列化与键顺序无关，跨轮比较稳定。用于重复检测识别"连续相同工具调用集合"。
     fn tool_calls_signature(calls: &[ToolCall]) -> String {
-        let mut sigs: Vec<String> = calls
-            .iter()
-            .map(|c| {
-                let input = serde_json::to_string(&c.input).unwrap_or_else(|_| c.input.to_string());
-                format!("{}|{}", c.name, input)
-            })
-            .collect();
+        let mut sigs: Vec<String> = calls.iter().map(Self::tool_fingerprint).collect();
         sigs.sort_unstable();
         sigs.join(";")
     }
 
-    /// 检测最近 3 轮工具调用签名是否完全相同（连续 ≥3 轮 → 死循环）。
-    fn is_repeating(signatures: &[String]) -> bool {
+    /// 检测最近 `threshold` 轮工具调用签名是否完全相同（连续 ≥ `threshold` 轮 → 死循环）。
+    fn is_repeating(signatures: &[String], threshold: u32) -> bool {
+        let threshold = threshold.max(1) as usize;
         let n = signatures.len();
-        if n < 3 {
+        if n < threshold {
             return false;
         }
         let last = &signatures[n - 1];
-        signatures[n - 3..].iter().all(|s| s == last)
+        signatures[n - threshold..].iter().all(|s| s == last)
     }
 
     /// 为会话中"有 `tool_calls` 但缺 `tool_result`"的 assistant 消息补合成错误结果

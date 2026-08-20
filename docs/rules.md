@@ -118,6 +118,8 @@ MCP 远程工具的 `is_read_only()` 与 `side_effect()` 据 server schema 的 `
 ### C-13 单轮调用上限
 单轮工具调用次数 ≤ `max_tool_iters`（默认 50）；连续相同调用 ≥ 3 次触发降级。防 LLM 死循环。
 
+**M-08 补充（软升级）**：硬停止（连续相同工具调用集合 ≥ 末级阈值 → `Stopped`）保留；新增单工具指纹逐级软提醒——连续命中 `repeat_guard_thresholds` 中间级（默认 `[3,5,8]`）时注入 system 提醒，不替换工具输出、不终止 turn。空阈值数组 = 关闭软提醒仅保留硬停止（默认 3 轮）。
+
 ### C-31 任务工具增量语义
 `task.create`/`task.update`/`task.list`（见 `design.md` §18）遵循 Claude Code v2.1.142+ 的增量模型契约：
 - **增量更新**：`TaskUpdateInput` 只更新非 `None` 字段；`add_blocks`/`add_blocked_by` 是**增量添加**依赖边而非整体替换，重复添加同一条边幂等（不报错不重复入图）。

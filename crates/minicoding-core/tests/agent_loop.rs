@@ -20,6 +20,24 @@ fn build_runtime(provider: ScriptedProvider, tools: ToolRegistry) -> Runtime {
     build_runtime_with_prompter(provider, tools, Arc::new(DenyPrompter))
 }
 
+/// 构造测试用 Runtime（指定 config，供 M-08 重复阈值配置路径测试）。
+fn build_runtime_with_config(
+    provider: ScriptedProvider,
+    tools: ToolRegistry,
+    config: RuntimeConfig,
+) -> Runtime {
+    RuntimeBuilder::new()
+        .provider(Arc::new(provider))
+        .context(Arc::new(TestContext::new("test system prompt")))
+        .storage(Arc::new(InMemoryStorage::new()))
+        .tools(tools)
+        .prompter(Arc::new(DenyPrompter))
+        .config(config)
+        .workdir(Utf8PathBuf::from("."))
+        .build()
+        .expect("runtime build")
+}
+
 /// 构造测试用 Runtime（可指定 prompter，供 switch_workdir 权限路径测试）。
 fn build_runtime_with_prompter(
     provider: ScriptedProvider,
@@ -352,6 +370,125 @@ async fn cancel_then_next_turn_still_works() {
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
+}
+
+/// M-08（R-03）：重复工具调用软提醒 + 硬停止。
+///
+/// 默认阈值 [3,5,8]：单工具指纹连续 3 轮注入 system 提醒（不终止），连续 8 轮整轮
+/// 签名相同才硬停止；不同 input 重置连续计数；空阈值数组关闭软提醒仅保留硬停止。
+#[tokio::test]
+async fn repeat_3_times_injects_soft_reminder() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::read_only("greet", "hi")));
+    // 3 轮相同工具调用（c1..c3 同 input，指纹相同）+ 第 4 轮文本结束
+    let mut script = vec![
+        tool_call_deltas("c1", "greet", "{}"),
+        tool_call_deltas("c2", "greet", "{}"),
+        tool_call_deltas("c3", "greet", "{}"),
+    ];
+    script.push(text_deltas("done"));
+    let rt = Arc::new(build_runtime(ScriptedProvider::new(script), tools));
+
+    let outcome = rt.run_turn(UserInput::from_text("loop")).await.unwrap();
+    assert!(
+        matches!(outcome, TurnOutcome::Finished(_)),
+        "3 轮相同工具不应硬停止（阈值 8）"
+    );
+
+    let snap = rt.context().snapshot().await;
+    let has_reminder = snap
+        .messages
+        .iter()
+        .any(|m| m.text().contains("[系统提醒]"));
+    assert!(
+        has_reminder,
+        "第 3 轮应注入 system 软提醒: {:?}",
+        snap.messages.iter().map(|m| m.text()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repeat_8_times_hard_stops() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::read_only("greet", "hi")));
+    // 8 轮相同工具调用 → 第 8 轮整轮签名连续 8 次 ≥ 末级阈值 → Stopped
+    let script: Vec<Vec<minicoding_core::provider::Delta>> = (0..8)
+        .map(|i| tool_call_deltas(&format!("c{i}"), "greet", "{}"))
+        .collect();
+    let rt = Arc::new(build_runtime(ScriptedProvider::new(script), tools));
+
+    let outcome = rt.run_turn(UserInput::from_text("loop")).await.unwrap();
+    match outcome {
+        TurnOutcome::Finished(msg) => {
+            assert!(
+                msg.text().contains("重复工具调用"),
+                "应硬停止: {:?}",
+                msg.text()
+            );
+        }
+        other => panic!("应返回 Finished(Stopped 消息)，实际 {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn different_args_resets_streak() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::read_only("greet", "hi")));
+    // 同一工具不同 input → 指纹不同，3 轮不触发提醒
+    let mut script = vec![
+        tool_call_deltas("c1", "greet", r#"{"name":"a"}"#),
+        tool_call_deltas("c2", "greet", r#"{"name":"b"}"#),
+        tool_call_deltas("c3", "greet", r#"{"name":"c"}"#),
+    ];
+    script.push(text_deltas("done"));
+    let rt = Arc::new(build_runtime(ScriptedProvider::new(script), tools));
+
+    let outcome = rt.run_turn(UserInput::from_text("loop")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+
+    let snap = rt.context().snapshot().await;
+    let has_reminder = snap
+        .messages
+        .iter()
+        .any(|m| m.text().contains("[系统提醒]"));
+    assert!(!has_reminder, "不同 input 不应触发软提醒");
+}
+
+#[tokio::test]
+async fn thresholds_empty_disables_soft_only() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::read_only("greet", "hi")));
+    // 空阈值数组：无软提醒；3 轮相同集合 → 硬停止（默认 3）
+    let mut config = RuntimeConfig::default();
+    config.tools.repeat_guard_thresholds = Vec::new();
+    let script = vec![
+        tool_call_deltas("c1", "greet", "{}"),
+        tool_call_deltas("c2", "greet", "{}"),
+        tool_call_deltas("c3", "greet", "{}"),
+    ];
+    let rt = Arc::new(build_runtime_with_config(
+        ScriptedProvider::new(script),
+        tools,
+        config,
+    ));
+
+    let outcome = rt.run_turn(UserInput::from_text("loop")).await.unwrap();
+    match outcome {
+        TurnOutcome::Finished(msg) => {
+            assert!(
+                msg.text().contains("重复工具调用"),
+                "空阈值时 3 轮应硬停止: {:?}",
+                msg.text()
+            );
+        }
+        other => panic!("应返回 Finished(Stopped 消息)，实际 {other:?}"),
+    }
+    let snap = rt.context().snapshot().await;
+    let has_reminder = snap
+        .messages
+        .iter()
+        .any(|m| m.text().contains("[系统提醒]"));
+    assert!(!has_reminder, "空阈值数组应关闭软提醒");
 }
 
 /// M-06：step 边界事件持久化（StepStarted/StepEnded 一一配对）。

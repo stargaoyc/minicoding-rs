@@ -1280,6 +1280,7 @@ turn_timeout_sec = 600
 
 [tools]
 enabled_groups = ["core", "fs", "shell", "web"]
+repeat_guard_thresholds = [3, 5, 8]   # M-08: 单工具指纹逐级软提醒阈值；空数组 = 仅硬停止
 [tools.fs]
 max_read_bytes = 1048576
 [tools.shell]

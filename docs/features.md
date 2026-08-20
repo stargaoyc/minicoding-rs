@@ -14,6 +14,7 @@
 | A-02 | 多轮 Agent 循环 | 工具调用→结果→继续，直到 EndTurn | M2 | 已实现 |
 | A-03 | 并行/串行工具调度 | 无副作用并行、有副作用严格串行 | M2 | 已实现 |
 | A-04 | 停止条件与防死循环 | max_iters / turn_timeout / 重复检测 | M2 | 已实现 |
+| A-04b | 循环打断软升级（M-08） | 单工具指纹逐级软提醒（`repeat_guard_thresholds` 默认 [3,5,8]）+ 硬停止阈值可配；空数组关闭软提醒（见 `design.md` §2.2） | M2 | 已实现 |
 | A-05 | 类型化子 Agent | Explore/Plan/General/Custom，隔离上下文 | M5 | 已实现 |
 | A-06 | Plan 模式 | 双重只读强制 + plan.exit + 预批准缓存 | M5 | 已实现 |
 | A-07 | 任务管理工具 | TaskCreate/TaskUpdate/TaskList 增量模型 + 依赖 + 持久化 | M3 | 已实现 |
@@ -287,7 +288,7 @@
 
 | 领域 | 项数 |
 |------|:---:|
-| Agent 运行时 | 15 |
+| Agent 运行时 | 16 |
 | LLM Provider | 8 |
 | 工具系统 | 22 |
 | 上下文管理 | 10 |
@@ -303,7 +304,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **195** |
+| **合计** | **196** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 
