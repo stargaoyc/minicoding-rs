@@ -304,6 +304,17 @@ deny_domains = ["*.internal.corp"]
 
 - `minicoding cred delete` 清理 keyring 条目与文件 fallback。
 - 检测到 401/403 时提示用户重新登录，不自动重试避免锁定。
+- **M-10 重解析语义**：provider 不再持有构造期一次性 `api_key` 快照，改持
+  `CredentialResolver`——每次请求经 `resolve` 重读凭证（缓存 ≤60s，`invalidate()`
+  保存配置后立即失效），换 key 后 ≤TTL 内新请求自动生效，**零重启**。C-04 不放松：
+  凭证仍仅存内存缓存与 OS keyring/env/文件 fallback，不落盘明文、不下传子进程、
+  日志脱敏（`Debug` 输出仅显示 `<resolver>`，不泄前缀）。
+
+### 6.4 配置写防陈旧（M-10）
+
+`config.toml` 顶层 `revision` 原子自增；`save_provider_config(provider, expected_revision)`：
+`expected_revision` 与当前不匹配时拒绝写入（`StaleWrite`），防止多客户端（桌面 + Web）
+并发保存互相覆盖。`GET /config` 返回 `config_revision` 供前端保存前锁定基准。
 
 ---
 

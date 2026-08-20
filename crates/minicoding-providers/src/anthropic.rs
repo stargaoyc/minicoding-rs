@@ -38,7 +38,8 @@ pub struct AnthropicProvider {
     /// 自定义显示名（`None` 时回退到 `PROVIDER_ID`）。
     display_name: Option<String>,
     api_base: String,
-    api_key: String,
+    /// M-10：凭证重解析器（每次请求 resolve，缓存 ≤TTL；不再持有构造期一次性快照）。
+    resolver: Arc<crate::common::CredentialResolver>,
     model: String,
     client: reqwest::Client,
     tokenizer: Arc<ApproxTokenizer>,
@@ -50,8 +51,8 @@ impl std::fmt::Debug for AnthropicProvider {
             .field("display_name", &self.display_name)
             .field("api_base", &self.api_base)
             .field("model", &self.model)
-            // 不输出 api_key（C-04：日志脱敏）
-            .field("api_key", &crate::common::mask_key(&self.api_key))
+            // 不输出凭证内容（C-04：日志脱敏）
+            .field("api_key", &"<resolver>")
             .finish_non_exhaustive()
     }
 }
@@ -86,10 +87,15 @@ impl AnthropicProvider {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
+        let resolver = crate::common::CredentialResolver::from_env();
+        let key = api_key.into();
+        if !key.is_empty() {
+            resolver.seed(PROVIDER_ID, key);
+        }
         Ok(Self {
             display_name,
             api_base: api_base.into(),
-            api_key: api_key.into(),
+            resolver: Arc::new(resolver),
             model: model.into(),
             client,
             tokenizer: Arc::new(ApproxTokenizer),
@@ -140,8 +146,12 @@ impl AnthropicProvider {
         body
     }
 
-    /// 构造鉴权 headers（`x-api-key` + `anthropic-version`）。
+    /// 构造鉴权 headers（`x-api-key` + `anthropic-version`；M-10：每次请求重解析凭证）。
     fn auth_headers(&self) -> Result<HeaderMap, LlmError> {
+        let key = self
+            .resolver
+            .resolve(PROVIDER_ID)?
+            .ok_or(LlmError::NotConfigured)?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -150,7 +160,7 @@ impl AnthropicProvider {
         );
         headers.insert(
             "x-api-key",
-            HeaderValue::from_str(&self.api_key)
+            HeaderValue::from_str(&key)
                 .map_err(|e| LlmError::Network(format!("invalid api key: {e}")))?,
         );
         Ok(headers)
@@ -1410,7 +1420,10 @@ mod tests {
         )
         .expect("构造 provider");
         let s = format!("{provider:?}");
-        assert!(s.contains("sk-s***"), "Debug 应脱敏 api_key: {s}");
+        assert!(
+            !s.contains("sk-secret"),
+            "Debug 不应泄漏 api_key 前缀（resolver 隐藏）: {s}"
+        );
         assert!(
             !s.contains("secret-12345"),
             "Debug 不应泄漏完整 api_key: {s}"

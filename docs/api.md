@@ -409,6 +409,24 @@ pub struct Capabilities {
 }
 ```
 
+**M-10 凭证重解析**（换 key 零重启，见 `security.md` §6.3）：
+
+```rust
+/// 每次请求重读凭证（缓存 ≤TTL），`invalidate()` 立即失效。
+pub struct CredentialResolver { /* cache + ttl + loader */ }
+impl CredentialResolver {
+    pub fn new(ttl: Duration, loader: CredentialLoader) -> Self;
+    pub fn from_env() -> Self;                    // 读 {PROVIDER}_API_KEY
+    pub fn seed(&self, provider: &str, key: String);  // 构造期已知 key 预填充
+    pub fn resolve(&self, provider: &str) -> Result<Option<String>, LlmError>;
+    pub fn invalidate(&self, provider: &str);
+}
+```
+
+- `OpenAiProvider`/`AnthropicProvider` 构造签名不变（`api_key` 作 seed），内部改持
+  `Arc<CredentialResolver>`；`chat_stream` 每次请求 `resolve` 后构造 `Bearer`/`x-api-key`；
+- `loader` 返回 `None` 且缓存有旧值时保留旧值（CLI 一次性 `--api-key` 场景）；
+
 ### 3.2 `Tokenizer`
 
 ```rust
@@ -1638,13 +1656,19 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
   五个可选字段覆盖 server 默认值（W-19 设置面板：Web 模式前端设置存储经此注入，
   Tauri 模式写 `config.toml` 后由 `serve` 读取为默认值，两类来源都无需新建端点）；
 - `GET /config` 返回 server 当前默认配置（`ServerConfigResponse`：provider/api_base/model/
-  timeout_sec/max_retries/small_model/turn_timeout_sec/compress/permission_timeout_sec/preset，
-  **不含 API key**，C-04）。只读（无 PUT），设置面板用它兜底显示真实默认值；
+  timeout_sec/max_retries/small_model/turn_timeout_sec/compress/permission_timeout_sec/preset/
+  config_revision，**不含 API key**，C-04）。只读（无 PUT），设置面板用它兜底显示真实默认值；
+  `config_revision`（`config.toml` 顶层 `revision` 实时值）供前端保存前锁定基准（M-10 防陈旧写，
+  见 `security.md` §6.4）；
 - `POST /sessions/{id}/cancel` → `SessionManager::cancel` → `Runtime::cancel()`（CancellationToken），
   中断当前 turn，SSE 推 `TurnEnd { stop_reason: interrupted }`，`POST /sessions/{id}/messages`
   返回 `final_text = "[已取消]"`；
 - 前端 turn 进行中（`POST /messages` 阻塞）接收 SSE `tool_call_started`/`tool_call_finished`
   渲染工具调用卡片（进行中/✓完成/✗失败），`elapsed` 计时区分"正在运行/疑似卡死"。
+
+桌面端（Tauri invoke）M-10 变更：`save_provider_config(provider, expected_revision: Option<u64>)`
+——`expected_revision` 与 `config.toml` 当前 `revision` 不匹配时返回 `StaleWrite` 错误且不覆盖
+（防多客户端并发覆盖）；新增 `get_config_revision()` 返回当前 `revision` 供前端保存前锁定基准。
 
 ### 9.2 Workspace 端点（W-11 项目工作区，见 `design.md` §26.9）
 

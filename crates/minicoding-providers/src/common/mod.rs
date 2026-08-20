@@ -7,15 +7,21 @@
 //! 设计依据：`design.md` §10 错误分类与恢复策略、`rules.md` C-07（重试上限）/C-13
 //! （防死循环）。
 
+pub mod credential;
 pub mod ndjson;
 pub mod retry;
 pub mod sse;
 
+pub use credential::CredentialResolver;
 pub use ndjson::NdjsonStream;
 pub use retry::{RetryConfig, RetryProvider};
 
 /// API key 脱敏（前 4 字符 + `***`），用于日志/Debug 输出（C-04）。
+///
+/// M-10 起 provider 不再持有明文 `api_key`（改持 `CredentialResolver`），本函数保留
+/// 供外部 crate 对日志/诊断文本脱敏（如 keyring 读取路径）。
 #[must_use]
+#[allow(dead_code)]
 pub fn mask_key(key: &str) -> String {
     let len = key.chars().count();
     if len <= 4 {

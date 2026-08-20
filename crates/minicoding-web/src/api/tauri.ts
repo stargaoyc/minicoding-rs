@@ -68,9 +68,17 @@ export function getProviderConfig(): Promise<ProviderConfig> {
   return invoke<ProviderConfig>("get_provider_config");
 }
 
-/** 保存 provider 配置到 `config.toml`（原子写入，不含 api_key 明文）。 */
-export function saveProviderConfig(provider: ProviderConfig): Promise<void> {
-  return invoke<void>("save_provider_config", { provider });
+/** 保存 provider 配置到 `config.toml`（原子写入，不含 api_key 明文；M-10 防陈旧写）。 */
+export function saveProviderConfig(
+  provider: ProviderConfig,
+  expected_revision: number | null = null,
+): Promise<void> {
+  return invoke<void>("save_provider_config", { provider, expected_revision });
+}
+
+/** 读取当前配置修订号（M-10 防陈旧写：保存前锁定基准）。 */
+export function getConfigRevision(): Promise<number> {
+  return invoke<number>("get_config_revision");
 }
 
 /** 上下文配置（对应 Rust `ContextConfig` 子集，`[context]` 段）。 */

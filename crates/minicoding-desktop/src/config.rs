@@ -40,13 +40,30 @@ pub fn get_provider_config() -> Result<ProviderConfig> {
 /// **不写入 `api_key` 明文**：`ProviderConfig.api_key` 字段留空或用 `env:VAR` 语法，
 /// 真实凭证由 [`store_api_key`] 写入 OS keyring（C-04）。
 ///
+/// **M-10 防陈旧写**：`expected_revision` 为 `Some(x)` 时，若当前配置 `revision != x`
+/// （其他客户端已抢先保存）拒绝写入并返回 `StaleWrite` 错误文本，不覆盖；保存成功后
+/// `revision` 原子自增。`None` 表示无条件写（兼容旧调用方）。
+///
 /// # Errors
-/// 配置文件序列化失败、IO 错误时返回错误。
-pub fn save_provider_config(provider: ProviderConfig) -> Result<()> {
+/// 配置文件序列化失败、IO 错误、revision 不匹配时返回错误。
+pub fn save_provider_config(
+    provider: ProviderConfig,
+    expected_revision: Option<u64>,
+) -> Result<()> {
     // 读取现有配置（保留其他段）
     let mut config = load_config()
         .map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))
         .unwrap_or_default();
+    if let Some(expected) = expected_revision {
+        if config.revision != expected {
+            return Err(anyhow::anyhow!(
+                "StaleWrite: 配置修订号不匹配（当前 {}，期望 {}），请刷新后重试",
+                config.revision,
+                expected
+            ));
+        }
+    }
+    config.revision = config.revision.saturating_add(1);
     config.provider = provider;
 
     let config_path = paths::config_path().context("无法确定配置文件路径")?;
@@ -190,7 +207,7 @@ mod tests {
             small: None,
         };
 
-        save_provider_config(provider.clone()).expect("save provider config");
+        save_provider_config(provider.clone(), None).expect("save provider config");
 
         let loaded = get_provider_config().expect("get provider config");
         assert_eq!(loaded.default, "openai");
@@ -198,6 +215,56 @@ mod tests {
         assert_eq!(loaded.api_base, "https://api.deepseek.com/v1");
         assert_eq!(loaded.model, "deepseek-chat");
         assert!(loaded.api_key.is_empty(), "api_key 不应落明文");
+
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MINICODING_HOME");
+        }
+    }
+
+    /// M-10：revision 自增 + 陈旧写被拒。
+    #[test]
+    fn stale_write_rejected_and_revision_increments() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: 持有 ENV_LOCK 保证串行，无并发 set_var 风险。
+        unsafe {
+            std::env::set_var("MINICODING_HOME", tmp.path());
+        }
+
+        let provider = ProviderConfig {
+            default: "openai".into(),
+            name: None,
+            api_base: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "gpt-4".into(),
+            timeout_sec: 60,
+            max_retries: 3,
+            small: None,
+        };
+        // 首次保存 revision 0 → 1
+        save_provider_config(provider.clone(), Some(0)).expect("首写应成功");
+        assert_eq!(
+            load_config().expect("load").revision,
+            1,
+            "保存后 revision 应自增"
+        );
+
+        // 用陈旧 revision 0 再写 → StaleWrite 拒绝
+        let err = save_provider_config(provider.clone(), Some(0)).expect_err("陈旧写应被拒");
+        assert!(
+            err.to_string().contains("StaleWrite"),
+            "错误应标记 StaleWrite: {err}"
+        );
+        assert_eq!(
+            load_config().expect("load").revision,
+            1,
+            "拒绝后 revision 不变"
+        );
+
+        // 用当前 revision 1 写 → 成功，自增到 2
+        save_provider_config(provider, Some(1)).expect("当前 revision 写应成功");
+        assert_eq!(load_config().expect("load").revision, 2);
 
         // SAFETY: 同上。
         unsafe {

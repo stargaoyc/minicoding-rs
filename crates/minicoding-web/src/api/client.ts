@@ -129,6 +129,8 @@ export interface ServerConfigResponse {
   compress: boolean;
   permission_timeout_sec: number;
   preset: string;
+  /** 配置修订号（M-10 防陈旧写：保存前锁定基准，与 `save_provider_config` 的 expected_revision 配套）。 */
+  config_revision: number;
 }
 
 export interface CreateSessionResponse {

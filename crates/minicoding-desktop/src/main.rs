@@ -103,6 +103,7 @@ fn main() {
             start_session,
             get_provider_config,
             save_provider_config,
+            get_config_revision,
             get_context_config,
             save_context_config,
             store_api_key,
@@ -235,12 +236,24 @@ fn get_provider_config() -> Result<ProviderConfig, String> {
     config::get_provider_config().map_err(|e| e.to_string())
 }
 
-/// `save_provider_config`：保存 provider 配置到 `config.toml`（原子写入）。
+/// `save_provider_config`：保存 provider 配置到 `config.toml`（原子写入，M-10 防陈旧写）。
 ///
 /// `api_key` 字段不落明文，由 `store_api_key` 写入 OS keyring（C-04）。
+/// `expected_revision` 为 `None` 时无条件写（兼容旧前端）；为 `Some(x)` 时 revision
+/// 不匹配返回 `StaleWrite` 错误，前端需刷新后重试。
 #[tauri::command]
-fn save_provider_config(provider: ProviderConfig) -> Result<(), String> {
-    config::save_provider_config(provider).map_err(|e| e.to_string())
+fn save_provider_config(
+    provider: ProviderConfig,
+    expected_revision: Option<u64>,
+) -> Result<(), String> {
+    config::save_provider_config(provider, expected_revision).map_err(|e| e.to_string())
+}
+
+/// `get_config_revision`：读取当前配置修订号（前端保存前锁定基准，M-10 防陈旧写）。
+#[tauri::command]
+fn get_config_revision() -> Result<u64, String> {
+    let c = config::load_config().map_err(|e| e.to_string())?;
+    Ok(c.revision)
 }
 
 /// `get_context_config`：读取上下文配置（`[context]` 段，turn 超时/压缩开关）。

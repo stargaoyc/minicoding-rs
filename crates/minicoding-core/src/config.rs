@@ -15,6 +15,10 @@ pub use watcher::ConfigWatcher;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
+    /// 配置修订号（M-10 防陈旧写：`save_provider_config` 原子自增，写前比对）。
+    ///
+    /// wire 兼容：旧配置无此字段，反序列化默认 0。
+    pub revision: u64,
     pub provider: ProviderConfig,
     pub context: ContextConfig,
     pub tools: ToolsConfig,

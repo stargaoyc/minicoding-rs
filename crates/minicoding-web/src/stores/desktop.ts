@@ -4,6 +4,7 @@ import {
   startSession,
   getProviderConfig,
   saveProviderConfig,
+  getConfigRevision,
   storeApiKey,
   loadApiKey,
   saveContextConfig,
@@ -173,7 +174,9 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
           ? { model: input.small_model.trim(), api_base: null, api_key: null }
           : null,
       };
-      await saveProviderConfig(provider);
+      // 保存前锁定 revision 基准（M-10 防陈旧写：并发的另一客户端已保存则 StaleWrite 拒绝）
+      const revision = await getConfigRevision();
+      await saveProviderConfig(provider, revision);
       // [context] 段：turn 超时 / 压缩开关（sidecar 启动时 `minicoding serve` 读取生效）
       await saveContextConfig({
         turn_timeout_sec: input.turn_timeout_sec,

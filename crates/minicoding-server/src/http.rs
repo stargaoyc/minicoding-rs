@@ -146,6 +146,8 @@ pub struct ServerConfigResponse {
     compress: bool,
     permission_timeout_sec: u64,
     preset: String,
+    /// 配置修订号（M-10 防陈旧写：前端保存前锁定基准，config.toml 实时值）。
+    config_revision: u64,
 }
 
 /// `CreateSession` 请求 body。
@@ -380,6 +382,7 @@ async fn health() -> &'static str {
 /// 与 `config.toml` 交叉核对）。新会话可通过 `CreateSessionBody` 会话级覆盖。
 async fn server_config(State(state): State<AppState>) -> Json<ServerConfigResponse> {
     let c = &state.cfg;
+    let config_revision = minicoding_core::config::load_config().map_or(0, |cfg| cfg.revision);
     Json(ServerConfigResponse {
         provider_kind: c.provider_kind.clone(),
         provider_name: c.provider_name.clone(),
@@ -392,6 +395,7 @@ async fn server_config(State(state): State<AppState>) -> Json<ServerConfigRespon
         compress: c.compress,
         permission_timeout_sec: c.permission_timeout_sec,
         preset: c.preset.clone(),
+        config_revision,
     })
 }
 
