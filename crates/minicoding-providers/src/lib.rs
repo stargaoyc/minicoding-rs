@@ -25,7 +25,7 @@ mod openai;
 mod tokenizer;
 
 pub use anthropic::{AnthropicProvider, ApproxTokenizer, PROVIDER_ID as ANTHROPIC_PROVIDER_ID};
-pub use common::{NdjsonStream, RetryConfig, RetryProvider};
+pub use common::{CredentialResolver, NdjsonStream, RetryConfig, RetryProvider};
 pub use ollama::{
     DEFAULT_API_BASE as OLLAMA_DEFAULT_API_BASE, OllamaProvider, PROVIDER_ID as OLLAMA_PROVIDER_ID,
 };

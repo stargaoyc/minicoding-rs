@@ -45,6 +45,9 @@ pub enum ContentBlock {
         call_id: super::ToolCallId,
         content: super::ToolContent,
         is_error: bool,
+        /// 工具执行元数据（含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
+        #[serde(default)]
+        metadata: super::ToolResultMeta,
     },
 }
 
@@ -80,6 +83,29 @@ pub struct MessageMeta {
     pub summarized: bool,
     /// 消息来源。
     pub source: MessageSource,
+    /// 本消息替代了事件 seq 区间 `[from_seq, to_seq]`（压缩追溯）。
+    ///
+    /// 压缩摘要/合并消息携带被替换消息的 seq 区间，审计可追溯"这轮压缩掉了
+    /// 什么"（`AuditKind::Compress`）。`None` = 非压缩产物。wire 兼容：
+    /// 旧数据无此字段，反序列化时默认 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressed_range: Option<CompressedRange>,
+}
+
+/// 压缩追溯区间：本消息替代的事件 seq 区间。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
+pub struct CompressedRange {
+    /// 被替代区间起始事件 seq（含）。
+    pub from_seq: u64,
+    /// 被替代区间结束事件 seq（含）。
+    pub to_seq: u64,
+    /// 被替代消息的 token 总量（压缩掉的 token）。
+    pub dropped_tokens: usize,
 }
 
 /// 一条对话消息。
@@ -116,6 +142,7 @@ impl Message {
             created_at: OffsetDateTime::now_utc(),
             metadata: MessageMeta {
                 source: MessageSource::User,
+                compressed_range: None,
                 ..Default::default()
             },
         }
@@ -133,6 +160,7 @@ impl Message {
             created_at: OffsetDateTime::now_utc(),
             metadata: MessageMeta {
                 source: MessageSource::User,
+                compressed_range: None,
                 ..Default::default()
             },
         }
@@ -150,6 +178,7 @@ impl Message {
             created_at: OffsetDateTime::now_utc(),
             metadata: MessageMeta {
                 source: MessageSource::Llm,
+                compressed_range: None,
                 ..Default::default()
             },
         }
@@ -213,12 +242,14 @@ pub fn repair_dangling_tool_calls(msgs: Vec<Message>) -> Vec<Message> {
                             "[interrupted] 工具调用未执行（turn 被取消/超时/崩溃）",
                         ),
                         is_error: true,
+                        metadata: crate::model::ToolResultMeta::default(),
                     }],
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     created_at: OffsetDateTime::now_utc(),
                     metadata: MessageMeta {
                         source: MessageSource::Tool,
+                        compressed_range: None,
                         ..Default::default()
                     },
                 });
@@ -267,6 +298,7 @@ mod proptests {
                     pinned,
                     summarized,
                     source,
+                    compressed_range: None,
                 },
             }
         }
@@ -323,12 +355,14 @@ mod proptests {
                     call_id: call_id.to_string(),
                     content: ToolContent::text("ok"),
                     is_error: false,
+                    metadata: crate::model::ToolResultMeta::default(),
                 }],
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 created_at: OffsetDateTime::now_utc(),
                 metadata: MessageMeta {
                     source: MessageSource::Tool,
+                    compressed_range: None,
                     ..Default::default()
                 },
             }

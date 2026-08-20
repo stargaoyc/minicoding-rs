@@ -40,6 +40,7 @@ use crate::storage::{
 use crate::tool::{ToolContext, ToolRegistry};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -708,10 +709,15 @@ impl Runtime {
             // 使用 `async move` 避免 `async` 捕获 `&self` 的引用（产生 `&&self`），
             // 让 future 类型只借用 `&self`（单层引用），可与 SDK 的 `Box::pin` 配合。
             let turn_fut = async move {
-                // 重复检测：记录每轮工具调用签名，连续 3 轮相同 → 死循环
+                // 重复检测：整轮签名用于硬停止（连续 ≥ 末级阈值），
+                // 单工具指纹用于软提醒（逐级阈值 [3,5,8]）。
                 let mut call_signatures: Vec<String> = Vec::new();
+                // 指纹 → 本 turn 内连续出现次数
+                let mut fingerprint_streaks: HashMap<String, u32> = HashMap::new();
+                // 指纹 → 已提醒的最高阈值级（避免同一级重复提醒）
+                let mut reminded_levels: HashMap<String, u32> = HashMap::new();
 
-                for _iter in 0..max_iters {
+                for iter in 0..max_iters {
                     // 2. 构建请求（system + tools + 压缩后的历史）
                     let req = match self.ctx.build_chat_request(&self.tools, &self.config).await {
                         Ok(r) => r,
@@ -750,11 +756,56 @@ impl Runtime {
                         return Ok(TurnOutcome::Finished(assistant_msg));
                     }
 
-                    // 5.1 重复检测：连续 ≥3 轮相同工具调用集合 → 死循环，提前终止
-                    //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
+                    // 5.1 重复检测：先软提醒，后硬停止。
+                    //     硬停止阈值 = 配置末级（非空）或默认 3（空数组 = 关闭软提醒）。
+                    let thresholds = &self.config.tools.repeat_guard_thresholds;
+                    let hard_stop_count = thresholds.last().copied().unwrap_or(3);
                     let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
+
+                    // 5.1a 单工具指纹软提醒：对每轮出现的指纹计数递增，未出现的清零
+                    //     （"连续"语义：中间隔一轮未调用即视为中断）。命中中间级阈值
+                    //     且未提醒过该级时，向上下文注入 system 级提醒（不替换工具输出、
+                    //     不 return——模型可见历史不失真）。
+                    let mut current_fingerprints: HashSet<String> = HashSet::new();
+                    for c in &assistant_msg.tool_calls {
+                        let fp = Self::tool_fingerprint(c);
+                        current_fingerprints.insert(fp.clone());
+                        let streak = fingerprint_streaks.entry(fp).or_insert(0);
+                        *streak += 1;
+                    }
+                    for fp in fingerprint_streaks.keys().cloned().collect::<Vec<_>>() {
+                        if !current_fingerprints.contains(&fp) {
+                            fingerprint_streaks.remove(&fp);
+                        }
+                    }
+                    if !thresholds.is_empty() {
+                        let mut reminder_ctx = None;
+                        for (fp, streak) in &fingerprint_streaks {
+                            if *streak > 1 {
+                                for lvl in thresholds.iter().copied() {
+                                    if *streak == lvl && lvl < hard_stop_count {
+                                        let already = reminded_levels.get(fp).copied().unwrap_or(0);
+                                        if lvl > already {
+                                            reminder_ctx = Some((fp.clone(), lvl));
+                                            reminded_levels.insert(fp.clone(), lvl);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((fp, lvl)) = reminder_ctx {
+                            let reminder = Message::system_text(format!(
+                                "[系统提醒] 检测到重复工具调用 {fp} 已达 {lvl} 次。若陷入死循环，请改变策略或调用 'stop' 结束本轮。"
+                            ));
+                            self.ctx.append(reminder).await;
+                            tracing::warn!(fingerprint = %fp, lvl, "injected soft repeat reminder");
+                        }
+                    }
+
+                    // 5.1b 硬停止：整轮签名连续 ≥ 末级阈值 → 死循环，提前终止
+                    //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
                     call_signatures.push(sig);
-                    if Self::is_repeating(&call_signatures) {
+                    if Self::is_repeating(&call_signatures, hard_stop_count) {
                         tracing::warn!("turn terminated: repeated tool calls detected");
                         let event = Event::TurnEnd {
                             stop_reason: StopReason::Stopped,
@@ -766,7 +817,21 @@ impl Runtime {
                         )));
                     }
 
-                    // 6. 执行工具调用
+                    // 6. 执行工具调用前：记录 step 边界开始（定位压缩点/中断点）。
+                    //    log-only 事件（C-05：不进 transcript），携带将执行的
+                    //    tool_call_ids 供回放/审计定位。
+                    let step_ids: Vec<String> = assistant_msg
+                        .tool_calls
+                        .iter()
+                        .map(|c| c.id.clone())
+                        .collect();
+                    let event = Event::StepStarted {
+                        iter,
+                        tool_call_ids: step_ids,
+                    };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
+
                     let results = match self.execute_tool_calls(&assistant_msg.tool_calls).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -787,6 +852,12 @@ impl Runtime {
                         self.persist_event(&event).await;
                         self.events.emit(event);
                     }
+
+                    // 7.1 step 边界结束：结果已全部回灌。
+                    //     cancel/timeout 中断时此事件缺失，可据此定位中断点。
+                    let event = Event::StepEnded { iter };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
                 }
 
                 // 达到 max_iters 上限
@@ -890,30 +961,35 @@ impl Runtime {
         Box::pin(async move { self.run_turn(user_input).await })
     }
 
+    /// 计算单工具调用指纹（`name|规范化 input`）。
+    ///
+    /// 与 `tool_calls_signature` 的区别：按单个调用计算而非整轮集合排序拼接，
+    /// 用于更灵敏的软提醒（同一工具反复调用即可命中，无需整轮集合完全相同）。
+    /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），跨轮比较稳定。
+    fn tool_fingerprint(call: &ToolCall) -> String {
+        let input = serde_json::to_string(&call.input).unwrap_or_else(|_| call.input.to_string());
+        format!("{}|{}", call.name, input)
+    }
+
     /// 计算一轮工具调用的签名（`name|规范化 input`，多调用排序后拼接）。
     ///
     /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），保证 input
     /// 序列化与键顺序无关，跨轮比较稳定。用于重复检测识别"连续相同工具调用集合"。
     fn tool_calls_signature(calls: &[ToolCall]) -> String {
-        let mut sigs: Vec<String> = calls
-            .iter()
-            .map(|c| {
-                let input = serde_json::to_string(&c.input).unwrap_or_else(|_| c.input.to_string());
-                format!("{}|{}", c.name, input)
-            })
-            .collect();
+        let mut sigs: Vec<String> = calls.iter().map(Self::tool_fingerprint).collect();
         sigs.sort_unstable();
         sigs.join(";")
     }
 
-    /// 检测最近 3 轮工具调用签名是否完全相同（连续 ≥3 轮 → 死循环）。
-    fn is_repeating(signatures: &[String]) -> bool {
+    /// 检测最近 `threshold` 轮工具调用签名是否完全相同（连续 ≥ `threshold` 轮 → 死循环）。
+    fn is_repeating(signatures: &[String], threshold: u32) -> bool {
+        let threshold = threshold.max(1) as usize;
         let n = signatures.len();
-        if n < 3 {
+        if n < threshold {
             return false;
         }
         let last = &signatures[n - 1];
-        signatures[n - 3..].iter().all(|s| s == last)
+        signatures[n - threshold..].iter().all(|s| s == last)
     }
 
     /// 为会话中"有 `tool_calls` 但缺 `tool_result`"的 assistant 消息补合成错误结果
@@ -1063,6 +1139,9 @@ impl Runtime {
     /// `PermissionPolicy::check` → 必要时 `PermissionPrompter::prompt` → 决策落
     /// `AuditSink`（C-01、AGENTS.md §5.5）。只读工具直接并行执行（BuiltinPolicy
     /// 对 `SideEffect::None` 返回 `Allow`，此处跳过以避免无谓 IO）。
+    /// 分桶 + 权限 + 并行/串行调度的完整循环体，行数由分支复杂度决定
+    /// （分桶、权限决策、Hook、沙箱拒绝、fallback 五层逻辑无法再安全拆分）。
+    #[allow(clippy::too_many_lines)]
     async fn execute_tool_calls(
         &self,
         calls: &[ToolCall],
@@ -1092,6 +1171,8 @@ impl Runtime {
         // future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
         let events = self.events.clone();
         let tools = self.tools.clone();
+        let denial_detector = self.denial_detector.clone();
+        let sandbox_breaker = self.sandbox_breaker.clone();
         let ro_futs: Vec<ToolFuture> = readonly
             .iter()
             .map(|call| {
@@ -1100,6 +1181,8 @@ impl Runtime {
                 let tool_name = call.name.clone();
                 let events = events.clone();
                 let tools = tools.clone();
+                let denial_detector = denial_detector.clone();
+                let sandbox_breaker = sandbox_breaker.clone();
                 // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
                 // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
                 let call: ToolCall = (**call).clone();
@@ -1128,9 +1211,21 @@ impl Runtime {
                     });
                     let result = match tools.dispatch(&call, &ctx).await {
                         Ok(r) => r,
-                        // design.md §4.5：工具错误以 is_error=true 回灌 LLM 自我修正，
-                        // 不中止 turn（未知工具/参数不合法等模型可自行纠正）。
-                        Err(e) => ToolResult::err_text(format!("tool error: {e}")),
+                        // 沙箱拒绝检测（只读桶与副作用路径共用，C-30 不可绕过）。
+                        Err(e) => {
+                            if let Some(r) = Self::build_denial_result(
+                                denial_detector.as_ref(),
+                                sandbox_breaker.as_ref(),
+                                &tool_name,
+                                &e,
+                            ) {
+                                r
+                            } else {
+                                // design.md §4.5：工具错误以 is_error=true 回灌 LLM
+                                // 自我修正，不中止 turn（未知工具/参数不合法等模型可自行纠正）。
+                                ToolResult::err_text(format!("tool error: {e}"))
+                            }
+                        }
                     };
                     events.emit(Event::ToolCallFinished {
                         call_id: call_id.clone(),
@@ -1736,20 +1831,45 @@ impl Runtime {
         tool: &str,
         error: &crate::model::ToolError,
     ) -> Option<(ToolCallId, ToolResult)> {
+        Self::build_denial_result(
+            self.denial_detector.as_ref(),
+            self.sandbox_breaker.as_ref(),
+            tool,
+            error,
+        )
+        .map(|r| (call_id.clone(), r))
+    }
+
+    /// 沙箱拒绝检测（为静态辅助：只读并行桶与副作用串行路径共用）。
+    ///
+    /// 检测工具错误是否为沙箱拒绝（EPERM/EACCES/landlock 等）。若是：
+    /// - 更新熔断器计数；
+    /// - 软熔断（≥3 次）：附加方向提醒返回；
+    /// - 硬熔断（≥5 次）：返回带总结的错误；
+    /// - 未熔断：返回带 denial 标识的错误，提示 LLM/用户。
+    ///
+    /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
+    /// 返回 `None` 表示非 denial，调用方原样传播错误。
+    fn build_denial_result(
+        detector: &dyn crate::sandbox::SandboxDenialDetector,
+        breaker: &dyn crate::sandbox::SandboxDenialTracker,
+        tool: &str,
+        error: &crate::model::ToolError,
+    ) -> Option<ToolResult> {
         let error_text = error.to_string();
-        let m = self.denial_detector.detect(tool, &error_text)?;
+        let m = detector.detect(tool, &error_text)?;
         tracing::warn!(
             tool = %m.tool,
             reason = m.signature.reason,
             platform = m.signature.platform,
             "sandbox denial detected"
         );
-        let state = self.sandbox_breaker.record_denial();
-        let result = match state {
+        let state = breaker.record_denial();
+        Some(match state {
             BreakerState::HardTripped => {
-                let summary = crate::sandbox::hard_trip_summary(self.sandbox_breaker.count());
+                let summary = crate::sandbox::hard_trip_summary(breaker.count());
                 tracing::warn!(
-                    count = self.sandbox_breaker.count(),
+                    count = breaker.count(),
                     "sandbox circuit breaker hard-tripped"
                 );
                 metrics::set_circuit_breaker("sandbox", "hard_tripped");
@@ -1759,13 +1879,19 @@ impl Runtime {
                         "{summary}\n原始错误：{error_text}"
                     )),
                     is_error: true,
-                    metadata: crate::model::ToolResultMeta::default(),
+                    metadata: crate::model::ToolResultMeta {
+                        sandbox_denied: Some(crate::model::SandboxDenyInfo {
+                            kind: m.kind.clone(),
+                            detail: error_text.clone(),
+                        }),
+                        ..Default::default()
+                    },
                 }
             }
             BreakerState::SoftTripped => {
-                let reminder = crate::sandbox::soft_trip_reminder(self.sandbox_breaker.count());
+                let reminder = crate::sandbox::soft_trip_reminder(breaker.count());
                 tracing::warn!(
-                    count = self.sandbox_breaker.count(),
+                    count = breaker.count(),
                     "sandbox circuit breaker soft-tripped"
                 );
                 metrics::set_circuit_breaker("sandbox", "soft_tripped");
@@ -1776,19 +1902,29 @@ impl Runtime {
                         reason = m.signature.reason
                     )),
                     is_error: true,
-                    metadata: crate::model::ToolResultMeta::default(),
+                    metadata: crate::model::ToolResultMeta {
+                        sandbox_denied: Some(crate::model::SandboxDenyInfo {
+                            kind: m.kind.clone(),
+                            detail: error_text.clone(),
+                        }),
+                        ..Default::default()
+                    },
                 }
             }
             BreakerState::Closed => {
                 metrics::record_error("sandbox");
-                ToolResult::err_text(format!(
+                let mut result = ToolResult::err_text(format!(
                     "sandbox denied ({reason}): {error_text}\n\
                      提示：可切换更宽松的沙箱预设（如 --sandbox workspace-write）重试",
                     reason = m.signature.reason
-                ))
+                ));
+                result.metadata.sandbox_denied = Some(crate::model::SandboxDenyInfo {
+                    kind: m.kind,
+                    detail: error_text,
+                });
+                result
             }
-        };
-        Some((call_id.clone(), result))
+        })
     }
 
     /// 记录权限决策审计（C-01 决策可追溯，AGENTS.md §5.5）。
@@ -1828,6 +1964,7 @@ impl Runtime {
             call_id,
             content: result.content,
             is_error: result.is_error,
+            metadata: result.metadata,
         }];
         Message {
             id: ulid::Ulid::new().to_string(),
@@ -1838,6 +1975,7 @@ impl Runtime {
             created_at: time::OffsetDateTime::now_utc(),
             metadata: MessageMeta {
                 source: MessageSource::Tool,
+                compressed_range: None,
                 ..Default::default()
             },
         }

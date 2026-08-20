@@ -90,6 +90,7 @@ Auto memory（`auto.md`，见 `design.md` §8.7）是 Agent 可写的自动学�
 - **拒绝计数硬阈值**：单 turn 内累计沙箱拒绝 ≥3 次触发熔断（注入提醒"连续 N 次沙箱拒绝，可能方向有误，请重新评估或切换更宽松沙箱预设"），≥5 次强制 TurnEnd 回灌错误总结。
 - **拒绝是内核级反馈**：沙箱拒绝来自 `EPERM`/Seatbelt denial/Landlock denial，是内核级硬反馈，**不可**被应用层 `allow` 规则覆盖（与 C-22 同源）。LLM 不得通过文本声明"沙箱已放宽""重试可成功"来跳过熔断。
 - **升级流不绕过权限**：沙箱拒绝后的"请求批准 → 放宽重试"升级流仍走 `PermissionPrompter`，用户可拒绝；用户拒绝后 LLM 不得在文本中"声称用户已同意"而重试。
+- **M-09 结构化判定**：熔断与回灌以结构化 `SandboxDenyKind`（`syscall_blocked`/`write_forbidden`/`resource_limit`/`external`，见 `api.md` §3.9）替代纯文本匹配；只读并行桶与副作用串行路径统一接入检测（无 `SideEffect` 差距），检测结果经 `ToolResultMeta.sandbox_denied` 透传到协议层与前端拒绝卡片，文本匹配仅在兜底（`External`）保留。
 
 ---
 
@@ -117,6 +118,8 @@ MCP 远程工具的 `is_read_only()` 与 `side_effect()` 据 server schema 的 `
 
 ### C-13 单轮调用上限
 单轮工具调用次数 ≤ `max_tool_iters`（默认 50）；连续相同调用 ≥ 3 次触发降级。防 LLM 死循环。
+
+**M-08 补充（软升级）**：硬停止（连续相同工具调用集合 ≥ 末级阈值 → `Stopped`）保留；新增单工具指纹逐级软提醒——连续命中 `repeat_guard_thresholds` 中间级（默认 `[3,5,8]`）时注入 system 提醒，不替换工具输出、不终止 turn。空阈值数组 = 关闭软提醒仅保留硬停止（默认 3 轮）。
 
 ### C-31 任务工具增量语义
 `task.create`/`task.update`/`task.list`（见 `design.md` §18）遵循 Claude Code v2.1.142+ 的增量模型契约：

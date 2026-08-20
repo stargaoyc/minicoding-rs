@@ -15,6 +15,10 @@ pub use watcher::ConfigWatcher;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
+    /// 配置修订号（防陈旧写：`save_provider_config` 原子自增，写前比对）。
+    ///
+    /// wire 兼容：旧配置无此字段，反序列化默认 0。
+    pub revision: u64,
     pub provider: ProviderConfig,
     pub context: ContextConfig,
     pub tools: ToolsConfig,
@@ -136,6 +140,15 @@ pub struct ToolsConfig {
     pub fs_max_read_bytes: usize,
     pub shell_timeout_sec: u64,
     pub shell_max_output_bytes: usize,
+    /// 重复工具调用升级阈值（对齐 dsh）：单工具指纹连续命中
+    /// `thresholds[i]` 轮时注入一级 system 提醒（软提醒，不替换输出、不终止）。
+    /// 空数组 = 关闭软提醒，仅保留硬停止（整轮签名连续重复 ≥ 3 轮 → `Stopped`）。
+    #[serde(default = "default_repeat_thresholds")]
+    pub repeat_guard_thresholds: Vec<u32>,
+}
+
+fn default_repeat_thresholds() -> Vec<u32> {
+    vec![3, 5, 8]
 }
 
 impl Default for ToolsConfig {
@@ -145,6 +158,7 @@ impl Default for ToolsConfig {
             fs_max_read_bytes: 1024 * 1024,
             shell_timeout_sec: 120,
             shell_max_output_bytes: 1024 * 1024,
+            repeat_guard_thresholds: default_repeat_thresholds(),
         }
     }
 }

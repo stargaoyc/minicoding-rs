@@ -54,8 +54,17 @@ pub struct MessageMeta {
     pub pinned: bool,
     pub summarized: bool,
     pub source: MessageSource,   // User / Llm / Tool / Subagent
+    pub compressed_range: Option<CompressedRange>,  // M-07: 压缩追溯区间，None=非压缩产物
+}
+
+pub struct CompressedRange {
+    pub from_seq: u64,         // 被替代区间起始事件序号（含）
+    pub to_seq: u64,           // 被替代区间结束事件序号（含）
+    pub dropped_tokens: usize, // 被替代消息的 token 总量
 }
 ```
+
+`compressed_range` 为 M-07压缩追溯字段：L2 摘要消息携带被替代消息的序号区间，L3/L4 丢弃消息的区间记入 `CompressResult` 并随 `AuditKind::Compress` 审计落盘（detail 为 JSON）。`#[serde(default, skip_serializing_if = "Option::is_none")]` 保证 wire 兼容——旧数据无此字段时默认 `None`。
 
 ### 2.2 工具模型
 
@@ -400,6 +409,24 @@ pub struct Capabilities {
 }
 ```
 
+**M-10 凭证重解析**（换 key 零重启，见 `security.md` §6.3）：
+
+```rust
+/// 每次请求重读凭证（缓存 ≤TTL），`invalidate()` 立即失效。
+pub struct CredentialResolver { /* cache + ttl + loader */ }
+impl CredentialResolver {
+    pub fn new(ttl: Duration, loader: CredentialLoader) -> Self;
+    pub fn from_env() -> Self;                    // 读 {PROVIDER}_API_KEY
+    pub fn seed(&self, provider: &str, key: String);  // 构造期已知 key 预填充
+    pub fn resolve(&self, provider: &str) -> Result<Option<String>, LlmError>;
+    pub fn invalidate(&self, provider: &str);
+}
+```
+
+- `OpenAiProvider`/`AnthropicProvider` 构造签名不变（`api_key` 作 seed），内部改持
+  `Arc<CredentialResolver>`；`chat_stream` 每次请求 `resolve` 后构造 `Bearer`/`x-api-key`；
+- `loader` 返回 `None` 且缓存有旧值时保留旧值（CLI 一次性 `--api-key` 场景）；
+
 ### 3.2 `Tokenizer`
 
 ```rust
@@ -424,6 +451,16 @@ pub trait Tool {
     /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖。
     fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
 
+    /// 输出 JSON Schema 声明（M-11）。
+    /// 仅返回 `ToolContent::Json` 的工具提供；自由文本工具返回 `None`。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> { None }
+
+    /// 渲染意图投影（M-11）。
+    /// 返回 `RenderIntent` 描述工具结果的前端展示形态；默认按内容类型推断。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
+    }
+
     async fn execute(
         &self,
         input: serde_json::Value,
@@ -432,6 +469,24 @@ pub trait Tool {
 }
 
 pub enum SideEffect { None, FileWrite, Command, Network }
+
+/// 工具输出声明（M-11）：JSON 输出工具的 schema。
+pub struct ToolOutputSchema { pub schema: serde_json::Value }
+
+/// 列表子项（label + 可选 hint，M-11）。
+pub struct ListItem { pub label: String, pub hint: Option<String> }
+
+/// 列表类别（M-11）。
+pub enum ListKind { Files, Processes, Generic }
+
+/// 渲染意图（M-11）：工具结果的前端展示形态。
+pub enum RenderIntent {
+    Text { content: String },
+    List { items: Vec<ListItem>, kind: ListKind },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Code { lang: Option<String>, content: String },
+    Json { value: serde_json::Value },
+}
 
 pub struct ToolContext {
     pub workdir: Utf8PathBuf,
@@ -444,6 +499,8 @@ pub struct ToolContext {
 ```
 
 `is_read_only()` 默认基于 `side_effect()`，但拆为独立方法是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致。Plan 模式硬门用 `is_read_only()` 而非 `side_effect()` 判断，给 MCP 工具留出"声明只读即可在 Plan 模式下用"的通道。
+
+`output_schema()`（M-11）让 JSON 输出工具声明结果的 JSON Schema，前端据此校验数据合法性；`render_output()` 是**服务端到前端的渲染投影**：纯函数、无 IO，工具声明其结果的展示形态（文本/列表/表格/代码/JSON），未覆盖时默认按 `ToolContent` 类型推断（`Text`→文本直出、`Json`→JSON 直出），保证未提供实现的工具行为与 M-11 前一致。前端按工具名本地渲染（零协议改动，推荐方案，见 `improvement-design.md` ）。
 
 ### 3.4 `ToolRegistry`
 
@@ -463,7 +520,7 @@ impl ToolRegistry {
 pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Plan, Mcp }
 ```
 
-新增 `Task`/`Plan`/`Mcp` 三个工具组：`Task` 含 `task.create`/`task.update`/`task.list`（旧版 `todo.write` 作为废弃别名）；`Plan` 含 `plan.exit`；`Mcp` 是动态注册的外部 MCP 工具集合。
+新增 `Task`/`Plan`/`Mcp` 三个工具组：`Task` 含 `task.create`/`task.update`/`task.list`（旧版 `todo.write` 作为废弃别名）；`Plan` 含 `plan.exit`/`plan.list`（M-11 新增，只读，可穿透 Plan 硬门，见 `design.md` §16）；`Mcp` 是动态注册的外部 MCP 工具集合。
 
 ### 3.5 `Storage`
 
@@ -718,6 +775,8 @@ pub trait ContextManager {
     async fn restore(&self, snap: ContextSnapshot);
     fn token_count(&self) -> usize;
     fn message_count(&self) -> usize;
+    // M-07：会话 id 提示（默认 no-op），Runtime 构造时调用，供压缩审计记录
+    fn set_session_hint(&self, id: &str);
 }
 
 pub struct ContextSnapshot {
@@ -849,6 +908,34 @@ pub trait SandboxDriver {
 | `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） |
 
 `.git`/`.hg`/`.svn` VCS 目录在所有写策略下默认强制只读（防破坏版本库元数据），需 `tools.sandbox.allow_vcs_write = true`（旧名 `allow_dotgit_write`，向后兼容）显式放开。详见 `security.md` §8.2。
+
+**M-09 结构化拒绝**：
+
+```rust
+/// 沙箱拒绝类型（tagged enum，wire 为 `{ "kind": "...", ...payload }`）。
+pub enum SandboxDenyKind {
+    PathEscape { attempted: String, allowed_root: String }, // C-03 路径越界
+    SyscallBlocked { syscall: String },   // seccomp/EPERM
+    WriteForbidden { path: String },      // landlock/Seatbelt/EACCES
+    ResourceLimit { limit: String },      // 资源配额
+    External,                             // macOS/Windows 兜底
+}
+
+/// 沙箱拒绝详情（挂在 `ToolResultMeta.sandbox_denied`，wire 可选字段）。
+pub struct SandboxDenyInfo { pub kind: SandboxDenyKind, pub detail: String }
+
+pub enum SandboxError {
+    Sandbox(String),
+    Denied { kind: SandboxDenyKind, detail: String, stderr_tail: String },
+    Io(#[from] std::io::Error),
+}
+```
+
+- 拒绝检测（`SandboxDenialDetector` → `DenialMatch.kind`）产出结构化类型，熔断器
+  （C-30）与协议层消费结构化结果而非纯文本；
+- `ToolResultMeta.sandbox_denied` 与 `ContentBlock::ToolResult.metadata` 为 wire 可选
+  字段（`serde default`），旧数据反序列化兼容；
+- 前端 `ToolCallCard` 按 `kind` 渲染"沙箱拒绝"卡片（类型经 ts-rs 自动导出）。
 
 ### 3.10 `ProjectDocLoader`（AGENTS.md 分层加载，见 `design.md` §8.6）
 
@@ -1172,6 +1259,12 @@ pub enum Event {
     /// 500ms debounce 后发出；需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）
     /// 自行订阅 `EventBus` 处理。
     ConfigChanged,
+    /// M-06：一个执行步开始（LLM 返回后、执行工具前广播并持久化）。
+    /// `tool_call_ids` 为该步要执行的工具调用集合。log-only（C-05），供中断点定位。
+    StepStarted { iter: u32, tool_call_ids: Vec<String> },
+    /// M-06：一个执行步结束（全部 tool_result 回灌后广播并持久化）。
+    /// cancel/timeout 中断时缺失，可据此定位中断点。
+    StepEnded { iter: u32 },
 }
 ```
 
@@ -1263,6 +1356,7 @@ turn_timeout_sec = 600
 
 [tools]
 enabled_groups = ["core", "fs", "shell", "web"]
+repeat_guard_thresholds = [3, 5, 8]   # M-08: 单工具指纹逐级软提醒阈值；空数组 = 仅硬停止
 [tools.fs]
 max_read_bytes = 1048576
 [tools.shell]
@@ -1592,13 +1686,19 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
   五个可选字段覆盖 server 默认值（W-19 设置面板：Web 模式前端设置存储经此注入，
   Tauri 模式写 `config.toml` 后由 `serve` 读取为默认值，两类来源都无需新建端点）；
 - `GET /config` 返回 server 当前默认配置（`ServerConfigResponse`：provider/api_base/model/
-  timeout_sec/max_retries/small_model/turn_timeout_sec/compress/permission_timeout_sec/preset，
-  **不含 API key**，C-04）。只读（无 PUT），设置面板用它兜底显示真实默认值；
+  timeout_sec/max_retries/small_model/turn_timeout_sec/compress/permission_timeout_sec/preset/
+  config_revision，**不含 API key**，C-04）。只读（无 PUT），设置面板用它兜底显示真实默认值；
+  `config_revision`（`config.toml` 顶层 `revision` 实时值）供前端保存前锁定基准（M-10 防陈旧写，
+  见 `security.md` §6.4）；
 - `POST /sessions/{id}/cancel` → `SessionManager::cancel` → `Runtime::cancel()`（CancellationToken），
   中断当前 turn，SSE 推 `TurnEnd { stop_reason: interrupted }`，`POST /sessions/{id}/messages`
   返回 `final_text = "[已取消]"`；
 - 前端 turn 进行中（`POST /messages` 阻塞）接收 SSE `tool_call_started`/`tool_call_finished`
   渲染工具调用卡片（进行中/✓完成/✗失败），`elapsed` 计时区分"正在运行/疑似卡死"。
+
+桌面端（Tauri invoke）M-10 变更：`save_provider_config(provider, expected_revision: Option<u64>)`
+——`expected_revision` 与 `config.toml` 当前 `revision` 不匹配时返回 `StaleWrite` 错误且不覆盖
+（防多客户端并发覆盖）；新增 `get_config_revision()` 返回当前 `revision` 供前端保存前锁定基准。
 
 ### 9.2 Workspace 端点（W-11 项目工作区，见 `design.md` §26.9）
 

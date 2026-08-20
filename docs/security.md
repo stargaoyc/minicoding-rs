@@ -304,6 +304,17 @@ deny_domains = ["*.internal.corp"]
 
 - `minicoding cred delete` 清理 keyring 条目与文件 fallback。
 - 检测到 401/403 时提示用户重新登录，不自动重试避免锁定。
+- **M-10 重解析语义**：provider 不再持有构造期一次性 `api_key` 快照，改持
+  `CredentialResolver`——每次请求经 `resolve` 重读凭证（缓存 ≤60s，`invalidate()`
+  保存配置后立即失效），换 key 后 ≤TTL 内新请求自动生效，**零重启**。C-04 不放松：
+  凭证仍仅存内存缓存与 OS keyring/env/文件 fallback，不落盘明文、不下传子进程、
+  日志脱敏（`Debug` 输出仅显示 `<resolver>`，不泄前缀）。
+
+### 6.4 配置写防陈旧（M-10）
+
+`config.toml` 顶层 `revision` 原子自增；`save_provider_config(provider, expected_revision)`：
+`expected_revision` 与当前不匹配时拒绝写入（`StaleWrite`），防止多客户端（桌面 + Web）
+并发保存互相覆盖。`GET /config` 返回 `config_revision` 供前端保存前锁定基准。
 
 ---
 
@@ -323,6 +334,10 @@ deny_domains = ["*.internal.corp"]
 - 文件权限 `0600`，仅当前用户可读。
 - 追加写，不可篡改历史（无 update/delete API）。
 - 可选：每条记录带 HMAC 签名（密钥派生自机器标识），防篡改（后续）。
+
+### 7.4 压缩审计（M-07）
+
+上下文压缩成功后追加一条 `kind: compress` 审计（detail 为 JSON：压缩级别、各分支计数、丢弃消息的序号区间 `{from_seq, to_seq}`、掉 token 量、压缩前后 token 数），使"这轮压缩掉了什么"可追溯。`AuditKind::Compress` 与权限决策审计同一 `audit.log`（0600，追加写），`CompressedRange` 语义见 `data-model.md` §1。
 
 ### 7.3 查询
 
@@ -450,13 +465,22 @@ shell.run / fs.write 执行
    │     └─ 否 → 普通错误，原样回灌 LLM
 ```
 
-**denial 签名库**（按平台）：
+**denial 签名库**（按平台；M-09 起每条签名映射结构化 `SandboxDenyKind`）：
 
-| 平台 | 签名 |
-|------|------|
-| Linux | `errno=EPERM`/`EACCES`；Landlock `denied` 关键字；seccomp `Bad system call`/`SIGSYS` |
-| macOS | `sandbox-exec: ... denied`；`Operation not permitted`；`Sandbox violation` |
-| Windows | `Access is denied`（5）；`privilege not held`（1314） |
+| 平台 | 签名 | 结构化类型 |
+|------|------|-----------|
+| Linux | `errno=EPERM`；seccomp `Bad system call`/`SIGSYS` | `syscall_blocked` |
+| Linux | `EACCES`；Landlock `denied` 关键字 | `write_forbidden` |
+| macOS | `Sandbox violation` | `write_forbidden` |
+| macOS | `sandbox-exec` 启动失败 | `external` |
+| Windows | `Access is denied`（5） | `write_forbidden` |
+| Windows | `privilege not held`（1314） | `external` |
+
+**M-09 结构化透传**：检测结果带 `SandboxDenyKind`（带 payload，如 `syscall_blocked { syscall }`），
+经 `ToolResultMeta.sandbox_denied` 写入工具结果消息（`ContentBlock::ToolResult.metadata`），
+持久化/协议层/前端拒绝卡片统一消费；只读并行桶与副作用串行路径共用同一检测函数
+（`build_denial_result`，C-30 无 `SideEffect` 检测缺口）。`SandboxError::Denied` 变体
+提供驱动层结构化拒绝的出口（payload 无法从 stderr 可靠解析的字段留空，原文在 `detail`）。
 
 升级流仅对 `WorkspaceWrite`/`ReadOnly` 生效；`ExternalSandbox`/`DangerFullAccess` 无内核拒绝，不触发。放宽操作受 §2 内置黑名单约束——即使用户批准放宽，危险命令/SSRF/敏感路径仍 `Deny`。每次放宽记审计（`reason=sandbox_escalation`），便于事后追溯。
 

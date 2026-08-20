@@ -14,6 +14,7 @@
 | A-02 | 多轮 Agent 循环 | 工具调用→结果→继续，直到 EndTurn | M2 | 已实现 |
 | A-03 | 并行/串行工具调度 | 无副作用并行、有副作用严格串行 | M2 | 已实现 |
 | A-04 | 停止条件与防死循环 | max_iters / turn_timeout / 重复检测 | M2 | 已实现 |
+| A-04b | 循环打断软升级（M-08） | 单工具指纹逐级软提醒（`repeat_guard_thresholds` 默认 [3,5,8]）+ 硬停止阈值可配；空数组关闭软提醒（见 `design.md` §2.2） | M2 | 已实现 |
 | A-05 | 类型化子 Agent | Explore/Plan/General/Custom，隔离上下文 | M5 | 已实现 |
 | A-06 | Plan 模式 | 双重只读强制 + plan.exit + 预批准缓存 | M5 | 已实现 |
 | A-07 | 任务管理工具 | TaskCreate/TaskUpdate/TaskList 增量模型 + 依赖 + 持久化 | M3 | 已实现 |
@@ -38,6 +39,7 @@
 | L-06 | 模型路由（Router） | `Router` trait + `StaticRouter` 骨架（`core::provider::router`），按任务类型选模型；M6 交付骨架，M7+ 实现按 `Task::kind` 路由 | M6 | 已实现（骨架） |
 | L-07 | 多模态（Vision） | 图片输入 | M6 | 已实现 |
 | L-08 | 独立小 LLM | 为摘要/compact/memory 提取配置独立 provider（`[provider.small]`），未设置时与主 provider 相同，可配更便宜模型降本（见 `design.md` §3.8、`modules.md` §10.3） | M3 | 已实现 |
+| L-09 | 凭证重解析（M-10） | `CredentialResolver`：每次请求重读凭证（缓存 ≤60s，`invalidate()` 立即失效，`loader` 注入 keyring/env 来源）；provider 不再持有构造期 `api_key` 快照，`chat_stream` 内 resolve——换 key 零重启（见 `security.md` §6.3、`api.md` §3.1） | M10 | 已实现 |
 
 ## 3. 工具系统
 
@@ -62,9 +64,11 @@
 | T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现 |
 | T-14 | `task.create`/`update`/`list` | 增量任务管理 + 依赖 + 持久化（替代 todo.write） | None | M3 | 已实现 |
 | T-15 | `plan.exit` | 退出 Plan 模式并提交计划 | None | M5 | 已实现 |
+| T-15b | `plan.list` | 查询 Plan 模式状态与预批准命令（M-11 新增；只读，穿透 Plan 硬门；输出 `PlanModeController::snapshot()` 的 mode + allowed_prompts，前端渲染为表格 `tool`/`prompt`） | None | M11 | 已实现 |
 | T-16 | `memory.write` | 写长期记忆 | FileWrite | M3 | 已实现 |
 | T-17 | MCP 远程工具 | `mcp__<server>__<tool>` 动态注册 | 据 schema | M5 | 已实现 |
 | T-18 | 自定义工具注册 | 第三方实现 `Tool` trait | - | M2 | 已实现 |
+| T-19 | 输出渲染声明（M-11） | `Tool` trait 新增 `output_schema()`（JSON 工具声明输出 schema）与 `render_output()`（`RenderIntent` 投影：Text/List/Table/Code/Json，文本直出回归兼容）；全部内置工具已补充：`fs.read`→Code、`fs.list`/`fs.glob`→List(Files)、`fs.grep`→List(Generic)、`shell.run`→Code、`git.diff`→Code(lang=diff)、`task.list`/`plan.list`→Table、`task.create`/`task.update`/`task.spawn`/`plan.exit`/`shell.output`→Json+schema；前端按工具名本地渲染（零协议改动，见 `api.md` §3.3） | - | M11 | 已实现 |
 
 ## 4. 上下文管理
 
@@ -74,6 +78,7 @@
 | C-02 | 消息权重模型 | role×recency×sticky×pin | M3 | 已实现 |
 | C-03 | 4 级压缩管道 | 裁剪→摘要→滚动→硬截断 | M3 | 已实现 |
 | C-04 | 压缩日志与快照 | 可回放、可调试 | M3 | 已实现 |
+| C-04b | 压缩追溯（M-07） | 摘要消息携带 `compressed_range`（from/to seq + 掉 token），L3/L4 丢弃区间记入 `CompressResult`，压缩完成落 `AuditKind::Compress` 审计 | M3 | 已实现 |
 | C-05 | 压缩备份（可选） | 压缩前原文保留 | M3 | 已实现 |
 | C-06 | `compress=off` 兜底 | 关闭压缩直通 | M3 | 已实现 |
 | C-07 | 压缩熔断与防 Thrash | 失败计数≥3 熔断 / Thrash 检测 / 状态保留清单 / 降级链 | M3 | 已实现 |
@@ -116,6 +121,7 @@
 | P-17 | 审批模式（ApprovalMode） | Untrusted/OnFailure/OnRequest/Never | M4 | 已实现 |
 | P-18 | 预设（Preset） | read-only/auto/external-sandbox/full-access 一键选定 | M4 | 已实现 |
 | P-19 | 沙箱拒绝检测与升级 | EPERM/Seatbelt denial → 请求批准 → 放宽重试 | M4 | 已实现 |
+| P-19b | 沙箱拒绝结构化（M-09） | `SandboxDenyKind` 结构化判定替代纯文本匹配（熔断 C-30 加强）；只读并行桶与副作用路径统一接入检测；`ToolResultMeta.sandbox_denied` 透传协议层（见 `security.md` §8.7、`api.md` §3.9） | M4 | 已实现 |
 | P-20 | VCS 目录保护 | .git/.hg/.svn 默认只读 | M4 | 已实现 |
 | P-21 | 进程硬化（pre-main） | PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_* | M4 | 已实现 |
 | P-22 | `minicoding exec` | 非交互批量执行 + 沙箱策略 | M4 | 已实现 |
@@ -123,6 +129,7 @@
 | P-24 | AGENTS.md 写保护 | fs.write/edit 对 AGENTS.md 默认 Ask | M3 | 已实现 |
 | P-25 | PermissionMode 模式生效 | `AcceptEdits`（工作区内文件编辑自动 Allow，shell 仍 Ask）/ `BypassPermissions`（全自动，C-03 越界与 C-23 仍硬拦）；server `--preset` 与会话级 `CreateSessionBody.preset`（auto/read-only/external-sandbox/full-access，C-22 警告） | M2 | 已实现 |
 | P-26 | 沙箱初始化失败询问回退 | `apply`/`post_spawn` 失败（如 Windows Job Object 恢复线程快照竞态）→ High risk 询问是否沙箱外运行（C-22 用户显式选定）→ `DangerFullAccess` 重试一次，决策落 audit.log；仅询问一次不回退循环 | M4 | 已实现 |
+| P-27 | 配置写防陈旧（M-10） | `config.toml` 顶层 `revision` 原子自增；`save_provider_config(provider, expected_revision)` 不匹配返回 `StaleWrite` 且不覆盖（防桌面 + Web 并发写覆盖）；`GET /config` 返回 `config_revision` 供前端锁定基准（见 `security.md` §6.4、`api.md` §9.1） | M10 | 已实现 |
 
 ## 7. Hooks 系统（参考 Claude Code）
 
@@ -193,6 +200,7 @@
 | S-25 | SSE durable recovery | `Last-Event-ID` cursor 三级回退：内存 ring buffer → `EventStore::load_after` → `RehydrateRequired`（见 `design.md` §25.5） | M8+ | 已实现 |
 | S-26 | `--replay` 事件重放 | `--replay`/`--resume` 优先走 snapshot + 事件流重放，旧会话回退到消息日志（见 `design.md` §25.6） | M8+ | 已实现 |
 | S-27 | 事件 schema 版本化 | `SCHEMA_VERSION` + `EventRecord.schema_version`，旧版会话 migration 适配（见 `design.md` §25.7） | M8+ | 已实现 |
+| S-27b | 会话 step 边界事件（M-06） | `StepStarted`/`StepEnded` 持久化（SCHEMA_VERSION=2，log-only 不进 transcript），重放跳过，cancel/timeout 可定位中断点（见 `design.md` §25.2） | M8+ | 已实现 |
 
 ## 11. 前端
 
@@ -285,23 +293,23 @@
 
 | 领域 | 项数 |
 |------|:---:|
-| Agent 运行时 | 15 |
-| LLM Provider | 8 |
-| 工具系统 | 22 |
-| 上下文管理 | 9 |
+| Agent 运行时 | 16 |
+| LLM Provider | 9 |
+| 工具系统 | 24 |
+| 上下文管理 | 10 |
 | 记忆 | 8 |
-| 权限与安全 | 26 |
+| 权限与安全 | 28 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
-| 持久化与存储 | 15 |
+| 持久化与存储 | 16 |
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **193** |
+| **合计** | **201** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 

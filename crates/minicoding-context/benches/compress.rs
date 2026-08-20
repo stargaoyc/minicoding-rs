@@ -90,6 +90,7 @@ fn bench_compress(c: &mut Criterion) {
                             black_box(&budget),
                             None,
                             false,
+                            None,
                         )
                         .await
                         .expect("compress_pipeline should succeed");

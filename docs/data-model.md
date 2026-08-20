@@ -21,6 +21,11 @@ ContextSnapshot          (ContextManager 运行时镜像)
  ├── token_count
  └── compression_log: Vec<CompressionStep>
 
+CompressedRange          (M-07 压缩追溯，随 MessageMeta 序列化)
+ ├── from_seq: u64      # 被替代区间起始事件序号（含）
+ ├── to_seq: u64        # 被替代区间结束事件序号（含）
+ └── dropped_tokens     # 被替代消息的 token 总量
+
 PermissionStore          (决策持久化)
  └── rules: Vec<Rule>
 
@@ -50,6 +55,17 @@ MemoryStore
 {"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"user","content":[{"type":"text","text":"解释入口"}],"created_at":"...","meta":{"source":"user"}}
 {"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"assistant","content":[{"type":"text","text":"让我读取"}],"tool_calls":[{"id":"call_1","name":"fs.read","input":{"path":"src/main.rs"}}],"created_at":"...","meta":{"tokens":28,"source":"llm","usage":{"input":512,"output":28}}}
 {"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"fn main() {...}"},"is_error":false}],"created_at":"...","meta":{"source":"tool","tool_name":"fs.read","elapsed_ms":3,"bytes":1024}}
+
+`tool_result` 块 M-09 起携带可选 `metadata` 字段（含 `sandbox_denied` 结构化拒绝信息；
+旧数据无此字段，反序列化默认空）：
+
+```json
+{"v":1,"type":"message","id":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"sandbox denied (EPERM): ..."},"is_error":true,"metadata":{"elapsed":{"secs":0,"nanos":0},"bytes":0,"truncated":false,"sandbox_denied":{"kind":{"kind":"syscall_blocked","syscall":"Bad system call"},"detail":"execution: Bad system call"}}}],"created_at":"...","meta":{"source":"tool"}}
+```
+
+`sandbox_denied.kind` 为 tagged enum（`kind` 标签 + payload）：`path_escape`（C-03 路径越界，
+含 `attempted`/`allowed_root`）、`syscall_blocked`（seccomp/EPERM）、`write_forbidden`（landlock/
+Seatbelt/`EACCES`）、`resource_limit`、`external`（macOS/Windows 兜底）。
 {"v":1,"type":"compression","id":"cmp_01H...","at":"...","steps":[{"kind":"tool_result_truncate","affected":["msg_01H..."]},{"kind":"summarize","affected":["msg_01H...","msg_01H..."],"summary_id":"msg_01H..."}],"tokens_before":12000,"tokens_after":4500}
 {"v":1,"type":"message","id":"msg_01H...","parent_uuid":null,"role":"system","content":[{"type":"text","text":"[summarized] ..."}],"created_at":"...","meta":{"source":"summarize","summarized":true}}
 {"v":1,"type":"session_end","at":"...","reason":"normal"}
@@ -68,6 +84,7 @@ MemoryStore
 | `meta.source` | 消息产生方：`system`/`user`/`llm`/`tool`/`subagent`/`summarize` |
 | `meta.pinned` | 是否用户固定（不被压缩） |
 | `meta.summarized` | 是否为摘要替换后的消息 |
+| `meta.compressed_range` | M-07 可选：`{from_seq, to_seq, dropped_tokens}` 压缩追溯区间（见 §1）。**旧文件读取时按 `None` 处理**（`#[serde(default, skip_serializing_if)]`） |
 
 ### 2.4 兼容性策略
 

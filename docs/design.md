@@ -101,6 +101,8 @@ impl Runtime {
 
 主循环的 6 个步骤对应"写入用户消息 → 构建请求 → 流式调用 LLM → 落盘 assistant 消息 → 判止/执行工具 → 落盘 tool_result 并回到步骤 2"。两个关键不变量由代码结构保证：消息先写盘（`storage.append`）再入上下文（`ctx.append`）再广播，崩溃时磁盘与内存一致；无工具调用时立即 `TurnEnd` 退出，有工具调用则进入 §2.3 的并行/串行调度。`emit` 全程异步广播事件供 frontend 渲染与 OTel 记录。
 
+**M-08循环打断器软升级**：在硬停止之前增加逐级软提醒（对齐 dsh `repeat-tool-reminder`）。硬停止保留（整轮工具调用集合签名连续重复 ≥ 末级阈值 → `Stopped`，C-13 早期止损），软提醒用单工具指纹（`name|规范化 input`，比整轮集合更灵敏）连续命中 `repeat_guard_thresholds` 中某级（默认 `[3,5,8]`）时，向上下文注入一条 system 级提醒（不替换工具输出、不 return——模型可见历史不失真）。空阈值数组关闭软提醒，仅保留硬停止（默认 3 轮）。提醒消息仅注入上下文不落盘，resume 后不重建（瞬态提示）。
+
 ### 2.3 工具执行（并行 + 串行 + 权限）
 
 工具执行遵循两条硬规则：
@@ -261,6 +263,14 @@ Level 3: 滚动窗口
 Level 4: 硬截断
     - 兜底，按 token 数从尾部保留，记录告警
 ```
+
+> **M-07压缩追溯**：各级压缩生成替代/丢弃消息时记录追溯信息，审计可定位"这轮压缩掉了什么"：
+>
+> - 新增 `MessageMeta.compressed_range: Option<CompressedRange>`（`from_seq`/`to_seq`/`dropped_tokens`），L2 摘要消息携带被替代消息的序号区间与掉 token 量；
+> - L3 滚动/L4 硬截断的丢弃消息记录到 `CompressResult.dropped_range`/`dropped_tokens`（消息已被删除，无消息可携带 metadata）；
+> - 压缩成功后经 `AuditSink` 落一条 `AuditKind::Compress` 审计（detail 为 JSON：level/各分支计数/区间/前后 token 量）。
+>
+> 序号口径：消息序号锚点（`ContextManagerImpl` 的 append 计数）近似事件 seq——每条 append 的消息占一个连续序号，Step 事件等非消息事件不占消息序号。`set_session_hint`（`ContextManager` trait 默认方法）由 Runtime 构造时注入会话 id，供压缩审计记录。
 
 ### 3.4 Token 预算分配
 
@@ -489,6 +499,14 @@ pub trait Tool {
     /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖（见 §19.3、rules.md C-25）。
     fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
 
+    /// 输出 JSON Schema 声明（M-11）：仅返回 `ToolContent::Json` 的工具提供。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> { None }
+
+    /// 渲染意图投影（M-11）：纯函数，声明结果的前端展示形态。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
+    }
+
     /// 执行
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext)
         -> Result<ToolResult, ToolError>;
@@ -500,9 +518,20 @@ pub enum SideEffect {
     Command,     // 执行 shell —— 串行
     Network,     // 网络请求 —— 串行
 }
+
+/// 渲染意图（M-11）：工具结果的前端展示形态。
+pub enum RenderIntent {
+    Text { content: String },
+    List { items: Vec<ListItem>, kind: ListKind },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Code { lang: Option<String>, content: String },
+    Json { value: serde_json::Value },
+}
 ```
 
 `side_effect()` 不仅驱动权限策略（见 §9），还是 §2.3 并行/串行分桶的依据，因此工具实现必须如实标注：把写操作误标为 `None` 会绕过串行约束并产生竞态。`is_read_only()` 拆为独立方法（而非直接用 `side_effect() == None`）是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致——Plan 模式硬门（§16.1）用 `is_read_only()` 判断，给声明了 `readOnlyHint` 的 MCP 工具留出"Plan 模式可用"的通道。权威定义见 `api.md` §3.3。
+
+`output_schema()`/`render_output()`（M-11）提供**服务端到前端的渲染投影**：工具是纯函数声明自己的输出形态（列表/表格/代码/JSON），前端据此画卡片，而非回灌 LLM 的原始文本。二者均为可选覆盖——默认 `render_output` 按 `ToolContent` 类型推断（`Text`→文本直出、`Json`→JSON 直出），未提供实现的工具行为与 M-11 前一致（回归兼容）。设计权衡见 `improvement-design.md` ：推荐前端按工具名 + schema 本地渲染（零协议改动），不把 RenderIntent 塞进 wire。
 
 ### 4.2 ToolRegistry
 
@@ -541,6 +570,12 @@ impl ToolRegistry {
 | `git.diff` | git | None | 查看 diff |
 | `git.apply` | git | FileWrite | 应用 patch |
 | `task.spawn` | core | None | 启动子 Agent |
+| `task.create` / `task.update` / `task.list` | task | None | 增量任务管理（见 §18） |
+| `plan.exit` | plan | None | 退出 Plan 模式并提交计划（§16.4，C-25 穿透） |
+| `plan.list` | plan | None | 查询 Plan 模式状态与预批准命令（M-11 新增，只读，C-25 穿透） |
+| `memory.write` | core | FileWrite | 写长期记忆 |
+
+全部内置工具在 M-11 均补充了 `output_schema()`/`render_output()` 渲染声明：`fs.list`/`fs.glob` → `List{kinds: Files}`、`fs.grep` → `List{Generic}`、`fs.read`/`shell.run` → `Code`、`git.diff` → `Code{lang: diff}`、`task.list`/`plan.list` → `Table`；JSON 输出工具（`task.create`/`task.update`/`task.spawn`/`plan.exit`/`shell.output`）提供 `output_schema` + JSON 直出；确认类文本工具（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`/`shell.background`/`shell.kill`/`git.apply`/`web.fetch`/`web.search`/`memory.write`）显式声明文本直出（与默认行为一致）。
 
 ### 4.4 工具上下文与隔离
 
@@ -2754,6 +2789,8 @@ Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `Permiss
 4. 更新 `durable_seq`（供 SSE cursor 协同）；
 5. `MessageAppended` 时递增 `message_since_snapshot`，达到 `SNAPSHOT_INTERVAL`（50）触发 snapshot 落盘。
 
+> **M-06step 边界事件**：`StepStarted { iter, tool_call_ids }` / `StepEnded { iter }` 同样走 `try_persist` 落盘（log-only，C-05：不进 transcript、不参与消息重建）。`StepStarted` 在 LLM 返回后、执行工具前持久化（此时 tool_call_ids 已知），`StepEnded` 在全部 tool_result 回灌后持久化。cancel/timeout 中断时仅存在 `StepStarted` 而无 `StepEnded`，据此定位中断点。
+
 **best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程（与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，replay 可从最近 snapshot + 剩余事件重建。
 
 `PermissionModeChanged` 事件由 `PlanControllerHandle::persist_mode_changed` 持久化（`plan.exit`/`/plan`/`--plan` 触发的模式切换），不触发 snapshot。
@@ -2779,6 +2816,7 @@ snapshot 触发条件：每 `SNAPSHOT_INTERVAL`（50）条 `MessageAppended` 事
    - `MessageAppended`：追加到 `messages`；
    - `PermissionResolved`/`TaskUpdated`/`TurnEnd`：仅记录审计轨迹，不重建运行时状态；
    - `PermissionModeChanged`：更新 `final_permission_mode`；
+   - `StepStarted`/`StepEnded`（M-06）：跳过——log-only 事件，不影响消息重建（v1 旧会话无此类事件，天然兼容）；
 4. 返回 `ReplayedSession { session, audit_trail, last_seq, final_permission_mode }`。
 
 **seq 连续性检查**：事件 seq 必须连续（`expected = last_seq + 1`），跳跃返回 `ReplayError::SeqGap`（可能事件丢失）。
@@ -2812,10 +2850,11 @@ CLI `load_session_by_mode` 对 `Resume`/`Replay` 模式优先走事件重放路�
 
 ### 25.7 schema 版本化
 
-`SCHEMA_VERSION = 1`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
+`SCHEMA_VERSION = 2`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
 
 - v0（隐式）：消息日志（无 `EventRecord` 包装），`replay_session_state` 回退到消息列表；
-- v1：当前 schema，`EventRecord` 显式包装 `PersistedEvent`。
+- v1：`EventRecord` 显式包装 `PersistedEvent`（SessionCreated/MessageAppended/PermissionResolved/PermissionModeChanged/TaskUpdated/TurnEnd）；
+- v2（M-06）：新增 `PersistedEvent::StepStarted`/`StepEnded`（log-only，重放跳过）。v1 事件流无 Step 事件，`replay_session_state` 无需分支处理即兼容。
 
 未来变更（如新增事件变体、字段语义变更）递增 `SCHEMA_VERSION`，并在 `replay_session_state` 中按版本分支处理。`SessionSnapshot.schema_version` 同步演进。
 
