@@ -145,10 +145,21 @@ pub struct ToolsConfig {
     /// 空数组 = 关闭软提醒，仅保留硬停止（整轮签名连续重复 ≥ 3 轮 → `Stopped`）。
     #[serde(default = "default_repeat_thresholds")]
     pub repeat_guard_thresholds: Vec<u32>,
+    /// 只读工具并行度（M-12）：`0` = 串行顺序执行，`>0` = 至多 N 个并发。
+    ///
+    /// 只读工具（`SideEffect::None`）无副作用，并行安全；副作用工具始终串行
+    /// （C-01 权限检查不可并发竞态）。turn 边界热更新白名单字段之一
+    /// （见 `tech-stack.md` §13 决策记录）。
+    #[serde(default = "default_parallel_reads")]
+    pub parallel_reads: u32,
 }
 
 fn default_repeat_thresholds() -> Vec<u32> {
     vec![3, 5, 8]
+}
+
+fn default_parallel_reads() -> u32 {
+    8
 }
 
 impl Default for ToolsConfig {
@@ -159,6 +170,7 @@ impl Default for ToolsConfig {
             shell_timeout_sec: 120,
             shell_max_output_bytes: 1024 * 1024,
             repeat_guard_thresholds: default_repeat_thresholds(),
+            parallel_reads: default_parallel_reads(),
         }
     }
 }
@@ -461,5 +473,18 @@ command = "git status --short"
         assert_eq!(cfg.hooks.on_hook_error, OnHookError::Continue);
         assert_eq!(cfg.hooks.default_timeout_sec, 30);
         assert_eq!(cfg.hooks.total_count(), 0);
+    }
+
+    #[test]
+    fn tools_config_parallel_reads_defaults_to_8() {
+        let cfg = RuntimeConfig::default();
+        assert_eq!(cfg.tools.parallel_reads, 8);
+        // 旧配置文件无 `parallel_reads` 字段时回退默认 8（serde default）
+        let parsed: RuntimeConfig =
+            toml::from_str("[tools]\nfs_max_read_bytes = 42").expect("parse");
+        assert_eq!(parsed.tools.parallel_reads, 8);
+        // 显式声明 0 保持 0（关闭并行）
+        let zero: RuntimeConfig = toml::from_str("[tools]\nparallel_reads = 0").expect("parse");
+        assert_eq!(zero.tools.parallel_reads, 0);
     }
 }

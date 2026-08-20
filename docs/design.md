@@ -1538,6 +1538,10 @@ pub enum Event {
     /// 配置文件变更通知（S-22 热更新）。
     /// `ConfigWatcher` 监听 `~/.minicoding/config.toml`，500ms debounce 后广播；
     /// 需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）自行订阅处理。
+    /// **Runtime 侧应用策略（M-12，R-04）**：仅探测/通知，不在此事件内直接热换——
+    /// 白名单字段（`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）
+    /// 在下次 `run_turn` 开头由 `reload_safe_config` 应用（turn 边界生效，
+    /// 见 `tech-stack.md` §13）；非白名单字段变更仅 warn 提示重启，不做全量热重载。
     ConfigChanged,
 }
 ```
@@ -1571,6 +1575,7 @@ compress_strategy = "summary_then_truncate"
 [tools]
 enabled_groups = ["core", "fs", "shell", "web"]
 shell.timeout_sec = 120
+parallel_reads = 8            # 只读工具并行度；0 = 串行
 
 [permission]
 default = "ask"
@@ -1581,6 +1586,8 @@ glob = "src/**"
 [storage]
 dir = "~/.minicoding/sessions"
 ```
+
+**M-12（R-04）热更新语义**：`ConfigWatcher` 探测 config.toml 变更后广播 `Event::ConfigChanged`，Runtime 在**每次 turn 边界**读取并应用白名单字段（仅当文件中显式声明该 key）：`provider.model`（请求体 `model` 改用 `req.params.model`，tokenizer 仍为构造时快照）、`context.turn_timeout_sec`、`tools.parallel_reads`（0=串行；>0=有界并发，只读桶用 `buffer_unordered`）。白名单外字段（如 `provider.api_key`、熔断相关配置）不热换，仅 warn 提示重启——不做全量热重载（C-29 熔断与 provider 重建依赖构造时配置）。详见 `tech-stack.md` §13 决策记录。
 
 ---
 

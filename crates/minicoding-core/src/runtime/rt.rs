@@ -72,7 +72,21 @@ pub struct Runtime {
     pub(crate) ctx: Arc<dyn ContextManager>,
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) tools: ToolRegistry,
-    pub(crate) config: RuntimeConfig,
+    /// 运行期配置（M-12 起锁保护，见 `tech-stack.md` §13 决策记录）。
+    ///
+    /// turn 边界 `reload_safe_config` 做白名单热更新（`provider.model`/
+    /// `context.turn_timeout_sec`/`tools.parallel_reads`），其余字段变更仅告警
+    /// 提示重启。用 `std::sync::RwLock`（非 tokio）：`build_dispatch_config`
+    /// 是同步 fn 无法 `read().await`；所有读取点均为短临界区，guard 不跨 await
+    /// （满足 clippy `await_holding_lock`）。
+    pub(crate) config: std::sync::RwLock<RuntimeConfig>,
+    /// config.toml 路径（M-12：`Some` 时 turn 边界白名单热更新启用）。
+    ///
+    /// CLI 注入 `paths::config_path()`；server 不注入（配置全部来自参数，保持不启用）。
+    pub(crate) config_path: Option<Utf8PathBuf>,
+    /// 上次文件版本的非白名单签名（`reload_safe_config` 用：首次加载不告警，
+    /// 检测到后续非白名单变更时 warn 提示重启）。
+    pub(crate) last_non_whitelist_sig: std::sync::Mutex<Option<u64>>,
     pub(crate) session: Session,
     pub(crate) events: EventBus,
     /// 当前工作目录（W-11 工作区切换：`switch_workdir` 在 `&self` 下更新，需内部可变）。
@@ -691,6 +705,10 @@ impl Runtime {
             self.sandbox_breaker.reset();
             metrics::set_circuit_breaker("sandbox", "closed");
 
+            // M-12（R-04）：turn 边界白名单配置热更新（ConfigWatcher 仅探测变更并
+            // 广播 `Event::ConfigChanged`，具体应用在本方法执行，见 tech-stack.md §13）。
+            self.reload_safe_config().await;
+
             // 1. 构造用户消息并入库
             let user_msg = Message::user_text(user_input.text);
             if let Err(e) = self.storage.append(&self.session.id, &user_msg).await {
@@ -702,8 +720,14 @@ impl Runtime {
             self.persist_event(&event).await;
             self.events.emit(event);
 
-            let max_iters = self.config.context.max_tool_iters;
-            let turn_timeout = Duration::from_secs(self.config.context.turn_timeout_sec);
+            // 配置快照：锁内短读后克隆（turn 循环内多处读取不再重复取锁）。
+            // `max_iters`/`turn_timeout` 为 Copy 值，供外层 select! 超时分支复用。
+            let config_snapshot = {
+                let cfg = self.config.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                cfg.clone()
+            };
+            let max_iters = config_snapshot.context.max_tool_iters;
+            let turn_timeout = Duration::from_secs(config_snapshot.context.turn_timeout_sec);
 
             // 主循环封装为 future，由外层 select! 与 timeout/cancel 组合。
             // 使用 `async move` 避免 `async` 捕获 `&self` 的引用（产生 `&&self`），
@@ -719,7 +743,7 @@ impl Runtime {
 
                 for iter in 0..max_iters {
                     // 2. 构建请求（system + tools + 压缩后的历史）
-                    let req = match self.ctx.build_chat_request(&self.tools, &self.config).await {
+                    let req = match self.ctx.build_chat_request(&self.tools, &config_snapshot).await {
                         Ok(r) => r,
                         Err(e) => {
                             metrics::record_error("context");
@@ -758,7 +782,7 @@ impl Runtime {
 
                     // 5.1 重复检测（M-08，R-03）：先软提醒，后硬停止。
                     //     硬停止阈值 = 配置末级（非空）或默认 3（空数组 = 关闭软提醒）。
-                    let thresholds = &self.config.tools.repeat_guard_thresholds;
+                    let thresholds = &config_snapshot.tools.repeat_guard_thresholds;
                     let hard_stop_count = thresholds.last().copied().unwrap_or(3);
                     let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
 
@@ -900,7 +924,7 @@ impl Runtime {
                 }
                 () = tokio::time::sleep(turn_timeout) => {
                     tracing::warn!(
-                        timeout_sec = self.config.context.turn_timeout_sec,
+                        timeout_sec = turn_timeout.as_secs(),
                         "turn timed out"
                     );
                     // M-03（D-05）：超时同样可能留下悬空 tool_calls，回填合成结果。
@@ -1161,7 +1185,7 @@ impl Runtime {
 
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
 
-        // 无副作用：并发执行（最多 8 并发）
+        // 无副作用：按 `tools.parallel_reads` 并发执行（0 = 串行，见 tech-stack.md §13）。
         // 克隆 `events`/`tools` 到闭包外，让 async 块只捕获 owned 数据，
         // 避免捕获 `&self` 导致 future 非 `'static`（无法被 SDK `tokio::spawn`）。
         //
@@ -1254,9 +1278,25 @@ impl Runtime {
                 fut
             })
             .collect();
-        let mut ro_stream = futures::stream::iter(ro_futs).buffer_unordered(8);
-        while let Some(r) = ro_stream.next().await {
-            results.push(r?);
+        let parallel_reads = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.tools.parallel_reads
+        };
+        // M-12：`parallel_reads = 0` 时串行执行（顺序与 LLM 原始顺序一致，便于定位）。
+        // 并行分支用 `buffer_unordered`，结果随后按原始顺序回填（见下方 sort）。
+        if parallel_reads == 0 {
+            for fut in ro_futs {
+                results.push(fut.await?);
+            }
+        } else {
+            let mut ro_stream =
+                futures::stream::iter(ro_futs).buffer_unordered(parallel_reads as usize);
+            while let Some(r) = ro_stream.next().await {
+                results.push(r?);
+            }
         }
 
         // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
@@ -1456,16 +1496,153 @@ impl Runtime {
     /// C-21：policy 返回 `Deny` 时视为内置黑名单 Deny（当前 `BuiltinPolicy` 仅产出
     /// L0 Deny：项目文档保护 C-02、路径越界 C-03），Hook 的 Allow 被忽略。
     fn build_dispatch_config(&self, verdict: &Verdict) -> DispatchConfig {
-        let hook_config = &self.config.hooks;
+        // 短临界区读取两个 Copy 字段（guard 不跨 await，`&self` 同步 fn 亦可用）
+        let (on_error, default_timeout_sec) = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (cfg.hooks.on_hook_error, cfg.hooks.default_timeout_sec)
+        };
         let builtin_deny = match verdict {
             Verdict::Deny(msg) => Some(msg.clone()),
             _ => None,
         };
         DispatchConfig {
-            on_error: hook_config.on_hook_error,
-            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            on_error,
+            timeout: Duration::from_secs(default_timeout_sec),
             builtin_deny,
         }
+    }
+
+    /// M-12（R-04）：turn 边界白名单配置热更新。
+    ///
+    /// [`ConfigWatcher`]（`paths::config_path()` 监听）仅广播 `Event::ConfigChanged`，
+    /// 具体应用由本方法在 `run_turn` 开头执行（`tech-stack.md` §13 决策记录）：
+    /// - **不做全量热重载**：C-29 压缩熔断状态机与 provider 重建依赖构造时配置，
+    ///   热换不安全；白名单外的字段变更仅 warn 提示重启。
+    /// - 白名单字段（`provider.model`/`context.turn_timeout_sec`/
+    ///   `tools.parallel_reads`）**仅当文件中显式存在**该 key 时应用
+    ///   （`toml::Value` presence 判断），避免 serde default（文件缺字段补默认值）
+    ///   覆盖 CLI/env 传入的覆盖值。
+    /// - 文件缺失/解析失败时静默保留当前配置（best-effort，与 `load_config` 的
+    ///   last-known-good 机制正交：此处不写 LKG）。
+    async fn reload_safe_config(&self) {
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        let Ok(raw) = tokio::fs::read_to_string(path).await else {
+            return; // 无配置文件：CLI 未配置时的正常路径，静默跳过
+        };
+        let fresh: RuntimeConfig = match toml::from_str(&raw) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "config reload: parse failed, keeping current config"
+                );
+                return;
+            }
+        };
+        let file_val: toml::Value = match toml::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return, // 与上方同源解析，理论不可达
+        };
+
+        // 非白名单签名（白名单字段 + revision 剥除后）：
+        // 先读当前运行期签名，供下方「变更提示重启」比对。
+        let sig_current = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Self::config_non_whitelist_sig(&cfg)
+        };
+        let sig_fresh = Self::config_non_whitelist_sig(&fresh);
+
+        // 应用白名单字段（写锁临界区仅字段赋值，无 await）。
+        let mut cfg = self
+            .config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut applied: Vec<&'static str> = Vec::new();
+        if Self::toml_has(&file_val, &["provider", "model"]) {
+            cfg.provider.model.clone_from(&fresh.provider.model);
+            applied.push("provider.model");
+        }
+        if Self::toml_has(&file_val, &["context", "turn_timeout_sec"]) {
+            cfg.context.turn_timeout_sec = fresh.context.turn_timeout_sec;
+            applied.push("context.turn_timeout_sec");
+        }
+        if Self::toml_has(&file_val, &["tools", "parallel_reads"]) {
+            cfg.tools.parallel_reads = fresh.tools.parallel_reads;
+            applied.push("tools.parallel_reads");
+        }
+        drop(cfg);
+
+        if !applied.is_empty() {
+            tracing::info!(
+                path = %path,
+                applied = ?applied,
+                "config reload: applied whitelist fields at turn boundary"
+            );
+        }
+
+        // 非白名单变更检测：与上次文件版本比对（首次加载 `last == None` 不告警）。
+        let mut last = self
+            .last_non_whitelist_sig
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let needs_warn = last.is_some() && sig_current != sig_fresh && *last != Some(sig_fresh);
+        *last = Some(sig_fresh);
+        if needs_warn {
+            tracing::warn!(
+                path = %path,
+                "config reload: detected non-whitelist changes (restart required to take effect); whitelist fields applied"
+            );
+        }
+    }
+
+    /// 在 `toml::Value` 中按路径查找 key 是否存在（M-12 白名单 presence 判断）。
+    fn toml_has(v: &toml::Value, path: &[&str]) -> bool {
+        let mut cur = v;
+        for key in path {
+            match cur.get(key) {
+                Some(next) => cur = next,
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// 配置的「非白名单签名」：序列化 JSON 后剔除白名单路径与 `revision`，
+    /// 对剩余字符串做 hash。用于检测「需重启生效」的配置变更（M-12）。
+    fn config_non_whitelist_sig(cfg: &RuntimeConfig) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut v = serde_json::to_value(cfg).unwrap_or_default();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("revision");
+        }
+        if let Some(p) = v.pointer_mut("/provider")
+            && let Some(o) = p.as_object_mut()
+        {
+            o.remove("model");
+        }
+        if let Some(c) = v.pointer_mut("/context")
+            && let Some(o) = c.as_object_mut()
+        {
+            o.remove("turn_timeout_sec");
+        }
+        if let Some(t) = v.pointer_mut("/tools")
+            && let Some(o) = t.as_object_mut()
+        {
+            o.remove("parallel_reads");
+        }
+        let mut h = DefaultHasher::new();
+        v.to_string().hash(&mut h);
+        h.finish()
     }
 
     /// 运行 `PreToolUse` Hook（policy.check 之后、工具执行前）。
@@ -1764,13 +1941,24 @@ impl Runtime {
         side_effect: SideEffect,
         _result: &ToolResult,
     ) {
-        let hook_config = &self.config.hooks;
-        if hook_config.post_tool_use.is_empty() {
+        // 短临界区读取（guard 在首个 await 前释放）+ 快速跳过
+        let (on_error, default_timeout_sec, has_post_tool_use) = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                cfg.hooks.on_hook_error,
+                cfg.hooks.default_timeout_sec,
+                !cfg.hooks.post_tool_use.is_empty(),
+            )
+        };
+        if !has_post_tool_use {
             return; // 无 PostToolUse Hook，快速跳过
         }
         let dispatch_cfg = DispatchConfig {
-            on_error: hook_config.on_hook_error,
-            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            on_error,
+            timeout: Duration::from_secs(default_timeout_sec),
             builtin_deny: None,
         };
         let hook_input = self
@@ -1794,13 +1982,24 @@ impl Runtime {
         side_effect: SideEffect,
         _error: &crate::model::ToolError,
     ) {
-        let hook_config = &self.config.hooks;
-        if hook_config.post_tool_use_failure.is_empty() {
+        // 短临界区读取（guard 在首个 await 前释放）+ 快速跳过
+        let (on_error, default_timeout_sec, has_post_failure_hook) = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                cfg.hooks.on_hook_error,
+                cfg.hooks.default_timeout_sec,
+                !cfg.hooks.post_tool_use_failure.is_empty(),
+            )
+        };
+        if !has_post_failure_hook {
             return; // 无 PostToolUseFailure Hook，快速跳过
         }
         let dispatch_cfg = DispatchConfig {
-            on_error: hook_config.on_hook_error,
-            timeout: Duration::from_secs(hook_config.default_timeout_sec),
+            on_error,
+            timeout: Duration::from_secs(default_timeout_sec),
             builtin_deny: None,
         };
         let hook_input = self

@@ -104,11 +104,14 @@ impl AnthropicProvider {
 
     /// 构造 POST 请求体（Anthropic messages 格式，`stream: true`）。
     /// system prompt 放顶层 `system` 字段，不进 messages（见 `design.md` §4.2）。
+    // 保留 `&self` 接收者（`unused_self`）：M-12 起 model 取自 `req.params.model`，
+    // 改为关联函数会波及多处测试调用点。
+    #[allow(clippy::unused_self)]
     fn build_request_body(&self, req: &ChatRequest) -> Value {
         let messages: Vec<Value> = req.messages.iter().map(message_to_anthropic).collect();
 
         let mut body = json!({
-            "model": self.model,
+            "model": req.params.model,
             "messages": messages,
             "stream": true,
             "max_tokens": req.params.max_output_tokens.unwrap_or(4_096),

@@ -281,6 +281,7 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | MCP 客户端 | `rmcp` 2.2（官方，M4 一步到位） | 自实现 http/stdio | 官方 SDK 协议跟进快、对齐 2025-11-25 spec、含 `#[tool]` 宏与 schemars；自实现易落后、维护成本高 |
 | LSP server | `tower-lsp`（M8） | 自研 JSON-RPC stdio 薄封装 | LSP 协议方法集庞大（`textDocument/*`/`workspace/*`/`window/*`），`tower-lsp` 提供类型安全派发与生命周期管理；自研易出错且落后 LSP spec；与 ACP 共享 `minicoding-protocol` wire types，仅语义映射层不同 |
 | 文件锁 | `fs2` | `flock` 裸调 | 跨平台封装、API 稳定 |
+| 配置热更新策略（M-12，R-04） | **白名单 + turn 边界生效**：`ConfigWatcher` 仅探测变更并广播 `Event::ConfigChanged`；`Runtime` 在每次 `run_turn` 开头读 config.toml，**仅当文件中显式存在**白名单 key（`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）时才覆盖运行期配置；非白名单字段变更仅 warn 提示重启 | 全量热重载 / 完全不做热更新 | **不做全量热重载**：C-29 压缩熔断状态机与 provider 重建依赖构造时配置，热换不安全；白名单 presence 判断避免 serde default（文件缺字段补默认值）覆盖 CLI/env 覆盖值。`provider.model` 热生效依赖 `build_request_body` 改用 `req.params.model`（tokenizer 仍为构造时快照，接受此限制）。`Runtime.config` 用 `std::sync::RwLock` 锁保护（`build_dispatch_config` 是同步 fn 无法 `read().await`），读取点均为短临界区、guard 不跨 await |
 
 ### 13.1 `trait-variant` 宏的风险管理
 

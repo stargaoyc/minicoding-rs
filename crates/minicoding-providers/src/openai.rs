@@ -100,6 +100,10 @@ impl OpenAiProvider {
     }
 
     /// 构造 POST 请求体（OpenAI chat completions 格式，`stream: true`）。
+    // 保留 `&self` 接收者（`unused_self`）：M-12 起 model 取自 `req.params.model`
+    // （turn 边界热换 model），改为关联函数会波及多处测试调用点；`&self` 风格与
+    // `message_to_openai` 等辅助保持一致。
+    #[allow(clippy::unused_self)]
     fn build_request_body(&self, req: &ChatRequest) -> Value {
         let mut messages = Vec::with_capacity(req.messages.len() + 1);
         if !req.system.is_empty() {
@@ -110,7 +114,7 @@ impl OpenAiProvider {
         }
 
         let mut body = json!({
-            "model": self.model,
+            "model": req.params.model,
             "messages": messages,
             "stream": true,
             "stream_options": {"include_usage": true},

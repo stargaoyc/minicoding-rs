@@ -75,6 +75,14 @@ pub struct RuntimeBuilder {
     /// CLI 注入 `ConfigWatcher::start(...)` 结果；`ConfigWatcher` 随 `Runtime` 存活，
     /// drop 时自动停止监听并结束后台 task。未注入时不监听配置变更。
     config_watcher: Option<ConfigWatcher>,
+    /// config.toml 路径（M-12，默认 `None` → 不启用 turn 边界白名单热更新）。
+    ///
+    /// CLI 注入 `paths::config_path()`；server 不注入（配置全部来自参数）。
+    /// 与 `config_watcher` 配合：watcher 探测变更并广播 `Event::ConfigChanged`，
+    /// Runtime 在每次 `run_turn` 开头经 `reload_safe_config` 应用白名单字段
+    /// （`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`），
+    /// 非白名单变更仅告警提示重启（不做全量热重载，见 `tech-stack.md` §13）。
+    config_path: Option<Utf8PathBuf>,
     /// 事件存储（Event Sourcing，默认 `NoopEventStore`）。
     ///
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
@@ -122,6 +130,7 @@ impl RuntimeBuilder {
             subagent_runner: None,
             extension_host: None,
             config_watcher: None,
+            config_path: None,
             event_store: None,
             snapshot_store: None,
         }
@@ -345,6 +354,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置 config.toml 路径（M-12：启用 turn 边界白名单热更新）。
+    ///
+    /// 与 `with_config_watcher` 配合：watcher 探测变更并广播 `Event::ConfigChanged`，
+    /// Runtime 每次 `run_turn` 开头经 `reload_safe_config` 应用白名单字段
+    /// （`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`），
+    /// 非白名单变更仅告警提示重启（不做全量热重载，见 `tech-stack.md` §13）。
+    /// 不设置时（`None`）不启用文件重载（如 server：配置全部来自参数）。
+    #[must_use]
+    pub fn with_config_path(mut self, p: Utf8PathBuf) -> Self {
+        self.config_path = Some(p);
+        self
+    }
+
     /// 设置事件存储（Event Sourcing，默认 `NoopEventStore`）。
     ///
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
@@ -403,7 +425,10 @@ impl RuntimeBuilder {
             ctx,
             storage,
             tools: self.tools,
-            config: self.config,
+            // M-12：运行期配置改锁保护（`reload_safe_config` turn 边界白名单热更新）
+            config: std::sync::RwLock::new(self.config),
+            config_path: self.config_path,
+            last_non_whitelist_sig: std::sync::Mutex::new(None),
             session,
             events: self.events,
             workdir: tokio::sync::RwLock::new(workdir),

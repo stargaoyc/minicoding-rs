@@ -97,6 +97,9 @@ impl OllamaProvider {
     }
 
     /// 构造 POST 请求体（Ollama chat 格式，`stream: true`）。
+    // 保留 `&self` 接收者（`unused_self`）：M-12 起 model 取自 `req.params.model`，
+    // 改为关联函数会波及多处测试调用点。
+    #[allow(clippy::unused_self)]
     fn build_request_body(&self, req: &ChatRequest) -> Value {
         let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
         if !req.system.is_empty() {
@@ -107,7 +110,7 @@ impl OllamaProvider {
         }
 
         let mut body = json!({
-            "model": self.model,
+            "model": req.params.model,
             "messages": messages,
             "stream": true,
         });

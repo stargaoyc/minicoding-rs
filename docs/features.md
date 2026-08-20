@@ -194,7 +194,7 @@
 | S-07 | FileChangeJournal | 会话内文件改动账本（file_undo 特性门控） | M4 | 已实现 |
 | S-20 | last-known-good 配置回退 | 解析成功时原子写入 `~/.minicoding/.last-known-good.toml`，解析失败时回退（见 `design.md` §12） | M1 | 已实现 |
 | S-21 | env: 环境变量语法 | 统一使用 `env:VAR_NAME` 语法引用环境变量，支持 `env:VAR:-fallback` 回退（见 `tech-stack.md` §12） | M1 | 已实现 |
-| S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更（见 `design.md` §11、`modules.md` §1.2） | M6+ | 已实现 |
+| S-22 | 配置热更新 | `ConfigWatcher`（`notify` 8）+ `Event::ConfigChanged`，500ms debounce，best-effort 监听；扩展通过 `on_config_changed()` 接收变更；Runtime 侧白名单热更新（M-12，R-04）：`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads` 在 turn 边界经 `reload_safe_config` 应用（仅当文件中显式声明该 key），非白名单变更 warn 提示重启、不做全量热重载（见 `design.md` §11/§12、`tech-stack.md` §13） | M6+ | 已实现 |
 | S-23 | Event Sourcing 事件流 | `EventStore`（`{id}.events.jsonl`）持久化状态变更事件，`seq` 单调递增，支持事件重放重建 `Session`（见 `design.md` §25） | M8+ | 已实现 |
 | S-24 | Snapshot 重放 | `SnapshotStore`（`{id}.snapshot.json`）每 50 条 `MessageAppended` 落盘 snapshot，加速 replay（见 `design.md` §25.3） | M8+ | 已实现 |
 | S-25 | SSE durable recovery | `Last-Event-ID` cursor 三级回退：内存 ring buffer → `EventStore::load_after` → `RehydrateRequired`（见 `design.md` §25.5） | M8+ | 已实现 |
