@@ -10,7 +10,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use minicoding_core::config::RuntimeConfig;
 use minicoding_core::context::{ContextManager, ContextSnapshot};
@@ -19,6 +19,7 @@ use minicoding_core::model::{Message, RuntimeError};
 use minicoding_core::otel::span_name;
 use minicoding_core::prompt::{PromptContext, PromptPipeline};
 use minicoding_core::provider::{BoxFuture, ChatRequest, GenerationParams, LlmProvider, Tokenizer};
+use minicoding_core::storage::{AuditKind, AuditRecord, AuditSink};
 use minicoding_core::tool::ToolRegistry;
 use tokio::sync::Mutex;
 
@@ -78,6 +79,15 @@ pub struct ContextManagerImpl {
     circuit_breaker: Mutex<CircuitBreaker>,
     // C-08：预测性压缩追踪器（记录每 turn token 历史）。
     predictive_tracker: Mutex<PredictiveTracker>,
+    // M-07（R-02）：消息序号锚点——append 计数，供压缩追溯区间推算
+    // （每条 append 的消息占一个连续序号，与事件流 seq 的关系见
+    // `CompressedRange` 文档；Step 事件不占消息序号）。
+    append_seq: AtomicU64,
+    // M-07（R-02）：压缩审计 sink（可选注入；未注入时压缩不打审计）。
+    audit: Option<Arc<dyn AuditSink>>,
+    // M-07（R-02）：会话 id（`set_session_hint` 由 Runtime 构造时注入）。
+    // std Mutex：`set_session_hint` 是 sync trait 方法，不能 await tokio 锁。
+    session_id: std::sync::Mutex<Option<String>>,
 }
 
 impl ContextManagerImpl {
@@ -103,7 +113,23 @@ impl ContextManagerImpl {
             token_cache: AtomicUsize::new(0),
             circuit_breaker: Mutex::new(CircuitBreaker::new()),
             predictive_tracker: Mutex::new(PredictiveTracker::new()),
+            append_seq: AtomicU64::new(0),
+            audit: None,
+            session_id: std::sync::Mutex::new(None),
         }
+    }
+
+    /// 注入压缩审计 sink（M-07，R-02）。
+    ///
+    /// 未注入时压缩流程不落 `AuditKind::Compress` 审计（如测试场景）。
+    pub fn set_audit(&mut self, audit: Arc<dyn AuditSink>) {
+        self.audit = Some(audit);
+    }
+
+    /// 压缩前最后一条消息的序号（`None` = 尚无消息）。
+    fn last_append_seq(&self) -> Option<u64> {
+        let n = self.append_seq.load(Ordering::SeqCst);
+        (n > 0).then_some(n)
     }
 
     /// 创建使用默认系统提示词的上下文管理器。
@@ -165,6 +191,52 @@ impl ContextManagerImpl {
         }
     }
 
+    /// 压缩成功审计（M-07，R-02）：记录级别、压缩区间、掉 token 量。
+    ///
+    /// 未注入 audit sink 时为 no-op。detail 为 JSON 文本，便于审计侧结构化检索。
+    async fn record_compress_audit(
+        &self,
+        result: &CompressResult,
+        level: u8,
+        tokens_before: usize,
+        tokens_after: usize,
+    ) {
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let detail = serde_json::json!({
+            "level": level,
+            "clipped_count": result.clipped_count,
+            "summarized_count": result.summarized_count,
+            "dropped_count": result.dropped_count,
+            "truncated_count": result.truncated_count,
+            "fallback_used": result.fallback_used,
+            "dropped_range": result.dropped_range.map(|(from, to)| {
+                serde_json::json!({ "from_seq": from, "to_seq": to })
+            }),
+            "dropped_tokens": result.dropped_tokens,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+        })
+        .to_string();
+        let rec = AuditRecord {
+            ts: time::OffsetDateTime::now_utc(),
+            session: self
+                .session_id
+                .lock()
+                .expect("session_id poisoned")
+                .clone()
+                .unwrap_or_default(),
+            kind: AuditKind::Compress,
+            tool: None,
+            decision: None,
+            detail,
+        };
+        if let Err(e) = audit.record(rec).await {
+            tracing::warn!(error = %e, "compress audit record failed (best-effort)");
+        }
+    }
+
     /// 压缩管道入口（T-M3-2 + T-M3-3 熔断/降级链）。
     ///
     /// 按 `docs/design.md` §3.3 实现 4 级压缩（裁剪→摘要→滚动→硬截断），并集成
@@ -196,12 +268,14 @@ impl ContextManagerImpl {
         let (outcome, new_tokens, tokens_before) = {
             let mut guard = self.messages.write().await;
             let tokens_before = self.tokenizer.count_messages(&guard);
+            let anchor_seq = self.last_append_seq();
             let outcome = compress_pipeline(
                 &mut guard,
                 self.tokenizer.as_ref(),
                 &self.budget,
                 provider_ref,
                 backup_before_compress,
+                anchor_seq,
             )
             .await;
             // 压缩后重算 token 缓存（messages 可能已变更）
@@ -226,6 +300,9 @@ impl ContextManagerImpl {
         match outcome {
             Ok(result) => {
                 let level = compress_level(&result);
+                // M-07（R-02）：压缩完成落审计（可追溯压缩区间与掉 token 量）
+                self.record_compress_audit(&result, level, tokens_before, new_tokens)
+                    .await;
                 if new_tokens > threshold {
                     Self::handle_oversize(&mut breaker, level, new_tokens, threshold)?;
                 } else {
@@ -326,6 +403,10 @@ impl fmt::Debug for ContextManagerImpl {
 }
 
 impl ContextManager for ContextManagerImpl {
+    fn set_session_hint(&self, id: &str) {
+        *self.session_id.lock().expect("session_id poisoned") = Some(id.to_string());
+    }
+
     fn append(&self, msg: Message) -> BoxFuture<'_, ()> {
         // 增量计算新消息 token（含消息框架开销），append 后加到缓存。
         let delta = self.tokenizer.count_messages(std::slice::from_ref(&msg));
@@ -333,6 +414,8 @@ impl ContextManager for ContextManagerImpl {
             self.messages.write().await.push(msg);
             self.count.fetch_add(1, Ordering::SeqCst);
             self.token_cache.fetch_add(delta, Ordering::SeqCst);
+            // M-07：消息序号锚点递增（压缩追溯区间推算基准）
+            self.append_seq.fetch_add(1, Ordering::SeqCst);
         })
     }
 
@@ -820,6 +903,60 @@ mod tests {
             !req.system.contains("static fallback"),
             "不应回退到静态 system_prompt: {}",
             req.system
+        );
+    }
+
+    // === 场景 10b：压缩成功落 Compress 审计（M-07，R-02）===
+
+    #[tokio::test]
+    async fn compress_records_compress_audit() {
+        use minicoding_core::provider::BoxFuture;
+        use minicoding_core::storage::{AuditKind, AuditRecord, AuditSink, StorageError};
+
+        #[derive(Default)]
+        struct InMemoryAudit(std::sync::Mutex<Vec<AuditRecord>>);
+        impl AuditSink for InMemoryAudit {
+            fn record(&self, rec: AuditRecord) -> BoxFuture<'_, Result<(), StorageError>> {
+                self.0.lock().expect("poisoned").push(rec);
+                Box::pin(async move { Ok(()) })
+            }
+        }
+
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let audit = Arc::new(InMemoryAudit::default());
+        // 30 条 × 200 字符 > 阈值 → L3 rolling 丢弃（无 provider 跳过 L2）
+        let mut mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        mgr.set_audit(audit.clone());
+        mgr.set_session_hint("sess-compress-1");
+        for _ in 0..30 {
+            mgr.append(Message::user_text("x".repeat(200))).await;
+        }
+        assert!(mgr.token_count() > TokenBudget::new(6_000).compact_threshold());
+
+        mgr.compress(false).await.expect("compress 应成功");
+
+        let records = audit.0.lock().expect("poisoned").clone();
+        assert_eq!(records.len(), 1, "应落一条 Compress 审计");
+        let rec = &records[0];
+        assert!(matches!(rec.kind, AuditKind::Compress));
+        assert_eq!(rec.session, "sess-compress-1");
+        let detail: serde_json::Value =
+            serde_json::from_str(&rec.detail).expect("detail 应为 JSON");
+        assert!(
+            detail["level"].as_u64().unwrap_or(0) > 0,
+            "应记录压缩级别: {detail}"
+        );
+        assert!(
+            detail["dropped_range"]["from_seq"].as_u64().is_some(),
+            "应记录丢弃区间: {detail}"
+        );
+        assert!(
+            detail["dropped_tokens"].as_u64().unwrap_or(0) > 0,
+            "应记录掉 token 量: {detail}"
+        );
+        assert!(
+            detail["tokens_before"].as_u64().unwrap_or(0)
+                > detail["tokens_after"].as_u64().unwrap_or(0)
         );
     }
 

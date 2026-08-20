@@ -8,27 +8,37 @@ use minicoding_core::provider::Tokenizer;
 
 use crate::budget::TokenBudget;
 
-use super::CompressResult;
+use super::{CompressResult, seq_of};
 
 /// L4 硬截断兜底。
 ///
 /// 分离 system 与非 system 消息：保留全部 system 消息，从非 system 消息头部
 /// 丢弃最旧的若干条，直到 `tokenizer.count_messages` ≤ `budget.compact_threshold()`。
-/// 丢弃数记入 `result.truncated_count` 并打 warn 日志。
+/// 丢弃数记入 `result.truncated_count` 并打 warn 日志；丢弃消息的序号区间与
+/// token 量记入 `result.dropped_range`/`result.dropped_tokens`（M-07）。
 pub fn hard_truncate(
     messages: &mut Vec<Message>,
     tokenizer: &dyn Tokenizer,
     budget: &TokenBudget,
     result: &mut CompressResult,
+    anchor_seq: Option<u64>,
 ) {
     let threshold = budget.compact_threshold();
     if tokenizer.count_messages(messages) <= threshold {
         return;
     }
 
+    // M-07（R-02）：本函数调用前的消息数（追溯区间推算基准，须在 drain 前取）
+    let total_before = messages.len();
+
     // 分离 system（全保留）与非 system（从头部丢弃）
     let mut system_msgs: Vec<Message> = Vec::new();
     let mut non_system: Vec<Message> = Vec::new();
+    // M-07（R-02）：原列表中第一个非 system 消息的 index（追溯区间起点）
+    let first_non_system_idx = messages
+        .iter()
+        .position(|m| m.role != Role::System)
+        .unwrap_or(messages.len());
     for msg in messages.drain(..) {
         match msg.role {
             Role::System => system_msgs.push(msg),
@@ -48,11 +58,20 @@ pub fn hard_truncate(
     }
 
     let dropped = keep_from;
+    // M-07（R-02）：被丢弃消息的 token 量（供追溯/审计）
+    for msg in non_system.iter().take(keep_from) {
+        result.dropped_tokens += tokenizer.count_messages(std::slice::from_ref(msg));
+    }
     system_msgs.extend(non_system.into_iter().skip(keep_from));
     *messages = system_msgs;
 
     if dropped > 0 {
         result.truncated_count += dropped;
+        if let Some(anchor) = anchor_seq {
+            let from = seq_of(first_non_system_idx, total_before, anchor);
+            let to = seq_of(first_non_system_idx + dropped - 1, total_before, anchor);
+            result.dropped_range = Some((from, to));
+        }
         tracing::warn!(
             dropped = dropped,
             threshold = threshold,
@@ -100,7 +119,7 @@ mod tests {
         let total_before = tokenizer.count_messages(&msgs);
         assert!(total_before > budget.compact_threshold());
         let mut result = CompressResult::default();
-        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result);
+        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result, Some(2000));
         assert!(result.truncated_count > 0);
         assert!(tokenizer.count_messages(&msgs) <= budget.compact_threshold());
     }
@@ -119,7 +138,7 @@ mod tests {
             msgs.push(Message::user_text(format!("msg{i:02}"))); // 5 chars each
         }
         let mut result = CompressResult::default();
-        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result);
+        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result, Some(2000));
         // system 消息必须保留
         assert_eq!(msgs[0].role, minicoding_core::model::Role::System);
         assert!(
@@ -134,7 +153,7 @@ mod tests {
         let budget = TokenBudget::new(10_000);
         let mut msgs = vec![Message::user_text("short")];
         let mut result = CompressResult::default();
-        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result);
+        hard_truncate(&mut msgs, &tokenizer, &budget, &mut result, Some(2000));
         assert_eq!(result.truncated_count, 0);
         assert_eq!(msgs.len(), 1);
     }

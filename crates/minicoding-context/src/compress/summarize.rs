@@ -5,9 +5,9 @@
 //! 启发式兜底恒成功，故本函数不因 LLM 失败而返回错误。
 
 use minicoding_core::model::{
-    ContentBlock, Message, MessageMeta, MessageSource, Role, RuntimeError,
+    CompressedRange, ContentBlock, Message, MessageMeta, MessageSource, Role, RuntimeError,
 };
-use minicoding_core::provider::LlmProvider;
+use minicoding_core::provider::{LlmProvider, Tokenizer};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -48,9 +48,11 @@ impl Default for SummarizeConfig {
 /// （理论不可达，启发式兜底恒成功）。
 pub async fn summarize_old_messages(
     messages: &mut Vec<Message>,
+    tokenizer: &dyn Tokenizer,
     provider: &dyn LlmProvider,
     config: &SummarizeConfig,
     result: &mut CompressResult,
+    anchor_seq: Option<u64>,
 ) -> Result<(), RuntimeError> {
     let total = messages.len();
     if total < 2 {
@@ -99,6 +101,29 @@ pub async fn summarize_old_messages(
     let insert_pos = to_summarize[0];
     let now = OffsetDateTime::now_utc();
     let ts = now.format(&Rfc3339).unwrap_or_default();
+
+    // M-07（R-02）：推算被替代消息的序号区间与掉 token 量
+    // （消息序号锚点：压缩前最后消息序号 = anchor_seq，index i 的序号 =
+    // anchor_seq - (压缩前消息数 - 1 - i)）。
+    let compressed_range = anchor_seq.map(|anchor| {
+        let total = messages.len();
+        let from_index = to_summarize[0];
+        let to_index = to_summarize[to_summarize.len() - 1];
+        let seq_of = |i: usize| anchor - (total as u64 - 1 - i as u64);
+        let from_seq = seq_of(from_index);
+        let to_seq = seq_of(to_index);
+        let dropped_tokens: usize = selected
+            .iter()
+            .map(|m| tokenizer.count_messages(std::slice::from_ref(m)))
+            .sum();
+        result.dropped_tokens += dropped_tokens;
+        CompressedRange {
+            from_seq,
+            to_seq,
+            dropped_tokens,
+        }
+    });
+
     let summary_msg = Message {
         id: ulid::Ulid::new().to_string(),
         role: Role::Assistant,
@@ -111,6 +136,7 @@ pub async fn summarize_old_messages(
         metadata: MessageMeta {
             summarized: true,
             source: MessageSource::Llm,
+            compressed_range,
             ..Default::default()
         },
     };

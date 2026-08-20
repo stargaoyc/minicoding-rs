@@ -67,6 +67,8 @@ pub enum AuditKind {
     ToolResult,
     HookRun,
     FileUndone,
+    /// 上下文压缩（M-07，R-02）：detail 携带压缩区间与掉 token 量，可追溯。
+    Compress,
 }
 
 /// 审计 sink trait（权限决策等必须落盘，见 AGENTS.md §5.5，`dyn` 兼容）。

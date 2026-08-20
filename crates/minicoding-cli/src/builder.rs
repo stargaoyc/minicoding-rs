@@ -293,6 +293,11 @@ pub fn build_runtime(
         Some((pipeline, ctx_template))
     };
 
+    // 4b. 构造审计 sink（AGENTS.md §5.5：权限决策必须落 audit.log，0600 权限）。
+    //     M-07（R-02）：压缩审计（AuditKind::Compress）同走此 sink，须在 ctx 构造前就绪。
+    let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
+    let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
+
     // 5. 构造 context manager（T-M3-1/2/3：ContextManagerImpl + 4 级压缩 + 熔断）
     //    注入 TiktokenTokenizer 做精确 token 计数；L2 摘要 provider 用 small（如有）
     //    降本，回退到主 provider。分词器构造失败时降级为 SimpleContextManager（无压缩）。
@@ -304,12 +309,14 @@ pub fn build_runtime(
             Ok(tokenizer) => {
                 // 128K 上下文窗口（gpt-4o 系列）；TODO: 按 model 精确查询 context window
                 let context_window = 128_000;
-                let mgr = ContextManagerImpl::new(
+                let mut mgr = ContextManagerImpl::new(
                     system_prompt.clone(),
                     Arc::new(tokenizer),
                     context_window,
                     Some(summary_provider.clone()),
                 );
+                // M-07（R-02）：注入压缩审计 sink
+                mgr.set_audit(audit.clone());
                 #[cfg(feature = "extensions")]
                 let mgr = {
                     if let Some((pipeline, ctx_template)) = prompt_pipeline {
@@ -397,11 +404,7 @@ pub fn build_runtime(
         }
     };
 
-    // 8. 构造审计 sink（AGENTS.md §5.5：权限决策必须落 audit.log，0600 权限）
-    let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
-    let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
-
-    // 9. 按 mode 加载会话（T-M3-10a/b：resume/replay/fork）
+    // 8. 按 mode 加载会话（T-M3-10a/b：resume/replay/fork）
     //     - Resume/Replay：原 id，原存储文件追加写；
     //     - Fork：新 id，复制前缀消息到新文件（原文件不变）。
     //     消息不在此处注入上下文，由调用方 `restore_history` 完成回填。

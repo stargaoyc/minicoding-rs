@@ -52,11 +52,25 @@ pub struct CompressResult {
     pub fallback_used: bool,
     /// C-05：压缩前的消息备份（`backup_before_compress=true` 时填充）。
     pub backup: Option<Vec<Message>>,
+    /// M-07（R-02）：L3/L4 丢弃消息的序号区间 `(from_seq, to_seq)`（消息序号锚点）。
+    pub dropped_range: Option<(u64, u64)>,
+    /// M-07（R-02）：被替代/被丢弃消息的总 token 数（L2 的记入摘要消息 metadata，
+    /// L3/L4 的记入此处）。
+    pub dropped_tokens: usize,
 }
 
 /// 计算消息序列的 token 数。
 fn token_count(messages: &[Message], tokenizer: &dyn Tokenizer) -> usize {
     tokenizer.count_messages(messages)
+}
+
+/// M-07（R-02）：由消息序号锚点推算 index `i` 对应的事件序号。
+///
+/// 压缩前最后一条消息（index `total - 1`）对应 `anchor_seq`，index `i` 的序号
+/// = `anchor_seq - (total - 1 - i)`（Step 事件等非消息事件不占消息序号，故为
+/// 消息维度的近似事件序号，审计追溯足够）。
+fn seq_of(i: usize, total: usize, anchor_seq: u64) -> u64 {
+    anchor_seq.saturating_sub(total as u64 - 1 - i as u64)
 }
 
 /// 4 级压缩管道入口。
@@ -77,6 +91,7 @@ pub async fn compress_pipeline(
     budget: &TokenBudget,
     provider: Option<&dyn LlmProvider>,
     backup_before_compress: bool,
+    anchor_seq: Option<u64>,
 ) -> Result<CompressResult, RuntimeError> {
     let mut result = CompressResult::default();
     let threshold = budget.compact_threshold();
@@ -97,9 +112,16 @@ pub async fn compress_pipeline(
 
     // L2: 旧消息摘要（需 provider，异步调 LLM）
     if let Some(p) = provider {
-        summarize_old_messages(messages, p, &SummarizeConfig::default(), &mut result)
-            .instrument(tracing::info_span!("compress", level = "L2"))
-            .await?;
+        summarize_old_messages(
+            messages,
+            tokenizer,
+            p,
+            &SummarizeConfig::default(),
+            &mut result,
+            anchor_seq,
+        )
+        .instrument(tracing::info_span!("compress", level = "L2"))
+        .await?;
         if token_count(messages, tokenizer) <= threshold {
             return Ok(result);
         }
@@ -108,7 +130,13 @@ pub async fn compress_pipeline(
     // L3: 滚动窗口（同步）
     {
         let _span = tracing::info_span!("compress", level = "L3").entered();
-        rolling_window(messages, &RollingConfig::default(), &mut result);
+        rolling_window(
+            messages,
+            &RollingConfig::default(),
+            &mut result,
+            tokenizer,
+            anchor_seq,
+        );
     }
     if token_count(messages, tokenizer) <= threshold {
         return Ok(result);
@@ -117,7 +145,7 @@ pub async fn compress_pipeline(
     // L4: 硬截断兜底（同步）
     {
         let _span = tracing::info_span!("compress", level = "L4").entered();
-        hard_truncate(messages, tokenizer, budget, &mut result);
+        hard_truncate(messages, tokenizer, budget, &mut result, anchor_seq);
     }
     Ok(result)
 }
@@ -244,7 +272,7 @@ mod tests {
         let budget = TokenBudget::new(10_000); // threshold = (10000-4096-1024)*0.85 = 4148
         let mut msgs = vec![Message::user_text("hello"), Message::user_text("world")];
         // 10 tokens < 4148，不应触发任何压缩级别
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, None)
             .await
             .expect("compress_pipeline 应成功");
         assert_eq!(result.clipped_count, 0);
@@ -272,7 +300,7 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, None)
             .await
             .expect("compress_pipeline 应成功");
         // L1 应裁剪该 tool_result（9000 > 2000 阈值字符）
@@ -304,9 +332,20 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
+        // anchor=30：追溯区间 [1,10]（丢弃最旧 10 条）
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, Some(30))
             .await
             .expect("compress_pipeline 应成功");
+        // M-07：L3 丢弃区间与 token 量
+        assert_eq!(
+            result.dropped_range,
+            Some((1, 10)),
+            "L3 应记录丢弃区间 [1,10]"
+        );
+        assert_eq!(
+            result.dropped_tokens, 2_000,
+            "L3 应记录丢弃 token 量（10×200）"
+        );
         // L1：无 tool_result，不裁剪
         assert_eq!(result.clipped_count, 0, "L1 不应裁剪纯文本消息");
         // L2：无 provider，跳过
@@ -339,11 +378,22 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false)
+        // anchor=30：L3 丢 [1,10]，L4 丢 [11,14]（10 字符 ×4 条）
+        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, Some(30))
             .await
             .expect("compress_pipeline 应成功");
         // L3 丢弃 10 条
         assert_eq!(result.dropped_count, 10, "L3 应丢弃 10 条");
+        // M-07：L4 追溯区间（L3 后剩 20 条 200 tokens，丢 3 条 → 170 ≤ 阈值 [11,13]）
+        assert_eq!(
+            result.dropped_range,
+            Some((11, 13)),
+            "L4 应记录丢弃区间 [11,13]"
+        );
+        assert_eq!(
+            result.dropped_tokens, 130,
+            "L4 应累计丢弃 token 量（10×10+3×10）"
+        );
         // L4 必须触发（L3 后 200 > 170）
         assert!(
             result.truncated_count > 0,
@@ -376,9 +426,16 @@ mod tests {
         assert!(tokens_before > budget.compact_threshold());
 
         let provider = MockSummaryProvider::new();
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, Some(&provider), false)
-            .await
-            .expect("compress_pipeline 应成功");
+        let result = compress_pipeline(
+            &mut msgs,
+            &tokenizer,
+            &budget,
+            Some(&provider),
+            false,
+            Some(10),
+        )
+        .await
+        .expect("compress_pipeline 应成功");
         // L2 应摘要 5 条（ratio=0.5，10 条 × 0.5 = 5）
         assert!(
             result.summarized_count > 0,
@@ -399,5 +456,20 @@ mod tests {
             "L2 后应低于阈值: {}",
             tokenizer.count_messages(&msgs)
         );
+        // M-07：摘要消息应带压缩追溯区间（10 条中权重最低的 5 条被替代）
+        let summary_msg = msgs
+            .iter()
+            .find(|m| m.metadata.summarized)
+            .expect("应有摘要消息");
+        let range = summary_msg
+            .metadata
+            .compressed_range
+            .as_ref()
+            .expect("摘要消息应有 compressed_range");
+        assert!(
+            range.from_seq >= 1 && range.to_seq <= 10,
+            "区间应在 [1,10] 内: {range:?}"
+        );
+        assert!(range.dropped_tokens > 0, "应记录被替代 token 量: {range:?}");
     }
 }

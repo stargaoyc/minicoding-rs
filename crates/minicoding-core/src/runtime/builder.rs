@@ -387,6 +387,9 @@ impl RuntimeBuilder {
             .session
             .unwrap_or_else(|| Session::new(workdir.clone(), self.config_hash));
 
+        // M-07（R-02）：会话 id 提示注入（压缩审计等需要会话标识的内部记录）
+        ctx.set_session_hint(&session.id);
+
         // 沙箱策略默认 `WorkspaceWrite { workdir, [] }`（auto 预设，C-22 默认隔离）。
         let sandbox_policy = self
             .sandbox_policy

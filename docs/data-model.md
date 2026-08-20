@@ -21,6 +21,11 @@ ContextSnapshot          (ContextManager 运行时镜像)
  ├── token_count
  └── compression_log: Vec<CompressionStep>
 
+CompressedRange          (M-07 压缩追溯，随 MessageMeta 序列化)
+ ├── from_seq: u64      # 被替代区间起始事件序号（含）
+ ├── to_seq: u64        # 被替代区间结束事件序号（含）
+ └── dropped_tokens     # 被替代消息的 token 总量
+
 PermissionStore          (决策持久化)
  └── rules: Vec<Rule>
 
@@ -68,6 +73,7 @@ MemoryStore
 | `meta.source` | 消息产生方：`system`/`user`/`llm`/`tool`/`subagent`/`summarize` |
 | `meta.pinned` | 是否用户固定（不被压缩） |
 | `meta.summarized` | 是否为摘要替换后的消息 |
+| `meta.compressed_range` | M-07 可选：`{from_seq, to_seq, dropped_tokens}` 压缩追溯区间（见 §1）。**旧文件读取时按 `None` 处理**（`#[serde(default, skip_serializing_if)]`） |
 
 ### 2.4 兼容性策略
 

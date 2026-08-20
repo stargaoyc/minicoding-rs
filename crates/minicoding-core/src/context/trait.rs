@@ -28,4 +28,9 @@ pub trait ContextManager: Send + Sync {
     fn restore(&self, snap: ContextSnapshot) -> BoxFuture<'_, ()>;
     fn token_count(&self) -> usize;
     fn message_count(&self) -> usize;
+    /// 会话 id 提示（M-07，R-02）：Runtime 构造时调用，供实现记录当前会话，
+    /// 用于压缩审计（`AuditKind::Compress`）等需要会话标识的内部记录。
+    ///
+    /// 默认 no-op——不要求所有实现支持（如测试用 `ContextManager` 无需记录）。
+    fn set_session_hint(&self, _id: &str) {}
 }

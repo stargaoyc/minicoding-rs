@@ -324,6 +324,10 @@ deny_domains = ["*.internal.corp"]
 - 追加写，不可篡改历史（无 update/delete API）。
 - 可选：每条记录带 HMAC 签名（密钥派生自机器标识），防篡改（后续）。
 
+### 7.4 压缩审计（M-07，R-02）
+
+上下文压缩成功后追加一条 `kind: compress` 审计（detail 为 JSON：压缩级别、各分支计数、丢弃消息的序号区间 `{from_seq, to_seq}`、掉 token 量、压缩前后 token 数），使"这轮压缩掉了什么"可追溯。`AuditKind::Compress` 与权限决策审计同一 `audit.log`（0600，追加写），`CompressedRange` 语义见 `data-model.md` §1。
+
 ### 7.3 查询
 
 ```bash
