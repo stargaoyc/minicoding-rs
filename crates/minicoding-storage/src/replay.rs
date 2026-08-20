@@ -154,6 +154,9 @@ pub fn replay_session_state(
                 final_permission_mode = *to;
                 audit_trail.push(record.event.clone());
             }
+            // M-06（SCHEMA_VERSION 2）：step 边界事件仅 log 定位（压缩点/中断点），
+            // 不重建任何状态。v1 事件流无此变体；此处显式匹配保持 forward-compat。
+            PersistedEvent::StepStarted { .. } | PersistedEvent::StepEnded { .. } => {}
         }
         last_seq = record.seq;
     }
@@ -332,6 +335,43 @@ mod tests {
     fn replay_empty_events_without_snapshot_errors() {
         let result = replay_session_state(None, Vec::new());
         assert!(matches!(result, Err(ReplayError::MissingSessionCreated)));
+    }
+
+    #[test]
+    fn replay_handles_v2_step_events_ignored() {
+        // M-06：step 边界事件不重建状态、不进 audit_trail，仅消费 seq
+        let id = "01STEP";
+        let events = vec![
+            make_session_created(1, id),
+            EventRecord::new(
+                2,
+                id.to_string(),
+                PersistedEvent::StepStarted {
+                    iter: 0,
+                    tool_call_ids: vec!["call_a".to_string()],
+                },
+            ),
+            make_message_appended(3, id, "assistant with tool call"),
+            EventRecord::new(4, id.to_string(), PersistedEvent::StepEnded { iter: 0 }),
+        ];
+        let result = replay_session_state(None, events).unwrap();
+        assert_eq!(result.session.messages.len(), 1);
+        assert!(result.audit_trail.is_empty(), "step 事件不进审计轨迹");
+        assert_eq!(result.last_seq, 4);
+    }
+
+    #[test]
+    fn replay_handles_v1_without_step_events() {
+        // v1 兼容：无 step 事件的事件流（旧会话）replay 正常
+        let id = "01V1";
+        let events = vec![
+            make_session_created(1, id),
+            make_message_appended(2, id, "v1 message"),
+        ];
+        let result = replay_session_state(None, events).unwrap();
+        assert_eq!(result.session.messages.len(), 1);
+        assert_eq!(result.last_seq, 2);
+        // 旧会话按 v1 语义重建（Step 事件缺席即无 step 边界，行为与 v1 一致）
     }
 
     #[test]

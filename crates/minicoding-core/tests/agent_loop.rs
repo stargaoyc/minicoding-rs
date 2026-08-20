@@ -11,7 +11,8 @@ use minicoding_core::runtime::{Event, Runtime, RuntimeBuilder};
 use minicoding_core::tool::ToolRegistry;
 
 use common::{
-    InMemoryStorage, MockTool, ScriptedProvider, TestContext, text_deltas, tool_call_deltas,
+    InMemoryEventStore, InMemoryStorage, MockTool, ScriptedProvider, TestContext, text_deltas,
+    tool_call_deltas,
 };
 
 /// 构造测试用 Runtime：注入 mock provider、内存存储、空工具表。
@@ -31,6 +32,25 @@ fn build_runtime_with_prompter(
         .storage(Arc::new(InMemoryStorage::new()))
         .tools(tools)
         .prompter(prompter)
+        .config(RuntimeConfig::default())
+        .workdir(Utf8PathBuf::from("."))
+        .build()
+        .expect("runtime build")
+}
+
+/// 构造测试用 Runtime（注入内存事件存储，M-06 step 事件断言用）。
+fn build_runtime_with_event_store(
+    provider: ScriptedProvider,
+    tools: ToolRegistry,
+    event_store: Arc<InMemoryEventStore>,
+) -> Runtime {
+    RuntimeBuilder::new()
+        .provider(Arc::new(provider))
+        .context(Arc::new(TestContext::new("test system prompt")))
+        .storage(Arc::new(InMemoryStorage::new()))
+        .tools(tools)
+        .prompter(Arc::new(DenyPrompter))
+        .event_store(event_store)
         .config(RuntimeConfig::default())
         .workdir(Utf8PathBuf::from("."))
         .build()
@@ -331,6 +351,83 @@ async fn cancel_then_next_turn_still_works() {
             panic!("第二次 turn 不应被取消（cancel token 应已重建）")
         }
         other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+/// M-06：step 边界事件持久化（StepStarted/StepEnded 一一配对）。
+///
+/// 两次 LLM 迭代：iter0 带工具调用（有 step 对），iter1 纯文本（无 step 事件）。
+/// 验证事件流按 seq 记录 StepStarted（携带 tool_call_ids）→ StepEnded。
+#[tokio::test]
+async fn turn_with_2_steps_persists_step_pairs() {
+    use minicoding_core::storage::{EventStore, PersistedEvent};
+
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(MockTool::read_only("greet", "hi")));
+    let provider = ScriptedProvider::new(vec![
+        tool_call_deltas("call_1", "greet", "{}"),
+        text_deltas("done"),
+    ]);
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let rt = Arc::new(build_runtime_with_event_store(
+        provider,
+        tools,
+        event_store.clone(),
+    ));
+
+    let outcome = rt.run_turn(UserInput::from_text("hello")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+
+    let records = event_store.load(&rt.session().id.clone()).await.unwrap();
+    let steps_started: Vec<&PersistedEvent> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            PersistedEvent::StepStarted { .. } => Some(&r.event),
+            _ => None,
+        })
+        .collect();
+    let steps_ended: Vec<&PersistedEvent> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            PersistedEvent::StepEnded { .. } => Some(&r.event),
+            _ => None,
+        })
+        .collect();
+
+    // 仅 iter0 有工具调用：1 对 step 事件
+    assert_eq!(
+        steps_started.len(),
+        1,
+        "expected 1 step started: records={records:?}"
+    );
+    assert_eq!(
+        steps_ended.len(),
+        1,
+        "expected 1 step ended: records={records:?}"
+    );
+
+    match (steps_started[0], steps_ended[0]) {
+        (
+            PersistedEvent::StepStarted {
+                iter: s_iter,
+                tool_call_ids,
+            },
+            PersistedEvent::StepEnded { iter: e_iter },
+        ) => {
+            assert_eq!(*s_iter, 0);
+            assert_eq!(*e_iter, 0);
+            assert_eq!(tool_call_ids.as_slice(), ["call_1"]);
+        }
+        _ => panic!("unexpected step event shapes"),
+    }
+    // step 事件均带 SCHEMA_VERSION 2
+    for r in records.iter().filter(|r| {
+        matches!(
+            r.event,
+            PersistedEvent::StepStarted { .. } | PersistedEvent::StepEnded { .. }
+        )
+    }) {
+        assert_eq!(r.schema_version, minicoding_core::storage::SCHEMA_VERSION);
     }
 }
 

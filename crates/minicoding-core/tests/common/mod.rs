@@ -16,7 +16,7 @@ use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
     Usage,
 };
-use minicoding_core::storage::{SessionMeta, Storage, StorageError};
+use minicoding_core::storage::{EventRecord, EventStore, SessionMeta, Storage, StorageError};
 use minicoding_core::tool::{Tool, ToolContext};
 
 /// 简单分词器（按字符数估算，仅用于测试）。
@@ -218,6 +218,69 @@ impl Storage for InMemoryStorage {
         _summary: &str,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
         // 测试 mock：摘要更新为 no-op（InMemoryStorage 不维护 index）
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+/// 内存事件存储（M-06 测试用）：记录全部 `EventRecord`，seq 单调递增。
+/// 仅 `agent_loop` 集成测试使用；共享模块被其它测试编译时属预期未引用。
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct InMemoryEventStore {
+    records: Mutex<Vec<EventRecord>>,
+}
+
+#[allow(dead_code)]
+impl InMemoryEventStore {
+    /// 创建空事件存储。
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取出全部记录快照（按 seq 升序）。
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<EventRecord> {
+        self.records.lock().expect("records poisoned").clone()
+    }
+}
+
+#[allow(dead_code)]
+impl EventStore for InMemoryEventStore {
+    fn append(
+        &self,
+        _session: &SessionId,
+        record: EventRecord,
+    ) -> BoxFuture<'_, Result<(), StorageError>> {
+        let mut guard = self.records.lock().expect("records poisoned");
+        guard.push(record);
+        Box::pin(async move { Ok(()) })
+    }
+    fn load(&self, _session: &SessionId) -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>> {
+        let records = self.records.lock().expect("records poisoned").clone();
+        Box::pin(async move { Ok(records) })
+    }
+    fn load_after(
+        &self,
+        _session: &SessionId,
+        after_seq: u64,
+    ) -> BoxFuture<'_, Result<Vec<EventRecord>, StorageError>> {
+        let records: Vec<EventRecord> = self
+            .records
+            .lock()
+            .expect("records poisoned")
+            .iter()
+            .filter(|r| r.seq > after_seq)
+            .cloned()
+            .collect();
+        Box::pin(async move { Ok(records) })
+    }
+    fn next_seq(&self, _session: &SessionId) -> BoxFuture<'_, Result<u64, StorageError>> {
+        let next = self.records.lock().expect("records poisoned").len() as u64 + 1;
+        Box::pin(async move { Ok(next) })
+    }
+    fn delete(&self, _session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
+        self.records.lock().expect("records poisoned").clear();
         Box::pin(async move { Ok(()) })
     }
 }

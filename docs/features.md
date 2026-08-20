@@ -74,6 +74,7 @@
 | C-02 | 消息权重模型 | role×recency×sticky×pin | M3 | 已实现 |
 | C-03 | 4 级压缩管道 | 裁剪→摘要→滚动→硬截断 | M3 | 已实现 |
 | C-04 | 压缩日志与快照 | 可回放、可调试 | M3 | 已实现 |
+| C-04b | 压缩追溯（M-07） | 摘要消息携带 `compressed_range`（from/to seq + 掉 token），L3/L4 丢弃区间记入 `CompressResult`，压缩完成落 `AuditKind::Compress` 审计 | M3 | 已实现 |
 | C-05 | 压缩备份（可选） | 压缩前原文保留 | M3 | 已实现 |
 | C-06 | `compress=off` 兜底 | 关闭压缩直通 | M3 | 已实现 |
 | C-07 | 压缩熔断与防 Thrash | 失败计数≥3 熔断 / Thrash 检测 / 状态保留清单 / 降级链 | M3 | 已实现 |
@@ -193,6 +194,7 @@
 | S-25 | SSE durable recovery | `Last-Event-ID` cursor 三级回退：内存 ring buffer → `EventStore::load_after` → `RehydrateRequired`（见 `design.md` §25.5） | M8+ | 已实现 |
 | S-26 | `--replay` 事件重放 | `--replay`/`--resume` 优先走 snapshot + 事件流重放，旧会话回退到消息日志（见 `design.md` §25.6） | M8+ | 已实现 |
 | S-27 | 事件 schema 版本化 | `SCHEMA_VERSION` + `EventRecord.schema_version`，旧版会话 migration 适配（见 `design.md` §25.7） | M8+ | 已实现 |
+| S-27b | 会话 step 边界事件（M-06） | `StepStarted`/`StepEnded` 持久化（SCHEMA_VERSION=2，log-only 不进 transcript），重放跳过，cancel/timeout 可定位中断点（见 `design.md` §25.2） | M8+ | 已实现 |
 
 ## 11. 前端
 
@@ -288,20 +290,20 @@
 | Agent 运行时 | 15 |
 | LLM Provider | 8 |
 | 工具系统 | 22 |
-| 上下文管理 | 9 |
+| 上下文管理 | 10 |
 | 记忆 | 8 |
 | 权限与安全 | 26 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
-| 持久化与存储 | 15 |
+| 持久化与存储 | 16 |
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **193** |
+| **合计** | **195** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 

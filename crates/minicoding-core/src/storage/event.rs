@@ -37,16 +37,20 @@ use time::OffsetDateTime;
 /// 旧版会话通过 migration 适配：
 /// - v0（隐式）：消息日志（无 `EventRecord` 包装），`replay_session_state` 回退
 ///   到消息列表；
-/// - v1：当前 schema，`EventRecord` 显式包装 `PersistedEvent`。
+/// - v1：`EventRecord` 显式包装 `PersistedEvent`（无 step 边界事件）；
+/// - v2：新增 `StepStarted`/`StepEnded`（M-06，step 边界定位，仅 log 不进
+///   transcript）。`replay_session_state` 对 v1 事件流跳过 Step 处理（Step 事件
+///   不影响消息重建，向后兼容）。
 ///
 /// 未来变更（如新增事件变体、字段语义变更）递增此版本号，并在
 /// `replay_session_state` 中按版本分支处理。
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
-/// 持久化事件种类（`Event` 子集，仅状态变更类）。
+/// 持久化事件种类（`Event` 子集，仅状态变更类 + step 定位类）。
 ///
 /// 与 `runtime::Event` 的区别：
-/// - 仅包含状态变更事件（replay 后可重建 `Session`）；
+/// - 仅包含状态变更事件（replay 后可重建 `Session`）与 step 边界事件
+///   （`StepStarted`/`StepEnded`，M-06：仅 log 定位，不重建状态）；
 /// - 不含瞬态事件（`Token`/`TurnStreamingStarted`/`ToolCallStarted`/
 ///   `ToolCallFinished`/`PermissionRequested`/`ConfigChanged`）；
 /// - `SessionCreated` 携带 `workdir`/`config_hash`/`created_at`（重建 `Session` 必需）。
@@ -96,6 +100,18 @@ pub enum PersistedEvent {
     ///
     /// 与 `runtime::Event::TurnEnd` 一一映射。replay 时仅记录审计轨迹。
     TurnEnd { stop_reason: StopReason },
+    /// step 开始（M-06，SCHEMA_VERSION 2+）：一次 LLM 请求 + 其触发的工具调用。
+    ///
+    /// 仅 log 定位（压缩点/中断点），replay 时不重建任何状态（C-05：不进
+    /// transcript，模型不可见）。v1 事件流无此变体，replay 跳过。
+    StepStarted {
+        iter: u32,
+        tool_call_ids: Vec<String>,
+    },
+    /// step 结束（M-06，SCHEMA_VERSION 2+）：该次迭代工具结果已全部回灌。
+    ///
+    /// cancel/timeout 中断时可能只有 `StepStarted` 无 `StepEnded`（中断点定位）。
+    StepEnded { iter: u32 },
 }
 
 /// 持久化事件记录（携带 seq + schema 元数据）。
@@ -264,6 +280,16 @@ pub fn try_persist(event: &crate::runtime::Event) -> Option<PersistedEvent> {
         crate::runtime::Event::TurnEnd { stop_reason } => Some(PersistedEvent::TurnEnd {
             stop_reason: stop_reason.clone(),
         }),
+        crate::runtime::Event::StepStarted {
+            iter,
+            tool_call_ids,
+        } => Some(PersistedEvent::StepStarted {
+            iter: *iter,
+            tool_call_ids: tool_call_ids.clone(),
+        }),
+        crate::runtime::Event::StepEnded { iter } => {
+            Some(PersistedEvent::StepEnded { iter: *iter })
+        }
         // 瞬态事件：Token / ReasoningDelta / TurnStreamingStarted / ToolCallStarted /
         // ToolCallFinished / PermissionRequested / ConfigChanged / SessionCreated
         // SessionCreated 由 Runtime 显式构造完整 PersistedEvent（携带 workdir 等）
@@ -317,6 +343,57 @@ mod tests {
         assert_eq!(back.seq, 42);
         assert_eq!(back.schema_version, SCHEMA_VERSION);
         assert!(matches!(back.event, PersistedEvent::MessageAppended { .. }));
+    }
+
+    #[test]
+    fn schema_version_bumped_to_2() {
+        // M-06：v2 引入 StepStarted/StepEnded 变体
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn step_events_roundtrip_with_tagged_serde() {
+        // step 事件序列化按 tag="type" snake_case，协议层可识别
+        let started = PersistedEvent::StepStarted {
+            iter: 1,
+            tool_call_ids: vec!["call_a".to_string()],
+        };
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("\"type\":\"step_started\""), "{json}");
+        let back: PersistedEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            PersistedEvent::StepStarted {
+                iter: 1,
+                tool_call_ids,
+            } if tool_call_ids == ["call_a"]
+        ));
+
+        let ended = PersistedEvent::StepEnded { iter: 1 };
+        let json = serde_json::to_string(&ended).unwrap();
+        assert!(json.contains("\"type\":\"step_ended\""), "{json}");
+        let back: PersistedEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, PersistedEvent::StepEnded { iter: 1 }));
+    }
+
+    #[test]
+    fn try_persist_maps_step_events() {
+        use crate::runtime::Event;
+        let started = Event::StepStarted {
+            iter: 2,
+            tool_call_ids: vec!["call_x".to_string(), "call_y".to_string()],
+        };
+        assert!(matches!(
+            try_persist(&started),
+            Some(PersistedEvent::StepStarted {
+                iter: 2,
+                tool_call_ids,
+            }) if tool_call_ids == ["call_x", "call_y"]
+        ));
+        assert!(matches!(
+            try_persist(&Event::StepEnded { iter: 2 }),
+            Some(PersistedEvent::StepEnded { iter: 2 })
+        ));
     }
 
     #[tokio::test]

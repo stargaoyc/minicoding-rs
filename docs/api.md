@@ -54,8 +54,17 @@ pub struct MessageMeta {
     pub pinned: bool,
     pub summarized: bool,
     pub source: MessageSource,   // User / Llm / Tool / Subagent
+    pub compressed_range: Option<CompressedRange>,  // M-07: 压缩追溯区间，None=非压缩产物
+}
+
+pub struct CompressedRange {
+    pub from_seq: u64,         // 被替代区间起始事件序号（含）
+    pub to_seq: u64,           // 被替代区间结束事件序号（含）
+    pub dropped_tokens: usize, // 被替代消息的 token 总量
 }
 ```
+
+`compressed_range` 为 M-07（R-02）压缩追溯字段：L2 摘要消息携带被替代消息的序号区间，L3/L4 丢弃消息的区间记入 `CompressResult` 并随 `AuditKind::Compress` 审计落盘（detail 为 JSON）。`#[serde(default, skip_serializing_if = "Option::is_none")]` 保证 wire 兼容——旧数据无此字段时默认 `None`。
 
 ### 2.2 工具模型
 
@@ -718,6 +727,8 @@ pub trait ContextManager {
     async fn restore(&self, snap: ContextSnapshot);
     fn token_count(&self) -> usize;
     fn message_count(&self) -> usize;
+    // M-07：会话 id 提示（默认 no-op），Runtime 构造时调用，供压缩审计记录
+    fn set_session_hint(&self, id: &str);
 }
 
 pub struct ContextSnapshot {
@@ -1172,6 +1183,12 @@ pub enum Event {
     /// 500ms debounce 后发出；需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）
     /// 自行订阅 `EventBus` 处理。
     ConfigChanged,
+    /// M-06（R-01）：一个执行步开始（LLM 返回后、执行工具前广播并持久化）。
+    /// `tool_call_ids` 为该步要执行的工具调用集合。log-only（C-05），供中断点定位。
+    StepStarted { iter: u32, tool_call_ids: Vec<String> },
+    /// M-06（R-01）：一个执行步结束（全部 tool_result 回灌后广播并持久化）。
+    /// cancel/timeout 中断时缺失，可据此定位中断点。
+    StepEnded { iter: u32 },
 }
 ```
 

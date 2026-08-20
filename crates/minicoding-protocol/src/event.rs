@@ -79,6 +79,14 @@ pub enum EventKind {
     TaskUpdated { task: Task },
     /// 配置文件变更（S-22 热更新）。
     ConfigChanged,
+    /// 一个执行步开始（M-06，R-02）：`iter` 为 step 迭代序号，`tool_call_ids`
+    /// 为该步要执行的工具调用。仅进度展示，不参与消息重建。
+    StepStarted {
+        iter: u32,
+        tool_call_ids: Vec<String>,
+    },
+    /// 一个执行步结束（M-06，R-02）：`iter` 对应 `StepStarted`。
+    StepEnded { iter: u32 },
     /// NDJSON 专用：`ListSessions` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
     SessionsListed { sessions: Vec<SessionMeta> },
     /// NDJSON 专用：`GetSession` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
@@ -134,6 +142,14 @@ impl From<&Event> for EventKind {
             },
             Event::TaskUpdated { task } => Self::TaskUpdated { task: task.clone() },
             Event::ConfigChanged => Self::ConfigChanged,
+            Event::StepStarted {
+                iter,
+                tool_call_ids,
+            } => Self::StepStarted {
+                iter: *iter,
+                tool_call_ids: tool_call_ids.clone(),
+            },
+            Event::StepEnded { iter } => Self::StepEnded { iter: *iter },
         }
     }
 }
@@ -179,6 +195,14 @@ impl EventKind {
             PersistedEvent::TurnEnd { stop_reason } => Self::TurnEnd {
                 stop_reason: stop_reason.clone(),
             },
+            PersistedEvent::StepStarted {
+                iter,
+                tool_call_ids,
+            } => Self::StepStarted {
+                iter: *iter,
+                tool_call_ids: tool_call_ids.clone(),
+            },
+            PersistedEvent::StepEnded { iter } => Self::StepEnded { iter: *iter },
         }
     }
 }

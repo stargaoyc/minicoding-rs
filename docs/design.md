@@ -262,6 +262,14 @@ Level 4: 硬截断
     - 兜底，按 token 数从尾部保留，记录告警
 ```
 
+> **M-07（R-02）压缩追溯**：各级压缩生成替代/丢弃消息时记录追溯信息，审计可定位"这轮压缩掉了什么"：
+>
+> - 新增 `MessageMeta.compressed_range: Option<CompressedRange>`（`from_seq`/`to_seq`/`dropped_tokens`），L2 摘要消息携带被替代消息的序号区间与掉 token 量；
+> - L3 滚动/L4 硬截断的丢弃消息记录到 `CompressResult.dropped_range`/`dropped_tokens`（消息已被删除，无消息可携带 metadata）；
+> - 压缩成功后经 `AuditSink` 落一条 `AuditKind::Compress` 审计（detail 为 JSON：level/各分支计数/区间/前后 token 量）。
+>
+> 序号口径：消息序号锚点（`ContextManagerImpl` 的 append 计数）近似事件 seq——每条 append 的消息占一个连续序号，Step 事件等非消息事件不占消息序号。`set_session_hint`（`ContextManager` trait 默认方法）由 Runtime 构造时注入会话 id，供压缩审计记录。
+
 ### 3.4 Token 预算分配
 
 ```
@@ -2754,6 +2762,8 @@ Event 与 Message 的关键区别：Event 记录"发生了什么"（如 `Permiss
 4. 更新 `durable_seq`（供 SSE cursor 协同）；
 5. `MessageAppended` 时递增 `message_since_snapshot`，达到 `SNAPSHOT_INTERVAL`（50）触发 snapshot 落盘。
 
+> **M-06（R-01）step 边界事件**：`StepStarted { iter, tool_call_ids }` / `StepEnded { iter }` 同样走 `try_persist` 落盘（log-only，C-05：不进 transcript、不参与消息重建）。`StepStarted` 在 LLM 返回后、执行工具前持久化（此时 tool_call_ids 已知），`StepEnded` 在全部 tool_result 回灌后持久化。cancel/timeout 中断时仅存在 `StepStarted` 而无 `StepEnded`，据此定位中断点。
+
 **best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程（与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，replay 可从最近 snapshot + 剩余事件重建。
 
 `PermissionModeChanged` 事件由 `PlanControllerHandle::persist_mode_changed` 持久化（`plan.exit`/`/plan`/`--plan` 触发的模式切换），不触发 snapshot。
@@ -2779,6 +2789,7 @@ snapshot 触发条件：每 `SNAPSHOT_INTERVAL`（50）条 `MessageAppended` 事
    - `MessageAppended`：追加到 `messages`；
    - `PermissionResolved`/`TaskUpdated`/`TurnEnd`：仅记录审计轨迹，不重建运行时状态；
    - `PermissionModeChanged`：更新 `final_permission_mode`；
+   - `StepStarted`/`StepEnded`（M-06）：跳过——log-only 事件，不影响消息重建（v1 旧会话无此类事件，天然兼容）；
 4. 返回 `ReplayedSession { session, audit_trail, last_seq, final_permission_mode }`。
 
 **seq 连续性检查**：事件 seq 必须连续（`expected = last_seq + 1`），跳跃返回 `ReplayError::SeqGap`（可能事件丢失）。
@@ -2812,10 +2823,11 @@ CLI `load_session_by_mode` 对 `Resume`/`Replay` 模式优先走事件重放路�
 
 ### 25.7 schema 版本化
 
-`SCHEMA_VERSION = 1`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
+`SCHEMA_VERSION = 2`（当前）。`EventRecord.schema_version` 标记事件结构版本，旧版会话通过 migration 适配：
 
 - v0（隐式）：消息日志（无 `EventRecord` 包装），`replay_session_state` 回退到消息列表；
-- v1：当前 schema，`EventRecord` 显式包装 `PersistedEvent`。
+- v1：`EventRecord` 显式包装 `PersistedEvent`（SessionCreated/MessageAppended/PermissionResolved/PermissionModeChanged/TaskUpdated/TurnEnd）；
+- v2（M-06，R-01）：新增 `PersistedEvent::StepStarted`/`StepEnded`（log-only，重放跳过）。v1 事件流无 Step 事件，`replay_session_state` 无需分支处理即兼容。
 
 未来变更（如新增事件变体、字段语义变更）递增 `SCHEMA_VERSION`，并在 `replay_session_state` 中按版本分支处理。`SessionSnapshot.schema_version` 同步演进。
 

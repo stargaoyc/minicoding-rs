@@ -56,6 +56,20 @@ pub enum Event {
     /// 自行订阅 `EventBus` 并处理。`ConfigWatcher` 已做 500ms debounce，此处收到即代表
     /// 配置文件确有变更。
     ConfigChanged,
+    /// step 开始（M-06）：一次 LLM 请求 + 其触发的工具调用（第 N 次迭代）。
+    ///
+    /// 在工具调用执行前广播（携带将执行的 `tool_call_ids`），用于前端展示 step
+    /// 进度；与 `PersistedEvent::StepStarted` 一一映射（落盘定位压缩点/中断点，
+    /// 见 `design.md` §25）。log-only，不进 transcript（C-05）。
+    StepStarted {
+        iter: u32,
+        tool_call_ids: Vec<String>,
+    },
+    /// step 结束（M-06）：该次迭代的工具结果已全部回灌（含中断时合成的结果）。
+    ///
+    /// 与 `PersistedEvent::StepEnded` 一一映射。cancel/timeout 中断时可能只出现
+    /// `StepStarted` 而无 `StepEnded`——正是中断点定位依据。
+    StepEnded { iter: u32 },
 }
 
 /// 事件总线（broadcast channel）。

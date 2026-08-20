@@ -711,7 +711,7 @@ impl Runtime {
                 // 重复检测：记录每轮工具调用签名，连续 3 轮相同 → 死循环
                 let mut call_signatures: Vec<String> = Vec::new();
 
-                for _iter in 0..max_iters {
+                for iter in 0..max_iters {
                     // 2. 构建请求（system + tools + 压缩后的历史）
                     let req = match self.ctx.build_chat_request(&self.tools, &self.config).await {
                         Ok(r) => r,
@@ -766,7 +766,21 @@ impl Runtime {
                         )));
                     }
 
-                    // 6. 执行工具调用
+                    // 6. 执行工具调用前：记录 step 边界开始（M-06，定位压缩点/中断点）。
+                    //    log-only 事件（C-05：不进 transcript），携带将执行的
+                    //    tool_call_ids 供回放/审计定位。
+                    let step_ids: Vec<String> = assistant_msg
+                        .tool_calls
+                        .iter()
+                        .map(|c| c.id.clone())
+                        .collect();
+                    let event = Event::StepStarted {
+                        iter,
+                        tool_call_ids: step_ids,
+                    };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
+
                     let results = match self.execute_tool_calls(&assistant_msg.tool_calls).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -787,6 +801,12 @@ impl Runtime {
                         self.persist_event(&event).await;
                         self.events.emit(event);
                     }
+
+                    // 7.1 step 边界结束（M-06）：结果已全部回灌。
+                    //     cancel/timeout 中断时此事件缺失，可据此定位中断点。
+                    let event = Event::StepEnded { iter };
+                    self.persist_event(&event).await;
+                    self.events.emit(event);
                 }
 
                 // 达到 max_iters 上限
@@ -1838,6 +1858,7 @@ impl Runtime {
             created_at: time::OffsetDateTime::now_utc(),
             metadata: MessageMeta {
                 source: MessageSource::Tool,
+                compressed_range: None,
                 ..Default::default()
             },
         }
