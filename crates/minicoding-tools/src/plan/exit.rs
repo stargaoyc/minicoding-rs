@@ -3,7 +3,7 @@
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::policy::{PermissionMode, PlanModeController, PreApprovedPrompt};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext, ToolOutputSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 /// 并把 `allowed_prompts` 注入会话级 `PermissionPolicy` 缓存。
 pub struct PlanExit {
     schema: ToolSchema,
+    output_schema: ToolOutputSchema,
     controller: Arc<dyn PlanModeController>,
 }
 
@@ -62,7 +63,26 @@ impl PlanExit {
                 "required": ["plan_path"]
             }),
         };
-        Self { schema, controller }
+        // R-05（M-11）：声明输出 JSON 形态（退出状态 + 目标模式 + 预批准数）。
+        let output_schema = ToolOutputSchema {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "plan_path": {"type": "string"},
+                    "target_mode": {"type": "string"},
+                    "allowed_prompts_count": {"type": "integer"},
+                    "plan_was_edited": {"type": "boolean"},
+                    "hint": {"type": "string"}
+                },
+                "required": ["status"]
+            }),
+        };
+        Self {
+            schema,
+            output_schema,
+            controller,
+        }
     }
 }
 
@@ -158,6 +178,16 @@ impl Tool for PlanExit {
                 "hint": "已切换到执行期，用户可在新模式下继续对话。预批准命令将自动 Allow。",
             })))
         })
+    }
+
+    /// 输出 JSON Schema（R-05，M-11）：退出状态 + 目标模式。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        Some(&self.output_schema)
+    }
+
+    /// 渲染意图（R-05，M-11）：结构化 JSON 直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 
@@ -307,5 +337,39 @@ mod tests {
         let tool = PlanExit::new(controller);
         assert_eq!(tool.side_effect(), SideEffect::None);
         assert!(tool.is_read_only());
+    }
+
+    #[test]
+    fn plan_exit_declares_output_schema() {
+        // R-05（M-11）：plan.exit 声明输出 JSON 形态（退出状态 + 目标模式 + 预批准数）。
+        let controller = make_controller(PermissionMode::Plan);
+        let tool = PlanExit::new(controller);
+        let schema = tool.output_schema().expect("output schema");
+        assert_eq!(schema.schema["type"], "object");
+        assert_eq!(schema.schema["properties"]["target_mode"]["type"], "string");
+        assert!(
+            schema.schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "status")
+        );
+    }
+
+    #[test]
+    fn plan_exit_render_output_defaults_to_json() {
+        let controller = make_controller(PermissionMode::Plan);
+        let tool = PlanExit::new(controller);
+        let result = ToolResult::ok_json(json!({
+            "status": "plan_exited",
+            "plan_path": ".minicoding/plan.md",
+            "target_mode": "default",
+            "allowed_prompts_count": 0,
+            "plan_was_edited": false
+        }));
+        match tool.render_output(&result) {
+            RenderIntent::Json { .. } => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

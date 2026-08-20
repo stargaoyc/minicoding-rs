@@ -451,6 +451,16 @@ pub trait Tool {
     /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖。
     fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
 
+    /// 输出 JSON Schema 声明（R-05，M-11）。
+    /// 仅返回 `ToolContent::Json` 的工具提供；自由文本工具返回 `None`。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> { None }
+
+    /// 渲染意图投影（R-05，M-11）。
+    /// 返回 `RenderIntent` 描述工具结果的前端展示形态；默认按内容类型推断。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
+    }
+
     async fn execute(
         &self,
         input: serde_json::Value,
@@ -459,6 +469,24 @@ pub trait Tool {
 }
 
 pub enum SideEffect { None, FileWrite, Command, Network }
+
+/// 工具输出声明（R-05，M-11）：JSON 输出工具的 schema。
+pub struct ToolOutputSchema { pub schema: serde_json::Value }
+
+/// 列表子项（label + 可选 hint，R-05，M-11）。
+pub struct ListItem { pub label: String, pub hint: Option<String> }
+
+/// 列表类别（R-05，M-11）。
+pub enum ListKind { Files, Processes, Generic }
+
+/// 渲染意图（R-05，M-11）：工具结果的前端展示形态。
+pub enum RenderIntent {
+    Text { content: String },
+    List { items: Vec<ListItem>, kind: ListKind },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Code { lang: Option<String>, content: String },
+    Json { value: serde_json::Value },
+}
 
 pub struct ToolContext {
     pub workdir: Utf8PathBuf,
@@ -471,6 +499,8 @@ pub struct ToolContext {
 ```
 
 `is_read_only()` 默认基于 `side_effect()`，但拆为独立方法是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致。Plan 模式硬门用 `is_read_only()` 而非 `side_effect()` 判断，给 MCP 工具留出"声明只读即可在 Plan 模式下用"的通道。
+
+`output_schema()`（R-05，M-11）让 JSON 输出工具声明结果的 JSON Schema，前端据此校验数据合法性；`render_output()` 是**服务端到前端的渲染投影**：纯函数、无 IO，工具声明其结果的展示形态（文本/列表/表格/代码/JSON），未覆盖时默认按 `ToolContent` 类型推断（`Text`→文本直出、`Json`→JSON 直出），保证未提供实现的工具行为与 M-11 前一致。前端按工具名本地渲染（零协议改动，推荐方案，见 `improvement-design.md` R-05）。
 
 ### 3.4 `ToolRegistry`
 
@@ -490,7 +520,7 @@ impl ToolRegistry {
 pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Plan, Mcp }
 ```
 
-新增 `Task`/`Plan`/`Mcp` 三个工具组：`Task` 含 `task.create`/`task.update`/`task.list`（旧版 `todo.write` 作为废弃别名）；`Plan` 含 `plan.exit`；`Mcp` 是动态注册的外部 MCP 工具集合。
+新增 `Task`/`Plan`/`Mcp` 三个工具组：`Task` 含 `task.create`/`task.update`/`task.list`（旧版 `todo.write` 作为废弃别名）；`Plan` 含 `plan.exit`/`plan.list`（M-11 新增，只读，可穿透 Plan 硬门，见 `design.md` §16）；`Mcp` 是动态注册的外部 MCP 工具集合。
 
 ### 3.5 `Storage`
 

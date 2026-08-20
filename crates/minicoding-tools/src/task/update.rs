@@ -3,7 +3,7 @@
 use crate::task::{TaskPatch, TaskStore};
 use minicoding_core::model::{SideEffect, TaskStatus, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext, ToolOutputSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use std::sync::Arc;
 /// 依赖图不可成环（C-31）。
 pub struct TaskUpdate {
     schema: ToolSchema,
+    output_schema: ToolOutputSchema,
     store: Arc<dyn TaskStore>,
 }
 
@@ -57,7 +58,26 @@ impl TaskUpdate {
                 "required": ["task_id"]
             }),
         };
-        Self { schema, store }
+        // R-05（M-11）：声明输出 JSON 形态（完整 Task 对象）。
+        let output_schema = ToolOutputSchema {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string"},
+                    "status": {"type": "string"},
+                    "summary": {"type": ["string", "null"]},
+                    "blocks": {"type": "array", "items": {"type": "string"}},
+                    "blocked_by": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["id", "content", "status"]
+            }),
+        };
+        Self {
+            schema,
+            output_schema,
+            store,
+        }
     }
 }
 
@@ -103,6 +123,16 @@ impl Tool for TaskUpdate {
                 |e| ToolError::InvalidInput(format!("serialize task: {e}")),
             )?))
         })
+    }
+
+    /// 输出 JSON Schema（R-05，M-11）：完整 Task 对象。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        Some(&self.output_schema)
+    }
+
+    /// 渲染意图（R-05，M-11）：结构化 JSON 直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 
@@ -190,5 +220,31 @@ mod tests {
     fn update_schema_name_is_task_update() {
         let tool = TaskUpdate::new(make_store());
         assert_eq!(tool.schema().name, "task.update");
+    }
+
+    #[test]
+    fn update_declares_output_schema() {
+        // R-05（M-11）：task.update 声明输出 JSON 形态（完整 Task 对象）。
+        let tool = TaskUpdate::new(make_store());
+        let schema = tool.output_schema().expect("output schema");
+        assert_eq!(schema.schema["type"], "object");
+        assert_eq!(schema.schema["properties"]["id"]["type"], "string");
+        assert!(
+            schema.schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "status")
+        );
+    }
+
+    #[test]
+    fn update_render_output_defaults_to_json() {
+        let tool = TaskUpdate::new(make_store());
+        let result = ToolResult::ok_json(json!({"id": "x", "status": "inprogress"}));
+        match tool.render_output(&result) {
+            RenderIntent::Json { .. } => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

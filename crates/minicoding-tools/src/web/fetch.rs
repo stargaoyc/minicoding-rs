@@ -6,7 +6,7 @@
 use super::ssrf::validate_url;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool};
 
 /// `web.fetch` 工具。
 pub struct WebFetch {
@@ -70,6 +70,11 @@ impl Tool for WebFetch {
             // 2. HTTP GET + 转换 + 截断
             fetch_and_convert(&url, max_bytes).await
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：抓取内容（Markdown 文本）默认文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

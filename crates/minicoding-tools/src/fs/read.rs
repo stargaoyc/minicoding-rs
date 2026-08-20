@@ -6,7 +6,7 @@
 use crate::util::{resolve_path, truncate_output};
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -125,6 +125,18 @@ impl Tool for FsRead {
             result.metadata.bytes = bytes;
             Ok(result)
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：文件内容 → 代码片段（未知语言）。不提供
+    /// `output_schema`（自由文本，R-05：仅 JSON 输出工具提供）。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        match &result.content {
+            minicoding_core::model::ToolContent::Text(text) => RenderIntent::Code {
+                lang: None,
+                content: text.clone(),
+            },
+            _ => RenderIntent::default_for(result),
+        }
     }
 }
 
@@ -399,5 +411,30 @@ mod tests {
         let tool = FsRead::new();
         assert_eq!(tool.side_effect(), SideEffect::None);
         assert!(tool.is_read_only());
+    }
+
+    #[test]
+    fn render_output_projects_text_to_code() {
+        // R-05（M-11）：fs.read 文本内容 → Code 渲染（灵感语言未知）。
+        let tool = FsRead::new();
+        let result = ToolResult::ok_text("fn main() {\n}");
+        match tool.render_output(&result) {
+            RenderIntent::Code { lang, content } => {
+                assert_eq!(lang, None);
+                assert_eq!(content, "fn main() {\n}");
+            }
+            other => panic!("expected Code, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_output_non_text_falls_back_to_default() {
+        // 非文本内容（如 JSON）走默认路径，保持行为与 M-11 前一致。
+        let tool = FsRead::new();
+        let result = ToolResult::ok_json(serde_json::json!({"unexpected": true}));
+        assert!(matches!(
+            tool.render_output(&result),
+            RenderIntent::Json { .. }
+        ));
     }
 }

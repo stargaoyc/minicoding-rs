@@ -6,6 +6,7 @@ use crate::journal::Journal;
 use crate::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use crate::provider::BoxFuture;
 use crate::sandbox::{SandboxDriver, SandboxPolicy};
+use crate::tool::render::{RenderIntent, ToolOutputSchema};
 use camino::Utf8PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,4 +115,21 @@ pub trait Tool: Send + Sync {
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>>;
+
+    /// 输出 JSON Schema（R-05，M-11）：声明执行结果的结构化形态。
+    ///
+    /// `Some` 表示该工具返回 `ToolContent::Json`，前端可据此校验数据合法性；
+    /// `None` 表示仅自由文本（默认）。只对返回 JSON 的工具提供。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        None
+    }
+
+    /// 输出渲染意图（R-05，M-11）：把执行结果投影为结构化渲染描述。
+    ///
+    /// 默认实现 [`RenderIntent::default_for`]：文本直出 / JSON 美化，与 M-11 之前
+    /// 的渲染行为一致（回归保底）。结构化工具（`task.*`/`plan.*`/`fs.glob` 等）
+    /// 覆盖此方法提供卡片化渲染。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
+    }
 }

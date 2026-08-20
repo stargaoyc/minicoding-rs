@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
-import type { Message } from "../../api/generated";
+import type { Message, ToolResult } from "../../api/generated";
 import type { ActiveTool } from "../../hooks/useChat";
 import { summarizeToolContent } from "../../lib/message";
 import type { ToolContent } from "../../api/generated";
@@ -227,9 +227,104 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
         <span className="text-[10px] text-[var(--color-text-muted)]">{callId.slice(-6)}</span>
         <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">{statusLabel}</span>
       </div>
-      {summary && (
+      {/* R-05（M-11）：按工具名本地渲染结构化结果（零协议改动，前端内置 renderer）。
+           fs.glob → 文件列表；task.list / plan.list → 表格；其余工具回落文本摘要。 */}
+      {status === "ok" && result && renderStructuredToolResult(name, result)}
+      {(!result || status !== "ok") && summary && (
         <p className="mt-1 line-clamp-2 text-[11px] text-[var(--color-text-muted)]">{summary}</p>
       )}
     </div>
   );
+}
+
+/**
+ * R-05（M-11）工具结果本地渲染器：按工具名 + 内容类型投影为结构化卡片。
+ * 与后端 `Tool::render_output`（`RenderIntent`）语义一致；后端未提供该工具的
+ * renderer 时（理想是 MCP 三方可扩展）回落文本摘要。见 `design.md` §7。
+ */
+function renderStructuredToolResult(name: string, result: ToolResult): ReactNode {
+  const content = result && "content" in result ? result.content : undefined;
+  if (!content) return null;
+
+  // fs.glob：文本每行一个相对路径 → 文件列表
+  if (name === "fs.glob" && content.type === "text") {
+    const lines = content.content.split("\n").filter((l) => l.length > 0);
+    if (lines.length === 0) return null;
+    return (
+      <ul className="mt-1.5 space-y-0.5 border-t border-[var(--color-border)]/60 pt-1.5">
+        {lines.slice(0, 20).map((line) => (
+          <li key={line} className="truncate font-mono text-[11px] text-[var(--color-text-muted)]">
+            📄 {line}
+          </li>
+        ))}
+        {lines.length > 20 && (
+          <li className="text-[10px] text-[var(--color-text-muted)]">… 共 {lines.length} 项</li>
+        )}
+      </ul>
+    );
+  }
+
+  // task.list / plan.list：JSON 数组 → 表格
+  if ((name === "task.list" || name === "plan.list") && content.type === "json") {
+    const value = content.content as Record<string, unknown> | null;
+    if (!value) return null;
+    const headers =
+      name === "task.list"
+        ? ["id", "status", "content"]
+        : ["tool", "prompt"];
+    const rows = extractTableRows(name, value);
+    if (rows.length === 0) return null;
+    return (
+      <table className="mt-1.5 w-full border-collapse border-t border-[var(--color-border)]/60 text-left text-[11px]">
+        <thead>
+          <tr>
+            {headers.map((h) => (
+              <th
+                key={h}
+                className="px-1.5 py-0.5 font-medium text-[var(--color-text-muted)]"
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 50).map((row, i) => (
+            <tr key={i} className="border-t border-[var(--color-border)]/40">
+              {row.map((cell, j) => (
+                <td key={j} className="px-1.5 py-0.5 font-mono text-[var(--color-text-muted)]">
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  return null; // 回落外层文本摘要
+}
+
+/** 从 JSON 结果提取表格行（task.list: tasks[] / plan.list: allowed_prompts[]）。 */
+function extractTableRows(name: string, value: Record<string, unknown>): string[][] {
+  const list =
+    name === "task.list"
+      ? value.tasks
+      : name === "plan.list"
+        ? value.allowed_prompts
+        : undefined;
+  if (!Array.isArray(list)) return [];
+  if (name === "task.list") {
+    return (list as Array<Record<string, unknown>>)
+      .map((t) => [
+        String(t.id ?? ""),
+        String(t.status ?? ""),
+        String(t.content ?? ""),
+      ]);
+  }
+  return (list as Array<Record<string, unknown>>).map((p) => [
+    String(p.tool ?? ""),
+    String(p.prompt ?? ""),
+  ]);
 }

@@ -1,4 +1,4 @@
-//! Plan 模式工具（`plan.exit`，见 `design.md` §16.4）。
+//! Plan 模式工具（`plan.exit`/`plan.list`，见 `design.md` §16.4）。
 //!
 //! `plan.exit` 由模型在 Plan 阶段完成 plan.md 后调用，携带"预批准命令"清单。
 //! Runtime 接到调用后：
@@ -6,12 +6,17 @@
 //! 2. 切换 `PermissionMode` 为 `target_mode`（Default 或 `AcceptEdits`）；
 //! 3. 缓存 `allowed_prompts` 到会话级状态，执行期命中即 `Allow`。
 //!
-//! 该工具属 `Plan` 工具组，`SideEffect::None`（仅切换状态 + 缓存），可穿透
+//! `plan.list`（M-11 新增）列出当前 Plan 模式状态（`mode` + `allowed_prompts`），
+//! 供模型在 Plan 阶段查询。
+//!
+//! 两工具均属 `Plan` 工具组，`SideEffect::None`（仅切换状态 + 缓存），可穿透
 //! Plan 模式硬门（`is_read_only() == true`，C-25）。
 
 mod exit;
+mod list;
 
 pub use exit::PlanExit;
+pub use list::PlanList;
 
 use minicoding_core::policy::PlanModeController;
 use minicoding_core::tool::ToolRegistry;
@@ -21,7 +26,8 @@ use std::sync::Arc;
 ///
 /// `controller` 由 `Runtime::plan_controller()` 提供，共享 Runtime 的 `plan_state`。
 pub fn register_plan_tools(registry: &mut ToolRegistry, controller: Arc<dyn PlanModeController>) {
-    registry.register(Arc::new(PlanExit::new(controller)));
+    registry.register(Arc::new(PlanExit::new(controller.clone())));
+    registry.register(Arc::new(PlanList::new(controller)));
 }
 
 #[cfg(test)]
@@ -65,11 +71,24 @@ mod tests {
     }
 
     #[test]
-    fn register_plan_tools_registers_single_tool() {
+    fn register_plan_tools_registers_both_tools() {
         let mut registry = ToolRegistry::new();
         register_plan_tools(&mut registry, make_controller());
         assert!(registry.get("plan.exit").is_some());
-        assert_eq!(registry.len(), 1);
+        assert!(registry.get("plan.list").is_some());
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn register_plan_tools_shared_controller() {
+        let mut registry = ToolRegistry::new();
+        register_plan_tools(&mut registry, make_controller());
+        // 两个工具共享同一 controller（plan_state），快照一致
+        assert_eq!(registry.get("plan.exit").unwrap().name(), "plan.exit");
+        assert_eq!(registry.get("plan.list").unwrap().name(), "plan.list");
+        // 均只读（C-25 穿透 Plan 硬门）
+        assert!(registry.get("plan.exit").unwrap().is_read_only());
+        assert!(registry.get("plan.list").unwrap().is_read_only());
     }
 
     #[test]

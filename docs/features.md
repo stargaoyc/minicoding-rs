@@ -64,9 +64,11 @@
 | T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现 |
 | T-14 | `task.create`/`update`/`list` | 增量任务管理 + 依赖 + 持久化（替代 todo.write） | None | M3 | 已实现 |
 | T-15 | `plan.exit` | 退出 Plan 模式并提交计划 | None | M5 | 已实现 |
+| T-15b | `plan.list` | 查询 Plan 模式状态与预批准命令（M-11 新增；只读，穿透 Plan 硬门；输出 `PlanModeController::snapshot()` 的 mode + allowed_prompts，前端渲染为表格 `tool`/`prompt`） | None | M11 | 已实现 |
 | T-16 | `memory.write` | 写长期记忆 | FileWrite | M3 | 已实现 |
 | T-17 | MCP 远程工具 | `mcp__<server>__<tool>` 动态注册 | 据 schema | M5 | 已实现 |
 | T-18 | 自定义工具注册 | 第三方实现 `Tool` trait | - | M2 | 已实现 |
+| T-19 | 输出渲染声明（M-11，R-05） | `Tool` trait 新增 `output_schema()`（JSON 工具声明输出 schema）与 `render_output()`（`RenderIntent` 投影：Text/List/Table/Code/Json，文本直出回归兼容）；全部内置工具已补充：`fs.read`→Code、`fs.list`/`fs.glob`→List(Files)、`fs.grep`→List(Generic)、`shell.run`→Code、`git.diff`→Code(lang=diff)、`task.list`/`plan.list`→Table、`task.create`/`task.update`/`task.spawn`/`plan.exit`/`shell.output`→Json+schema；前端按工具名本地渲染（零协议改动，见 `api.md` §3.3） | - | M11 | 已实现 |
 
 ## 4. 上下文管理
 
@@ -293,7 +295,7 @@
 |------|:---:|
 | Agent 运行时 | 16 |
 | LLM Provider | 9 |
-| 工具系统 | 22 |
+| 工具系统 | 24 |
 | 上下文管理 | 10 |
 | 记忆 | 8 |
 | 权限与安全 | 28 |
@@ -307,7 +309,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 19 |
-| **合计** | **199** |
+| **合计** | **201** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
 

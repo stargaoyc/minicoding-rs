@@ -5,7 +5,7 @@
 
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool};
 use tokio::process::Command;
 
 /// `git.apply` 工具。
@@ -102,6 +102,11 @@ impl Tool for GitApply {
             }
             Ok(ToolResult::ok_text("patch 已应用"))
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：应用确认消息，文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

@@ -3,7 +3,7 @@
 use minicoding_core::memory::MemoryStore;
 use minicoding_core::model::{MemoryError, SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -215,6 +215,11 @@ impl Tool for MemoryWrite {
                 }
             }
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：写入确认消息，文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

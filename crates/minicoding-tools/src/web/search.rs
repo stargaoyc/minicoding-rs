@@ -5,7 +5,7 @@
 
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool};
 
 /// `DuckDuckGo` HTML 搜索端点（无需 API key）。
 const DDG_HTML_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
@@ -121,6 +121,11 @@ impl Tool for WebSearch {
 
             Ok(ToolResult::ok_text(text))
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：搜索结果格式化文本，文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

@@ -7,7 +7,7 @@
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 use std::fmt::Write as _;
@@ -198,6 +198,17 @@ impl Tool for ShellRun {
             result.metadata.bytes = bytes;
             Ok(result)
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：命令输出 → 代码片段（语言未知，可能是 shell 输出或日志）。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        match &result.content {
+            minicoding_core::model::ToolContent::Text(text) => RenderIntent::Code {
+                lang: None,
+                content: text.clone(),
+            },
+            _ => RenderIntent::default_for(result),
+        }
     }
 }
 

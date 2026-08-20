@@ -6,12 +6,13 @@
 use super::background::BackgroundShellStore;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool, ToolOutputSchema};
 use std::sync::Arc;
 
 /// `shell.output` 工具：非阻塞读取后台 shell 输出。
 pub struct ShellOutput {
     schema: ToolSchema,
+    output_schema: ToolOutputSchema,
     store: Arc<dyn BackgroundShellStore>,
 }
 
@@ -35,7 +36,24 @@ impl ShellOutput {
                 "required": ["shell_id"]
             }),
         };
-        Self { schema, store }
+        // R-05（M-11）：声明输出 JSON 形态（stdout/stderr 快照 + 退出状态）。
+        let output_schema = ToolOutputSchema {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                    "exited": {"type": "boolean"},
+                    "exit_code": {"type": ["integer", "null"]}
+                },
+                "required": ["stdout", "stderr", "exited"]
+            }),
+        };
+        Self {
+            schema,
+            output_schema,
+            store,
+        }
     }
 }
 
@@ -70,6 +88,16 @@ impl Tool for ShellOutput {
                 "exit_code": status.exit_code,
             })))
         })
+    }
+
+    /// 输出 JSON Schema（R-05，M-11）：stdout/stderr 快照 + 退出状态。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        Some(&self.output_schema)
+    }
+
+    /// 渲染意图（R-05，M-11）：结构化 JSON 直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 
@@ -154,5 +182,42 @@ mod tests {
     fn output_schema_has_correct_name() {
         let tool = ShellOutput::new(make_store());
         assert_eq!(tool.name(), "shell.output");
+    }
+
+    #[test]
+    fn output_declares_output_schema() {
+        // R-05（M-11）：shell.output 声明输出 JSON 形态（stdout/stderr + 退出状态）。
+        let tool = ShellOutput::new(make_store());
+        let schema = tool.output_schema().expect("output schema");
+        assert_eq!(schema.schema["type"], "object");
+        assert_eq!(schema.schema["properties"]["stdout"]["type"], "string");
+        assert!(
+            schema.schema["properties"]
+                .get("exit_code")
+                .expect("exit_code")
+                .is_object()
+        );
+        assert!(
+            schema.schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "exited")
+        );
+    }
+
+    #[test]
+    fn output_render_output_defaults_to_json() {
+        let tool = ShellOutput::new(make_store());
+        let result = ToolResult::ok_json(serde_json::json!({
+            "stdout": "hi",
+            "stderr": "",
+            "exited": true,
+            "exit_code": 0
+        }));
+        match tool.render_output(&result) {
+            RenderIntent::Json { .. } => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

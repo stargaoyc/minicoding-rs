@@ -3,7 +3,7 @@
 use crate::task::TaskStore;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext, ToolOutputSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 /// `task_id` 由 Runtime 生成（ULID），LLM 不可伪造（C-31）。
 pub struct TaskCreate {
     schema: ToolSchema,
+    output_schema: ToolOutputSchema,
     store: Arc<dyn TaskStore>,
 }
 
@@ -36,7 +37,22 @@ impl TaskCreate {
                 "required": ["content"]
             }),
         };
-        Self { schema, store }
+        // R-05（M-11）：声明输出 JSON 形态（task_id + status）。
+        let output_schema = ToolOutputSchema {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string"}
+                },
+                "required": ["task_id", "status"]
+            }),
+        };
+        Self {
+            schema,
+            output_schema,
+            store,
+        }
     }
 }
 
@@ -72,6 +88,16 @@ impl Tool for TaskCreate {
                 json!({ "task_id": task.id, "status": task.status }),
             ))
         })
+    }
+
+    /// 输出 JSON Schema（R-05，M-11）：task_id + status。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        Some(&self.output_schema)
+    }
+
+    /// 渲染意图（R-05，M-11）：结构化 JSON 直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 
@@ -132,5 +158,31 @@ mod tests {
     fn create_schema_name_is_task_create() {
         let tool = TaskCreate::new(make_store());
         assert_eq!(tool.schema().name, "task.create");
+    }
+
+    #[test]
+    fn create_declares_output_schema() {
+        // R-05（M-11）：task.create 声明输出 JSON 形态（task_id + status）。
+        let tool = TaskCreate::new(make_store());
+        let schema = tool.output_schema().expect("output schema");
+        assert_eq!(schema.schema["type"], "object");
+        assert_eq!(schema.schema["properties"]["task_id"]["type"], "string");
+        assert!(
+            schema.schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "task_id")
+        );
+    }
+
+    #[test]
+    fn create_render_output_defaults_to_json() {
+        let tool = TaskCreate::new(make_store());
+        let result = ToolResult::ok_json(json!({"task_id": "x", "status": "pending"}));
+        match tool.render_output(&result) {
+            RenderIntent::Json { .. } => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

@@ -499,6 +499,14 @@ pub trait Tool {
     /// MCP 工具根据 server schema 的 `readOnlyHint` 覆盖（见 §19.3、rules.md C-25）。
     fn is_read_only(&self) -> bool { self.side_effect() == SideEffect::None }
 
+    /// 输出 JSON Schema 声明（R-05，M-11）：仅返回 `ToolContent::Json` 的工具提供。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> { None }
+
+    /// 渲染意图投影（R-05，M-11）：纯函数，声明结果的前端展示形态。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
+    }
+
     /// 执行
     async fn execute(&self, input: serde_json::Value, ctx: &ToolContext)
         -> Result<ToolResult, ToolError>;
@@ -510,9 +518,20 @@ pub enum SideEffect {
     Command,     // 执行 shell —— 串行
     Network,     // 网络请求 —— 串行
 }
+
+/// 渲染意图（R-05，M-11）：工具结果的前端展示形态。
+pub enum RenderIntent {
+    Text { content: String },
+    List { items: Vec<ListItem>, kind: ListKind },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Code { lang: Option<String>, content: String },
+    Json { value: serde_json::Value },
+}
 ```
 
 `side_effect()` 不仅驱动权限策略（见 §9），还是 §2.3 并行/串行分桶的依据，因此工具实现必须如实标注：把写操作误标为 `None` 会绕过串行约束并产生竞态。`is_read_only()` 拆为独立方法（而非直接用 `side_effect() == None`）是因为 MCP 工具的只读性由 server schema 声明（`readOnlyHint`），可能与本地 `side_effect` 推断不一致——Plan 模式硬门（§16.1）用 `is_read_only()` 判断，给声明了 `readOnlyHint` 的 MCP 工具留出"Plan 模式可用"的通道。权威定义见 `api.md` §3.3。
+
+`output_schema()`/`render_output()`（M-11，R-05）提供**服务端到前端的渲染投影**：工具是纯函数声明自己的输出形态（列表/表格/代码/JSON），前端据此画卡片，而非回灌 LLM 的原始文本。二者均为可选覆盖——默认 `render_output` 按 `ToolContent` 类型推断（`Text`→文本直出、`Json`→JSON 直出），未提供实现的工具行为与 M-11 前一致（回归兼容）。设计权衡见 `improvement-design.md` R-05：推荐前端按工具名 + schema 本地渲染（零协议改动），不把 RenderIntent 塞进 wire。
 
 ### 4.2 ToolRegistry
 
@@ -551,6 +570,12 @@ impl ToolRegistry {
 | `git.diff` | git | None | 查看 diff |
 | `git.apply` | git | FileWrite | 应用 patch |
 | `task.spawn` | core | None | 启动子 Agent |
+| `task.create` / `task.update` / `task.list` | task | None | 增量任务管理（见 §18） |
+| `plan.exit` | plan | None | 退出 Plan 模式并提交计划（§16.4，C-25 穿透） |
+| `plan.list` | plan | None | 查询 Plan 模式状态与预批准命令（M-11 新增，只读，C-25 穿透） |
+| `memory.write` | core | FileWrite | 写长期记忆 |
+
+全部内置工具在 M-11 均补充了 `output_schema()`/`render_output()` 渲染声明（R-05）：`fs.list`/`fs.glob` → `List{kinds: Files}`、`fs.grep` → `List{Generic}`、`fs.read`/`shell.run` → `Code`、`git.diff` → `Code{lang: diff}`、`task.list`/`plan.list` → `Table`；JSON 输出工具（`task.create`/`task.update`/`task.spawn`/`plan.exit`/`shell.output`）提供 `output_schema` + JSON 直出；确认类文本工具（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`/`shell.background`/`shell.kill`/`git.apply`/`web.fetch`/`web.search`/`memory.write`）显式声明文本直出（与默认行为一致）。
 
 ### 4.4 工具上下文与隔离
 

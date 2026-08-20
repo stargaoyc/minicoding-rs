@@ -20,7 +20,7 @@ use minicoding_core::model::{
 };
 use minicoding_core::policy::PlanModeController;
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext, ToolOutputSchema};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use std::sync::Arc;
 /// 父 Agent 只接收 `summary`，子 Agent 内部的副作用由其自身权限链处理。
 pub struct TaskSpawn {
     schema: ToolSchema,
+    output_schema: ToolOutputSchema,
     runner: Arc<dyn SubagentRunner>,
     plan_controller: Arc<dyn PlanModeController>,
 }
@@ -86,8 +87,22 @@ impl TaskSpawn {
                 "required": ["prompt"]
             }),
         };
+        // R-05（M-11）：声明输出 JSON 形态（summary + artifacts + 成本/完成标记）。
+        let output_schema = ToolOutputSchema {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "artifacts": {"type": "array"},
+                    "token_used": {"type": "integer"},
+                    "completed": {"type": "boolean"}
+                },
+                "required": ["summary"]
+            }),
+        };
         Self {
             schema,
+            output_schema,
             runner,
             plan_controller,
         }
@@ -242,6 +257,16 @@ impl Tool for TaskSpawn {
                 "completed": result.completed,
             })))
         })
+    }
+
+    /// 输出 JSON Schema（R-05，M-11）：`summary` + `artifacts` + `token_used` + `completed`。
+    fn output_schema(&self) -> Option<&ToolOutputSchema> {
+        Some(&self.output_schema)
+    }
+
+    /// 渲染意图（R-05，M-11）：结构化 JSON 直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 
@@ -499,5 +524,40 @@ mod tests {
         let tool = TaskSpawn::new(runner, controller);
         assert_eq!(tool.side_effect(), SideEffect::None);
         assert!(tool.is_read_only());
+    }
+
+    #[test]
+    fn spawn_declares_output_schema() {
+        // R-05（M-11）：task.spawn 声明输出 JSON 形态（summary + artifacts + 成本）。
+        let runner = MockRunner::with_ok("ok");
+        let controller = MockController::new(PermissionMode::Default);
+        let tool = TaskSpawn::new(runner, controller);
+        let schema = tool.output_schema().expect("output schema");
+        assert_eq!(schema.schema["type"], "object");
+        assert_eq!(schema.schema["properties"]["summary"]["type"], "string");
+        assert!(
+            schema.schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .any(|v| v == "summary")
+        );
+    }
+
+    #[test]
+    fn spawn_render_output_defaults_to_json() {
+        let runner = MockRunner::with_ok("ok");
+        let controller = MockController::new(PermissionMode::Default);
+        let tool = TaskSpawn::new(runner, controller);
+        let result = ToolResult::ok_json(json!({
+            "summary": "done",
+            "artifacts": [],
+            "token_used": 10,
+            "completed": true
+        }));
+        match tool.render_output(&result) {
+            RenderIntent::Json { .. } => {}
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 }

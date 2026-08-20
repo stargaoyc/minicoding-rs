@@ -4,7 +4,7 @@ use crate::util::{ensure_dir, resolve_path, truncate_output};
 use camino::Utf8PathBuf;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{ListItem, ListKind, RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 use std::fmt::Write;
@@ -141,6 +141,32 @@ impl Tool for FsGrep {
             result.metadata.bytes = bytes;
             Ok(result)
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：匹配行（`path:line:content`）→ 通用列表。
+    ///
+    /// 每行一个 `ListItem`（label=整行）。空结果/解析无关直接返回默认。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        match &result.content {
+            minicoding_core::model::ToolContent::Text(text) => {
+                let items: Vec<ListItem> = text
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| ListItem {
+                        label: l.to_string(),
+                        hint: None,
+                    })
+                    .collect();
+                if items.is_empty() {
+                    return RenderIntent::default_for(result);
+                }
+                RenderIntent::List {
+                    items,
+                    kind: ListKind::Generic,
+                }
+            }
+            _ => RenderIntent::default_for(result),
+        }
     }
 }
 
@@ -319,5 +345,32 @@ mod tests {
         let tool = FsGrep::new();
         let err = tool.execute(json!({"path": "."}), &ctx).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn render_output_projects_match_lines_to_list() {
+        // R-05（M-11）：fs.grep 匹配行（path:line:content）→ List{Generic}。
+        let tool = FsGrep::new();
+        let result = ToolResult::ok_text("a.rs:3:pub fn main()\nb.rs:1:use std::fmt");
+        match tool.render_output(&result) {
+            RenderIntent::List { items, kind } => {
+                assert_eq!(kind, ListKind::Generic);
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].label, "a.rs:3:pub fn main()");
+                assert_eq!(items[1].label, "b.rs:1:use std::fmt");
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_output_empty_text_falls_back_to_default() {
+        // 空结果 → 默认文本直出（回归保底）。
+        let tool = FsGrep::new();
+        let result = ToolResult::ok_text(String::new());
+        match tool.render_output(&result) {
+            RenderIntent::Text { .. } => {}
+            other => panic!("expected Text fallback, got {other:?}"),
+        }
     }
 }

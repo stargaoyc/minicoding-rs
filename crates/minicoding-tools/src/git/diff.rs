@@ -6,7 +6,7 @@
 use crate::util::resolve_path;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool};
 use tokio::process::Command;
 
 /// `git.diff` 工具。
@@ -96,6 +96,17 @@ impl Tool for GitDiff {
             }
             Ok(ToolResult::ok_text(String::from_utf8_lossy(&output.stdout)))
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：diff 文本 → 代码片段（`lang: "diff"` 语法高亮）。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        match &result.content {
+            minicoding_core::model::ToolContent::Text(text) => RenderIntent::Code {
+                lang: Some("diff".to_string()),
+                content: text.clone(),
+            },
+            _ => RenderIntent::default_for(result),
+        }
     }
 }
 

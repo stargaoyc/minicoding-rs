@@ -5,7 +5,7 @@ use crate::util::resolve_path;
 use minicoding_core::journal::FileChange;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -160,6 +160,11 @@ impl Tool for FsMultiEdit {
                 args.path
             )))
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：编辑确认消息，文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

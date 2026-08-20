@@ -13,7 +13,7 @@ use minicoding_core::metrics;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::Tool;
+use minicoding_core::tool::{RenderIntent, Tool};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -289,6 +289,11 @@ impl Tool for ShellBackground {
                 "后台 shell 已启动 (shell_id={shell_id})。用 shell.output 读取输出。"
             )))
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：启动确认消息，文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        RenderIntent::default_for(result)
     }
 }
 

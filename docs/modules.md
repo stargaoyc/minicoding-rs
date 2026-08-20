@@ -608,7 +608,8 @@ minicoding-tools/src/
 │   └── list.rs            # TaskList 快照
 ├── worktree.rs            # WorktreeSubagentRunner（git worktree 隔离装饰器，M-05 从 core 下沉）
 ├── plan/
-│   └── exit.rs            # ExitPlanMode（见 design.md §16.4）
+│   ├── exit.rs            # ExitPlanMode（见 design.md §16.4）
+│   └── list.rs            # PlanList 快照（M-11 新增，只读，穿透 Plan 硬门）
 ├── mcp/
 │   └── wrapper.rs         # 把 McpClient 远程工具包装为本地 Tool trait
 └── util/
@@ -626,6 +627,8 @@ minicoding-tools/src/
 - **task.create/update/list**：增量模型，状态机 `Pending→InProgress→Completed` 不可跳跃（C-31）。
 - **task.spawn（T-M5-7，T-13）**：启动类型化子 Agent（`SubagentType::Explore/Plan/GeneralPurpose/Custom`），隔离上下文（独立 ContextManager），Plan 模式下被硬门拒绝（`SideEffect::None` 仍受 `PermissionMode::Plan` 约束）。OTel `subagent` span 挂在父 turn span 下（O-04）。子 Agent env 不含凭证（C-04）。
 - **plan.exit（T-M5-6，T-15）**：退出 Plan 模式并提交计划，切回 Default 模式并缓存 `allowed_prompts`（预批准），避免 ExitPlanMode 后逐条重新确认。Plan 模式硬门用 `is_read_only()` 判断（C-25）。
+- **plan.list（M-11，T-15b）**：只读查询 `PlanModeController::snapshot()` 的 `mode` + `allowed_prompts`，`render_output` 投影为表格（tool/prompt），空预批准回落 JSON；`is_read_only() = true` 穿透 Plan 硬门（C-25），便于模型在执行期自查当前模式与预批准命令。
+- **M-11 渲染声明（R-05，T-19）**：`Tool` trait 的 `output_schema()`/`render_output()` 由各工具实现（见 `design.md` §4.1）；本 crate 全部内置工具已补充，前端按工具名本地渲染（零协议改动）。
 - **mcp::wrapper**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
 - **worktree.rs（M-05）**：`WorktreeSubagentRunner` 装饰器实现 `SubagentRunner`（trait 在 core），`Isolation::Worktree` 时 `git worktree add` 建隔离目录、按 `merge_back` 合并、`auto_cleanup` 清理，非 git 仓库降级 `Shared`（A-15）。
 - **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）+ 按需依赖 context/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。

@@ -4,7 +4,7 @@ use crate::util::{ensure_dir, resolve_path, truncate_output};
 use camino::Utf8PathBuf;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{ListItem, ListKind, RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -113,6 +113,30 @@ impl Tool for FsGlob {
             result.metadata.bytes = bytes;
             Ok(result)
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：文本路径列表 → 文件列表卡片。
+    ///
+    /// `fs.glob` 输出为每行一个相对路径的文本；投影为 `List { kind: Files }`
+    /// 供前端渲染文件列表（对齐 dsh presentResult 的文件树卡片）。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        match &result.content {
+            minicoding_core::model::ToolContent::Text(text) => {
+                let items = text
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| ListItem {
+                        label: l.to_string(),
+                        hint: None,
+                    })
+                    .collect();
+                RenderIntent::List {
+                    items,
+                    kind: ListKind::Files,
+                }
+            }
+            _ => RenderIntent::default_for(result),
+        }
     }
 }
 
@@ -273,5 +297,39 @@ mod tests {
         let tool = FsGlob::new();
         let err = tool.execute(json!({"path": "."}), &ctx).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn render_output_projects_text_paths_to_file_list() {
+        let tool = FsGlob::new();
+        let result = ToolResult::ok_text("src/a.rs\nsrc/b.rs");
+        match tool.render_output(&result) {
+            RenderIntent::List { items, kind } => {
+                assert_eq!(kind, ListKind::Files);
+                let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+                assert_eq!(labels, vec!["src/a.rs", "src/b.rs"]);
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_output_skips_empty_lines() {
+        let tool = FsGlob::new();
+        let result = ToolResult::ok_text("a.rs\n\nb.rs\n");
+        match tool.render_output(&result) {
+            RenderIntent::List { items, .. } => {
+                let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+                assert_eq!(labels, vec!["a.rs", "b.rs"]);
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_schema_is_none_for_text_tool() {
+        // fs.glob 输出为自由文本，不声明 JSON schema（R-05：仅 JSON 工具提供）
+        let tool = FsGlob::new();
+        assert!(tool.output_schema().is_none());
     }
 }

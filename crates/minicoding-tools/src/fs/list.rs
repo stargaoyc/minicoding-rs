@@ -4,7 +4,7 @@ use crate::util::{resolve_path, truncate_output};
 use camino::Utf8PathBuf;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::tool::{Tool, ToolContext};
+use minicoding_core::tool::{ListItem, ListKind, RenderIntent, Tool, ToolContext};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -91,6 +91,38 @@ impl Tool for FsList {
             result.metadata.bytes = bytes;
             Ok(result)
         })
+    }
+
+    /// 渲染意图（R-05，M-11）：目录条目（JSON 文本）→ 文件列表卡片。
+    ///
+    /// 输出为 `[{name,type,size}]` 的 pretty JSON 文本；解析为
+    /// `List { kind: Files }`（label=name，hint=type）。截断或解析失败时
+    /// 退化为文本直出。
+    fn render_output(&self, result: &ToolResult) -> RenderIntent {
+        let minicoding_core::model::ToolContent::Text(text) = &result.content else {
+            return RenderIntent::default_for(result);
+        };
+        let Ok(entries) = serde_json::from_str::<Vec<Value>>(text) else {
+            return RenderIntent::default_for(result);
+        };
+        if entries.is_empty() {
+            return RenderIntent::default_for(result);
+        }
+        let items: Vec<ListItem> = entries
+            .iter()
+            .map(|e| ListItem {
+                label: e
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                hint: e.get("type").and_then(Value::as_str).map(str::to_string),
+            })
+            .collect();
+        RenderIntent::List {
+            items,
+            kind: ListKind::Files,
+        }
     }
 }
 
@@ -322,5 +354,40 @@ mod tests {
         let tool = FsList::new();
         let err = tool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn render_output_projects_entries_to_file_list() {
+        // R-05（M-11）：fs.list 的 pretty JSON 文本 → List{Files}（label=name, hint=type）。
+        let tool = FsList::new();
+        let result = ToolResult::ok_text(
+            serde_json::to_string_pretty(&json!([
+                {"name": "a.rs", "type": "file", "size": 10},
+                {"name": "src", "type": "dir", "size": 0}
+            ]))
+            .expect("serialize"),
+        );
+        match tool.render_output(&result) {
+            RenderIntent::List { items, kind } => {
+                assert_eq!(kind, ListKind::Files);
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].label, "a.rs");
+                assert_eq!(items[0].hint.as_deref(), Some("file"));
+                assert_eq!(items[1].label, "src");
+                assert_eq!(items[1].hint.as_deref(), Some("dir"));
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_output_unparsable_falls_back_to_default() {
+        // 截断/异常文本解析失败 → 默认文本直出（回归保底）。
+        let tool = FsList::new();
+        let result = ToolResult::ok_text("not json at all");
+        match tool.render_output(&result) {
+            RenderIntent::Text { .. } => {}
+            other => panic!("expected Text fallback, got {other:?}"),
+        }
     }
 }
