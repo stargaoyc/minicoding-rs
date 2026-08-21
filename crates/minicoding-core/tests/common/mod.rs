@@ -2,7 +2,7 @@
 //!
 //! 供 `crates/minicoding-core/tests/` 下集成测试复用，见 AGENTS.md §2.8。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -188,9 +188,19 @@ impl Tool for MockTool {
 }
 
 /// 内存存储（无需磁盘 IO，便于快速测试）。
+///
+/// M-13 起按会话分桶（`HashMap<SessionId, Vec<Message>>`），实现完整 `Storage`
+/// 语义（list/delete/update_summary），可运行 `testing::storage_contract` 契约
+/// 断言——与 JSONL 后端共享同一套行为保证。
 #[derive(Default)]
 pub struct InMemoryStorage {
-    messages: Mutex<Vec<Vec<Message>>>,
+    sessions: Mutex<HashMap<SessionId, SessionEntry>>,
+}
+
+#[derive(Debug, Default)]
+struct SessionEntry {
+    messages: Vec<Message>,
+    summary: Option<String>,
 }
 
 impl InMemoryStorage {
@@ -203,39 +213,72 @@ impl InMemoryStorage {
 impl Storage for InMemoryStorage {
     fn append(
         &self,
-        _session: &SessionId,
+        session: &SessionId,
         msg: &Message,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
-        // InMemoryStorage 按"会话"分桶；测试场景单会话，统一存到桶 0
         let msg = msg.clone();
-        let messages = &self.messages;
+        let sid = session.clone();
+        let sessions = &self.sessions;
         Box::pin(async move {
-            let mut guard = messages.lock().expect("storage poisoned");
-            if guard.is_empty() {
-                guard.push(Vec::new());
-            }
-            guard[0].push(msg);
+            sessions
+                .lock()
+                .expect("storage poisoned")
+                .entry(sid)
+                .or_default()
+                .messages
+                .push(msg);
             Ok(())
         })
     }
-    fn load(&self, _session: &SessionId) -> BoxFuture<'_, Result<Vec<Message>, StorageError>> {
-        let guard = self.messages.lock().expect("storage poisoned");
-        let msgs = guard.first().cloned().unwrap_or_default();
+    fn load(&self, session: &SessionId) -> BoxFuture<'_, Result<Vec<Message>, StorageError>> {
+        let msgs = self
+            .sessions
+            .lock()
+            .expect("storage poisoned")
+            .get(session)
+            .map_or_else(Vec::new, |e| e.messages.clone());
         Box::pin(async move { Ok(msgs) })
     }
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>> {
-        Box::pin(async move { Ok(Vec::new()) })
+        let metas: Vec<SessionMeta> = self
+            .sessions
+            .lock()
+            .expect("storage poisoned")
+            .iter()
+            .map(|(id, e)| SessionMeta {
+                id: id.clone(),
+                created_at: time::OffsetDateTime::now_utc(),
+                message_count: e.messages.len(),
+                last_message_at: time::OffsetDateTime::now_utc(),
+                summary: e.summary.clone(),
+            })
+            .collect();
+        Box::pin(async move { Ok(metas) })
     }
-    fn delete(&self, _session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
+    fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
+        self.sessions
+            .lock()
+            .expect("storage poisoned")
+            .remove(session);
         Box::pin(async move { Ok(()) })
     }
     fn update_summary(
         &self,
-        _session: &SessionId,
-        _summary: &str,
+        session: &SessionId,
+        summary: &str,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
-        // 测试 mock：摘要更新为 no-op（InMemoryStorage 不维护 index）
-        Box::pin(async move { Ok(()) })
+        let summary = summary.to_string();
+        let sid = session.clone();
+        let sessions = &self.sessions;
+        Box::pin(async move {
+            sessions
+                .lock()
+                .expect("storage poisoned")
+                .entry(sid)
+                .or_default()
+                .summary = Some(summary);
+            Ok(())
+        })
     }
 }
 

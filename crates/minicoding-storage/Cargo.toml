@@ -22,3 +22,5 @@ time = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# M-13（R-09）：复用 core 的存储契约断言（与内存后端共享同一套行为保证）
+minicoding-core = { workspace = true, features = ["test-util"] }

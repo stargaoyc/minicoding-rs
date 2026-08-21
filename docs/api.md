@@ -543,9 +543,13 @@ pub struct SessionMeta {
 }
 ```
 
-`JsonlStorage` 实现 `Storage` trait，并扩展以下能力（见 `features.md` S-02/S-03/S-04）：
+**M-13 存储契约测试**（`feature = "test-util"`，R-09）：`minicoding_core::testing::storage_contract`
+提供全部 `Storage` 后端必须满足的共享断言（append/load 往返、list 元数据、summary 可见、
+delete 幂等、并发 append 不丢消息），内存 mock 与 `JsonlStorage`（`tests/storage_contract_jsonl.rs`，
+另含更高 `format_version` 显式拒绝与单坏行容错的 trait 级覆盖）运行同一套断言；未来 SQLite
+后端接入时零成本复用。fsync 策略评估结论见 `tech-stack.md` §13.2。
 
-```rust
+`JsonlStorage` 实现 `Storage` trait，并扩展以下能力（见 `features.md` S-02/S-03/S-04）：```rust
 // 会话索引（index.json）：轻量元数据列出，无需逐个打开 .jsonl
 pub struct SessionIndex { /* Vec<SessionIndexEntry> */ }
 pub struct SessionIndexEntry {

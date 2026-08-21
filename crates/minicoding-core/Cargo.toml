@@ -38,9 +38,20 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 tempfile = { workspace = true }
 proptest = { workspace = true }
 
+# M-13：内存后端契约测试依赖 test-util（testing 模块）；未启用时跳过该目标
+# （JSONL 侧由 minicoding-storage 的 dev-dep 强制启用，workspace 全量测试覆盖）。
+[[test]]
+name = "storage_contract"
+required-features = ["test-util"]
+
 [features]
 default = []
 # 启用 ts-rs 类型导出（M9 前端 DTO 契约，见 AGENTS.md §8.4）
 # `cargo test --features ts -p minicoding-core` 生成 `core` 的 TS 类型到
 # `crates/minicoding-web/src/api/generated/`，供前端导入。
 ts = ["dep:ts-rs"]
+# 启用跨 crate 共享测试基建（M-13 存储契约测试，R-09）。
+# 仅 dev-dependency 使用：领域 crate（如 minicoding-storage）以
+# `dev-dependencies + features = ["test-util"]` 引入，在自己的集成测试中
+# 对具体后端（JSONL/未来 SQLite）运行与 core 内存后端相同的契约断言。
+test-util = []
