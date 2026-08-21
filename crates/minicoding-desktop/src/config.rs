@@ -54,14 +54,14 @@ pub fn save_provider_config(
     let mut config = load_config()
         .map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))
         .unwrap_or_default();
-    if let Some(expected) = expected_revision {
-        if config.revision != expected {
-            return Err(anyhow::anyhow!(
-                "StaleWrite: 配置修订号不匹配（当前 {}，期望 {}），请刷新后重试",
-                config.revision,
-                expected
-            ));
-        }
+    if let Some(expected) = expected_revision
+        && config.revision != expected
+    {
+        return Err(anyhow::anyhow!(
+            "StaleWrite: 配置修订号不匹配（当前 {}，期望 {}），请刷新后重试",
+            config.revision,
+            expected
+        ));
     }
     config.revision = config.revision.saturating_add(1);
     config.provider = provider;
