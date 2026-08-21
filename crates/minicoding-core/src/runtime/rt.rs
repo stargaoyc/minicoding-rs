@@ -1394,9 +1394,8 @@ impl Runtime {
             }
         };
 
-        // 2. 构建 Hook 分发配置 + C-21 builtin_deny 标记
+        // 2. 构建 Hook 分发配置（S4：Hook 改写输入后此处会基于合并 verdict 重建）
         let dispatch_cfg = self.build_dispatch_config(&verdict);
-        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
 
         // 3. PreToolUse Hook（policy.check 之后、工具执行前）
         let mut effective_call = call.clone();
@@ -1410,12 +1409,64 @@ impl Runtime {
             )
             .await?;
 
-        // 4. 解析为最终决策（PreToolUse 直出 / Verdict Allow|Deny / Ask→PermissionRequest Hook→prompter）
+        // 3.1 S4/C-01/C-21：Hook `modify_input` 修改了输入时，对**修改后**的输入重跑
+        //     策略检查并与原 verdict 取严（Deny > Ask > Allow）——用户批准的是原始
+        //     输入，Hook 改写后的输入必须重新过黑名单/路径策略，否则批准 A 执行 B。
+        let input_modified = effective_call.input != call.input;
+        let verdict = if input_modified {
+            match self
+                .policy
+                .check(&call.name, &effective_call.input, &perm_ctx)
+                .await
+            {
+                Ok(rechecked) => merge_verdicts_stricter(&verdict, rechecked),
+                Err(e) => {
+                    self.record_permission_audit(&call.name, &Decision::Deny(e.to_string()), None)
+                        .await;
+                    tracing::warn!(tool = %call.name, error = %e, "policy recheck on modified input failed");
+                    return Ok((
+                        call.id.clone(),
+                        ToolResult::err_text(format!("permission error: {e}")),
+                    ));
+                }
+            }
+        } else {
+            verdict
+        };
+        // 合并后 verdict 可能升级为 Deny：重建 dispatch_cfg/is_builtin_deny，
+        // 保证 C-21（builtin Deny 不被 Hook Allow 覆盖）对改写后输入同样成立
+        let dispatch_cfg = if input_modified {
+            self.build_dispatch_config(&verdict)
+        } else {
+            dispatch_cfg
+        };
+        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+
+        // PreToolUse 直出决策与合并 verdict 冲突时取严（Hook Allow 不能越过重查 Deny）
+        let pre_decision = match (&pre_decision, &verdict) {
+            (Some(Decision::Allow), Verdict::Deny(reason)) => Some(Decision::Deny(format!(
+                "输入被 Hook 修改后未通过策略复查: {reason}"
+            ))),
+            _ => pre_decision,
+        };
+
+        // 4. 解析为最终决策（PreToolUse 直出 / Verdict Allow|Deny / Ask→PermissionRequest Hook→prompter）。
+        //    Ask 场景传 effective_call——弹窗展示的是实际将执行的（可能被 Hook 改写的）输入。
         let (decision, prompt_id) = if let Some(d) = pre_decision {
             (d, None)
         } else {
-            self.resolve_decision(&verdict, call, side_effect, &dispatch_cfg, is_builtin_deny)
-                .await?
+            self.resolve_decision(
+                &verdict,
+                if input_modified {
+                    &effective_call
+                } else {
+                    call
+                },
+                side_effect,
+                &dispatch_cfg,
+                is_builtin_deny,
+            )
+            .await?
         };
 
         // 5. 落审计（所有副作用权限决策均落盘，AGENTS.md §5.5；
@@ -2333,3 +2384,26 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Runtime>();
 };
+
+/// S4：合并两个 Verdict 取较严者（Deny > Ask > Allow）。
+///
+/// 用途：Hook `modify_input` 改写工具入参后，原始输入与修改后输入的策略判定
+/// 需同时满足（任一 Deny 即 Deny；任一要求 Ask 则升级为 Ask）。
+fn merge_verdicts_stricter(a: &Verdict, b: Verdict) -> Verdict {
+    use Verdict::{Allow, Ask, Deny};
+    fn rank(v: &Verdict) -> u8 {
+        match v {
+            Allow => 0,
+            Ask(_) => 1,
+            Deny(_) => 2,
+        }
+    }
+    if rank(a) >= rank(&b) {
+        match a {
+            Deny(_) | Ask(_) => a.clone(),
+            Allow => b,
+        }
+    } else {
+        b
+    }
+}

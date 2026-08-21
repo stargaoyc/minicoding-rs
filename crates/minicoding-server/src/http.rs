@@ -75,9 +75,13 @@ pub struct ServerConfig {
     pub web_dir: Option<Utf8PathBuf>,
     /// CORS 允许的来源列表（M9 `--cors-origin`，见 `design.md` §26.6）。
     ///
-    /// 空列表 = 允许任意来源（`Access-Control-Allow-Origin: *`，开发默认）；
-    /// 非空列表 = 仅允许列出的来源（精确匹配，生产部署用）。桌面模式同源无需配置。
+    /// 空列表 = 默认仅允许**本机来源**（`localhost`/`127.0.0.1`/`[::1]` 任意端口，S2 防浏览器
+    /// drive-by）；非空列表 = 仅允许列出的精确来源。`*` 通配不支持。
     pub cors_origins: Vec<String>,
+    /// API 鉴权 token（S1/C-01 配套）。`Some(t)` = 除 `/health` 外全端点强制
+    /// `Authorization: Bearer <t>` 或 `?token=<t>`（`EventSource` 专用）；
+    /// `None` = 关闭鉴权（调用方须向用户输出红字警告并记审计语义风险）。
+    pub auth_token: Option<String>,
     /// 默认安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`）。
     pub preset: String,
     /// LLM 请求超时（秒，默认 120）。
@@ -174,6 +178,10 @@ struct CreateSessionBody {
     /// `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。
     #[serde(default)]
     preset: Option<String>,
+    /// 高危预设（`full-access`/`external-sandbox`）的二次确认字段（S3/C-22）：
+    /// UI 弹出红色警告确认后置 true 回传；缺失或 false 时请求被拒。
+    #[serde(default)]
+    confirm_danger: Option<bool>,
     /// Plan 模式（C-25：先规划后执行，写 `plan.md` + 子任务拆分，仅只读工具可用）。
     /// `true` 时会话初始 `PermissionMode` 为 `Plan`（客户端显式 `body.permission_mode`
     /// 优先于本开关）。
@@ -271,19 +279,34 @@ impl From<SessionManagerError> for HttpError {
     }
 }
 
+/// S2：本机来源判定（解析 URI host 精确匹配，防 `http://localhost.evil.com` 伪装）。
+fn is_local_origin(origin: &axum::http::HeaderValue, _parts: &axum::http::request::Parts) -> bool {
+    origin
+        .to_str()
+        .ok()
+        .and_then(|s| axum::http::Uri::try_from(s).ok())
+        .and_then(|uri| uri.host().map(str::to_string))
+        .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]"))
+}
+
 /// 构造 axum Router。
 ///
 /// `web_dir` 设为 `Some(dir)` 时在 API/SSE 路由之外挂载 `ServeDir`（M9 `--web`，
 /// 见 `design.md` §26.7），未匹配静态文件的路径 fallback 到 `index.html`（SPA
 /// history 路由）。
 ///
-/// `cors_origins` 空列表 = 允许任意来源（开发默认）；非空 = 仅允许列出的来源
-/// （生产部署，M9 `--cors-origin`，见 `design.md` §26.6）。
-fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[String]) -> Router {
-    // CORS：空列表用 Any（开发默认），非空列表精确匹配（生产部署）
+/// `cors_origins` 空列表 = 默认仅允许**本机来源**（`localhost`/`127.0.0.1`/`[::1]`，任意
+/// 端口——开发默认，S2 防浏览器 drive-by）；非空 = 仅允许列出的精确来源
+/// （生产部署，M9 `--cors-origin`，见 `design.md` §26.6）。`*` 通配不再支持。
+fn build_router(
+    state: AppState,
+    web_dir: Option<&Utf8PathBuf>,
+    cors_origins: &[String],
+    auth_token: Option<&str>,
+) -> Router {
     let cors = if cors_origins.is_empty() {
         CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::predicate(is_local_origin))
             .allow_methods(Any)
             .allow_headers(Any)
     } else {
@@ -338,7 +361,57 @@ fn build_router(state: AppState, web_dir: Option<&Utf8PathBuf>, cors_origins: &[
         Router::new().merge(api_routes)
     };
 
+    // S1：鉴权中间件（除 /health 外强制 Bearer token 或 ?token=，OPTIONS 预检放行由
+    // CORS 层应答——auth 在内层、CORS 在外层，预检请求不触达 auth）
+    let app = if let Some(token) = auth_token {
+        let expected = token.to_string();
+        app.layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let expected = expected.clone();
+                async move {
+                    let path = req.uri().path();
+                    let authorized = path == "/health"
+                        || req.method() == axum::http::Method::OPTIONS
+                        || request_authorized(&req, &expected);
+                    if !authorized {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    next.run(req).await
+                }
+            },
+        ))
+    } else {
+        app
+    };
     app.layer(cors).with_state(state)
+}
+
+/// S1：常量时间字符串比较（防时序侧信道逐字节猜 token）。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+/// S1：请求是否携带有效凭证（`Authorization: Bearer <t>` 或 `?token=<t>`——后者仅供
+/// 浏览器 `EventSource` 使用，其无法自定义请求头）。
+fn request_authorized(req: &axum::extract::Request, expected: &str) -> bool {
+    if let Some(v) = req.headers().get(axum::http::header::AUTHORIZATION)
+        && let Ok(s) = v.to_str()
+        && let Some(bearer) = s.strip_prefix("Bearer ")
+    {
+        return constant_time_eq(bearer, expected);
+    }
+    req.uri().query().is_some_and(|q| {
+        q.split('&').any(|kv| {
+            kv.split_once('=')
+                .is_some_and(|(k, v)| k == "token" && constant_time_eq(v, expected))
+        })
+    })
 }
 
 /// 启动 HTTP server（阻塞当前 task）。
@@ -354,7 +427,17 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()> {
         cfg: cfg.clone(),
     };
 
-    let app = build_router(state, cfg.web_dir.as_ref(), &cfg.cors_origins);
+    if cfg.auth_token.is_none() {
+        tracing::warn!(
+            "API 鉴权已禁用（auth_token=None）：本机任意进程可读取会话、代答权限、执行命令"
+        );
+    }
+    let app = build_router(
+        state,
+        cfg.web_dir.as_ref(),
+        &cfg.cors_origins,
+        cfg.auth_token.as_deref(),
+    );
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .map_err(|e| anyhow::anyhow!("bind {addr} 失败: {e}", addr = cfg.bind))?;
@@ -428,6 +511,8 @@ async fn create_session(
     // preset 解析（会话级覆盖）：`full-access` 强制 `BypassPermissions` 全自动 +
     // `DangerFullAccess` 沙箱外运行（C-22：显式选定 + red 警告，见 build_preset_policy）
     if let Some(preset_str) = body.preset.as_deref() {
+        // S3/C-22：高危预设需请求体显式二次确认（UI 先弹红色警告框），仅日志不够
+        ensure_danger_preset_confirmed(preset_str, body.confirm_danger)?;
         let (mode, policy, warning) = build_preset_policy(preset_str, &params.workdir)?;
         // body.permission_mode 显式指定时优先于 preset 的默认模式
         if params.permission_mode == PermissionMode::Default {
@@ -446,6 +531,29 @@ async fn create_session(
     let session = state.mgr.create_session(Some(params))?;
     let session_id = session.session_id().clone();
     Ok(Json(CreateSessionResponse { session_id }))
+}
+
+/// 高危预设清单（C-22：沙箱降级或权限全自动）。
+const DANGER_PRESETS: &[&str] = &["full-access", "external-sandbox"];
+
+/// S3/C-22：高危预设必须携带 `confirm_danger: true`（UI 红色警告确认后回传）。
+///
+/// # Errors
+/// 高危预设未确认时返回 400 与引导信息。
+fn ensure_danger_preset_confirmed(
+    preset: &str,
+    confirm_danger: Option<bool>,
+) -> Result<(), HttpError> {
+    if DANGER_PRESETS.contains(&preset) && confirm_danger != Some(true) {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: format!(
+                "预设 `{preset}` 属高危配置（C-22）：沙箱降级/权限全自动。\
+                 请在 UI 确认红色警告后在请求体携带 \"confirm_danger\": true 重试"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// 解析安全预设为 `(PermissionMode, SandboxPolicy, 警告信息)`。
@@ -635,4 +743,211 @@ fn parse_sse_block(block: &str) -> SseEvent {
         sse_event = sse_event.id(seq);
     }
     sse_event
+}
+
+/// 生成 API 鉴权 token（S1）。委托 `core::util`（与 CLI/desktop 共用同一策略）。
+#[must_use]
+pub fn generate_auth_token() -> String {
+    minicoding_core::util::generate_auth_token()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+
+    // ── S3：danger preset 二次确认 ──
+
+    #[test]
+    fn danger_preset_without_confirm_rejected() {
+        for preset in ["full-access", "external-sandbox"] {
+            let err = ensure_danger_preset_confirmed(preset, None).expect_err("应拒绝");
+            assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+            assert!(err.message.contains("confirm_danger"), "{}", err.message);
+            let err =
+                ensure_danger_preset_confirmed(preset, Some(false)).expect_err("false 也应拒绝");
+            assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn danger_preset_with_confirm_accepted() {
+        for preset in DANGER_PRESETS {
+            ensure_danger_preset_confirmed(preset, Some(true)).expect("确认后应放行");
+        }
+    }
+
+    #[test]
+    fn safe_presets_need_no_confirm() {
+        for preset in ["auto", "read-only"] {
+            ensure_danger_preset_confirmed(preset, None).expect("安全预设无需确认");
+        }
+    }
+
+    // ── S2：本机来源判定 ──
+
+    fn origin_header(s: &str) -> axum::http::HeaderValue {
+        axum::http::HeaderValue::from_str(s).expect("header")
+    }
+    fn parts() -> axum::http::request::Parts {
+        axum::http::Request::builder()
+            .body(())
+            .expect("req")
+            .into_parts()
+            .0
+    }
+
+    #[test]
+    fn local_origins_allowed_any_port() {
+        let p = parts();
+        for o in [
+            "http://localhost",
+            "http://localhost:5173",
+            "http://127.0.0.1:8080",
+            "http://[::1]:3000",
+        ] {
+            assert!(is_local_origin(&origin_header(o), &p), "{o} 应允许");
+        }
+    }
+
+    // ── S1：鉴权中间件 ──
+
+    use axum::body::Body;
+    use axum::http::header::AUTHORIZATION;
+    use tower::ServiceExt;
+
+    /// 构造带鉴权的测试 app（SessionManager 用假 provider 参数，不发起真实请求）。
+    fn test_app(auth_token: Option<&str>) -> axum::Router {
+        let cfg = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            provider_kind: "openai".into(),
+            provider_name: None,
+            api_base: "http://localhost:1".into(),
+            api_key: String::new(),
+            model: "test-model".into(),
+            workdir: camino::Utf8PathBuf::from("."),
+            system: None,
+            permission_timeout_sec: 1,
+            web_dir: None,
+            cors_origins: Vec::new(),
+            auth_token: auth_token.map(str::to_string),
+            preset: "auto".into(),
+            timeout_sec: 1,
+            max_retries: 1,
+            small_model: None,
+            turn_timeout_sec: 1,
+            compress: false,
+        };
+        let params = crate::ServerRuntimeParams {
+            provider_kind: cfg.provider_kind.clone(),
+            provider_name: None,
+            api_base: cfg.api_base.clone(),
+            api_key: String::new(),
+            model: cfg.model.clone(),
+            workdir: cfg.workdir.clone(),
+            system: None,
+            permission_mode: minicoding_core::policy::PermissionMode::Default,
+            sandbox_policy: minicoding_core::sandbox::SandboxPolicy::ReadOnly,
+            timeout_sec: 1,
+            max_retries: 1,
+            small_model: None,
+            turn_timeout_sec: 1,
+            compress: false,
+        };
+        let mgr = Arc::new(SessionManager::new(params, Duration::from_secs(1)));
+        build_router(AppState { mgr, cfg }, None, &[], auth_token)
+    }
+
+    #[tokio::test]
+    async fn auth_required_without_token() {
+        let app = test_app(Some("secret-token"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "无 token 应 401");
+    }
+
+    #[tokio::test]
+    async fn auth_bearer_token_accepted() {
+        let app = test_app(Some("secret-token"));
+        let req = axum::http::Request::builder()
+            .uri("/sessions")
+            .header(AUTHORIZATION, "Bearer secret-token")
+            .body(Body::empty())
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "正确 Bearer token 应放行");
+    }
+
+    #[tokio::test]
+    async fn auth_query_token_accepted_for_sse() {
+        let app = test_app(Some("secret-token"));
+        // EventSource 场景：?token= 查询参数（此处用 /config 端点验证 query 通道）
+        let req = axum::http::Request::builder()
+            .uri("/config?token=secret-token")
+            .body(Body::empty())
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "?token= 应放行");
+    }
+
+    #[tokio::test]
+    async fn health_exempt_from_auth() {
+        let app = test_app(Some("secret-token"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "/health 免鉴权（liveness）");
+    }
+
+    #[tokio::test]
+    async fn no_auth_config_allows_all() {
+        let app = test_app(None);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "关闭鉴权时不应 401"
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_basic() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "ab"));
+    }
+
+    #[test]
+    fn non_local_origins_rejected() {
+        let p = parts();
+        for o in [
+            "https://evil.com",
+            "http://localhost.evil.com",
+            "http://evil-localhost.com",
+            "null",
+        ] {
+            assert!(!is_local_origin(&origin_header(o), &p), "{o} 应拒绝");
+        }
+    }
 }

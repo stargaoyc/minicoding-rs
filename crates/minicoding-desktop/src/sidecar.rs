@@ -67,8 +67,10 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
         std::env::var("MINICODING_SERVER_BIN").unwrap_or_else(|_| "minicoding-server".to_string());
 
     let web_dir = crate::resolve_web_dir();
+    // S1：desktop 生成 token 并经 CLI 参数传给 sidecar（内存传递，C-04 兼容）
+    let token = minicoding_core::util::generate_auth_token();
     let mut cmd = Command::new(&bin);
-    cmd.args(["--bind", "127.0.0.1:0"]);
+    cmd.args(["--bind", "127.0.0.1:0", "--auth-token", &token]);
     // 注入 provider 非敏感配置（从 config.toml 读取）
     cmd.args(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
@@ -99,7 +101,7 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
     .context("sidecar 启动超时")??;
 
     log::info!("sidecar 已启动: port={port}, pid={pid}");
-    Ok(SessionInfo { port, pid })
+    Ok(SessionInfo { port, pid, token })
 }
 
 /// 从 sidecar 输出行解析监听端口。
@@ -179,7 +181,14 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         .map_err(|e| anyhow::anyhow!("sidecar 配置错误: {e}"))?;
 
     let web_dir = crate::resolve_web_dir();
-    let mut args: Vec<String> = vec!["--bind".into(), "127.0.0.1:0".into()];
+    // S1：同 standalone 路径——token 内存传递（desktop 生成，前端请求时携带）
+    let token = minicoding_core::util::generate_auth_token();
+    let mut args: Vec<String> = vec![
+        "--bind".into(),
+        "127.0.0.1:0".into(),
+        "--auth-token".into(),
+        token.clone(),
+    ];
     // 注入 provider 非敏感配置（从 config.toml 读取，API key 由 sidecar 读 keyring）
     args.extend(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
@@ -241,7 +250,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
     });
 
     log::info!("Tauri sidecar 已启动: port={port}, pid={pid}");
-    Ok(SessionInfo { port, pid })
+    Ok(SessionInfo { port, pid, token })
 }
 
 #[cfg(test)]

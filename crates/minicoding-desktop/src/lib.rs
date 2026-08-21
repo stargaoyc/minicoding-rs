@@ -38,6 +38,8 @@ pub struct SessionInfo {
     pub port: u16,
     /// sidecar 进程 PID。
     pub pid: u32,
+    /// API 鉴权 token（S1）：desktop 生成并传给 sidecar，前端请求时携带。
+    pub token: String,
 }
 
 /// 解析 `minicoding-server` sidecar 的 web 目录。

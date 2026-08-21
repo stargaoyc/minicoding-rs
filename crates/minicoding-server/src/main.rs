@@ -72,6 +72,14 @@ struct Cli {
     /// 仅受信隔离容器内使用，C-22 red 警告）
     #[arg(long, default_value = "auto")]
     preset: String,
+
+    /// API 鉴权 token（S1）。省略时自动生成并以 `SERVER_TOKEN=<t>` 打印到 stdout。
+    #[arg(long)]
+    auth_token: Option<String>,
+
+    /// 关闭 API 鉴权（仅限本机隔离环境；任意进程可完全控制 Agent）
+    #[arg(long, default_value_t = false)]
+    no_auth: bool,
 }
 
 #[tokio::main]
@@ -110,8 +118,25 @@ async fn main() -> Result<()> {
         }
     });
 
+    // S1：鉴权 token——显式指定 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭
+    let auth_token = if cli.no_auth {
+        eprintln!(
+            "WARNING: API 鉴权已禁用（--no-auth）：本机任意进程可读取会话、代答权限、执行命令"
+        );
+        None
+    } else {
+        Some(
+            cli.auth_token
+                .unwrap_or_else(minicoding_server::generate_auth_token),
+        )
+    };
+    if let Some(t) = &auth_token {
+        println!("SERVER_TOKEN={t}");
+    }
+
     let cfg = ServerConfig {
         bind,
+        auth_token,
         provider_kind,
         provider_name,
         api_base,

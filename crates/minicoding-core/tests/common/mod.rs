@@ -133,6 +133,18 @@ impl MockTool {
         std::mem::take(&mut *self.calls.lock().expect("calls poisoned"))
     }
 
+    /// 创建命令类 mock 工具（`SideEffect::Command`，走副作用权限路径）。
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn command(name: &str, response: impl Into<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            side_effect: SideEffect::Command,
+            response: response.into(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
     /// 创建执行必失败的 mock 工具（M-09 沙箱拒绝检测测试用）。
     #[must_use]
     #[allow(dead_code)]

@@ -31,6 +31,8 @@ export interface SessionInfo {
   port: number;
   /** sidecar 进程 PID。 */
   pid: number;
+  /** API 鉴权 token（S1，desktop 生成，请求时携带）。 */
+  token: string;
 }
 
 /** 小 LLM 配置（对应 Rust `SmallProviderConfig`，可选）。 */

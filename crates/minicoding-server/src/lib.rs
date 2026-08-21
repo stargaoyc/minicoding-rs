@@ -51,7 +51,7 @@ pub mod sse;
 pub mod workspace;
 
 pub use acp::{AcpError, serve_acp};
-pub use http::{ServerConfig, serve};
+pub use http::{ServerConfig, generate_auth_token, serve};
 #[cfg(feature = "lsp")]
 pub use lsp::{LspError, serve_lsp};
 #[cfg(feature = "lsp")]

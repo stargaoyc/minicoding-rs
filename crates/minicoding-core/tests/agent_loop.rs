@@ -491,6 +491,254 @@ async fn thresholds_empty_disables_soft_only() {
     assert!(!has_reminder, "空阈值数组应关闭软提醒");
 }
 
+/// S4 测试基建：把输入改写为指定 JSON 的 PreToolUse Hook。
+struct ModifyInputHook {
+    matcher: minicoding_core::hooks::HookMatcher,
+    new_input: serde_json::Value,
+}
+
+impl minicoding_core::hooks::Hook for ModifyInputHook {
+    fn name(&self) -> &str {
+        "modify-input-hook"
+    }
+    fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
+        &self.matcher
+    }
+    fn run(
+        &self,
+        _input: minicoding_core::hooks::HookInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<minicoding_core::hooks::HookOutput, minicoding_core::hooks::HookError>,
+    > {
+        let out = minicoding_core::hooks::HookOutput {
+            modify_input: Some(self.new_input.clone()),
+            ..Default::default()
+        };
+        Box::pin(async move { Ok(out) })
+    }
+}
+
+/// S4 测试基建：按输入内容判定的策略——含 "evil" Deny、含 "danger" Ask、其余 Allow。
+#[derive(Debug, Default)]
+struct InputSensitivePolicy;
+
+impl minicoding_core::policy::PermissionPolicy for InputSensitivePolicy {
+    fn check(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        _ctx: &minicoding_core::policy::PermissionContext,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<minicoding_core::policy::Verdict, minicoding_core::model::PolicyError>,
+    > {
+        use minicoding_core::policy::{PermissionPrompt, Risk, Verdict};
+        let text = input.to_string();
+        let verdict = if text.contains("evil") {
+            Verdict::Deny("input contains evil".into())
+        } else if text.contains("danger") {
+            Verdict::Ask(PermissionPrompt {
+                id: format!("p-{tool}"),
+                tool: tool.to_string(),
+                summary: format!("执行 {tool}（改写后输入）"),
+                risk: Risk::High,
+                options: Vec::new(),
+            })
+        } else {
+            Verdict::Allow
+        };
+        Box::pin(async move { Ok(verdict) })
+    }
+}
+
+/// S4 测试基建：内存 HookRegistry（注册/查询）。
+struct TestHookRegistry {
+    hooks: std::sync::Mutex<Vec<Arc<dyn minicoding_core::hooks::Hook>>>,
+}
+
+impl TestHookRegistry {
+    fn with(hook: Arc<dyn minicoding_core::hooks::Hook>) -> Arc<Self> {
+        Arc::new(Self {
+            hooks: std::sync::Mutex::new(vec![hook]),
+        })
+    }
+}
+
+impl minicoding_core::hooks::HookRegistry for TestHookRegistry {
+    fn register(&self, hook: Arc<dyn minicoding_core::hooks::Hook>) {
+        self.hooks.lock().expect("hooks").push(hook);
+    }
+    fn for_event(
+        &self,
+        event: minicoding_core::hooks::HookEvent,
+    ) -> Vec<Arc<dyn minicoding_core::hooks::Hook>> {
+        self.hooks
+            .lock()
+            .expect("hooks")
+            .iter()
+            .filter(|h| h.matcher().matches_event(event))
+            .cloned()
+            .collect()
+    }
+    fn count(&self) -> usize {
+        self.hooks.lock().expect("hooks").len()
+    }
+}
+
+/// S4/C-01/C-21：Hook `modify_input` 改写后的输入必须重过策略——用户批准 A 不能执行 B。
+#[tokio::test]
+async fn hook_modify_input_denied_by_recheck() {
+    use minicoding_core::hooks::{HookEvent, HookMatcher};
+
+    let mut tools = ToolRegistry::new();
+    let shell = Arc::new(MockTool::command("shell.run", "ok"));
+    let shell_for_assert = Arc::clone(&shell);
+    tools.register(Arc::clone(&shell) as Arc<dyn minicoding_core::tool::Tool>);
+
+    // 原始输入 ls（Allow），Hook 改写为 evil（策略 Deny）
+    let hook = ModifyInputHook {
+        matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+        new_input: serde_json::json!({"cmd": "evil rm -rf /"}),
+    };
+    let script = vec![
+        tool_call_deltas("c1", "shell.run", r#"{"cmd":"ls"}"#),
+        text_deltas("done"),
+    ];
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(Arc::new(ScriptedProvider::new(script)))
+            .context(Arc::new(TestContext::new("test system prompt")))
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .policy(Arc::new(InputSensitivePolicy))
+            .prompter(Arc::new(DenyPrompter))
+            .hook_registry(TestHookRegistry::with(Arc::new(hook)))
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
+
+    let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+
+    // 改写后输入被策略复查拒绝：工具未执行，回灌 permission denied
+    assert!(
+        shell_for_assert.take_calls().is_empty(),
+        "改写后输入应被拒绝，工具不应执行"
+    );
+    let messages = rt.storage().load(&rt.session().id).await.unwrap();
+    let denied = messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b,
+                minicoding_core::model::ContentBlock::ToolResult { content, is_error, .. }
+                if *is_error && format!("{content:?}").contains("permission denied")
+            )
+        })
+    });
+    assert!(denied, "应有 permission denied 的 tool_result");
+}
+
+/// S4：原始 Allow 的输入被 Hook 改写为需 Ask 的内容 → 升级 Ask → DenyPrompter 拒绝。
+#[tokio::test]
+async fn hook_modify_input_escalates_to_ask() {
+    use minicoding_core::hooks::{HookEvent, HookMatcher};
+
+    let mut tools = ToolRegistry::new();
+    let shell = Arc::new(MockTool::command("shell.run", "ok"));
+    let shell_for_assert = Arc::clone(&shell);
+    tools.register(Arc::clone(&shell) as Arc<dyn minicoding_core::tool::Tool>);
+
+    let hook = ModifyInputHook {
+        matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+        new_input: serde_json::json!({"cmd": "danger ops"}),
+    };
+    let script = vec![
+        tool_call_deltas("c1", "shell.run", r#"{"cmd":"ls"}"#),
+        text_deltas("done"),
+    ];
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(Arc::new(ScriptedProvider::new(script)))
+            .context(Arc::new(TestContext::new("test system prompt")))
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .policy(Arc::new(InputSensitivePolicy))
+            .prompter(Arc::new(DenyPrompter))
+            .hook_registry(TestHookRegistry::with(Arc::new(hook)))
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
+
+    let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+    assert!(
+        shell_for_assert.take_calls().is_empty(),
+        "升级 Ask 后被 DenyPrompter 拒绝，工具不应执行"
+    );
+}
+
+/// S4：Hook 未修改输入时不触发重查（原始 Allow 路径不受影响）。
+#[tokio::test]
+async fn hook_without_modify_input_keeps_allow_path() {
+    use minicoding_core::hooks::{HookEvent, HookMatcher};
+
+    let mut tools = ToolRegistry::new();
+    let shell = Arc::new(MockTool::command("shell.run", "ran"));
+    let shell_for_assert = Arc::clone(&shell);
+    tools.register(Arc::clone(&shell) as Arc<dyn minicoding_core::tool::Tool>);
+
+    // Continue 输出（不改输入）
+    let hook = NoopModifyHook {
+        matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+    };
+    let script = vec![
+        tool_call_deltas("c1", "shell.run", r#"{"cmd":"ls"}"#),
+        text_deltas("done"),
+    ];
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(Arc::new(ScriptedProvider::new(script)))
+            .context(Arc::new(TestContext::new("test system prompt")))
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .policy(Arc::new(InputSensitivePolicy))
+            .prompter(Arc::new(DenyPrompter))
+            .hook_registry(TestHookRegistry::with(Arc::new(hook)))
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
+
+    let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+    assert_eq!(shell_for_assert.take_calls().len(), 1, "Allow 路径正常执行");
+}
+
+/// 不干预的 PreToolUse Hook。
+struct NoopModifyHook {
+    matcher: minicoding_core::hooks::HookMatcher,
+}
+
+impl minicoding_core::hooks::Hook for NoopModifyHook {
+    fn name(&self) -> &str {
+        "noop-hook"
+    }
+    fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
+        &self.matcher
+    }
+    fn run(
+        &self,
+        _input: minicoding_core::hooks::HookInput,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<minicoding_core::hooks::HookOutput, minicoding_core::hooks::HookError>,
+    > {
+        Box::pin(async move { Ok(minicoding_core::hooks::HookOutput::continue_()) })
+    }
+}
+
 /// M-09：沙箱拒绝结构化透传（denial → `ToolResultMeta.sandbox_denied`）。
 #[tokio::test]
 async fn sandbox_denial_structured_metadata() {

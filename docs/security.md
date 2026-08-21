@@ -795,3 +795,44 @@ minicoding doctor --security
 | 环境变量 | 白名单 include_only | 最小权限，兼容性靠 pass_through 补 |
 | Windows 沙箱 | 受限令牌 + DACL | 成熟度低于 macOS/Linux，初期降级 |
 | auto-review | 可选关闭 | 减少 200× 人类中断，但增加 LLM 成本 |
+
+---
+
+## 15. server 暴露面（S1/S2/S3，2026-08 Sprint 0）
+
+`minicoding serve` / `minicoding-server` 的 HTTP/SSE 端点是本机攻击面最高的一层
+（能读会话、代答权限、触发命令执行）。Sprint 0 落地三层防御：
+
+### 15.1 API 鉴权（S1）
+
+- 启动时强制启用：`--auth-token <t>` 显式指定；省略则自动生成并以 `SERVER_TOKEN=<t>`
+  打印到 stdout（desktop sidecar 由宿主生成并经 CLI 参数内存传递，C-04）；
+- 除 `/health`（liveness）外全端点要求 `Authorization: Bearer <t>`；
+  浏览器 `EventSource` 无法自定义请求头，SSE 端点额外接受 `?token=<t>` 查询参数；
+- token 比较为常量时间实现（防时序侧信道）；
+- `--no-auth` 显式关闭（stderr 三行红字警告），仅限本机隔离环境。
+
+### 15.2 CORS 默认收敛本机来源（S2）
+
+- `cors_origins` 为空时默认仅允许 `localhost`/`127.0.0.1`/`[::1]`（任意端口）——
+  解析 URI host 精确匹配，`http://localhost.evil.com` 类伪装不通过；
+- `--cors-origin` 显式追加精确来源；`*` 通配不再支持。
+  此前默认 `Allow Any` 与浏览器组合可构成 drive-by full-access RCE 链，已消除。
+
+### 15.3 高危预设二次确认（S3/C-22）
+
+- `POST /sessions` 携带 `preset=full-access|external-sandbox` 时必须同时携带
+  `"confirm_danger": true`（UI 先弹红色警告确认框），否则 400；
+- 确认后仍记 tracing warn；会话内每次工具调用的权限决策照常落 audit.log。
+
+### 15.4 Hook 改写输入的策略复查（S4/C-01/C-21）
+
+- PreToolUse Hook `modify_input` 改写工具入参后，Runtime 对**修改后**输入重跑
+  `PermissionPolicy::check`，与原判定**取严合并**（Deny > Ask > Allow）；
+- 合并后为 Deny 时重建 builtin_deny 标记——Hook 的 Allow 不能越过复查结果（C-21）；
+- Ask 弹窗展示改写后的实际输入；审计记录最终生效决策。
+
+### 15.5 LKG 配置不再复制凭证明文（S7/C-04）
+
+- `last-known-good.toml` 以**解析前**快照写入：保留 `env:VAR` 引用原文（回退时重新
+  解析，凭证不断供），剥离字面明文 key；文件 0600（`util::write_private` 统一收口）。

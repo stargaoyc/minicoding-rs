@@ -39,6 +39,15 @@ import type {
  */
 let apiBase: string = import.meta.env.VITE_API_BASE ?? "";
 
+/**
+ * 当前 API 鉴权 token（S1）。
+ *
+ * - Tauri 桌面模式：sidecar 启动后由 `setApiToken` 注入（desktop 生成并内存传递）；
+ * - Web 直连模式：`VITE_API_TOKEN` 环境变量；
+ * - Vite dev proxy 同源模式：proxy 侧注入，前端留空。
+ */
+let authToken: string = import.meta.env.VITE_API_TOKEN ?? "";
+
 /** 读取当前 API base。 */
 export function getApiBase(): string {
   return apiBase;
@@ -51,6 +60,11 @@ export function getApiBase(): string {
  */
 export function setApiBase(base: string): void {
   apiBase = base;
+}
+
+/** 设置 API 鉴权 token（S1，桌面模式 sidecar 启动后调用；空串回退 env）。 */
+export function setApiToken(token: string): void {
+  authToken = token || (import.meta.env.VITE_API_TOKEN ?? "");
 }
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────────
@@ -68,7 +82,12 @@ async function http<T>(path: string, init?: RequestInit, timeoutMs?: number): Pr
     const resp = await fetch(`${apiBase}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...init?.headers },
+      headers: {
+        "Content-Type": "application/json",
+        // S1：鉴权 token（桌面/直连模式携带；同源 proxy 模式为空不发送）
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...init?.headers,
+      },
     });
     if (!resp.ok) {
       const body = await resp.text();
@@ -275,7 +294,9 @@ export function subscribeEvents(
   onError?: (e: Event) => void,
   onOpen?: () => void,
 ): SSESubscription {
-  const url = `${apiBase}/sessions/${sessionId}/events`;
+  // S1：EventSource 不能自定义请求头，token 走查询参数（服务端仅接受该端点的 query 形式）
+  const authQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+  const url = `${apiBase}/sessions/${sessionId}/events${authQuery}`;
   const source = new EventSource(url);
 
   // 排查用：SSE 事件统计（token/reasoning_delta 高频事件按计数合并输出）

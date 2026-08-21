@@ -329,6 +329,9 @@ pub fn resolve_env_vars(config: &mut RuntimeConfig) {
 /// 加载配置（分层：config.toml > last-known-good > 默认）。
 ///
 /// 解析成功时原子写入 last-known-good；失败时回退。
+/// **S7（C-04）**：LKG 以**解析前**快照落盘——保留 `env:VAR` 引用原文（回退时可
+/// 重新解析，凭证不断供），剥离字面明文 key（真实凭证不复制到第二处磁盘文件）；
+/// 文件以 0600 权限写入。
 ///
 /// # Errors
 /// 仅当配置文件存在但解析失败 **且** last-known-good 也不可用时返回错误。
@@ -339,12 +342,15 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
         let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         match toml::from_str::<RuntimeConfig>(&raw) {
             Ok(mut cfg) => {
+                // S7：解析前快照写 LKG（保留 env: 引用、剥离明文 key、0600）
+                let lkg_snapshot = scrubbed_for_lkg(&cfg);
                 resolve_env_vars(&mut cfg);
-                // 原子写入 last-known-good
-                if let (Ok(lkg_path), Ok(serialized)) =
-                    (paths::last_known_good_path(), toml::to_string(&cfg))
-                {
-                    let _ = std::fs::write(lkg_path, serialized);
+                if let (Ok(lkg_path), Ok(serialized)) = (
+                    paths::last_known_good_path(),
+                    toml::to_string(&lkg_snapshot),
+                ) {
+                    let _ =
+                        crate::util::write_private(lkg_path.as_std_path(), serialized.as_bytes());
                 }
                 return Ok(cfg);
             }
@@ -352,8 +358,9 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
                 // 解析失败，尝试 last-known-good 回退（let chains 合并嵌套 if）
                 if let Ok(lkg_path) = paths::last_known_good_path()
                     && lkg_path.exists()
-                    && let Ok(lkg_raw) = std::fs::read_to_string(&lkg_path)
-                    && let Ok(mut lkg_cfg) = toml::from_str::<RuntimeConfig>(&lkg_raw)
+                    && let Some(mut lkg_cfg) = std::fs::read_to_string(&lkg_path)
+                        .ok()
+                        .and_then(|raw| toml::from_str::<RuntimeConfig>(&raw).ok())
                 {
                     tracing::warn!("config.toml 解析失败 ({e})，回退到 last-known-good");
                     resolve_env_vars(&mut lkg_cfg);
@@ -368,6 +375,24 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
     let mut cfg = RuntimeConfig::default();
     resolve_env_vars(&mut cfg);
     Ok(cfg)
+}
+
+/// LKG 落盘前剥离敏感字段（S7/C-04）：`api_key` **字面明文**不落第二处磁盘文件；
+/// `env:` / `${}` 引用原文保留（回退时 `resolve_env_vars` 重新解析，凭证不断供）。
+fn scrubbed_for_lkg(cfg: &RuntimeConfig) -> RuntimeConfig {
+    fn is_env_reference(s: &str) -> bool {
+        s.starts_with("env:") || s.starts_with("${")
+    }
+    let mut c = cfg.clone();
+    if !is_env_reference(&c.provider.api_key) {
+        c.provider.api_key = String::new();
+    }
+    if let Some(small) = &mut c.provider.small
+        && !small.api_key.as_deref().is_some_and(is_env_reference)
+    {
+        small.api_key = None;
+    }
+    c
 }
 
 /// 计算 config hash（用于 resume 时校验一致性）。
@@ -414,7 +439,76 @@ pub fn sanitize_env(env: &HashMap<String, String>) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]
+    #![allow(unsafe_code)] // set_var/remove_var（Rust 2024 标记 unsafe）
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// S7：LKG 保留 env: 引用原文、剥离字面明文 key、0600 权限。
+    #[test]
+    fn lkg_strips_plaintext_key_keeps_env_ref_and_0600() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: 持有 ENV_LOCK 保证串行，无并发 set_var 风险。
+        unsafe {
+            std::env::set_var("MINICODING_HOME", tmp.path());
+        }
+
+        let config_path = paths::config_path().expect("config path");
+        std::fs::write(
+            &config_path,
+            "[provider]\ndefault = \"openai\"\napi_key = \"sk-literal-secret-123\"\nmodel = \"gpt-4\"\n",
+        )
+        .expect("write config");
+
+        let cfg = load_config().expect("load");
+        assert_eq!(
+            cfg.provider.api_key, "sk-literal-secret-123",
+            "运行时配置保留明文 key"
+        );
+
+        let lkg_path = paths::last_known_good_path().expect("lkg path");
+        let lkg_raw = std::fs::read_to_string(&lkg_path).expect("lkg written");
+        assert!(
+            !lkg_raw.contains("sk-literal-secret-123"),
+            "LKG 不应包含字面明文 key: {lkg_raw}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&lkg_path)
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "LKG 应为 0600");
+        }
+
+        // env: 引用场景：引用原文保留，回退时可重新解析
+        std::fs::write(
+            &config_path,
+            "[provider]\ndefault = \"openai\"\napi_key = \"env:S7_TEST_KEY\"\nmodel = \"gpt-4\"\n",
+        )
+        .expect("write config");
+        // SAFETY: 同上。
+        unsafe {
+            std::env::set_var("S7_TEST_KEY", "sk-from-env");
+        }
+        let _ = load_config().expect("load 2");
+        let lkg_raw2 = std::fs::read_to_string(&lkg_path).expect("lkg 2");
+        assert!(
+            lkg_raw2.contains("env:S7_TEST_KEY"),
+            "env 引用应原样保留: {lkg_raw2}"
+        );
+        assert!(!lkg_raw2.contains("sk-from-env"), "解析后的值不应落 LKG");
+
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("S7_TEST_KEY");
+            std::env::remove_var("MINICODING_HOME");
+        }
+    }
 
     #[test]
     fn hooks_config_default_is_empty() {

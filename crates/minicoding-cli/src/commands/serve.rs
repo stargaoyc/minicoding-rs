@@ -103,10 +103,18 @@ pub struct ServeCommand {
 
     /// CORS 允许的来源（M9 `--cors-origin`，可多次指定，见 `design.md` §26.6）。
     ///
-    /// 默认（不指定）允许任意来源（`*`，开发用）；指定后仅允许列出的来源精确
-    /// 匹配（生产部署）。桌面模式同源无需配置。仅 HTTP 模式生效。
+    /// 默认（不指定）仅允许本机来源（`localhost`/`127.0.0.1`/`[::1]`，S2）；指定后仅允许
+    /// 列出的来源精确匹配。桌面模式同源无需配置。仅 HTTP 模式生效。
     #[arg(long = "cors-origin")]
     cors_origins: Vec<String>,
+
+    /// API 鉴权 token（S1）。省略时自动生成并打印 `SERVER_TOKEN=<t>`。仅 HTTP 模式生效。
+    #[arg(long)]
+    auth_token: Option<String>,
+
+    /// 关闭 API 鉴权（仅限本机隔离环境；任意进程可完全控制 Agent）。仅 HTTP 模式生效。
+    #[arg(long, default_value_t = false)]
+    no_auth: bool,
 
     /// 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见
     /// `security.md` §2.6）。`full-access` = 沙箱外全自动（BypassPermissions +
@@ -280,8 +288,26 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
     // 解析 provider 配置（CLI > env > config.toml > 默认）
     let resolved = resolve_provider_config(cmd);
 
+    // S1：鉴权 token——显式指定 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭
+    let auth_token = if cmd.no_auth {
+        eprintln!(
+            "WARNING: API 鉴权已禁用（--no-auth）：本机任意进程可读取会话、代答权限、执行命令"
+        );
+        None
+    } else {
+        Some(
+            cmd.auth_token
+                .clone()
+                .unwrap_or_else(minicoding_server::generate_auth_token),
+        )
+    };
+    if let Some(t) = &auth_token {
+        println!("SERVER_TOKEN={t}");
+    }
+
     let cfg = minicoding_server::ServerConfig {
         bind,
+        auth_token,
         provider_kind: resolved.provider_kind,
         provider_name: resolved.provider_name,
         api_base: resolved.api_base,
