@@ -1,0 +1,3 @@
+allowBuilds:
+  msw: false  # msw postinstall 仅装浏览器 CLI 扩展，库用法（vitest 内拦截）不需要
+verifyDepsBeforeRun: false

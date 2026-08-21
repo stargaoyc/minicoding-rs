@@ -4,6 +4,8 @@ import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
 import type { Message, ToolResult } from "../../api/generated";
 import type { ActiveTool } from "../../hooks/useChat";
+import { sandboxDenyLabel } from "../../lib/message";
+import type { SandboxDenyInfo as SandboxDenyInfoDto } from "../../api/generated";
 import { summarizeToolContent } from "../../lib/message";
 import type { ToolContent } from "../../api/generated";
 
@@ -136,6 +138,7 @@ export function MessageList({
                   pinned: false,
                   summarized: false,
                   source: "llm",
+                  compressed_range: null,
                 },
               } as Message
             }
@@ -219,14 +222,42 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
       : undefined,
   );
 
+  // M-09 沙箱拒绝卡片：结构化 metadata.sandbox_denied 存在时渲染专属样式，
+  // 前端只做展示（C-30 判定在后端，不可被前端绕过）
+  const denied =
+    result && typeof result === "object" && "metadata" in result
+      ? ((result as { metadata?: { sandbox_denied?: SandboxDenyInfoDto | null } }).metadata
+          ?.sandbox_denied ?? null)
+      : null;
+
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/60 px-3 py-2">
+    <div
+      className={`rounded-lg border px-3 py-2 ${
+        denied
+          ? "border-[var(--color-risk-high)]/50 bg-[var(--color-risk-high)]/5"
+          : "border-[var(--color-border)] bg-[var(--color-surface)]/60"
+      }`}
+    >
       <div className="flex items-center gap-2 text-xs">
         <span className={`${iconClass} text-sm leading-none`}>{icon}</span>
         <span className="font-mono text-[var(--color-text)]">{name}</span>
         <span className="text-[10px] text-[var(--color-text-muted)]">{callId.slice(-6)}</span>
-        <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">{statusLabel}</span>
+        {denied ? (
+          <span className="ml-auto rounded bg-[var(--color-risk-high)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-risk-high)]">
+            🛡 沙箱拒绝 · {sandboxDenyLabel(denied.kind)}
+          </span>
+        ) : (
+          <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">{statusLabel}</span>
+        )}
       </div>
+      {denied && (
+        <p
+          className="mt-1 line-clamp-2 break-all text-[11px] text-[var(--color-risk-high)]/90"
+          title={denied.detail}
+        >
+          {denied.detail}
+        </p>
+      )}
       {/* R-05（M-11）：按工具名本地渲染结构化结果（零协议改动，前端内置 renderer）。
            fs.glob → 文件列表；task.list / plan.list → 表格；其余工具回落文本摘要。 */}
       {status === "ok" && result && renderStructuredToolResult(name, result)}

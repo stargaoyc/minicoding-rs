@@ -7,23 +7,18 @@ import {
   subscribeEvents,
   type EventDto,
 } from "../api/client";
-import type { Message, ToolResult } from "../api/generated";
+import type { Message } from "../api/generated";
+import {
+  applyChatEvent,
+  initialChatState,
+  type ChatEffect,
+  type ChatStreamState,
+  type WaitingPermission,
+} from "./chatReducer";
 
-/** 进行中的工具调用（供 UI 渲染工具卡片，见 AGENTS.md §8.5 流式状态）。 */
-export interface ActiveTool {
-  callId: string;
-  tool: string;
-  status: "running" | "ok" | "err";
-  result?: ToolResult;
-}
-
-/** 等待用户确认的权限请求（`permission_requested` → resolved/turn_end 之间）。 */
-export interface WaitingPermission {
-  id: string;
-  tool: string;
-  summary: string;
-  risk: "low" | "medium" | "high";
-}
+// ActiveTool/WaitingPermission 类型与 SSE 归约逻辑在 `chatReducer.ts`
+// （M-14/R-10 抽出纯函数，供 record/replay 快照测试）；此处再导出保持兼容。
+export type { ActiveTool, WaitingPermission } from "./chatReducer";
 
 /**
  * 对话 hook：消息快照 + SSE 流式增量（见 AGENTS.md §8.5）。
@@ -59,7 +54,7 @@ export function useSendMessage(sessionId: string | null) {
         tool_calls: [],
         tool_call_id: null,
         created_at: new Date().toISOString(),
-        metadata: { tokens: null, pinned: false, summarized: false, source: "user" },
+        metadata: { tokens: null, pinned: false, summarized: false, source: "user", compressed_range: null },
       };
       qc.setQueryData<Message[]>(["messages", sessionId], (old) => [...(old ?? []), optimistic]);
       return { prev };
@@ -93,15 +88,12 @@ interface SSEStreamOptions {
  */
 export function useSSEStream(sessionId: string | null, options?: SSEStreamOptions) {
   const qc = useQueryClient();
-  const [streamingText, setStreamingText] = useState("");
-  // 当前 turn 的思考过程（reasoning/thinking 增量，瞬态展示，不持久化）
-  const [streamingReasoning, setStreamingReasoning] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
-  // 等待用户确认的权限请求（弹窗联动 + 底部横幅提示，解决"权限等待不可见"问题）
-  const [waitingPermission, setWaitingPermission] = useState<WaitingPermission | null>(null);
-  // 权限被拒提示（用户拒绝或 300s 超时自动拒绝），下个 turn 开始时清除
-  const [permissionDeniedMsg, setPermissionDeniedMsg] = useState<string | null>(null);
+  // SSE 归约状态集中在单一对象（M-14：归约逻辑在 chatReducer.ts，可 record/replay 测试）
+  const [chatState, setChatState] = useState<ChatStreamState>(initialChatState);
+  const { streamingText, streamingReasoning, isStreaming, activeTools, waitingPermission, permissionDeniedMsg } =
+    chatState;
+  // 归约用最新状态引用（handleEvent 闭包稳定，不随状态重建订阅）
+  const chatStateRef = useRef<ChatStreamState>(initialChatState);
   const waitingRef = useRef<WaitingPermission | null>(null);
   // turn 开始时刻（`turn_streaming_started` 或首个 `tool_call_started`），供 elapsed 计时
   const turnStartedAt = useRef<number | null>(null);
@@ -112,124 +104,61 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
   /** 处理一条权限请求（SSE 实时事件或 pending 快照恢复共用）。 */
   const handlePermissionRequested = useCallback(
     (e: { id: string; tool: string; summary: string; risk: "low" | "medium" | "high" }) => {
-      const w = { id: e.id, tool: e.tool, summary: e.summary, risk: e.risk };
+      const w: WaitingPermission = { id: e.id, tool: e.tool, summary: e.summary, risk: e.risk };
       waitingRef.current = w;
-      setWaitingPermission(w);
-      setPermissionDeniedMsg(null);
+      setChatState((prev) => {
+        const next = { ...prev, waitingPermission: w, permissionDeniedMsg: null };
+        chatStateRef.current = next;
+        return next;
+      });
       optsRef.current?.onPermissionRequested?.(w);
     },
     [],
   );
 
-  const handleEvent = useCallback(
-    (event: EventDto) => {
-      switch (event.type) {
-        case "turn_streaming_started":
-          setStreamingText("");
-          setStreamingReasoning("");
-          setIsStreaming(true);
-          setActiveTools([]);
-          setWaitingPermission(null);
-          setPermissionDeniedMsg(null);
-          turnStartedAt.current = Date.now();
-          break;
-        case "token":
-          setStreamingText((prev) => prev + event.text);
-          break;
-        case "reasoning_delta":
-          // 思考过程增量：追加到独立文本（与正文分开渲染）
-          setStreamingReasoning((prev) => prev + event.text);
-          break;
-        case "message_appended":
-          setStreamingText("");
-          setStreamingReasoning("");
-          setIsStreaming(false);
-          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
-          break;
-        case "turn_end":
-          setIsStreaming(false);
-          // 清空本 turn 的瞬态渲染：interrupted（用户终止）时后端不会补发
-          // message_appended 之外的清理事件，残留的流式文本/工具卡片会一直
-          // 停在列表最底部（用户反馈"终止后残留渲染"）。无条件清空最安全。
-          setStreamingText("");
-          setStreamingReasoning("");
-          setActiveTools([]);
-          // 权限请求未获响应（后端默认 300s 超时自动 Deny，不发 resolved 事件）：
-          // 在 turn 结束时提示原因，避免"静默失败"（工具卡片空 + 无文本内容）
-          if (event.stop_reason !== "interrupted") {
-            const w = waitingRef.current;
-            if (w) {
-              setPermissionDeniedMsg(`权限请求未及时确认，已自动拒绝：${w.tool}（超过响应时限）`);
-              waitingRef.current = null;
-              setWaitingPermission(null);
-            }
-          }
-          break;
-        case "tool_call_started":
-          // 工具开始：加入 active 列表（UI 显示 spinner + 工具名）
-          setActiveTools((prev) => [
-            ...prev.filter((t) => t.callId !== event.call_id),
-            { callId: event.call_id, tool: event.tool, status: "running" },
-          ]);
-          break;
-        case "tool_call_finished": {
-          setActiveTools((prev) =>
-            prev.map((t) =>
-              t.callId === event.call_id
-                ? {
-                    ...t,
-                    status: event.result.is_error ? "err" : "ok",
-                    result: event.result,
-                  }
-                : t,
-            ),
-          );
-          // 工具完成后刷新消息 + 工作区（文件改动后树/预览/diff 失效，W-11）
-          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "diff", sessionId] });
-          qc.invalidateQueries({ queryKey: ["workspace", "file", sessionId] });
-          break;
+  /** 副作用映射：reducer 产出的失效指令 → TanStack Query invalidate。 */
+  const runEffects = useCallback(
+    (effects: ChatEffect[]) => {
+      for (const e of effects) {
+        switch (e) {
+          case "invalidate-messages":
+            qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+            break;
+          case "invalidate-workspace":
+            qc.invalidateQueries({ queryKey: ["workspace", "root", sessionId] });
+            qc.invalidateQueries({ queryKey: ["workspace", "list", sessionId] });
+            qc.invalidateQueries({ queryKey: ["workspace", "diff", sessionId] });
+            qc.invalidateQueries({ queryKey: ["workspace", "file", sessionId] });
+            break;
+          case "invalidate-sessions":
+            qc.invalidateQueries({ queryKey: ["sessions"] });
+            break;
         }
-        case "permission_requested": {
-          handlePermissionRequested({
-            id: event.id,
-            tool: event.tool,
-            summary: event.summary,
-            risk: event.risk,
-          });
-          break;
-        }
-        case "permission_resolved": {
-          // 用户已在弹窗中决策；后端会继续/中止工具调用。
-          const w = waitingRef.current;
-          if (w && w.id === event.id) {
-            // Decision = "allow" | { deny: string }
-            if (typeof event.decision === "object") {
-              setPermissionDeniedMsg(`权限请求已被拒绝：${w.tool}（${event.decision.deny}）`);
-            }
-            waitingRef.current = null;
-            setWaitingPermission(null);
-          }
-          break;
-        }
-        case "task_updated":
-          // invalidate sessions 列表以刷新 task 计数
-          qc.invalidateQueries({ queryKey: ["sessions"] });
-          optsRef.current?.onTaskUpdated?.();
-          break;
-        case "permission_mode_changed":
-        case "session_created":
-        case "config_changed":
-        case "sessions_listed":
-        case "session_retrieved":
-        case "command_error":
-          qc.invalidateQueries({ queryKey: ["messages", sessionId] });
-          break;
       }
     },
     [qc, sessionId],
+  );
+
+  const handleEvent = useCallback(
+    (event: EventDto) => {
+      if (event.type === "turn_streaming_started") {
+        turnStartedAt.current = Date.now();
+      }
+      const { state, effects } = applyChatEvent(chatStateRef.current, event);
+      chatStateRef.current = state;
+      setChatState(state);
+      runEffects(effects);
+      if (event.type === "permission_requested") {
+        waitingRef.current = state.waitingPermission;
+        optsRef.current?.onPermissionRequested?.(state.waitingPermission!);
+      } else if (event.type === "permission_resolved" || event.type === "turn_end") {
+        waitingRef.current = state.waitingPermission;
+      }
+      if (event.type === "task_updated") {
+        optsRef.current?.onTaskUpdated?.();
+      }
+    },
+    [runEffects],
   );
 
   useEffect(() => {

@@ -3,7 +3,7 @@ import { User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall } from "../../api/generated";
 import { cn, formatTime } from "../../lib/utils";
-import { extractText, extractToolResultSummary } from "../../lib/message";
+import { extractText, extractToolResultSummary, sandboxDenyLabel } from "../../lib/message";
 
 const ROLE_CONFIG = {
   user: {
@@ -86,7 +86,14 @@ export function MessageBubble({
   // 工具结果消息（role=tool）：无任何可显示内容（如纯 JSON `{}`）时不渲染
   // 空白气泡（用户反馈"工具调用输出是空的，不如不显示"）
   const toolResult = message.role === "tool" ? extractToolResultSummary(message) : null;
-  if (message.role === "tool" && !toolResult?.text) {
+  // M-09 沙箱拒绝结构化信息（持久化在 tool_result 块 metadata 中）
+  const sandboxDenied =
+    message.role === "tool"
+      ? (message.content.find(
+          (b): b is Extract<typeof b, { type: "tool_result" }> => b.type === "tool_result",
+        )?.metadata?.sandbox_denied ?? null)
+      : null;
+  if (message.role === "tool" && !toolResult?.text && !sandboxDenied) {
     return null;
   }
 
@@ -116,7 +123,19 @@ export function MessageBubble({
           </span>
         </div>
         <div className="prose prose-invert max-w-none text-sm leading-relaxed">
-          {text ? (
+          {sandboxDenied ? (
+            <div className="rounded-md border border-[var(--color-risk-high)]/40 bg-[var(--color-risk-high)]/5 px-2.5 py-2 text-xs">
+              <span className="mr-1.5 font-medium text-[var(--color-risk-high)]">
+                🛡 沙箱拒绝 · {sandboxDenyLabel(sandboxDenied.kind)}
+              </span>
+              <span
+                className="whitespace-pre-wrap break-all text-[var(--color-risk-high)]/90"
+                title={sandboxDenied.detail}
+              >
+                {sandboxDenied.detail}
+              </span>
+            </div>
+          ) : text ? (
             <ReactMarkdown
               components={{
                 code: ({ children, className }) => (

@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "gen-types": "cargo test -p minicoding-protocol --features ts -- --nocapture 2>&1 | tail -5 && find src/api/generated -name '*.ts' -exec sed -i 's/[[:space:]]*$//' {} +",
     "lint": "oxlint src/",
-    "format": "oxfmt src/"
+    "format": "oxfmt src/",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:record": "SNAPSHOT_MODE=record vitest run"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.23",
@@ -31,13 +34,19 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.2",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "^6.0.3",
+    "@vitest/coverage-v8": "^4.1.11",
+    "jsdom": "^30.0.1",
+    "msw": "^2.15.0",
     "oxfmt": "^0.63.0",
     "oxlint": "^1.78.0",
     "tailwindcss": "^4.3.3",
     "typescript": "7.0.2",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.11"
   }
 }

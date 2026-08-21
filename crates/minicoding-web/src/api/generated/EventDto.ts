@@ -32,6 +32,8 @@ export type EventDto = {
   | { type: "permission_mode_changed"; from: PermissionMode; to: PermissionMode }
   | { type: "task_updated"; task: Task }
   | { type: "config_changed" }
+  | { type: "step_started"; iter: number; tool_call_ids: Array<string> }
+  | { type: "step_ended"; iter: number }
   | { type: "sessions_listed"; sessions: Array<SessionMeta> }
   | { type: "session_retrieved"; session_id: string; messages: Array<Message> }
   | { type: "command_error"; message: string }

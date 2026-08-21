@@ -156,6 +156,38 @@ jobs:
         env:
           OPENAI_API_KEY: sk-test-ci-mock-not-real
 
+  # M-14/R-10：前端单测基建（Vitest + MSW，AGENTS.md §8.8）。
+  # oxlint/oxfmt/tsc/vitest/vite build 与 Rust 侧 fmt/clippy/test 门禁对齐；
+  # 测试不连真实后端（MSW 拦截 REST + mock EventSource 重放 SSE fixture）。
+  web:
+    name: web (oxlint + tsc + vitest + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: crates/minicoding-web/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: crates/minicoding-web
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        working-directory: crates/minicoding-web
+        run: pnpm lint
+      - name: Typecheck
+        working-directory: crates/minicoding-web
+        run: pnpm typecheck
+      - name: Unit tests
+        working-directory: crates/minicoding-web
+        run: pnpm test
+      - name: Build
+        working-directory: crates/minicoding-web
+        run: pnpm build
+
   # W-06/W-07：Tauri 桌面壳编译（需 webkit2gtk/glib 系统库）。
   # 仅编译不运行（需 GUI 运行时），验证 desktop feature 代码正确性。
   desktop:

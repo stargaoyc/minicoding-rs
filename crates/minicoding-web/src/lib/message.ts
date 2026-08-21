@@ -43,3 +43,22 @@ export function extractToolResultSummary(message: Pick<Message, "content">): {
   // 空 JSON（如 `{}`）视为无可显示内容
   return { text: text.trim() === "{}" ? "" : text, isError: block.is_error };
 }
+
+/** 沙箱拒绝类型标签（M-09，与 Rust `SandboxDenyKind` 对齐）。 */
+export type SandboxDenyKindDto = import("../api/generated").SandboxDenyKind;
+
+/** `SandboxDenyKind` → 中文标签（前端拒绝卡片用）。 */
+export function sandboxDenyLabel(kind: SandboxDenyKindDto): string {
+  switch (kind.kind) {
+    case "path_escape":
+      return "路径越界";
+    case "syscall_blocked":
+      return "系统调用被拒";
+    case "write_forbidden":
+      return "写入被拒";
+    case "resource_limit":
+      return "资源受限";
+    case "external":
+      return "沙箱拒绝";
+  }
+}
