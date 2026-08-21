@@ -10,7 +10,7 @@ import {
   saveContextConfig,
   type ProviderConfig,
 } from "../api/tauri";
-import { setApiBase } from "../api/client";
+import { setApiBase, setApiToken } from "../api/client";
 import { loadWebSettings, saveWebSettings, type WebProviderSettings } from "./webSettings";
 
 /**
@@ -123,6 +123,7 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       const session = await startSession();
       const base = `http://127.0.0.1:${session.port}`;
       setApiBase(base);
+      setApiToken(session.token);
       set({ phase: "ready", apiBase: base, error: null });
     } catch (e) {
       set({

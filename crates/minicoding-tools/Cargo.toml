@@ -42,6 +42,8 @@ reqwest = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
+# 架构守卫：复用 core 的 manifest 断言
+minicoding-core = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
 
@@ -55,4 +57,6 @@ default = []
 # mcp = ["dep:minicoding-mcp"]
 web = ["dep:reqwest", "dep:url"]
 # full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "web"]
-
+[target.'cfg(unix)'.dependencies]
+# C-07：进程组整树终止（pre_exec setpgid + 超时 killpg）
+libc = "0.2"

@@ -222,7 +222,7 @@ libseccomp = "0.x"
 windows = { version = "...", features = ["..."] }
 ```
 
-- `minicoding-core` 依赖必须是"轻量 + 无平台/网络"（仅 `tokio`/`serde`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`，见 `docs/modules.md` §1.4）
+- `minicoding-core` 依赖必须"轻量 + 无平台/网络"：workspace 白名单见 `docs/modules.md` §1.4 与守卫测试 `tests/architecture.rs`（含 notify/ts-rs 等，新增需先过守卫并同步文档）
 - `reqwest`/`landlock`/`libseccomp`/`rmcp`/`ratatui`/`windows` 只在对应实现 crate 引入
 - 实现 crate 通过 cargo feature 按需启用（`default = ["memory", "sandbox"]` 等，见 `docs/modules.md` §0.4）
 

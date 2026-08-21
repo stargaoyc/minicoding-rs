@@ -23,6 +23,7 @@
 
 mod async_rewake;
 mod builtin;
+mod dispatch;
 mod protocol;
 mod registry;
 mod script;

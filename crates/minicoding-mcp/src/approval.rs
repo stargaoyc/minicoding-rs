@@ -398,6 +398,7 @@ mod tests {
             enabled: true,
             required: false,
             enabled_tools: None,
+            trust_read_only_hint: false,
         }
     }
 

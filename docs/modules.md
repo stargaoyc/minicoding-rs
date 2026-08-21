@@ -244,7 +244,7 @@ pub mod prelude {
 
 - **零实现逻辑**：core 不含压缩算法、黑名单正则、landlock ruleset、rmcp 调用、JSONL 写入等任何实现。`Runtime` 只编排：调 `ContextManager::build_chat_request` → `LlmProvider::chat_stream` → `ToolRegistry::dispatch`（其内调 `PermissionPolicy::check` → `SandboxDriver::apply`）。
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
-- **轻量依赖**：core 只依赖 `tokio`/`serde`/`serde_json`/`tracing`/`thiserror`/`uuid`/`time`/`camino`/`trait-variant`。无 `reqwest`/`landlock`/`rmcp`/`libseccomp` 等重依赖。
+- **轻量依赖**（A9 对齐实际清单，2026-08）：`tokio`/`tokio-util`/`futures`/`serde`/`serde_json`/`toml`/`tracing`/`thiserror`/`camino`/`uuid`/`ulid`/`time`/`home`/`trait-variant`/`semver`/`notify`(ConfigWatcher)/`ts-rs`(optional, feature `ts`)。守卫测试 `tests/architecture.rs` 白名单与此同步；无 `reqwest`/`landlock`/`rmcp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
 - **Denial 抽象（M-05）**：`SandboxDenialDetector`/`SandboxDenialTracker` trait 与 `BreakerState`/`DenialMatch` 数据在 core（`sandbox/breaker.rs`），平台签名库与熔断实现在 `minicoding-sandbox`（`denial.rs`），core 默认注入 `NoopDenialDetector`/`NoopDenialTracker` 兜底（与 NoopDriver 同哲学）。事件重放（`replay_session_state` 等）M-05 后位于 `minicoding-storage`，core 不再导出。
 - **熔断去重（M-05）**：沙箱拒绝熔断（C-30）与压缩熔断（C-29）共享 `util::CircuitBreaker` 通用骨架（单计数器 + 双阈值 + Closed/SoftTripped/HardTripped 状态）；压缩侧在骨架之上另维护 thrash 计数器（`consecutive_oversize`）表达其特有失效模式，两者状态语义各自映射，不互相耦合。
@@ -367,7 +367,7 @@ minicoding-memory/src/
 ```
 minicoding-hooks/src/
 ├── lib.rs                 # 工厂 + re-export
-├── registry.rs            # HookRegistryImpl 实现 HookRegistry（串行聚合，见 hooks.md §5）
+├── registry.rs            # HookRegistryImpl（dispatch 算法 A1 后位于本 crate `registry.rs`/`dispatch.rs`，core 仅留 trait 与 Noop） 实现 HookRegistry（串行聚合，见 hooks.md §5）
 ├── script.rs              # ScriptHook 适配器（外部可执行 + JSON over stdio + 退出码语义）
 ├── async_rewake.rs        # asyncRewake 异步唤醒管理（后台任务 + 唤醒注入，见 hooks.md §11）
 ├── builtin.rs             # 6 个内置示例 Hook（FmtOnWrite/AutoApproveTests/BlockSecrets/

@@ -18,7 +18,6 @@ use minicoding_core::memory::SessionSummarizer as SessionSummarizerTrait;
 use minicoding_core::model::{LlmError, MemoryError, Message, Role};
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::{BoxFuture, ChatRequest, Delta, GenerationParams, LlmProvider};
-use minicoding_storage::SessionIndex;
 
 /// 启发式兜底取每条消息首 N 字符（会话摘要规格：100，区别于 context compress 的 200）。
 const HEURISTIC_CHARS_PER_MSG: usize = 100;
@@ -215,22 +214,6 @@ fn role_label(role: &Role) -> &'static str {
     }
 }
 
-/// 将摘要写入会话索引：更新指定 `session_id` 的 `summary` 字段。
-///
-/// 若 `session_id` 不在索引中则无操作（会话尚未建立索引项时不应调用本函数）。
-/// 已存在则覆盖原 `summary`（无论原值是否为 `None`），保留原 `created_at`。
-pub fn save_summary(index: &mut SessionIndex, session_id: &str, summary: String) {
-    let updated = {
-        let Some(entry) = index.get(session_id) else {
-            return;
-        };
-        let mut u = entry.clone();
-        u.summary = Some(summary);
-        u
-    };
-    index.add(updated);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,10 +221,8 @@ mod tests {
     use minicoding_core::provider::{
         BoxFuture, BoxStream, Capabilities, ChatRequest, LlmProvider, Tokenizer,
     };
-    use minicoding_storage::SessionIndexEntry;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use time::OffsetDateTime;
 
     /// 可配置的 mock provider：按预设返回摘要文本或错误。
     /// 调用计数通过共享 `Arc<AtomicUsize>` 暴露给测试，便于在 provider 被转为
@@ -441,37 +422,5 @@ mod tests {
         let empty: Vec<Message> = Vec::new();
         let summary = heuristic_summary(&empty);
         assert_eq!(summary, "[heuristic fallback] ");
-    }
-
-    #[test]
-    fn save_summary_updates_existing_entry() {
-        let mut index = SessionIndex::new();
-        let entry = SessionIndexEntry::new("sess-1", None, OffsetDateTime::now_utc());
-        index.add(entry);
-
-        save_summary(&mut index, "sess-1", "new summary".to_string());
-
-        let updated = index.get("sess-1").unwrap();
-        assert_eq!(updated.summary.as_deref(), Some("new summary"));
-    }
-
-    #[test]
-    fn save_summary_overwrites_existing_summary() {
-        let mut index = SessionIndex::new();
-        let entry =
-            SessionIndexEntry::new("sess-1", Some("old".to_string()), OffsetDateTime::now_utc());
-        index.add(entry);
-
-        save_summary(&mut index, "sess-1", "fresh".to_string());
-
-        let updated = index.get("sess-1").unwrap();
-        assert_eq!(updated.summary.as_deref(), Some("fresh"));
-    }
-
-    #[test]
-    fn save_summary_missing_session_noop() {
-        let mut index = SessionIndex::new();
-        save_summary(&mut index, "nonexistent", "summary".to_string());
-        assert!(index.is_empty(), "expected empty: index");
     }
 }
