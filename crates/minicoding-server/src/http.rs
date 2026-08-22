@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn constant_time_eq_basic() {
         assert!(constant_time_eq("abc", "abc"));
-        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abx"));
         assert!(!constant_time_eq("abc", "ab"));
     }
 

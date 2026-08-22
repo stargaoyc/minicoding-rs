@@ -195,7 +195,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      # 钉住已验证的 nightly：2026-08-22 后的 nightly 在 tokio opaque type 上触发
+      # rustc ICE（layout_of rigid alias，影响本 job 的 GUI 依赖栈）
+      - uses: dtolnay/rust-toolchain@nightly-2026-08-19
       - uses: Swatinem/rust-cache@v2
       - name: Install Tauri system dependencies
         run: |
