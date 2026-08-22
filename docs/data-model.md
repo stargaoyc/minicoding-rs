@@ -47,53 +47,50 @@ MemoryStore
 
 ### 2.2 JSONL 记录结构
 
-会话文件 `~/.minicoding/sessions/{session_id}.jsonl`，每行一条记录。`message` 行新增可选字段 `parent_uuid`（与 `design.md` §10.3 对齐），用于支持 Fork / 压缩边界 / Side-chain。**默认情况下 `parent_uuid` 等于上一行 `message` 的 `id`，线性读取不需要建 DAG**——`parent_uuid` 仅在 Fork/Side-chain 检视时被使用。
+会话文件 `~/.minicoding/sessions/{session_id}.jsonl`，**每行一条裸 `Message` JSON**
+（无信封字段；D1 按磁盘事实重写，2026-08）。首行为格式版本头（M-02）：
 
 ```json
-{"v":1,"type":"session_start","id":"sess_01H...","created_at":"2026-07-24T10:00:00Z","workdir":"e:/projects/foo","config_hash":1234567890,"provider":"anthropic","model":"claude-sonnet-4"}
-{"v":1,"type":"message","id":"msg_01H...","parent_uuid":null,"role":"system","content":[{"type":"text","text":"You are..."}],"created_at":"...","meta":{"tokens":42,"source":"system"}}
-{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"user","content":[{"type":"text","text":"解释入口"}],"created_at":"...","meta":{"source":"user"}}
-{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"assistant","content":[{"type":"text","text":"让我读取"}],"tool_calls":[{"id":"call_1","name":"fs.read","input":{"path":"src/main.rs"}}],"created_at":"...","meta":{"tokens":28,"source":"llm","usage":{"input":512,"output":28}}}
-{"v":1,"type":"message","id":"msg_01H...","parent_uuid":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"fn main() {...}"},"is_error":false}],"created_at":"...","meta":{"source":"tool","tool_name":"fs.read","elapsed_ms":3,"bytes":1024}}
-
-`tool_result` 块 M-09 起携带可选 `metadata` 字段（含 `sandbox_denied` 结构化拒绝信息；
-旧数据无此字段，反序列化默认空）：
-
-```json
-{"v":1,"type":"message","id":"msg_01H...","role":"tool","tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"sandbox denied (EPERM): ..."},"is_error":true,"metadata":{"elapsed":{"secs":0,"nanos":0},"bytes":0,"truncated":false,"sandbox_denied":{"kind":{"kind":"syscall_blocked","syscall":"Bad system call"},"detail":"execution: Bad system call"}}}],"created_at":"...","meta":{"source":"tool"}}
+{"_header":{"format_version":1,"app":"minicoding","app_version":"0.2.33"}}
+{"id":"msg_01H...","role":"user","content":[{"type":"text","text":"解释入口"}],"tool_calls":[],"tool_call_id":null,"created_at":"2026-07-24T10:00:01Z","metadata":{"tokens":null,"pinned":false,"summarized":false,"source":"user","compressed_range":null}}
+{"id":"msg_01H...","role":"assistant","content":[{"type":"text","text":"让我读取"}],"tool_calls":[{"id":"call_1","name":"fs.read","input":{"path":"src/main.rs"}}],"tool_call_id":null,"created_at":"2026-07-24T10:00:02Z","metadata":{"tokens":28,"pinned":false,"summarized":false,"source":"llm","compressed_range":null}}
+{"id":"msg_01H...","role":"tool","tool_calls":[],"tool_call_id":"call_1","content":[{"type":"tool_result","call_id":"call_1","content":{"type":"text","text":"fn main() {...}"},"is_error":false,"metadata":{"elapsed":{"secs":0,"nanos":3000000},"bytes":1024,"truncated":false}}],"created_at":"2026-07-24T10:00:03Z","metadata":{"tokens":null,"pinned":false,"summarized":false,"source":"tool","compressed_range":null}}
 ```
 
-`sandbox_denied.kind` 为 tagged enum（`kind` 标签 + payload）：`path_escape`（C-03 路径越界，
-含 `attempted`/`allowed_root`）、`syscall_blocked`（seccomp/EPERM）、`write_forbidden`（landlock/
-Seatbelt/`EACCES`）、`resource_limit`、`external`（macOS/Windows 兜底）。
-{"v":1,"type":"compression","id":"cmp_01H...","at":"...","steps":[{"kind":"tool_result_truncate","affected":["msg_01H..."]},{"kind":"summarize","affected":["msg_01H...","msg_01H..."],"summary_id":"msg_01H..."}],"tokens_before":12000,"tokens_after":4500}
-{"v":1,"type":"message","id":"msg_01H...","parent_uuid":null,"role":"system","content":[{"type":"text","text":"[summarized] ..."}],"created_at":"...","meta":{"source":"summarize","summarized":true}}
-{"v":1,"type":"session_end","at":"...","reason":"normal"}
-```
+要点：
 
-### 2.3 字段说明
+- **`Message` 直接序列化**：字段名以 Rust struct 为准——`metadata`（非 `meta`）、
+  `source ∈ {user, llm, tool, subagent}`；无 `parent_uuid`/`usage`/`tool_name`/
+  `elapsed_ms` 字段（旧文档示例为过期设计稿，已按 D1 移除）；
+- **header 行**：仅文件创建时写入一次，`format_version` 高于当前支持版本的文件
+  在 `load` 时显式报 `StorageError::FormatUnsupported`、scan 跳过（M-02/S-28）；
+- **坏行容错**：单行解析失败跳过并 warn，全部损坏才报 `Corrupted`
+  （M-02/S-28 trait 级覆盖见存储契约测试）；
+- **压缩追溯**：摘要消息的 `metadata.compressed_range` 记录被替代的事件 seq
+  区间（M-07）；压缩审计走 `audit.log` 的 `AuditKind::Compress`，不在本文件；
+- **Fork/parent 链**：`parent_uuid` 仅存于 `index.json` 索引项（非消息行）。
+
+### 2.3 字段说明（以 Rust `Message`/`MessageMeta` 为准）
 
 | 字段 | 说明 |
 |------|------|
-| `v` | schema 版本，当前 1 |
-| `type` | `session_start` / `message` / `compression` / `session_end` / `permission` / `error` |
-| `id` | ULID，全局唯一且时间有序 |
-| `parent_uuid` | 仅 `message` 行：父消息 `id`。默认 = 上一行 `message` 的 `id`；`null` 表示链头或压缩边界（摘要行）；side-chain 头指向派发它的 `task.spawn` 工具调用 `id`。**可选字段，旧文件读取时按 `None` 处理并线性重建**（`#[serde(default)]`） |
-| `meta.tokens` | 该消息占用 token 数（assistant 含 output） |
-| `meta.usage` | 仅 assistant：上游返回的 token 用量 |
-| `meta.source` | 消息产生方：`system`/`user`/`llm`/`tool`/`subagent`/`summarize` |
-| `meta.pinned` | 是否用户固定（不被压缩） |
-| `meta.summarized` | 是否为摘要替换后的消息 |
-| `meta.compressed_range` | M-07 可选：`{from_seq, to_seq, dropped_tokens}` 压缩追溯区间（见 §1）。**旧文件读取时按 `None` 处理**（`#[serde(default, skip_serializing_if)]`） |
+| `_header.format_version` | 首行格式版本，当前 1；更高版本显式拒绝（M-02） |
+| `id` | 消息 id（ULID 形态字符串），全局唯一且时间有序 |
+| `role` | `system` / `user` / `assistant` / `tool` |
+| `content` | 内容块数组：`text` / `image` / `tool_use(ToolCall)` / `tool_result{call_id, content, is_error, metadata}` |
+| `tool_calls` | assistant 发起的工具调用列表（其余角色为空数组） |
+| `tool_call_id` | `role=tool` 时指向触发它的 call id（其余为 null） |
+| `created_at` | RFC3339 时间戳 |
+| `metadata.tokens` | 该消息 token 数（assistant 含 output；LLM 返回或估算） |
+| `metadata.pinned` | 压缩时不裁剪 |
+| `metadata.summarized` | 已被摘要替换 |
+| `metadata.source` | `user` / `llm` / `tool` / `subagent` |
+| `metadata.compressed_range` | M-07：本消息替代的事件 seq 区间 `[from_seq, to_seq]` + `dropped_tokens`（非压缩产物为 null） |
+| `content[].metadata.sandbox_denied` | M-09：沙箱拒绝结构化信息（wire 可选，见 §2.2 说明与 `security.md` §8.7） |
 
-### 2.4 兼容性策略
-
-- 读取时忽略未知字段（`#[serde(default)]` + `serde_json::Value` 兜底）。
-- `v` 字段用于 schema 迁移：`migrate(v_from, v_to, record)` 链式升级。
-- 旧字段保留至少 2 个大版本，标注 deprecated。
-- **`parent_uuid` 前向兼容**：旧文件（v=1，无 `parent_uuid` 字段）读取时 `parent_uuid` 默认 `None`，`Storage::load` 线性扫描时按"上一行 `id`"自动回填，等价于纯数组顺序模型——旧文件零迁移可用。
-
----
+**Fork / parent 链**：不在消息行——`index.json` 的索引项携带 `parent_uuid`
+（默认 = 上一条消息 id；side-chain 头指向派发它的 `task.spawn` 调用 id），
+仅 Fork/Side-chain 检视时使用。
 
 ## 3. 存储分层
 

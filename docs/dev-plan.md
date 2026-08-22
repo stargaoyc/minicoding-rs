@@ -5,7 +5,7 @@
 > **阅读约定**：
 > - **涉及功能** 引用 [`features.md`](./features.md) 的 ID（A-XX/L-XX/T-XX/C-XX/M-XX/P-XX/H-XX/X-XX/O-XX/S-XX/F-XX/E-XX/Q-XX）；
 > - **涉及约束** 引用 [`rules.md`](./rules.md) 的 ID（C-01..C-35）；
-> - **crate** 引用 [`modules.md`](./modules.md) 的 14 个 crate；
+> - **crate** 引用 [`modules.md`](./modules.md) 的 18 个 Cargo 成员 crate；
 > - 里程碑范围以 roadmap 为准。M4/M5 已对齐：M4 = 安全沙箱 + MCP + Journal（11 task），M5 = Hooks + Plan + 子 Agent + macOS 沙箱补齐（8 task）。平台优先级：M4 仅 Linux，M5+ 补 macOS，M6+ 补 Windows（见 `tech-stack.md` §11）。
 
 ---
@@ -113,7 +113,7 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 - **涉及约束**：无（基础设施）
 - **验收标准**：
   - `cargo build --workspace` 通过；
-  - `cargo metadata` 输出包含 14 个 crate；
+  - `cargo metadata` 输出包含 18 个 Cargo 成员 crate；
   - 每个 crate 的 `lib.rs` 含模块注释与 `#![deny(clippy::all, clippy::pedantic)]`（与 `AGENTS.md` §2.9 一致）。
 - **预估工作量**：S
 

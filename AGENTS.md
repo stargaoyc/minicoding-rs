@@ -30,7 +30,7 @@
 - 错误：库 crate `thiserror`，边界 crate `anyhow`
 - 路径：`camino::Utf8PathBuf`（UTF-8 保证）
 - HTTP：`reqwest`（rustls-tls，不裸用 hyper）
-- 沙箱：`sandbox-run` + `landlock` + `libseccomp`（主流库，**不自研** ruleset/profile 胶水）
+- 沙箱：自研驱动（landlock 已接，**seccomp 待接入**）——`sandbox-run` 因 EUPL-1.2 许可证弃用（见 tech-stack.md §13），AGENTS.md 原"不自研"条目随之回收
 - MCP：`rmcp` 2.2（官方 Rust MCP SDK，**不自研** stdio/http）
 - 详见 `docs/tech-stack.md`
 
@@ -45,7 +45,7 @@ minicoding-rs (workspace)
     ├── minicoding-memory        # 长期/Auto/会话记忆 + AGENTS.md loader
     ├── minicoding-hooks         # HookRegistry + ScriptHook + asyncRewake
     ├── minicoding-journal       # FileChangeJournal + /undo
-    ├── minicoding-sandbox       # OS 沙箱驱动（sandbox-run + landlock + libseccomp）
+    ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock；seccomp 待接入）
     ├── minicoding-mcp           # MCP client/server（rmcp 2.2）+ 进程池 + 后台预热
     ├── minicoding-storage       # JSONL 存储 + audit.log
     ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）+ 小 LLM
@@ -119,7 +119,7 @@ minicoding-rs (workspace)
   1. `cargo audit` 无已知漏洞
   2. `cargo deny check licenses` 合规（许可证限 MIT / Apache-2.0 / BSD / ISC）
   3. 仅开必要 feature（如 `reqwest` 只开 `json, rustls-tls, stream`）
-- 优先用主流库（见 `docs/tech-stack.md`），不自研能用库的（沙箱用 sandbox-run、MCP 用 rmcp、HTTP 用 reqwest）
+- 优先用主流库（见 `docs/tech-stack.md`），不自研能用库的（MCP 用 rmcp、HTTP 用 reqwest；沙箱驱动自研，见 tech-stack.md §13 决策记录）
 - 重依赖（`reqwest`/`landlock`/`libseccomp`/`rmcp`/`ratatui`/`windows`）只能在对应实现 crate 引入，不污染 core
 - `Cargo.lock` 提交到仓库（CLI 项目）
 

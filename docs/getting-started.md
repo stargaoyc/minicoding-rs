@@ -66,7 +66,7 @@ cargo --version
 git clone <repo-url> minicoding-rs
 cd minicoding-rs
 
-# 全量构建 workspace（14 个 crate，见 modules.md §0.1）
+# 全量构建 workspace（18 个 Cargo 成员 crate，见 modules.md §0.1；另有 minicoding-web 为独立 npm 项目）
 cargo build --workspace
 
 # 或仅构建 CLI
@@ -533,7 +533,7 @@ Cargo.toml 的依赖如下：
 - serde + serde_json：序列化框架...
 - rmcp 2.2：官方 Rust MCP SDK，对齐 MCP 2025-11-25 spec...
 
-该 workspace 包含 14 个 crate，依赖方向单向不循环（见 modules.md §0.2）。
+该 workspace 包含 18 个 Cargo 成员 crate，依赖方向单向不循环（见 modules.md §0.2）。
 ```
 
 执行流程（`architecture.md` §4.2）：

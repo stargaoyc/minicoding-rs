@@ -124,6 +124,8 @@ pub struct Runtime {
     pub(crate) journal: Option<Arc<dyn Journal>>,
     /// 沙箱拒绝检测器（抽象注入，默认 `NoopDenialDetector` 兜底）。
     pub(crate) denial_detector: Arc<dyn crate::sandbox::SandboxDenialDetector>,
+    /// 当前 turn 序号（PermissionContext.turn 用，0-based；run_turn 入口自增）。
+    pub(crate) current_turn: std::sync::atomic::AtomicU32,
     /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过；抽象注入）。
     pub(crate) sandbox_breaker: Arc<dyn crate::sandbox::SandboxDenialTracker>,
     /// Hook 注册表（M5，默认 `NoopHookRegistry` 兜底）。
@@ -744,6 +746,8 @@ impl Runtime {
                 let mut reminded_levels: HashMap<String, u32> = HashMap::new();
 
                 for iter in 0..max_iters {
+                    self.current_turn
+                        .store(iter, std::sync::atomic::Ordering::Relaxed);
                     // 2. 构建请求（system + tools + 压缩后的历史）
                     let req = match self.ctx.build_chat_request(&self.tools, &config_snapshot).await {
                         Ok(r) => r,
@@ -1147,11 +1151,13 @@ impl Runtime {
             .with_journal_opt(self.journal.clone());
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
+        // 查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch
+        // 报 NotFound，避免懒注册语义变化演变为免检绕过
         let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
             calls.iter().partition(|c| {
                 self.tools
                     .get(&c.name)
-                    .is_none_or(|t| t.side_effect() == SideEffect::None)
+                    .is_some_and(|t| t.side_effect() == SideEffect::None)
             });
 
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
@@ -1345,7 +1351,7 @@ impl Runtime {
             session: self.session.id.clone(),
             workdir: self.workdir.read().await.clone(),
             side_effect,
-            turn: 0,
+            turn: self.current_turn.load(std::sync::atomic::Ordering::Relaxed),
             history: Vec::new(),
             permission_mode: plan_snap.mode,
             allowed_prompts: plan_snap.allowed_prompts,

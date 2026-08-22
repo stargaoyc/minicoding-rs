@@ -531,6 +531,10 @@ pub trait Storage {
     async fn load(&self, session: &SessionId) -> Result<Vec<Message>, StorageError>;
     async fn list_sessions(&self) -> Result<Vec<SessionMeta>, StorageError>;
     async fn delete(&self, session: &SessionId) -> Result<(), StorageError>;
+    /// 会话摘要落盘（T-M3-6；D4 补录：此前 api.md 漏列第 5 方法）。
+    /// `SessionMeta.summary` 同步更新，`list_sessions` 可见。
+    async fn update_summary(&self, session: &SessionId, summary: &str)
+        -> Result<(), StorageError>;
 }
 
 pub struct SessionMeta {
@@ -538,7 +542,7 @@ pub struct SessionMeta {
     pub created_at: time::OffsetDateTime,
     pub message_count: usize,
     pub last_message_at: time::OffsetDateTime,
-    /// 会话摘要（首条用户消息 80 字符截断或 LLM 生成摘要，可能为空）。
+    /// 会话摘要（首条用户消息截断或 LLM 生成摘要，可能为空）。
     pub summary: Option<String>,
 }
 ```

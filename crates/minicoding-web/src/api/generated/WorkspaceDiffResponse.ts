@@ -4,4 +4,4 @@ import type { WorkspaceDiffEntry } from "./WorkspaceDiffEntry";
 /**
  * `GET /workspace/diff` 响应（会话内全部文件改动历史）。
  */
-export type WorkspaceDiffResponse = { entries: Array<WorkspaceDiffEntry> };
+export type WorkspaceDiffResponse = { entries: Array<WorkspaceDiffEntry>, };
