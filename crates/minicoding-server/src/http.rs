@@ -138,24 +138,32 @@ pub struct AppState {
 
 /// `GET /config` 响应（server 当前默认配置，不含 API key，C-04）。
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 pub struct ServerConfigResponse {
     provider_kind: String,
     provider_name: Option<String>,
     api_base: String,
     model: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     timeout_sec: u64,
     max_retries: u32,
     small_model: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     turn_timeout_sec: u64,
     compress: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     permission_timeout_sec: u64,
     preset: String,
     /// 配置修订号（M-10 防陈旧写：前端保存前锁定基准，config.toml 实时值）。
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     config_revision: u64,
 }
 
 /// `CreateSession` 请求 body。
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct CreateSessionBody {
     #[serde(default)]
     provider: Option<String>,
@@ -189,6 +197,7 @@ struct CreateSessionBody {
     plan_mode: bool,
     /// LLM 请求超时（秒，覆盖 server 默认）。
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     timeout_sec: Option<u64>,
     /// LLM 请求最大重试（覆盖 server 默认）。
     #[serde(default)]
@@ -206,18 +215,24 @@ struct CreateSessionBody {
 
 /// `CreateSession` 响应。
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct CreateSessionResponse {
     session_id: String,
 }
 
 /// `SendUserMessage` 请求 body。
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct SendMessageBody {
     text: String,
 }
 
 /// `SendUserMessage` 响应。
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct SendMessageResponse {
     stop_reason: String,
     final_text: String,
@@ -225,12 +240,16 @@ struct SendMessageResponse {
 
 /// `ResolvePermission` 请求 body。
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct ResolvePermissionBody {
     decision: Decision,
 }
 
 /// `GetSession` 响应。
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct GetSessionResponse {
     session_id: String,
     messages: Vec<minicoding_core::model::Message>,
@@ -240,6 +259,8 @@ struct GetSessionResponse {
 
 /// `ListSessions` 响应。
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
 struct ListSessionsResponse {
     sessions: Vec<minicoding_core::model::SessionMeta>,
 }
@@ -349,6 +370,7 @@ fn build_router(
             get(crate::workspace::workspace_diff),
         )
         .route("/config", get(server_config))
+        .route("/metrics", get(prometheus_metrics))
         .route("/health", get(health));
 
     let app = if let Some(dir) = web_dir {
@@ -598,6 +620,21 @@ fn build_preset_policy(
             ),
         }),
     }
+}
+
+/// `GET /metrics` — Prometheus text format 快照（P9）。
+///
+/// 纳入鉴权（与业务端点一致）；监控侧配 token 拉取。
+async fn prometheus_metrics() -> impl IntoResponse {
+    let body = minicoding_core::metrics::snapshot_prometheus();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }
 
 /// `GET /sessions` — 列出所有会话（内存活跃 + 磁盘历史合并）。
@@ -928,6 +965,46 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "关闭鉴权时不应 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_requires_auth_and_renders_prometheus() {
+        // 无 token → 401
+        let app = test_app(Some("secret-token"));
+        let resp = app
+            .oneshot(axum::http::Request::builder().uri("/metrics").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 带 token → 200 + Prometheus text format（先注入一个计数）
+        minicoding_core::metrics::set_active_sessions(1);
+        let app = test_app(Some("secret-token"));
+        let req = axum::http::Request::builder()
+            .uri("/metrics")
+            .header(AUTHORIZATION, "Bearer secret-token")
+            .body(Body::empty())
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ct.contains("text/plain"), "content-type: {ct}");
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(
+            body.starts_with("# TYPE minicoding_active_sessions") || body.contains("# TYPE "),
+            "应含 TYPE 注释行: {body}"
         );
     }
 

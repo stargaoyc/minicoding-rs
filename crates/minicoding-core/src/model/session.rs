@@ -50,6 +50,8 @@ pub struct Session {
     #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub workdir: Utf8PathBuf,
     /// 配置 hash，用于 resume 时校验一致性。
+    /// 配置 hash（resume 一致性校验）。wire 为 JSON number（P5：bigint 谎言修正）。
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub config_hash: u64,
     pub messages: Vec<Message>,
 }

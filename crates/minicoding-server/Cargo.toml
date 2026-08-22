@@ -46,6 +46,8 @@ thiserror = { workspace = true }
 camino = { workspace = true }
 time = { workspace = true }
 ulid = { workspace = true }
+# P1：HTTP DTO TS 导出（feature `ts`，仅 dev/CI 使用）
+ts-rs = { workspace = true, optional = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
@@ -59,6 +61,7 @@ keyring = { workspace = true }
 minicoding-sandbox = { workspace = true }
 
 [features]
+ts = ["dep:ts-rs", "minicoding-core/ts"]
 default = ["otel"]
 # OTLP 可观测性（与 CLI `otel` feature 对齐；默认启用，保证桌面 sidecar 开箱可接入，
 # 见 `docs/observability.md` §7；未配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时降级为纯本地 fmt 日志）

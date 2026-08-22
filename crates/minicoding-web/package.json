@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "gen-types": "cargo test -p minicoding-protocol --features ts -- --nocapture 2>&1 | tail -5 && find src/api/generated -name '*.ts' -exec sed -i 's/[[:space:]]*$//' {} +",
+    "gen-types": "cargo test -p minicoding-protocol --features ts -- --nocapture 2>&1 | tail -5 && cargo test -p minicoding-core --features ts -- --nocapture 2>&1 | tail -3 && cargo test -p minicoding-server --features ts -- --nocapture 2>&1 | tail -3 && node scripts/gen-types-post.mjs && pnpm exec oxfmt src/api/generated/ 2>&1 | tail -1",
     "lint": "oxlint src/",
     "format": "oxfmt src/",
     "typecheck": "tsc -b",
