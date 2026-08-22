@@ -103,6 +103,14 @@ impl Runtime {
 
 **M-08（R-03）循环打断器软升级**：在硬停止之前增加逐级软提醒（对齐 dsh `repeat-tool-reminder`）。硬停止保留（整轮工具调用集合签名连续重复 ≥ 末级阈值 → `Stopped`，C-13 早期止损），软提醒用单工具指纹（`name|规范化 input`，比整轮集合更灵敏）连续命中 `repeat_guard_thresholds` 中某级（默认 `[3,5,8]`）时，向上下文注入一条 system 级提醒（不替换工具输出、不 return——模型可见历史不失真）。空阈值数组关闭软提醒，仅保留硬停止（默认 3 轮）。提醒消息仅注入上下文不落盘，resume 后不重建（瞬态提示）。
 
+**实现差异注记（D2，2026-08 对齐 `rt.rs` 实际主循环）**：上述伪代码为骨架；
+实际循环额外包含——①turn 开始的并发 guard（同会话防重入）与沙箱拒绝熔断器重置；
+②M-12 turn 边界 `reload_safe_config` 白名单配置热应用；③有界迭代
+`for iter in 0..max_iters` 替代无界 loop；④M-08 单工具指纹软提醒注入与整轮签名
+硬停止（步骤 5.1a/5.1b）；⑤M-06 `StepStarted`/`StepEnded` log-only 事件双写事件流
+（步骤 5 前后，编号 6/7.1）；⑥每个 emit 前 `persist_event` 落 EventStore
+（Event Sourcing 双写）；⑦外层 `select!` 组合 turn_timeout / Ctrl-C 两路取消。
+
 ### 2.3 工具执行（并行 + 串行 + 权限）
 
 工具执行遵循两条硬规则：

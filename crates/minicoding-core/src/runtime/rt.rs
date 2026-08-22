@@ -1147,11 +1147,13 @@ impl Runtime {
             .with_journal_opt(self.journal.clone());
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
+        // S14：查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch
+        // 报 NotFound，避免懒注册语义变化演变为免检绕过
         let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
             calls.iter().partition(|c| {
                 self.tools
                     .get(&c.name)
-                    .is_none_or(|t| t.side_effect() == SideEffect::None)
+                    .is_some_and(|t| t.side_effect() == SideEffect::None)
             });
 
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());

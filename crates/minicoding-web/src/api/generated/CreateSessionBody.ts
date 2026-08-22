@@ -4,52 +4,44 @@ import type { PermissionMode } from "./PermissionMode";
 /**
  * `CreateSession` 请求 body。
  */
-export type CreateSessionBody = {
-  provider: string | null;
-  /**
-   * 自定义 provider 显示名（覆盖 server 默认，`None` 用 `default_params.provider_name`）。
-   */
-  provider_name: string | null;
-  api_base: string | null;
-  api_key: string | null;
-  model: string | null;
-  workdir: string | null;
-  system: string | null;
-  permission_mode: PermissionMode | null;
-  /**
-   * 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见 `Preset`）。
-   * `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。
-   */
-  preset: string | null;
-  /**
-   * 高危预设（`full-access`/`external-sandbox`）的二次确认字段（S3/C-22）：
-   * UI 弹出红色警告确认后置 true 回传；缺失或 false 时请求被拒。
-   */
-  confirm_danger: boolean | null;
-  /**
-   * Plan 模式（C-25：先规划后执行，写 `plan.md` + 子任务拆分，仅只读工具可用）。
-   * `true` 时会话初始 `PermissionMode` 为 `Plan`（客户端显式 `body.permission_mode`
-   * 优先于本开关）。
-   */
-  plan_mode: boolean;
-  /**
-   * LLM 请求超时（秒，覆盖 server 默认）。
-   */
-  timeout_sec: number;
-  /**
-   * LLM 请求最大重试（覆盖 server 默认）。
-   */
-  max_retries: number | null;
-  /**
-   * 小 LLM 模型名（摘要/压缩降本，`None` 继承 server 默认，见 `design.md` §3.8）。
-   */
-  small_model: string | null;
-  /**
-   * 单 turn 超时（秒，覆盖 server 默认）。
-   */
-  turn_timeout_sec: bigint | null;
-  /**
-   * 上下文压缩开关（覆盖 server 默认，C-18 软约束）。
-   */
-  compress: boolean | null;
-};
+export type CreateSessionBody = { provider: string | null, 
+/**
+ * 自定义 provider 显示名（覆盖 server 默认，`None` 用 `default_params.provider_name`）。
+ */
+provider_name: string | null, api_base: string | null, api_key: string | null, model: string | null, workdir: string | null, system: string | null, permission_mode: PermissionMode | null, 
+/**
+ * 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见 `Preset`）。
+ * `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。
+ */
+preset: string | null, 
+/**
+ * 高危预设（`full-access`/`external-sandbox`）的二次确认字段（S3/C-22）：
+ * UI 弹出红色警告确认后置 true 回传；缺失或 false 时请求被拒。
+ */
+confirm_danger: boolean | null, 
+/**
+ * Plan 模式（C-25：先规划后执行，写 `plan.md` + 子任务拆分，仅只读工具可用）。
+ * `true` 时会话初始 `PermissionMode` 为 `Plan`（客户端显式 `body.permission_mode`
+ * 优先于本开关）。
+ */
+plan_mode: boolean, 
+/**
+ * LLM 请求超时（秒，覆盖 server 默认）。
+ */
+timeout_sec: number, 
+/**
+ * LLM 请求最大重试（覆盖 server 默认）。
+ */
+max_retries: number | null, 
+/**
+ * 小 LLM 模型名（摘要/压缩降本，`None` 继承 server 默认，见 `design.md` §3.8）。
+ */
+small_model: string | null, 
+/**
+ * 单 turn 超时（秒，覆盖 server 默认）。
+ */
+turn_timeout_sec: bigint | null, 
+/**
+ * 上下文压缩开关（覆盖 server 默认，C-18 软约束）。
+ */
+compress: boolean | null, };

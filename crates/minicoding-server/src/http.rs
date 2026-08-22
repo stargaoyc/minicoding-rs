@@ -139,7 +139,10 @@ pub struct AppState {
 /// `GET /config` 响应（server 当前默认配置，不含 API key，C-04）。
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 pub struct ServerConfigResponse {
     provider_kind: String,
     provider_name: Option<String>,
@@ -163,7 +166,10 @@ pub struct ServerConfigResponse {
 /// `CreateSession` 请求 body。
 #[derive(Debug, Deserialize, Default)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct CreateSessionBody {
     #[serde(default)]
     provider: Option<String>,
@@ -216,7 +222,10 @@ struct CreateSessionBody {
 /// `CreateSession` 响应。
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct CreateSessionResponse {
     session_id: String,
 }
@@ -224,7 +233,10 @@ struct CreateSessionResponse {
 /// `SendUserMessage` 请求 body。
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct SendMessageBody {
     text: String,
 }
@@ -232,7 +244,10 @@ struct SendMessageBody {
 /// `SendUserMessage` 响应。
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct SendMessageResponse {
     stop_reason: String,
     final_text: String,
@@ -241,7 +256,10 @@ struct SendMessageResponse {
 /// `ResolvePermission` 请求 body。
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct ResolvePermissionBody {
     decision: Decision,
 }
@@ -249,7 +267,10 @@ struct ResolvePermissionBody {
 /// `GetSession` 响应。
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct GetSessionResponse {
     session_id: String,
     messages: Vec<minicoding_core::model::Message>,
@@ -260,7 +281,10 @@ struct GetSessionResponse {
 /// `ListSessions` 响应。
 #[derive(Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(feature = "ts", ts(export, export_to = "../../minicoding-web/src/api/generated/"))]
+#[cfg_attr(
+    feature = "ts",
+    ts(export, export_to = "../../minicoding-web/src/api/generated/")
+)]
 struct ListSessionsResponse {
     sessions: Vec<minicoding_core::model::SessionMeta>,
 }
@@ -973,7 +997,12 @@ mod tests {
         // 无 token → 401
         let app = test_app(Some("secret-token"));
         let resp = app
-            .oneshot(axum::http::Request::builder().uri("/metrics").body(Body::empty()).expect("req"))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

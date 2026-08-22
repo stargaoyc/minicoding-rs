@@ -304,16 +304,16 @@
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
-| 持久化与存储 | 16 |
+| 持久化与存储 | 17 |
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
 | 工程与质量 | 9 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 19 |
+| Web 与桌面（M9） | 20 |
 | **合计** | **203** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-19）19 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-19）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 
 ---
 

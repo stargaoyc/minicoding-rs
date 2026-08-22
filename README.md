@@ -94,7 +94,7 @@ minicoding-rs/
 │   ├── tech-stack.md            # 技术选型
 │   ├── roadmap.md               # 开发路线图
 │   ├── dev-plan.md              # 详细开发计划
-│   ├── features.md              # 功能清单（192 项）
+│   ├── features.md              # 功能清单（203 项）
 │   ├── rules.md                 # 运行时大模型约束（C-01..C-35）
 │   ├── m9-design.md             # M9 Web/桌面设计
 │   └── getting-started.md       # 上手指南
@@ -142,7 +142,7 @@ minicoding-rs/
 |------|------|
 | [开发路线图](docs/roadmap.md) | 里程碑与交付计划（M0–M10） |
 | [开发计划](docs/dev-plan.md) | 任务级开发计划（含验收标准与依赖） |
-| [功能清单](docs/features.md) | 全功能总账（按领域分组，192 项） |
+| [功能清单](docs/features.md) | 全功能总账（按领域分组，203 项） |
 | [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束（C-01..C-35） |
 | [开发过程文档](docs/development-process.md) | 项目开发全过程记录、关键设计决策、里程碑演进 |
 | [AI 编码约束](AGENTS.md) | AI 助手开发本项目时的编码/架构/文档/安全/前端规范 |

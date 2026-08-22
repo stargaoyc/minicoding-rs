@@ -12,6 +12,7 @@
 //! - 自定义：注册 layer 拦截 `metrics::*` target
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -43,10 +44,10 @@ pub fn snapshot_prometheus() -> String {
     for (key, val) in reg.iter() {
         let base = key.split('{').next().unwrap_or(key).to_string();
         if base != last_base {
-            out.push_str(&format!("# TYPE {base} counter\n"));
+            let _ = writeln!(out, "# TYPE {base} counter");
             last_base = base;
         }
-        out.push_str(&format!("{key} {val}\n"));
+        let _ = writeln!(out, "{key} {val}");
     }
     out
 }
@@ -60,7 +61,11 @@ pub fn snapshot_prometheus() -> String {
 /// - `direction`：方向（`input`/`output`/`cached`）
 /// - `count`：token 数量
 pub fn record_llm_tokens(provider: &str, direction: &str, count: u64) {
-    bump("minicoding_llm_tokens_total", &format!("{{provider=\"{provider}\",direction=\"{direction}\"}}"), count);
+    bump(
+        "minicoding_llm_tokens_total",
+        &format!("{{provider=\"{provider}\",direction=\"{direction}\"}}"),
+        count,
+    );
     if count > 0 {
         tracing::debug!(
             target: "metrics::llm_tokens_total",
@@ -79,7 +84,11 @@ pub fn record_llm_tokens(provider: &str, direction: &str, count: u64) {
 /// - `side_effect`：副作用类型（`none`/`file_write`/`command`）
 /// - `result`：执行结果（`ok`/`err`/`timeout`/`cancelled`）
 pub fn record_tool_call(tool: &str, side_effect: &str, result: &str) {
-    bump("minicoding_tool_calls_total", &format!(r#"{{tool="{tool}",result="{result}"}}"#), 1);
+    bump(
+        "minicoding_tool_calls_total",
+        &format!(r#"{{tool="{tool}",result="{result}"}}"#),
+        1,
+    );
     tracing::debug!(
         target: "metrics::tool_calls_total",
         tool = tool,
@@ -94,7 +103,11 @@ pub fn record_tool_call(tool: &str, side_effect: &str, result: &str) {
 /// # 参数
 /// - `verdict`：决策结果（`allow`/`deny`/`ask`/`allow_always`/`deny_always`）
 pub fn record_permission(verdict: &str) {
-    bump("minicoding_permissions_total", &format!("{{verdict=\"{verdict}\"}}"), 1);
+    bump(
+        "minicoding_permissions_total",
+        &format!("{{verdict=\"{verdict}\"}}"),
+        1,
+    );
     tracing::debug!(
         target: "metrics::permission_decisions_total",
         verdict = verdict,
@@ -108,7 +121,11 @@ pub fn record_permission(verdict: &str) {
 /// - `level`：压缩级别（`1`/`2`/`3`/`4`）
 /// - `result`：压缩结果（`ok`/`err`/`skipped`）
 pub fn record_compress(level: u8, result: &str) {
-    bump("minicoding_compress_total", &format!("{{level=\"{level}\",result=\"{result}\"}}"), 1);
+    bump(
+        "minicoding_compress_total",
+        &format!("{{level=\"{level}\",result=\"{result}\"}}"),
+        1,
+    );
     tracing::debug!(
         target: "metrics::compress_invocations_total",
         level = level,
@@ -124,7 +141,11 @@ pub fn record_compress(level: u8, result: &str) {
 /// - `event`：触发事件（`pre_tool_call`/`post_tool_call` 等）
 /// - `result`：执行结果（`ok`/`err`/`deny`）
 pub fn record_hook(hook: &str, event: &str, result: &str) {
-    bump("minicoding_hook_runs_total", &format!(r#"{{hook="{hook}",event="{event}"}}"#), 1);
+    bump(
+        "minicoding_hook_runs_total",
+        &format!(r#"{{hook="{hook}",event="{event}"}}"#),
+        1,
+    );
     tracing::debug!(
         target: "metrics::hook_executions_total",
         hook = hook,
@@ -139,7 +160,11 @@ pub fn record_hook(hook: &str, event: &str, result: &str) {
 /// # 参数
 /// - `category`：错误类别（`llm`/`tool`/`permission`/`sandbox`/`mcp`/`storage`/`hook`/`context`/`journal`）
 pub fn record_error(category: &str) {
-    bump("minicoding_errors_total", &format!("{{category=\"{category}\"}}"), 1);
+    bump(
+        "minicoding_errors_total",
+        &format!("{{category=\"{category}\"}}"),
+        1,
+    );
     tracing::error!(
         target: "metrics::errors_total",
         category = category,

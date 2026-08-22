@@ -89,6 +89,9 @@ impl Tool for FsWrite {
                     } else {
                         workdir.join(&args.path)
                     };
+                    // S16：建目录前对候选路径父链做 workdir 包容校验——NotFound
+                    // 分支绕过了 resolve_path 的越界检查，不能让 mkdir 逸出
+                    crate::util::assert_within_workdir(&workdir, &candidate)?;
                     if let Some(parent) = candidate.parent() {
                         tokio::fs::create_dir_all(parent)
                             .await

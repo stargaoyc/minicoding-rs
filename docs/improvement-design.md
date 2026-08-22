@@ -1,3 +1,6 @@
+> **[2026-08-21 起已被取代]** 本文档为历史快照，分析结论以
+> [`project-review-20260821.md`](./project-review-20260821.md) 为准。
+
 # minicoding-rs 改进设计文档（基于 deepseek-harness 对比）
 
 > 来源：`docs/deepseek-harness-comparison.md` v2（源码级调研）§4 改进意见 R-01..R-11

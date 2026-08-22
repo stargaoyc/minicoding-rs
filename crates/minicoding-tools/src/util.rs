@@ -248,3 +248,68 @@ mod tests {
         assert!(!truncated);
     }
 }
+
+/// S16：断言 `candidate` 位于 `workdir` 之内（组件级比较，供 mkdir 前防护）。
+///
+/// 与 [`resolve_path`] 的差异：不要求路径存在，仅做规范化 + 前缀包容判定。
+///
+/// # Errors
+/// 规范化失败或越界时返回 `ToolError::PathEscaped` 风格的 `Exec` 错误文本。
+pub fn assert_within_workdir(
+    workdir: &Utf8PathBuf,
+    candidate: &Utf8PathBuf,
+) -> Result<(), ToolError> {
+    let wd = workdir
+        .canonicalize_utf8()
+        .unwrap_or_else(|_| workdir.clone());
+    let cand = candidate.canonicalize_utf8().or_else(|_| {
+        // 目标不存在：对最长存在祖先规范化后拼回剩余段
+        let mut anc = candidate.clone();
+        let mut suffix = Vec::new();
+        loop {
+            anc = anc.parent().map(Utf8PathBuf::from).unwrap_or(anc.clone());
+            suffix.push(
+                candidate
+                    .strip_prefix(&anc)
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_default(),
+            );
+            if anc.canonicalize_utf8().is_ok() || anc.parent().is_none() {
+                break;
+            }
+        }
+        anc.canonicalize_utf8()
+            .map(|canon| suffix.iter().rev().fold(canon, |acc, seg| acc.join(seg)))
+            .map_err(|e| ToolError::Exec(format!("path normalize failed: {e}")))
+    })?;
+    if cand.starts_with(&wd) {
+        Ok(())
+    } else {
+        Err(ToolError::Exec(format!(
+            "path escapes workdir: {candidate}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod s16_tests {
+    use super::*;
+
+    #[test]
+    fn within_workdir_ok() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let wd =
+            Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canon")).expect("utf8");
+        assert!(assert_within_workdir(&wd, &wd.join("a/b/c.txt")).is_ok());
+        assert!(assert_within_workdir(&wd, &wd.join("x/y/z")).is_ok());
+    }
+
+    #[test]
+    fn outside_workdir_rejected_even_nonexistent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let wd =
+            Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canon")).expect("utf8");
+        // 不存在的越界路径（mkdir 前防护场景）
+        assert!(assert_within_workdir(&wd, &Utf8PathBuf::from("/tmp/s16-escape/a/b")).is_err());
+    }
+}

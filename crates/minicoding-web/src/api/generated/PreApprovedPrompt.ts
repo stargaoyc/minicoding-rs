@@ -6,13 +6,12 @@
  * `tool` 与 `prompt` 同时匹配时直接 `Allow`。`prompt` 为子串匹配（如
  * `"cargo build"` 匹配 `"cargo build --release"`）。
  */
-export type PreApprovedPrompt = {
-  /**
-   * 工具名（如 `"shell.run"`）。
-   */
-  tool: string;
-  /**
-   * 命令前缀（如 `"cargo build"`、`"git add"`）。
-   */
-  prompt: string;
-};
+export type PreApprovedPrompt = { 
+/**
+ * 工具名（如 `"shell.run"`）。
+ */
+tool: string, 
+/**
+ * 命令前缀（如 `"cargo build"`、`"git add"`）。
+ */
+prompt: string, };

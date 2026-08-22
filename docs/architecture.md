@@ -100,7 +100,7 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 
 ### 3.5 分层与 crate 映射（澄清架构层 ↔ api.md L1/L2/L3 ↔ modules.md 14 crate）
 
-本文档的"Frontend/Orchestration/Capability/Infrastructure"四层与 `api.md` §1 的"L1 Trait / L2 Runtime / L3 SDK"三档接口、`modules.md` §0.1 的 14 个 crate 三套视图对齐如下，避免读者在三者间漂移：
+本文档的"Frontend/Orchestration/Capability/Infrastructure"四层与 `api.md` §1 的"L1 Trait / L2 Runtime / L3 SDK"三档接口、`modules.md` §0.1 的 18 个 Cargo 成员 crate 三套视图对齐如下，避免读者在三者间漂移：
 
 | 架构层（本文） | 接口档（api.md） | crate（modules.md） | 内容 |
 |---------------|-----------------|---------------------|------|

@@ -44,67 +44,6 @@
 
 ## 2. 构建与编译问题
 
-### 2.1 libseccomp 未找到（Linux）
-
-#### 问题描述
-
-在 Linux 上执行 `cargo build --workspace --all-features` 或 `cargo build -p minicoding-sandbox` 时，编译报错：
-
-```text
-error: linking with `cc` failed: exit code: 1
-  = note: /usr/bin/ld: cannot find -lseccomp
-          collect2: error: ld returned 1 exit status
-
-error: could not compile `minicoding-sandbox` (lib) due to previous error
-```
-
-或编译期 `libseccomp` 的 `bindgen` 绑定生成阶段报 `seccomp.h` 未找到。
-
-#### 原因分析
-
-`minicoding-sandbox` 在 Linux 平台通过 `[target.'cfg(target_os = "linux")'.dependencies]` 引入 `libseccomp` crate（见 `AGENTS.md` §3.5、`docs/tech-stack.md` §11），用于 seccomp-bpf 系统调用白名单过滤（禁 `ptrace`/`mount`/`reboot`/`kexec_load`，与 `sandbox-run` 叠加）。`libseccomp` crate 是 C 库 `libseccomp` 的绑定，需要系统安装开发头文件（`seccomp.h`）与共享库（`libseccomp.so`），cargo 无法自动拉取。
-
-这是项目**唯一**需要系统包的依赖——HTTP 走 `rustls`（不依赖 OpenSSL）、`landlock` 是纯 Rust 绑定、`rmcp` 是纯 Rust、`sandbox-run` 是纯 Rust（见 `docs/getting-started.md` §1.1）。
-
-#### 解决方案
-
-按发行版安装 `libseccomp` 开发包：
-
-```bash
-# Debian / Ubuntu
-sudo apt install libseccomp-dev
-
-# Fedora / RHEL
-sudo dnf install libseccomp-devel
-
-# Arch / Manjaro
-sudo pacman -S libseccomp
-
-# Alpine（容器内常用）
-apk add libseccomp-dev
-```
-
-验证安装：
-
-```bash
-pkg-config --modversion libseccomp   # 应输出版本号，如 2.5.5
-ls /usr/include/seccomp.h            # 应存在
-```
-
-重新构建：
-
-```bash
-cargo build -p minicoding-sandbox
-```
-
-#### 预防措施
-
-- 新成员 onboarding 时先跑 `docs/getting-started.md` §1.1 的前置条件清单；
-- CI 已在 `ubuntu-latest` 镜像中预装 `libseccomp-dev`（GitHub Actions runner 默认含），无需在 `ci.yml` 显式安装；自建 runner 需确认；
-- 若只想编译非沙箱部分，可 `cargo build --workspace --exclude minicoding-sandbox` 临时绕过（不推荐，会丢失沙箱测试覆盖）。
-
----
-
 ### 2.2 glib-sys 构建失败（Tauri 桌面 CI）
 
 #### 问题描述
