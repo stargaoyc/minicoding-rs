@@ -201,9 +201,45 @@ async fn handle_undo_command(rt: &Runtime) {
             for (path, reason) in &report.failed_files {
                 anstream::eprintln!("{RED}  冲突：{path}（{reason}）{RED:#}");
             }
+            // S28/C-28：/undo 反向恢复也落审计（成功含恢复与冲突清单摘要）
+            let detail = format!(
+                "undone_entries={} restored={} conflicts={}",
+                report.undone_entries,
+                report.restored_files.len(),
+                report.failed_files.len()
+            );
+            if let Err(e) = rt
+                .audit()
+                .record(minicoding_core::storage::AuditRecord {
+                    ts: time::OffsetDateTime::now_utc(),
+                    session: rt.session().id.clone(),
+                    kind: minicoding_core::storage::AuditKind::FileUndone,
+                    tool: Some("undo".to_string()),
+                    decision: Some("allow".to_string()),
+                    detail,
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "undo audit record failed");
+            }
         }
         Err(e) => {
             anstream::eprintln!("{RED}/undo 失败：{e}{RED:#}");
+            // S28：失败的回滚同样留痕
+            if let Err(e2) = rt
+                .audit()
+                .record(minicoding_core::storage::AuditRecord {
+                    ts: time::OffsetDateTime::now_utc(),
+                    session: rt.session().id.clone(),
+                    kind: minicoding_core::storage::AuditKind::FileUndone,
+                    tool: Some("undo".to_string()),
+                    decision: Some("deny".to_string()),
+                    detail: format!("failed: {e}"),
+                })
+                .await
+            {
+                tracing::warn!(error = %e2, "undo audit record failed");
+            }
         }
     }
 }

@@ -3320,6 +3320,7 @@ dependencies = [
  "globset",
  "htmd",
  "ignore",
+ "libc",
  "minicoding-core",
  "minicoding-policy",
  "regex",

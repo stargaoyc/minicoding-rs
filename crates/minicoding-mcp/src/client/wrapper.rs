@@ -47,11 +47,13 @@ impl McpToolWrapper {
         tool: String,
         schema: ToolSchema,
         hint: ToolHint,
+        trust_read_only_hint: bool,
     ) -> Self {
         let (side_effect, read_only) = match hint {
-            ToolHint::ReadOnly => (SideEffect::None, true),
-            ToolHint::Destructive | ToolHint::Unknown => {
-                // C-25：未声明 hint 保守按 Command（串行 + Ask）
+            // S13/C-25：readOnlyHint 是远端进程的自我声明——仅在用户显式信任该
+            // server 时才免检；默认按 Command 处理（串行 + Ask，完整权限链）
+            ToolHint::ReadOnly if trust_read_only_hint => (SideEffect::None, true),
+            ToolHint::ReadOnly | ToolHint::Destructive | ToolHint::Unknown => {
                 (SideEffect::Command, false)
             }
         };
@@ -194,14 +196,28 @@ mod tests {
     async fn read_only_hint_maps_to_side_effect_none() {
         let client = Arc::new(StubMcpClient::new(ToolResult::ok_text("ok")));
         let wrapper = McpToolWrapper::new(
-            client,
+            client.clone(),
             "github".into(),
             "list_prs".into(),
             make_schema("mcp__github__list_prs"),
             ToolHint::ReadOnly,
+            false,
         );
-        assert_eq!(wrapper.side_effect(), SideEffect::None);
-        assert!(wrapper.is_read_only());
+        // S13：默认不信任远端自报只读 → 按 Command 处理（串行 + Ask）
+        assert_eq!(wrapper.side_effect(), SideEffect::Command);
+        assert!(!wrapper.is_read_only());
+
+        // 显式信任时才免检
+        let trusted = McpToolWrapper::new(
+            client.clone(),
+            "github".into(),
+            "list_prs".into(),
+            make_schema("mcp__github__list_prs"),
+            ToolHint::ReadOnly,
+            true,
+        );
+        assert_eq!(trusted.side_effect(), SideEffect::None);
+        assert!(trusted.is_read_only());
         assert_eq!(wrapper.name(), "mcp__github__list_prs");
     }
 
@@ -209,11 +225,12 @@ mod tests {
     async fn unknown_hint_maps_to_command() {
         let client = Arc::new(StubMcpClient::new(ToolResult::ok_text("ok")));
         let wrapper = McpToolWrapper::new(
-            client,
+            client.clone(),
             "github".into(),
-            "create_pr".into(),
-            make_schema("mcp__github__create_pr"),
-            ToolHint::Unknown,
+            "list_prs".into(),
+            make_schema("mcp__github__list_prs"),
+            ToolHint::ReadOnly,
+            false,
         );
         assert_eq!(wrapper.side_effect(), SideEffect::Command);
         assert!(!wrapper.is_read_only());
@@ -223,11 +240,12 @@ mod tests {
     async fn destructive_hint_maps_to_command() {
         let client = Arc::new(StubMcpClient::new(ToolResult::ok_text("ok")));
         let wrapper = McpToolWrapper::new(
-            client,
+            client.clone(),
             "db".into(),
             "drop_table".into(),
             make_schema("mcp__db__drop_table"),
             ToolHint::Destructive,
+            false,
         );
         assert_eq!(wrapper.side_effect(), SideEffect::Command);
         assert!(!wrapper.is_read_only());
@@ -242,6 +260,7 @@ mod tests {
             "list_prs".into(),
             make_schema("mcp__github__list_prs"),
             ToolHint::ReadOnly,
+            false,
         );
         let ctx = make_ctx();
         let result = wrapper
@@ -304,6 +323,7 @@ mod tests {
             "list_prs".into(),
             make_schema("mcp__github__list_prs"),
             ToolHint::ReadOnly,
+            false,
         );
         let ctx = make_ctx();
         let err = wrapper
@@ -322,6 +342,7 @@ mod tests {
             "list_prs".into(),
             make_schema("mcp__github__list_prs"),
             ToolHint::ReadOnly,
+            false,
         );
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(wrapper));

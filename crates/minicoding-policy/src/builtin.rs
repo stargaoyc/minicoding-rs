@@ -120,24 +120,39 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
     }
 }
 
-/// 检测工具调用是否命中 `plan.exit` 缓存的预批准清单。
+/// 检测工具调用是否命中 `plan.exit` 缓存的预批准清单（S6 词法比对版）。
 ///
-/// `tool` 完全相等且 `prompt` 是工具输入中对应字段的子串（前缀匹配更严格）。
-/// `prompt` 为空时仅匹配 `tool` 名（保守起见，空 prompt 不视为通配）。
+/// `tool` 完全相等且命令满足以下之一：
+/// - 与预批准 prompt **词法完全相等**；
+/// - 以 prompt 为**词边界前缀**（`cargo build` 批准 `cargo build --release`）；
+/// - 命令含复合操作符（`;`/`&&`/`||`/`|`/反引号/`$(`）时**永不命中**——复合命令
+///   不继承预批准（防 `git push; echo cargo test` 拼接绕过）。
 fn matches_pre_approved(tool: &str, input: &Value, allowed: &[PreApprovedPrompt]) -> bool {
     if allowed.is_empty() {
         return false;
     }
-    // 提取工具的"命令文本"——shell.run 的 command/cmd，其它工具的 input 整体 JSON。
-    let command_text = extract_command_text(input);
+    let Some(command_text) = extract_command_text(input) else {
+        return false;
+    };
+    // 复合命令一律不继承预批准（S6）
+    if [";", "&&", "||", "`", "$(", "|"]
+        .iter()
+        .any(|op| command_text.contains(op))
+    {
+        return false;
+    }
+    let cmd_tokens = tokenize_command(&command_text);
     allowed.iter().any(|p| {
         if p.tool != tool || p.prompt.is_empty() {
             return false;
         }
-        // 子串匹配：`"cargo build"` 匹配 `"cargo build --release"`。
-        command_text
-            .as_deref()
-            .is_some_and(|c| c.contains(&p.prompt))
+        let prompt_tokens = tokenize_command(&p.prompt);
+        if prompt_tokens.is_empty() {
+            return false;
+        }
+        // 完全相等 或 词边界前缀
+        cmd_tokens.len() >= prompt_tokens.len()
+            && cmd_tokens[..prompt_tokens.len()] == prompt_tokens[..]
     })
 }
 
@@ -235,10 +250,109 @@ fn is_instructional_content(content: &str) -> bool {
 ///
 /// 对项目约束文件的破坏性删除操作硬 `Deny`，配置无法覆盖。
 fn is_blacklisted(tool: &str, input: &Value) -> bool {
-    if tool != "fs.delete" {
-        return false;
+    match tool {
+        // C-23：项目约束文件——fs.delete 硬 Deny；fs.write 走 Ask+不可 AllowAlways
+        // 通道（check_file_write，允许一次性人工批准），shell 旁路由 shell_hits_blacklist 补齐
+        "fs.delete" => {
+            extract_path(input).is_some_and(|p| targets_project_doc(p) || in_vcs_metadata(p))
+        }
+        // S5：VCS 元数据写入（.git/hooks/pre-commit 植入等）无合法用例，硬 Deny
+        "fs.write" | "fs.edit" => extract_path(input).is_some_and(in_vcs_metadata),
+        // S5：shell 旁路——写约束文件 / 写 VCS 元数据（rm AGENTS.md、> .git/hooks/x 等）
+        "shell.run" => shell_hits_blacklist(input),
+        _ => false,
     }
-    extract_path(input).is_some_and(targets_project_doc)
+}
+
+/// S5/C-23：shell.run 命令是否以受保护目标为**写对象**。
+///
+/// 词法近似判定（诚实边界：base64|sh 等变形不在黑名单能力内，由沙箱与用户审批兜底）：
+/// - 破坏性动词（`rm`/`mv` 第一目的/`truncate`/`dd`/`sed -i`/`unlink`）后随
+///   `AGENTS.md`/`CLAUDE.md` 路径；
+/// - 重定向（`>`/`>>`）或 `tee` 目标为约束文件；
+/// - 任一 token 路径组件命中 VCS 元数据目录且伴随写意图（重定向/tee/`.git/hooks`）。
+fn shell_hits_blacklist(input: &Value) -> bool {
+    // 写意图动词：`sed` 需搭配 `-i` 才是写；`tee` 本身即写
+    const WRITE_VERBS: &[&str] = &["rm", "mv", "truncate", "dd", "unlink", "sed", "tee"];
+    const REDIRECTS: &[&str] = &[">", ">>", "&>", ">|"];
+    let Some(cmd) = extract_command_text(input) else {
+        return false;
+    };
+
+    // 按命令分隔符切段逐段独立判定（`;`/`|`/反引号/`$()`——`&&`/`||` 含于 `&`/`|`
+    // 的字符级切分；粗粒度切分只会影响检测灵敏度，方向 fail-closed）。
+    cmd.split([';', '|', '&', '`'])
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "$(")
+        .any(|segment| {
+            let tokens = tokenize_command(segment);
+            if tokens.is_empty() {
+                return false;
+            }
+            // 段首词即动词（shell 语法保证）；`sed -i` 特判写模式
+            let verb_writes = WRITE_VERBS.contains(&tokens[0].as_str())
+                && (tokens[0] != "sed" || tokens.iter().any(|t| t == "-i"));
+            tokens.iter().enumerate().any(|(i, tok)| {
+                if !(targets_project_doc(tok) || in_vcs_metadata(tok)) {
+                    return false;
+                }
+                // 重定向目标：紧邻前一个 token 是重定向符
+                let redirect_target = i > 0 && REDIRECTS.contains(&tokens[i - 1].as_str());
+                verb_writes || redirect_target
+            })
+        })
+}
+
+/// S5：命令词法切分——空白切分 + 剥离引号包裹 + 处理 `cmd>=file` 连写形态。
+fn tokenize_command(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                current.push(c);
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            // 连写重定向：`x>y` 拆为 ["x", ">", "y"]
+            '>' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                let next = chars.peek().copied();
+                if next == Some('>') || next == Some('&') || next == Some('|') {
+                    let mut op = String::from(">");
+                    op.push(chars.next().expect("peeked"));
+                    tokens.push(op);
+                } else {
+                    tokens.push(">".into());
+                }
+            }
+            _ if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// S5：路径是否位于 VCS 元数据目录内（.git/.hg/.svn 任一组件）。
+fn in_vcs_metadata(path: &str) -> bool {
+    Utf8Path::new(path)
+        .components()
+        .any(|c| matches!(c.as_str(), ".git" | ".hg" | ".svn"))
 }
 
 /// 文件写入类工具的权限判定。
@@ -1006,6 +1120,111 @@ mod tests {
     }
 
     // === targets_project_doc 单元测试 ===
+
+    // ===== S5：shell 旁路黑名单 =====
+
+    #[test]
+    fn shell_write_to_project_doc_denied() {
+        for cmd in [
+            "rm AGENTS.md",
+            "rm -rf subdir/AGENTS.md",
+            "mv CLAUDE.md /tmp/x",
+            "echo injected > AGENTS.md",
+            "echo x >> ./CLAUDE.md",
+            "cat evil.txt | tee AGENTS.md",
+            "sed -i s/a/b/ AGENTS.md",
+            "truncate -s 0 CLAUDE.md",
+            "echo injected>AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+    }
+
+    #[test]
+    fn shell_read_of_project_doc_allowed() {
+        for cmd in ["cat AGENTS.md", "head -5 CLAUDE.md", "grep foo AGENTS.md"] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(!is_blacklisted("shell.run", &input), "{cmd} 读操作不应拦截");
+        }
+    }
+
+    #[test]
+    fn shell_vcs_metadata_write_denied() {
+        for cmd in [
+            "echo hook > .git/hooks/pre-commit",
+            "tee .git/config < payload",
+            "rm -rf .git",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+    }
+
+    #[test]
+    fn fs_tools_vcs_metadata_denied() {
+        let write = serde_json::json!({ "path": ".git/hooks/pre-commit" });
+        assert!(is_blacklisted("fs.write", &write));
+        let del = serde_json::json!({ "path": "subdir/.hg/hgrc" });
+        assert!(is_blacklisted("fs.delete", &del) || is_blacklisted("fs.write", &del));
+        // 普通路径不受限
+        let normal = serde_json::json!({ "path": "src/main.rs" });
+        assert!(!is_blacklisted("fs.write", &normal));
+    }
+
+    #[test]
+    fn tokenize_command_handles_quotes_and_glued_redirect() {
+        assert_eq!(
+            tokenize_command("echo \"a > b\" > AGENTS.md"),
+            vec!["echo", "a > b", ">", "AGENTS.md"]
+        );
+        assert_eq!(tokenize_command("x>AGENTS.md"), vec!["x", ">", "AGENTS.md"]);
+        assert_eq!(tokenize_command("a >> b"), vec!["a", ">>", "b"]);
+    }
+
+    // ===== S6：预批准词法比对 =====
+
+    fn pre(tool: &str, prompt: &str) -> PreApprovedPrompt {
+        PreApprovedPrompt {
+            tool: tool.into(),
+            prompt: prompt.into(),
+        }
+    }
+
+    #[test]
+    fn pre_approved_word_prefix_matches() {
+        let allowed = vec![pre("shell.run", "cargo test")];
+        let hit = serde_json::json!({ "command": "cargo test --nocapture" });
+        assert!(matches_pre_approved("shell.run", &hit, &allowed));
+        let exact = serde_json::json!({ "command": "cargo test" });
+        assert!(matches_pre_approved("shell.run", &exact, &allowed));
+    }
+
+    #[test]
+    fn pre_approved_concat_bypass_blocked() {
+        let allowed = vec![pre("shell.run", "cargo test")];
+        for cmd in [
+            "git push; echo cargo test",
+            "git push && cargo test",
+            "echo cargo test",
+            "cargo build # cargo test",
+            "$(echo cargo test)",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                !matches_pre_approved("shell.run", &input, &allowed),
+                "{cmd} 不应命中预批准"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_approved_non_prefix_mismatch_rejected() {
+        let allowed = vec![pre("shell.run", "cargo test")];
+        // 非前缀：词序不同
+        let input = serde_json::json!({ "command": "npm run cargo test" });
+        assert!(!matches_pre_approved("shell.run", &input, &allowed));
+    }
 
     #[test]
     fn targets_project_doc_matches_agents_md_variants() {

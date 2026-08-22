@@ -83,6 +83,7 @@ impl Tool for ShellRun {
         SideEffect::Command
     }
 
+    #[allow(clippy::too_many_lines)] // spawn+沙箱+进程组+流式读取的线性执行流
     fn execute(
         &self,
         input: serde_json::Value,
@@ -93,14 +94,18 @@ impl Tool for ShellRun {
         // 沙箱驱动/策略克隆（Option<Arc<...>> / Option<SandboxPolicy>）
         let sandbox_driver = ctx.sandbox_driver.clone();
         let sandbox_policy = ctx.sandbox_policy.clone();
+        // S10：输出字节上限（clone 避免 ctx 引用进入 future）
+        let max_output_bytes = ctx.max_output_bytes;
         Box::pin(async move {
             let args: RunInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
-            // C-07：超时默认取 ToolContext（120s），输入可覆盖。
+            // C-07/S8：超时默认取 ToolContext（120s）；工具入参只能**缩短**不能超过
+            // 上限——防 LLM 传 `timeout_ms: u64::MAX` 使超时约束形同虚设。
             let timeout = args
                 .timeout_ms
-                .map_or(default_timeout, Duration::from_millis);
+                .map(Duration::from_millis)
+                .map_or(default_timeout, |t| t.min(default_timeout));
 
             let mut command = if cfg!(windows) {
                 let mut c = Command::new("cmd");
@@ -118,6 +123,20 @@ impl Tool for ShellRun {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            // S9/C-07（unix）：子进程自成进程组长（pgid == pid），超时后可 killpg
+            // 整树清理后台孤儿。与沙箱驱动的 pre_exec 钩子可共存（按序执行）。
+            #[cfg(unix)]
+            // SAFETY: pre_exec 闭包在 fork 后 exec 前的子进程上下文运行；
+            // setpgid(0,0) 仅设置自身进程组，纯 syscall，async-signal-safe。
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
             // C-04：仅传递白名单 env，凭证变量绝不下传子进程。
             for name in ENV_WHITELIST {
                 if let Ok(value) = std::env::var(name) {
@@ -161,17 +180,45 @@ impl Tool for ShellRun {
                 })?;
             }
 
-            // C-07：超时后 kill 子进程。
-            // `wait_with_output` 消耗 `child` 所有权；超时 future 被 drop 时，
-            // `kill_on_drop(true)` 触发 `start_kill` 发送 SIGKILL。
-            // 注：当前简化为单进程 kill；M4 将接入进程组（killpg）以清理子进程树。
-            let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                Ok(r) => r.map_err(ToolError::Io)?,
-                Err(_) => return Err(ToolError::Timeout(timeout)),
-            };
+            // S10/C-07：流式读取 + 每路字节上限——不再 `wait_with_output` 全量缓冲
+            // （超时窗口内 `cat /dev/urandom` 可打爆内存）。上限取 ToolContext 的
+            // max_output_bytes（默认 1 MiB），显示层仍有 MAX_OUTPUT_CHARS 二次截断。
+            let cap = max_output_bytes;
+            let mut stdout_pipe = child
+                .stdout
+                .take()
+                .ok_or_else(|| ToolError::Exec("stdout 管道丢失".into()))?;
+            let mut stderr_pipe = child
+                .stderr
+                .take()
+                .ok_or_else(|| ToolError::Exec("stderr 管道丢失".into()))?;
+            let stdout_task = tokio::spawn(async move { read_capped(&mut stdout_pipe, cap).await });
+            let stderr_task = tokio::spawn(async move { read_capped(&mut stderr_pipe, cap).await });
 
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // C-07/S9：超时后先 killpg 整树再 start_kill 兜底。
+            // 不用 wait_with_output（消耗所有权）：保留 child 句柄以便取 pid 杀组。
+            let status = if let Ok(r) = tokio::time::timeout(timeout, child.wait()).await {
+                r.map_err(ToolError::Io)?
+            } else {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    // 子进程是组长（setpgid(0,0)），pgid == pid
+                    let _ = tokio::task::spawn_blocking(move || unsafe {
+                        libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL)
+                    })
+                    .await;
+                }
+                let _ = child.start_kill();
+                // 等 pipe 读任务收尾（SIGKILL 后管道 EOF）
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(ToolError::Timeout(timeout));
+            };
+            let out_bytes = stdout_task.await.unwrap_or_default();
+            let err_bytes = stderr_task.await.unwrap_or_default();
+
+            let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
+            let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
             let mut combined = stdout;
             if !stderr.is_empty() {
                 if !combined.is_empty() {
@@ -180,10 +227,15 @@ impl Tool for ShellRun {
                 combined.push_str(&stderr);
             }
 
-            let (text, truncated) = truncate_chars(combined, MAX_OUTPUT_CHARS);
+            // S10：流式上限截断标记（cap 触顶即视为截断）+ 显示层二次截断
+            let stream_truncated = out_bytes.len() >= cap || err_bytes.len() >= cap;
+            let (text, truncated) = {
+                let (t, tr) = truncate_chars(combined, MAX_OUTPUT_CHARS);
+                (t, tr || stream_truncated)
+            };
 
             let mut result_text = String::new();
-            match output.status.code() {
+            match status.code() {
                 Some(0) => {}
                 Some(code) => {
                     let _ = writeln!(result_text, "[exit code: {code}]");
@@ -227,6 +279,26 @@ fn truncate_chars(text: String, max_chars: usize) -> (String, bool) {
     result.push_str(&truncated);
     result.push_str(indicator);
     (result, true)
+}
+
+/// S10：带字节上限的异步读取——达到上限后继续消费管道（防 SIGPIPE 干扰子进程）
+/// 但不再累积内存，返回实际保留的字节。
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: &mut R, cap: usize) -> std::vec::Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
+    let mut chunk = [0u8; 8192];
+    loop {
+        match r.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if buf.len() < cap {
+                    let take = n.min(cap - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+            }
+        }
+    }
+    buf
 }
 
 #[cfg(test)]
@@ -313,6 +385,80 @@ mod tests {
             .expect("run ok");
         assert!(result.metadata.truncated, "output should be truncated");
         assert!(text_of(&result).contains("... [output truncated]"));
+    }
+
+    /// S8：timeout_ms 超过 ctx 上限时被 clamp——sleep 5 + timeout_ms=u64::MAX
+    /// 应在 ctx.timeout（默认 120s？测试用短超时覆盖）内返回 Timeout。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_clamped_to_context_limit() {
+        let (_tmp, workdir) = make_workdir();
+        let mut ctx = ToolContext::new(workdir, "test".to_string());
+        ctx.timeout = std::time::Duration::from_millis(300);
+        let tool = ShellRun::new();
+        let started = std::time::Instant::now();
+        let err = tool
+            .execute(
+                json!({"command": "sleep 5", "timeout_ms": 18446744073709551615u64}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::Timeout(_)),
+            "应返回 Timeout: {err:?}"
+        );
+        // 300ms 超时 + 杀树余量，远小于 sleep 5
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "clamp 生效"
+        );
+    }
+
+    /// S9（unix）：超时后进程组整树清理——后台孤儿不残留。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_orphans_killed_on_timeout() {
+        let (_tmp, workdir) = make_workdir();
+        let mut ctx = ToolContext::new(workdir.clone(), "test".to_string());
+        ctx.timeout = std::time::Duration::from_millis(400);
+        let tool = ShellRun::new();
+        // 后台 sleep 60 孤儿 + 前台长任务
+        let err = tool
+            .execute(json!({"command": "sleep 60 & sleep 30"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Timeout(_)));
+        // killpg 后短暂等待，确认无 `sleep 60` 残留
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("ps -eo pid,cmd | grep 'sleep 60' | grep -v grep | wc -l")
+            .output()
+            .expect("ps");
+        let count = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(count, "0", "后台孤儿应被 killpg 清理，实际残留 {count}");
+    }
+
+    /// S10：流式字节上限——大输出在 cap 处截断，metadata.truncated 置位。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_capped_at_max_output_bytes() {
+        let (_tmp, workdir) = make_workdir();
+        let mut ctx = ToolContext::new(workdir, "test".to_string());
+        ctx.max_output_bytes = 4096;
+        let tool = ShellRun::new();
+        // ~3.4MB 输出，远超 4KB cap
+        let result = tool
+            .execute(json!({"command": "seq 1 500000"}), &ctx)
+            .await
+            .expect("run ok");
+        assert!(result.metadata.truncated);
+        assert!(
+            result.metadata.bytes < 8192,
+            "保留字节数应在 cap 附近而非全量: {}",
+            result.metadata.bytes
+        );
     }
 
     #[cfg(unix)]

@@ -248,9 +248,10 @@
 - **P5【低】Session.config_hash 类型谎言**
   generated/Session.ts `config_hash: bigint` 而 wire 是 JSON number；event.rs:28 对 seq 已做
   ts(type="number") 特判，此处遗漏。
-- **P6【中】SSE 无心跳机制**
-  sse.rs 全文无 heartbeat/ping/keep-alive（grep 证实）：空闲连接会被中间代理/NAT 静默掐断，
-  EventSource 重连虽自动但期间事件丢失只能靠 pending 快照补偿，权限弹窗之外的流式体验断裂。
+- **P6【已撤销（误报）】SSE 心跳**
+  ~~sse.rs 全文无 heartbeat~~ **修正**：http.rs:688 `Sse::new(mapped).keep_alive(KeepAlive::default())`
+  已启用 axum 默认 15s comment 心跳——审查时 grep 只查了 sse.rs 未覆盖 handler 组装点。
+  防御已存在，无需修复。
 - **P7【低】并发语义无约定：同一会话并发 POST messages、多客户端订阅行为未文档化未测试**
   switch_workdir 有锁超时 409，消息发送路径未见等价保护说明；多端同时订阅的事件广播行为
   未测。

@@ -55,4 +55,6 @@ default = []
 # mcp = ["dep:minicoding-mcp"]
 web = ["dep:reqwest", "dep:url"]
 # full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "web"]
-
+[target.'cfg(unix)'.dependencies]
+# S9/C-07：进程组整树终止（pre_exec setpgid + 超时 killpg）
+libc = "0.2"

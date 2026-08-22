@@ -81,6 +81,10 @@ pub struct McpServerConfig {
     pub required: bool,
     /// 仅启用指定工具（`None` = 全部）；用于收敛工具集。
     pub enabled_tools: Option<Vec<String>>,
+    /// 是否信任 server 自报的 `readOnlyHint`（S13/C-25）。默认 `false`——不受信
+    /// 声明下只读工具也按 `Command` 处理（串行 + Ask，走完整权限链）。
+    #[serde(default)]
+    pub trust_read_only_hint: bool,
 }
 
 fn default_startup_timeout() -> u64 {

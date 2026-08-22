@@ -836,3 +836,46 @@ minicoding doctor --security
 
 - `last-known-good.toml` 以**解析前**快照写入：保留 `env:VAR` 引用原文（回退时重新
   解析，凭证不断供），剥离字面明文 key；文件 0600（`util::write_private` 统一收口）。
+
+---
+
+## 16. 权限与资源加固（S5–S13/S21/S22/S28，2026-08 Sprint 1）
+
+### 16.1 黑名单扩展（S5/C-02/C-23）
+
+- `shell.run` 词法近似判定写受保护目标：破坏性动词（`rm`/`mv`/`truncate`/`dd`/`unlink`/
+  `sed -i`）或重定向（`>`/`>>`/tee）命中 `AGENTS.md`/`CLAUDE.md` → 硬 Deny（堵 shell
+  旁路——此前仅 fs.delete 被拦）；
+- VCS 元数据写入硬 Deny：fs.write/fs.edit/fs.delete 路径组件含 `.git/.hg/.svn`，
+  shell 命令写 `.git/hooks` 等 → Deny（Linux landlock 并集语义下的应用层补偿）；
+- 诚实边界：词法近似无法识别 base64|sh 类变形，该残余风险由沙箱与用户审批兜底。
+
+### 16.2 预批准缓存词法比对（S6）
+
+plan.exit 缓存命中改为：命令与预批准 prompt **词法完全相等** 或 **词边界前缀**；
+含复合操作符（`;`/`&&`/`|`/反引号/`$(`）的命令永不继承预批准——堵拼接绕过。
+
+### 16.3 shell.run 资源三连加固（S8–S10/C-07）
+
+- **超时 clamp**：工具入参 `timeout_ms` 只能缩短不能超过 ToolContext 上限；
+- **进程组整树终止**（unix）：pre_exec `setpgid(0,0)`，超时 `killpg(SIGKILL)` 清理后台孤儿；
+- **流式字节上限**：stdout/stderr 按 `max_output_bytes` 流式读取截断，不再全量缓冲。
+
+### 16.4 MCP 只读声明显式信任（S13/C-25）
+
+`McpServerConfig.trust_read_only_hint`（默认 `false`）：不受信时 server 自报只读的
+工具也按 `Command` 处理（串行 + Ask，走完整权限链）；仅在首次批准时显式勾选信任才免检。
+
+### 16.5 工具输出边界转义（S21/C-05）
+
+`wrap_tool_output` 对内容中的字面闭合标签插入零宽空格——防恶意网页内容提前闭合
+`<tool_output>` 边界实施 prompt injection。
+
+### 16.6 web.fetch 重定向逐跳 SSRF 复检（S22）
+
+自动重定向禁用，手动逐跳跟随（上限 5），每跳重过 `validate_url`（含 DNS 解析后 IP
+复检）——堵"公网入口 302 → 内网/元数据地址"绕过。
+
+### 16.7 /undo 落审计（S28/C-28）
+
+回滚成功（含恢复/冲突计数）与失败均记 `AuditKind::FileUndone` 审计条目。

@@ -766,6 +766,7 @@ mod tests {
             enabled: true,
             required: false,
             enabled_tools: None,
+            trust_read_only_hint: false,
         }
     }
 
@@ -785,6 +786,7 @@ mod tests {
             enabled: true,
             required: false,
             enabled_tools: None,
+            trust_read_only_hint: false,
         };
         assert_eq!(RmcpClient::transport_kind(&stdio_cfg.transport), "stdio");
 
@@ -919,6 +921,7 @@ mod tests {
             enabled: true,
             required: false,
             enabled_tools: None,
+            trust_read_only_hint: false,
         };
         let err =
             RmcpClient::build_http_config(&cfg).expect_err("stdio transport should be rejected");

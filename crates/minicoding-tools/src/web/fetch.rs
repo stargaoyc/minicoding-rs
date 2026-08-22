@@ -84,18 +84,51 @@ impl Tool for WebFetch {
 /// 但 SSRF 会拒绝 loopback，故测试直接调用本函数绕过 SSRF（SSRF 由
 /// `validate_url` 单独覆盖，见 `ssrf.rs` 测试）。
 async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, ToolError> {
-    // HTTP GET
+    // S22：禁用自动重定向，手动逐跳跟随——每一跳都重过 SSRF 校验（防"公网入口
+    // 302 → 内网/元数据地址"绕过与 DNS rebinding）。首跳校验在此处显式执行
+    // （测试态下与原行为一致地绕过，见循环内注释）。
+    const MAX_REDIRECTS: usize = 5;
+    let mut hops = 0usize;
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ToolError::Exec(format!("HTTP client 构建失败: {e}")))?;
 
-    let resp = client
-        .get(url)
-        .header("User-Agent", "minicoding/0.1")
-        .send()
-        .await
-        .map_err(|e| ToolError::Exec(format!("HTTP 请求失败: {e}")))?;
+    let mut current = url.to_string();
+    let resp = loop {
+        // 测试态跳过逐跳复检：wiremock 起在本机 loopback，SSRF 会拒绝（首跳
+        // 校验由调用方 fetch_and_convert 承担；此处生产路径每跳强制复检）
+        if !cfg!(test) {
+            super::ssrf::validate_url(&current).await?;
+        }
+        let resp = client
+            .get(&current)
+            .header("User-Agent", "minicoding/0.1")
+            .send()
+            .await
+            .map_err(|e| ToolError::Exec(format!("HTTP 请求失败: {e}")))?;
+        if resp.status().is_redirection() {
+            hops += 1;
+            if hops > MAX_REDIRECTS {
+                return Err(ToolError::Exec(format!(
+                    "重定向超过 {MAX_REDIRECTS} 跳上限"
+                )));
+            }
+            let Some(next) = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+            else {
+                return Err(ToolError::Exec("重定向缺少 Location 头".into()));
+            };
+            current = join_redirect_url(&current, next)?;
+            if current.len() > 2048 {
+                return Err(ToolError::Exec("重定向 URL 过长".into()));
+            }
+            continue;
+        }
+        break resp;
+    };
 
     if !resp.status().is_success() {
         return Err(ToolError::Exec(format!("HTTP {}", resp.status())));
@@ -134,6 +167,52 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
     };
 
     Ok(ToolResult::ok_text(truncated))
+}
+
+/// S22：解析相对 Location 为绝对 URL（同 scheme/host，路径合并）。
+fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    // 相对路径：取 base 的 scheme+authority 前缀拼接
+    let Some(scheme_end) = base.find("://") else {
+        return Err(ToolError::Exec("无效的 base URL".into()));
+    };
+    let rest = &base[scheme_end + 3..];
+    let authority_len = rest.find('/').unwrap_or(rest.len());
+    let origin = &base[..scheme_end + 3 + authority_len];
+    if location.starts_with('/') {
+        Ok(format!("{origin}{location}"))
+    } else {
+        // 相对路径按当前目录合并（简化：直接拼 origin + "/" + location）
+        Ok(format!("{origin}/{location}"))
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::join_redirect_url;
+
+    #[test]
+    fn absolute_location_passthrough() {
+        assert_eq!(
+            join_redirect_url("https://a.com/x", "https://b.com/y").expect("abs"),
+            "https://b.com/y"
+        );
+    }
+
+    #[test]
+    fn relative_location_joined_to_origin() {
+        assert_eq!(
+            join_redirect_url("https://a.com/x/y", "/z").expect("rel"),
+            "https://a.com/z"
+        );
+    }
+
+    #[test]
+    fn invalid_base_rejected() {
+        assert!(join_redirect_url("not-a-url", "/z").is_err());
+    }
 }
 
 #[cfg(test)]
