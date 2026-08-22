@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+# A8 架构守卫：复用 core 的 manifest 断言
+minicoding-core = { workspace = true, features = ["test-util"] }
 # PersistedEvent::SessionCreated 测试需要 OffsetDateTime 构造（见 event.rs 测试）
 time = { workspace = true }
 

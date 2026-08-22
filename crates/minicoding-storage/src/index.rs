@@ -192,6 +192,19 @@ impl SessionIndex {
         self.entries.iter().find(|e| e.session_id == session_id)
     }
 
+    /// 更新指定会话的摘要（A7：原 memory crate 的 `save_summary` 迁移至此——
+    /// 操作 `SessionIndex` 内部状态的逻辑归属 storage，解除领域交叉依赖）。
+    ///
+    /// `session_id` 不在索引中时无操作；存在则覆盖 `summary`，保留其余字段。
+    pub fn set_summary(&mut self, session_id: &str, summary: String) {
+        let Some(entry) = self.get(session_id) else {
+            return;
+        };
+        let mut updated = entry.clone();
+        updated.summary = Some(summary);
+        self.add(updated);
+    }
+
     /// 64KB 窗口列出：首尾各 32KB，超出部分以 `[... N more sessions]` 标注。
     ///
     /// 用于 CLI/上下文展示万级会话时避免资源耗尽（`rules.md` C-07）。按行边界
@@ -263,6 +276,38 @@ impl SessionIndex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn set_summary_updates_existing_entry() {
+        let mut index = SessionIndex::new();
+        let entry = SessionIndexEntry::new("sess-1", None, OffsetDateTime::now_utc());
+        index.add(entry);
+
+        index.set_summary("sess-1", "new summary".to_string());
+
+        let updated = index.get("sess-1").unwrap();
+        assert_eq!(updated.summary.as_deref(), Some("new summary"));
+    }
+
+    #[test]
+    fn set_summary_overwrites_existing() {
+        let mut index = SessionIndex::new();
+        let entry =
+            SessionIndexEntry::new("sess-1", Some("old".to_string()), OffsetDateTime::now_utc());
+        index.add(entry);
+        index.set_summary("sess-1", "fresh".to_string());
+        assert_eq!(
+            index.get("sess-1").unwrap().summary.as_deref(),
+            Some("fresh")
+        );
+    }
+
+    #[test]
+    fn set_summary_missing_session_noop() {
+        let mut index = SessionIndex::new();
+        index.set_summary("nonexistent", "summary".to_string());
+        assert!(index.is_empty());
+    }
+
     use super::*;
     use camino::Utf8PathBuf;
     use tempfile::tempdir;

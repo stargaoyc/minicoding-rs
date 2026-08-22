@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 minicoding-core = { workspace = true }
-minicoding-storage = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -22,5 +21,7 @@ time = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+# A8 架构守卫：复用 core 的 manifest 断言
+minicoding-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }

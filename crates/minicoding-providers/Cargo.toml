@@ -20,4 +20,6 @@ reqwest = { workspace = true }
 tiktoken-rs = { workspace = true }
 
 [dev-dependencies]
+# A8 架构守卫：复用 core 的 manifest 断言
+minicoding-core = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }

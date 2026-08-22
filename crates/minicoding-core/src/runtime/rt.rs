@@ -12,6 +12,8 @@
 //!
 //! 详见 `design.md` §2、§9、§16、§20。
 
+use super::plan_handle::PlanControllerHandle;
+use super::repeat_guard;
 use crate::config::{ConfigWatcher, RuntimeConfig};
 use crate::context::ContextManager;
 use crate::hooks::{
@@ -21,13 +23,13 @@ use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
 use crate::metrics;
 use crate::model::{
-    ContentBlock, Message, PolicyError, Role, RuntimeError, Session, SessionId, SideEffect,
-    StopReason, ToolCall, ToolCallId, ToolResult, TurnOutcome, UserInput,
+    ContentBlock, Message, Role, RuntimeError, Session, SideEffect, StopReason, ToolCall,
+    ToolCallId, ToolResult, TurnOutcome, UserInput,
 };
 use crate::otel::span_name;
 use crate::policy::{
-    Decision, PermissionContext, PermissionMode, PermissionPolicy, PermissionPrompt,
-    PermissionPrompter, PlanModeController, PlanModeSnapshot, PreApprovedPrompt, Verdict,
+    Decision, PermissionContext, PermissionPolicy, PermissionPrompt, PermissionPrompter,
+    PlanModeController, PlanModeSnapshot, Verdict,
 };
 use crate::provider::{BoxFuture, ChatRequest, Delta, LlmProvider};
 use crate::runtime::accumulator::DeltaAccumulator;
@@ -784,7 +786,7 @@ impl Runtime {
                     //     硬停止阈值 = 配置末级（非空）或默认 3（空数组 = 关闭软提醒）。
                     let thresholds = &config_snapshot.tools.repeat_guard_thresholds;
                     let hard_stop_count = thresholds.last().copied().unwrap_or(3);
-                    let sig = Self::tool_calls_signature(&assistant_msg.tool_calls);
+                    let sig = repeat_guard::tool_calls_signature(&assistant_msg.tool_calls);
 
                     // 5.1a 单工具指纹软提醒：对每轮出现的指纹计数递增，未出现的清零
                     //     （"连续"语义：中间隔一轮未调用即视为中断）。命中中间级阈值
@@ -792,7 +794,7 @@ impl Runtime {
                     //     不 return——模型可见历史不失真）。
                     let mut current_fingerprints: HashSet<String> = HashSet::new();
                     for c in &assistant_msg.tool_calls {
-                        let fp = Self::tool_fingerprint(c);
+                        let fp = repeat_guard::tool_fingerprint(c);
                         current_fingerprints.insert(fp.clone());
                         let streak = fingerprint_streaks.entry(fp).or_insert(0);
                         *streak += 1;
@@ -829,7 +831,7 @@ impl Runtime {
                     // 5.1b 硬停止：整轮签名连续 ≥ 末级阈值 → 死循环，提前终止
                     //     （C-13 补充：max_tool_iters 之外的早期止损，避免无谓消耗）
                     call_signatures.push(sig);
-                    if Self::is_repeating(&call_signatures, hard_stop_count) {
+                    if repeat_guard::is_repeating(&call_signatures, hard_stop_count) {
                         tracing::warn!("turn terminated: repeated tool calls detected");
                         let event = Event::TurnEnd {
                             stop_reason: StopReason::Stopped,
@@ -983,37 +985,6 @@ impl Runtime {
         user_input: UserInput,
     ) -> BoxFuture<'static, Result<TurnOutcome, RuntimeError>> {
         Box::pin(async move { self.run_turn(user_input).await })
-    }
-
-    /// 计算单工具调用指纹（`name|规范化 input`，M-08，R-03）。
-    ///
-    /// 与 `tool_calls_signature` 的区别：按单个调用计算而非整轮集合排序拼接，
-    /// 用于更灵敏的软提醒（同一工具反复调用即可命中，无需整轮集合完全相同）。
-    /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），跨轮比较稳定。
-    fn tool_fingerprint(call: &ToolCall) -> String {
-        let input = serde_json::to_string(&call.input).unwrap_or_else(|_| call.input.to_string());
-        format!("{}|{}", call.name, input)
-    }
-
-    /// 计算一轮工具调用的签名（`name|规范化 input`，多调用排序后拼接）。
-    ///
-    /// `serde_json` 默认对 `Value::Object` 用 `BTreeMap`（键排序），保证 input
-    /// 序列化与键顺序无关，跨轮比较稳定。用于重复检测识别"连续相同工具调用集合"。
-    fn tool_calls_signature(calls: &[ToolCall]) -> String {
-        let mut sigs: Vec<String> = calls.iter().map(Self::tool_fingerprint).collect();
-        sigs.sort_unstable();
-        sigs.join(";")
-    }
-
-    /// 检测最近 `threshold` 轮工具调用签名是否完全相同（连续 ≥ `threshold` 轮 → 死循环）。
-    fn is_repeating(signatures: &[String], threshold: u32) -> bool {
-        let threshold = threshold.max(1) as usize;
-        let n = signatures.len();
-        if n < threshold {
-            return false;
-        }
-        let last = &signatures[n - 1];
-        signatures[n - threshold..].iter().all(|s| s == last)
     }
 
     /// 为会话中"有 `tool_calls` 但缺 `tool_result`"的 assistant 消息补合成错误结果
@@ -2245,136 +2216,6 @@ impl std::fmt::Debug for Runtime {
             )
             .field("tools_count", &self.tools.len())
             .finish_non_exhaustive()
-    }
-}
-
-/// `PlanModeController` 适配器（共享 Runtime 的 `plan_state` + `events`）。
-///
-/// 由 `Runtime::plan_controller` 构造，注入到 `plan.exit` 工具。`plan.exit` 通过
-/// 它读写会话级 Plan 状态。设计为独立结构而非 `Runtime impl PlanModeController`，
-/// 避免给 Runtime 增加无关方法（`Arc<dyn PlanModeController>` 更显式）。
-///
-/// Event Sourcing：持有 `event_store`/`event_seq`/`durable_seq`/`session_id`，
-/// `exit_plan`/`set_mode` 触发 `PermissionModeChanged` 时同步持久化到事件流
-/// （replay 时重建 `final_permission_mode`，见 `replay_session_state`）。
-struct PlanControllerHandle {
-    state: Arc<RwLock<PlanModeSnapshot>>,
-    events: EventBus,
-    /// Event Sourcing 持久化字段（与 Runtime 共享 Arc）。
-    session_id: SessionId,
-    event_store: Arc<dyn EventStore>,
-    event_seq: Arc<TokioMutex<u64>>,
-    durable_seq: Arc<TokioMutex<u64>>,
-}
-
-impl PlanControllerHandle {
-    /// 持久化 `PermissionModeChanged` 事件到 EventStore（best-effort，无 snapshot 触发）。
-    ///
-    /// 与 `Runtime::persist_event` 区别：不触发 snapshot（`PermissionModeChanged`
-    /// 非 `MessageAppended`，不计入 `message_since_snapshot`）；不调用
-    /// `try_persist`（调用方已知是持久化事件）。
-    async fn persist_mode_changed(&self, from: PermissionMode, to: PermissionMode) {
-        let seq = {
-            let mut guard = self.event_seq.lock().await;
-            let s = *guard;
-            *guard += 1;
-            s
-        };
-        let record = EventRecord::new(
-            seq,
-            self.session_id.clone(),
-            PersistedEvent::PermissionModeChanged { from, to },
-        );
-        if let Err(e) = self.event_store.append(&self.session_id, record).await {
-            tracing::warn!(
-                error = %e,
-                session = %self.session_id,
-                seq,
-                "PermissionModeChanged persist failed (best-effort, continue)"
-            );
-            return;
-        }
-        let mut guard = self.durable_seq.lock().await;
-        if seq > *guard {
-            *guard = seq;
-        }
-    }
-}
-
-impl PlanModeController for PlanControllerHandle {
-    fn snapshot(&self) -> BoxFuture<'_, PlanModeSnapshot> {
-        let state = self.state.clone();
-        Box::pin(async move { state.read().await.clone() })
-    }
-
-    fn exit_plan(
-        &self,
-        allowed_prompts: Vec<PreApprovedPrompt>,
-        target_mode: PermissionMode,
-    ) -> BoxFuture<'_, Result<(), PolicyError>> {
-        let state = self.state.clone();
-        let events = self.events.clone();
-        let persister_session = self.session_id.clone();
-        let persister_store = self.event_store.clone();
-        let persister_seq = self.event_seq.clone();
-        let persister_durable = self.durable_seq.clone();
-        Box::pin(async move {
-            let mut snap = state.write().await;
-            if snap.mode != PermissionMode::Plan {
-                return Err(PolicyError::Policy(format!(
-                    "plan.exit 仅在 Plan 模式下可调用（当前：{:?}）",
-                    snap.mode
-                )));
-            }
-            let from = snap.mode;
-            snap.mode = target_mode;
-            snap.allowed_prompts = allowed_prompts;
-            drop(snap);
-            // Event Sourcing：持久化 PermissionModeChanged（best-effort）
-            let handle = PlanControllerHandle {
-                state,
-                events: events.clone(),
-                session_id: persister_session,
-                event_store: persister_store,
-                event_seq: persister_seq,
-                durable_seq: persister_durable,
-            };
-            handle.persist_mode_changed(from, target_mode).await;
-            events.emit(Event::PermissionModeChanged {
-                from,
-                to: target_mode,
-            });
-            tracing::info!(from = ?from, to = ?target_mode, "PermissionMode switched by plan.exit");
-            Ok(())
-        })
-    }
-
-    fn set_mode(&self, mode: PermissionMode) -> BoxFuture<'_, ()> {
-        let state = self.state.clone();
-        let events = self.events.clone();
-        let persister_session = self.session_id.clone();
-        let persister_store = self.event_store.clone();
-        let persister_seq = self.event_seq.clone();
-        let persister_durable = self.durable_seq.clone();
-        Box::pin(async move {
-            let mut snap = state.write().await;
-            let from = snap.mode;
-            snap.mode = mode;
-            // set_mode 是 CLI 显式切换，不重置 allowed_prompts（保留先前 plan.exit 缓存）
-            drop(snap);
-            // Event Sourcing：持久化 PermissionModeChanged（best-effort）
-            let handle = PlanControllerHandle {
-                state,
-                events: events.clone(),
-                session_id: persister_session,
-                event_store: persister_store,
-                event_seq: persister_seq,
-                durable_seq: persister_durable,
-            };
-            handle.persist_mode_changed(from, mode).await;
-            events.emit(Event::PermissionModeChanged { from, to: mode });
-            tracing::info!(from = ?from, to = ?mode, "PermissionMode switched by CLI");
-        })
     }
 }
 

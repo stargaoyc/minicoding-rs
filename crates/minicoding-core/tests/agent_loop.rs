@@ -584,6 +584,48 @@ impl minicoding_core::hooks::HookRegistry for TestHookRegistry {
     fn count(&self) -> usize {
         self.hooks.lock().expect("hooks").len()
     }
+    fn dispatch(
+        &self,
+        mut input: minicoding_core::hooks::HookInput,
+        config: minicoding_core::hooks::DispatchConfig,
+    ) -> minicoding_core::provider::BoxFuture<'_, minicoding_core::hooks::DispatchResult> {
+        // A1 下沉后测试桩需自行聚合：执行注册 Hook，应用 modify_input 与决策
+        // （C-21：builtin_deny 预置 Deny 且忽略后续 Allow）
+        use minicoding_core::hooks::{HookDecision, OnHookError};
+        Box::pin(async move {
+            let event = input.event;
+            let tool_name = input.tool.as_ref().map(|t| t.name.clone());
+            let mut result = minicoding_core::hooks::DispatchResult::default();
+            if let Some(reason) = config.builtin_deny.clone() {
+                result.decision = HookDecision::Deny;
+                result.reason = Some(reason);
+            }
+            for hook in self.for_event_with_tool(event, tool_name.as_deref()) {
+                if let Ok(out) = hook.run(input.clone()).await {
+                    if let Some(new_input) = out.modify_input {
+                        if let Some(ref mut tool) = input.tool {
+                            tool.input = new_input.clone();
+                        }
+                        result.modify_input = Some(new_input);
+                    }
+                    match out.decision {
+                        HookDecision::Allow
+                            if config.builtin_deny.is_none()
+                                && !matches!(config.on_error, OnHookError::Deny) =>
+                        {
+                            // 简化合并：无 builtin deny 时 Allow 生效（S4 场景不依赖）
+                        }
+                        HookDecision::Deny => {
+                            result.decision = HookDecision::Deny;
+                            result.reason = out.reason;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            result
+        })
+    }
 }
 
 /// S4/C-01/C-21：Hook `modify_input` 改写后的输入必须重过策略——用户批准 A 不能执行 B。
