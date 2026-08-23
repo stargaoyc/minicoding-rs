@@ -97,7 +97,9 @@ impl SandboxDriver for WindowsJobDriver {
     }
 
     fn is_hardened(&self) -> bool {
-        true
+        // S25：Windows 驱动仅进程遏制（Job Object）+ 受限令牌，无文件系统隔离——
+        // 如实报告，避免 doctor --security 高估防护（对齐 security.md §8.2）
+        false
     }
 
     fn id(&self) -> &'static str {
@@ -304,7 +306,7 @@ mod tests {
     fn driver_id_and_hardened() {
         let d = WindowsJobDriver::new();
         assert_eq!(d.id(), "windows-token");
-        assert!(d.is_hardened());
+        assert!(!d.is_hardened()); // S25：无文件系统隔离，如实报告
     }
 
     #[test]

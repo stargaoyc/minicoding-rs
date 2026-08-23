@@ -11,7 +11,7 @@
 //!
 //! ## 临时文件生命周期
 //!
-//! Profile 写入 `/tmp/minicoding-seatbelt-<pid>-<nanos>.sb`，`pre_exec` 内
+//! Profile 写入 tempfile 随机名 `.sb`（S26），`pre_exec` 内
 //! `sandbox_init` 成功读取后立即删除（profile 已加载进内核，文件不再需要）。
 //! 若 `sandbox_init` 失败也删除临时文件并返回错误。
 //!
@@ -102,13 +102,17 @@ fn apply_seatbelt(
 ) -> Result<(), SandboxError> {
     let profile = build_profile(policy);
 
-    // 写入临时文件（父进程，apply 返回前完成）。
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let tmp_path = format!("/tmp/minicoding-seatbelt-{pid}-{nanos}.sb");
+    // S26：tempfile 随机名 + 0600——消除 `/tmp` 可预测名的符号链接竞争窗口。
+    // NamedTempFile 不 drop（disable_cleanup 等价：保留路径），由 pre_exec 内
+    // sandbox_init 成功后删除；失败路径随 TempPath drop 清理。
+    let tmp_file = tempfile::Builder::new()
+        .prefix("minicoding-seatbelt")
+        .suffix(".sb")
+        .keep(true)
+        .tempfile()
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    let (tmp_path, _) = tmp_file.keep()?; // PathBuf + File
+    let tmp_path = tmp_path.to_string_lossy().into_owned();
     std::fs::write(&tmp_path, &profile)?;
 
     // pre_exec 闭包：子进程内调 sandbox_init，成功后删除临时文件。
