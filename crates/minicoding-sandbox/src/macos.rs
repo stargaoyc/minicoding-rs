@@ -107,12 +107,21 @@ fn apply_seatbelt(
     let tmp_file = tempfile::Builder::new()
         .prefix("minicoding-seatbelt")
         .suffix(".sb")
-        .keep(true)
         .tempfile()
         .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
-    let (tmp_path, _) = tmp_file.keep()?; // PathBuf + File
-    let tmp_path = tmp_path.to_string_lossy().into_owned();
-    std::fs::write(&tmp_path, &profile)?;
+    // 写入 profile 后保留路径（into_temp_path().keep() → io::Result<PathBuf>）
+    use std::io::Write as _;
+    write!(tmp_file.as_file(), "{profile}")
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    tmp_file
+        .as_file()
+        .sync_all()
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    let tmp_path_buf = tmp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|e| SandboxError::Io(e))?;
+    let tmp_path = tmp_path_buf.to_string_lossy().into_owned();
 
     // pre_exec 闭包：子进程内调 sandbox_init，成功后删除临时文件。
     let profile_path = tmp_path;
