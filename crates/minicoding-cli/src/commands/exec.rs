@@ -103,7 +103,8 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
         eprintln!("仅限受信环境使用。");
     }
 
-    let rt = crate::builder::build_runtime(
+    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    let mut rt = crate::builder::build_runtime(
         cmd.provider.as_deref(),
         cmd.provider_name.as_deref(),
         cmd.api_base.as_deref(),
@@ -123,6 +124,21 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     let exit_code = runtime.block_on(async {
+        // MCP client 接线（§7-P0）：exec 的 AutoApprovePrompter 使 C-24 首批
+        // 批准自动放行——与 exec"批量执行"定位一致，决策仍落 audit。
+        #[cfg(feature = "mcp")]
+        {
+            let prompter = minicoding_policy::AutoApprovePrompter::new();
+            if let Err(e) = minicoding_sdk::mcp_setup::attach_mcp_tools(
+                &mut rt,
+                &cmd.workdir.clone().into(),
+                std::sync::Arc::new(prompter),
+            )
+            .await
+            {
+                eprintln!("MCP 工具注册失败: {e}");
+            }
+        }
         // Event Sourcing：初始化事件流（exec 始终新建会话，持久化 SessionCreated）。
         if let Err(e) = rt.init_event_stream().await {
             eprintln!("初始化事件流失败: {e}");

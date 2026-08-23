@@ -10,11 +10,12 @@ authors.workspace = true
 
 [features]
 # A11：builder 组装 feature 矩阵（与原 cli/builder.rs cfg 门控对齐）
-default = ["sandbox", "hooks", "file-undo", "web", "extensions", "cred-keyring"]
+default = ["sandbox", "hooks", "file-undo", "web", "extensions", "cred-keyring", "mcp"]
 hooks = ["dep:minicoding-hooks"]
 file-undo = ["dep:minicoding-journal"]
 sandbox = ["dep:minicoding-sandbox"]
 extensions = ["dep:minicoding-extension-sdk"]
+mcp = ["dep:minicoding-mcp"]
 web = ["minicoding-tools/web"]
 cred-keyring = ["dep:keyring"]
 
@@ -31,6 +32,7 @@ minicoding-hooks = { workspace = true, optional = true }
 minicoding-journal = { workspace = true, optional = true }
 minicoding-sandbox = { workspace = true, optional = true }
 minicoding-extension-sdk = { workspace = true, optional = true }
+minicoding-mcp = { workspace = true, optional = true }
 keyring = { workspace = true, optional = true }
 
 tokio = { workspace = true }

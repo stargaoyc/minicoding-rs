@@ -34,9 +34,8 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use clap::{Args, Subcommand};
-use minicoding_core::mcp::{McpScope, McpServerConfig, McpTransport};
+use minicoding_core::mcp::{McpScope, McpTransport};
 use minicoding_core::paths;
-use serde::Deserialize;
 
 /// `mcp` 顶层子命令。
 #[derive(Args, Debug)]
@@ -114,7 +113,7 @@ fn list_servers(
     project_root: &Utf8PathBuf,
     store: &minicoding_mcp::FileChoicesStore,
 ) -> Result<()> {
-    let configs = load_all_configs(project_root)?;
+    let configs = minicoding_mcp::config::load_all_configs(project_root)?;
 
     // 加载 project 批准状态
     let project_choices: HashMap<String, minicoding_mcp::ApprovalState> =
@@ -170,66 +169,6 @@ fn list_servers(
     println!();
     println!("共 {} 个 server", configs.len());
     Ok(())
-}
-
-/// 加载所有作用域的 MCP server 配置（user + local + project）。
-fn load_all_configs(project_root: &Utf8PathBuf) -> Result<Vec<McpServerConfig>> {
-    let mut configs = Vec::new();
-
-    // user/local：~/.minicoding/mcp.json
-    let user_mcp_path = paths::minicoding_home().context("无法确定 minicoding home")?;
-    let user_mcp_file = user_mcp_path.join("mcp.json");
-    if user_mcp_file.exists() {
-        let text = std::fs::read_to_string(&user_mcp_file)
-            .with_context(|| format!("读取 {user_mcp_file} 失败"))?;
-        let file: UserMcpFile =
-            serde_json::from_str(&text).with_context(|| format!("解析 {user_mcp_file} 失败"))?;
-        for mut cfg in file.local.servers {
-            cfg.scope = McpScope::Local;
-            configs.push(cfg);
-        }
-        for mut cfg in file.user.servers {
-            cfg.scope = McpScope::User;
-            configs.push(cfg);
-        }
-    }
-
-    // project：.minicoding/mcp.json
-    let project_mcp_file = project_root.join(".minicoding").join("mcp.json");
-    if project_mcp_file.exists() {
-        let text = std::fs::read_to_string(&project_mcp_file)
-            .with_context(|| format!("读取 {project_mcp_file} 失败"))?;
-        let file: ProjectMcpFile =
-            serde_json::from_str(&text).with_context(|| format!("解析 {project_mcp_file} 失败"))?;
-        for mut cfg in file.servers.servers {
-            cfg.scope = McpScope::Project;
-            configs.push(cfg);
-        }
-    }
-
-    Ok(configs)
-}
-
-/// user/local 作用域配置文件结构。
-#[derive(Deserialize)]
-struct UserMcpFile {
-    #[serde(default)]
-    local: ScopeServers,
-    #[serde(default)]
-    user: ScopeServers,
-}
-
-/// project 作用域配置文件结构。
-#[derive(Deserialize)]
-struct ProjectMcpFile {
-    #[serde(default)]
-    servers: ScopeServers,
-}
-
-#[derive(Default, Deserialize)]
-struct ScopeServers {
-    #[serde(default)]
-    servers: Vec<McpServerConfig>,
 }
 
 /// 传输协议摘要（用于 list 输出）。

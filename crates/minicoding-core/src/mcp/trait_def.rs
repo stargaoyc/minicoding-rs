@@ -115,6 +115,14 @@ pub trait McpClient: Send + Sync {
     /// 返回所有已就绪 server 的工具 schema，命名为 `mcp__<server>__<tool>`。
     fn list_tools(&self) -> BoxFuture<'_, Vec<ToolSchema>>;
 
+    /// 各工具的 [`ToolHint`]（按 `mcp__<server>__<tool>` 全名索引）。
+    ///
+    /// 供 wrapper 决定 `side_effect`/`is_read_only`（S13/C-25：hint 是远端
+    /// 自我声明，默认不信任）。未实现时返回空 map（全部按 Unknown 处理）。
+    fn tool_hints(&self) -> BoxFuture<'_, std::collections::HashMap<String, ToolHint>> {
+        Box::pin(async { std::collections::HashMap::new() })
+    }
+
     /// 调用某个 MCP 工具，超时由 server 配置的 `tool_timeout_sec` 决定。
     ///
     /// # Errors

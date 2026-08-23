@@ -72,7 +72,7 @@ memory = ["dep:minicoding-memory"]
 hooks = ["dep:minicoding-hooks", "minicoding-sdk/hooks"]
 file-undo = ["dep:minicoding-journal", "minicoding-sdk/file-undo"]
 sandbox = ["dep:minicoding-sandbox", "minicoding-sdk/sandbox"]
-mcp = ["dep:minicoding-mcp"]
+mcp = ["dep:minicoding-mcp", "minicoding-sdk/mcp"]
 serve = ["dep:minicoding-server"]
 # 扩展系统（PromptPipeline + BundledExtensionHost，T-M8-2）
 extensions = ["dep:minicoding-extension-sdk", "minicoding-sdk/extensions"]

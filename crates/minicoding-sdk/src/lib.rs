@@ -36,6 +36,8 @@
 
 pub mod builder;
 pub mod cred;
+#[cfg(feature = "mcp")]
+pub mod mcp_setup;
 mod store;
 mod stream;
 

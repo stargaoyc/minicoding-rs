@@ -3243,6 +3243,7 @@ dependencies = [
  "minicoding-extension-sdk",
  "minicoding-hooks",
  "minicoding-journal",
+ "minicoding-mcp",
  "minicoding-memory",
  "minicoding-policy",
  "minicoding-providers",

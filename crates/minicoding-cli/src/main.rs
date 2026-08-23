@@ -235,7 +235,8 @@ fn main() -> Result<()> {
     let interactive = cli.session || cli.prompt.is_none();
 
     // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
-    let rt = builder::build_runtime(
+    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    let mut rt = builder::build_runtime(
         cli.provider.as_deref(),
         cli.provider_name.as_deref(),
         cli.api_base.as_deref(),
@@ -260,6 +261,20 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let exit_code = if interactive {
         runtime.block_on(async {
+            // MCP client 接线（§7-P0）：加载配置 → C-24 批准 → 启动 → 注册工具
+            #[cfg(feature = "mcp")]
+            {
+                let prompter = minicoding_policy::InteractivePrompter::new();
+                if let Err(e) = minicoding_sdk::mcp_setup::attach_mcp_tools(
+                    &mut rt,
+                    &camino::Utf8PathBuf::from(&cli.workdir),
+                    std::sync::Arc::new(prompter),
+                )
+                .await
+                {
+                    eprintln!("MCP 工具注册失败: {e}");
+                }
+            }
             // Event Sourcing：初始化事件流（新会话持久化 SessionCreated，
             // 恢复会话加载 seq 计数器 + snapshot，见 `design.md` §25.1）。
             // 必须在 `restore_history` 之前调用（`init_event_stream` 设置

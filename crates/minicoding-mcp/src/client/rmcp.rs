@@ -84,6 +84,8 @@ struct ServerConnection {
     service: RunningService<rmcp::service::RoleClient, ClientInfo>,
     /// 握手时缓存的工具 schema（已用 `mcp_tool_name` 命名）。
     tools: Vec<ToolSchema>,
+    /// 工具 hint（S13/C-25，供 wrapper 判定 `side_effect`；默认不信任）。
+    hints: HashMap<String, minicoding_core::mcp::ToolHint>,
     /// 工具调用超时（来自 server 配置）。
     tool_timeout: Duration,
 }
@@ -300,7 +302,7 @@ impl RmcpClient {
             })?;
 
         // 转换 schema + 命名 + enabled_tools 过滤
-        let tools = rmcp_tools
+        let tools_with_hints: Vec<(ToolSchema, minicoding_core::mcp::ToolHint)> = rmcp_tools
             .into_iter()
             .filter(|t| {
                 cfg.enabled_tools
@@ -310,17 +312,38 @@ impl RmcpClient {
             .map(|t| {
                 let name = crate::naming::mcp_tool_name(&cfg.name, &t.name)
                     .map_err(|e| McpError::Config(format!("tool name `{}` invalid: {e}", t.name)));
-                name.map(|full_name| ToolSchema {
-                    name: full_name,
-                    description: t.description.as_deref().unwrap_or("").to_string(),
-                    input_schema: serde_json::Value::Object(t.input_schema.as_ref().clone()),
+                // S13/C-25：annotations 是远端自我声明，仅采集供 wrapper 按
+                // trust_read_only_hint 决定是否采信（默认不信任 → Unknown/Command）
+                let annotations = t.annotations.clone().unwrap_or_default();
+                let hint = match (annotations.read_only_hint, annotations.destructive_hint) {
+                    (Some(true), _) => minicoding_core::mcp::ToolHint::ReadOnly,
+                    (_, Some(true)) => minicoding_core::mcp::ToolHint::Destructive,
+                    _ => minicoding_core::mcp::ToolHint::Unknown,
+                };
+                name.map(|full_name| {
+                    (
+                        ToolSchema {
+                            name: full_name,
+                            description: t.description.as_deref().unwrap_or("").to_string(),
+                            input_schema: serde_json::Value::Object(
+                                t.input_schema.as_ref().clone(),
+                            ),
+                        },
+                        hint,
+                    )
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let hints: HashMap<String, minicoding_core::mcp::ToolHint> = tools_with_hints
+            .iter()
+            .map(|(sc, h)| (sc.name.clone(), *h))
+            .collect();
+        let tools: Vec<ToolSchema> = tools_with_hints.into_iter().map(|(s, _)| s).collect();
 
         // 缓存连接 + 工具
         let conn = ServerConnection {
             service,
+            hints: hints.clone(),
             tools: tools.clone(),
             tool_timeout,
         };
@@ -399,6 +422,17 @@ impl McpClient for RmcpClient {
                 .await
                 .values()
                 .flat_map(|c| c.tools.clone())
+                .collect()
+        })
+    }
+
+    fn tool_hints(&self) -> BoxFuture<'_, HashMap<String, minicoding_core::mcp::ToolHint>> {
+        Box::pin(async move {
+            self.connections
+                .read()
+                .await
+                .values()
+                .flat_map(|c| c.hints.clone())
                 .collect()
         })
     }
