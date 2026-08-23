@@ -32,7 +32,7 @@
 | 组合单位 | Cordis 插件（vendor/ 目录自带框架）；**没有特权核心**，连 agent loop 都是插件（`ctx.agentLoop`） | `minicoding-core` 定义 trait + `Runtime` 聚合根编排 | dsh 组合粒度细、可替换性极强；minicoding 依赖方向清晰、编译期安全 |
 | 依赖声明 | `inject` 服务声明，加载顺序由依赖表达自动推导 | trait 显式注入（`RuntimeBuilder`） | 等价能力；dsh 有**配置热重载**（HMR），minicoding 无 |
 | 生命周期 | `FiberState` 状态机（PENDING→LOADING→ACTIVE→FAILED→UNLOADING→DISPOSED），插件回调返回值即 disposer，卸载逆序 | Runtime 所有权 + Drop；无插件动态装卸 | dsh 运行时动态装卸代价是运行期错误面更大；minicoding 编译期静态组合更安全 |
-| 配置装载 | `Loader`（EntryTree）加载 `cordis.yml` + **profile/bundle/patch 四层叠加**（`--patch` 覆盖任意一行），支持 `!!js` 插值 | `RuntimeConfig` 分层（MINICODING_HOME > project > user > 默认）+ profiles | dsh 的 patch 层栈与热重载是显著优势（见 §7 建议 R-04） |
+| 配置装载 | `Loader`（EntryTree）加载 `cordis.yml` + **profile/bundle/patch 四层叠加**（`--patch` 覆盖任意一行），支持 `!!js` 插值 | 单一 user 级 `config.toml`（MINICODING_HOME，project 层为规划项）+ profiles | dsh 的 patch 层栈与热重载是显著优势（见 §7 建议 R-04） |
 | 作用域 | 每 agent 作用域注册原语（`ctx.scope`），工具/服务可 shadow | 会话级 Runtime 实例，无嵌套作用域 | dsh 支持子 agent 局部注册工具（shadow/restrict），minicoding 子 agent 共享全量工具 |
 
 ### 2.2 事件模型：append-only 日志 vs EventBus 广播 + JSONL 落盘
@@ -104,7 +104,7 @@
 ### 2.9 配置与 env 分层
 
 - **dsh**：三层独立配置：① Cordis 插件树（bundle → profile patch → home patch → --patch 覆盖，支持热重载）；② 用户设置（`packages/settings`：schemastery schema、路径写操作、`expectedRevision` 防陈旧写、`describe({redactSecrets:true})` 对 wire 强制脱敏）；③ env 分层（`loadLayeredEnv`：process env > 调用目录 .env > $DSH_HOME/.env，已存在名字不覆盖；bootstrap-only 变量禁止写入 .env）。
-- **minicoding-rs**：`RuntimeConfig` 分层（MINICODING_HOME > project > user > 默认）+ profiles；环境变量优先级（CLI > env > config.toml > 默认）。
+- **minicoding-rs**：单一 user 级 `config.toml`（MINICODING_HOME）+ profiles；优先级 CLI > env > config.toml > 默认。
 
 **评述**：dsh 的 `expectedRevision` 防陈旧写、`redactSecrets` wire 脱敏视图、bootstrap 变量禁止入 .env 是三个防呆设计；minicoding 的 `[provider]`/`[context]` 段已支持 W-19 设置面板读写（本次已实现），可继续吸收 dsh 的防呆细节（见 R-07b）。
 
@@ -184,7 +184,7 @@
 - 收益：防死循环 + 省 token + 用户体验。
 
 **R-04 配置分层与热重载评估**
-- 现状：MINICODING_HOME > project > user > 默认，无热重载。
+- 现状：单一 user 级 config.toml（project 层为规划项），白名单热重载已实现（S-22）。
 - 建议：低优先——先完成 W-19 后的 `GET /config` 只读端点一致性；热重载涉及 Runtime 状态机（C-29 熔断），**不建议近期引入**（与 dsh 的 Cordis HMR 不同，Rust 静态组合改配置需重启语义明确）。标注为"明确不做"的决策可写入 docs/tech-stack.md §13 权衡记录。
 
 ### 中优先

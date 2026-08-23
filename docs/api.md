@@ -339,12 +339,11 @@ pub fn mcp_tool_name(server: &str, tool: &str) -> String {
 
 ## 3. L1 Trait 抽象
 
-> **dyn-compatibility 约定**：本节所有含 `async fn` 的 trait 都需要以 `Arc<dyn Trait>` 形式被 Runtime 持有，而原生 `async fn in trait` 默认非 dyn-compatible。统一使用 `trait_variant::make(Trait: Send)` 宏为每个 trait 生成 `Send` 变体（返回 `Pin<Box<dyn Future + Send>>`），从而既保留原生 async 语法、又支持 trait object。下文签名以原生 `async fn` 表达语义，实际定义处的宏标注见各小节首行。同步 trait（如 `Tokenizer`）无需此处理。
+> **dyn-compatibility 约定**：本节所有含 `async fn` 的 trait 都需要以 `Arc<dyn Trait>` 形式被 Runtime 持有，而原生 `async fn in trait` 默认非 dyn-compatible。统一采用手写返回类型：trait 方法签名显式声明返回 `Pin<Box<dyn Future + Send>>`（流式为 `BoxStream`），既保证 object-safe、又不引入宏依赖（范式见 `minicoding-core` `provider/trait.rs` 头注；`trait-variant` 宏曾评估、未采用，决策记录见 `tech-stack.md` §13.1）。下文签名以原生 `async fn` 表达语义，实际定义处的返回类型擦除见各小节源码。同步 trait（如 `Tokenizer`）无需此处理。
 
 ### 3.1 `LlmProvider`
 
 ```rust
-#[trait_variant::make(LlmProvider: Send)]
 pub trait LlmProvider {
     fn id(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
@@ -440,7 +439,6 @@ pub trait Tokenizer: Send + Sync {
 ### 3.3 `Tool`
 
 ```rust
-#[trait_variant::make(Tool: Send)]
 pub trait Tool {
     fn name(&self) -> &str;
     fn schema(&self) -> &ToolSchema;
@@ -525,7 +523,6 @@ pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Plan, Mcp }
 ### 3.5 `Storage`
 
 ```rust
-#[trait_variant::make(Storage: Send)]
 pub trait Storage {
     async fn append(&self, session: &SessionId, msg: &Message) -> Result<(), StorageError>;
     async fn load(&self, session: &SessionId) -> Result<Vec<Message>, StorageError>;
@@ -721,7 +718,6 @@ pub enum Decision {
 }
 
 /// 纯决策 trait（无交互、无 IO）。
-#[trait_variant::make(PermissionPolicy: Send)]
 pub trait PermissionPolicy {
     async fn check(
         &self,
@@ -740,7 +736,6 @@ pub struct PermissionContext {
 }
 
 /// 点对点交互器（非广播）。由 frontend 注入实现。
-#[trait_variant::make(PermissionPrompter: Send)]
 pub trait PermissionPrompter {
     async fn prompt(&self, req: PermissionPrompt) -> Decision;
 }
@@ -771,7 +766,6 @@ Runtime 的权限解析流程见 `design.md` §9.2。
 ### 3.7 `ContextManager`
 
 ```rust
-#[trait_variant::make(ContextManager: Send)]
 pub trait ContextManager {
     async fn append(&self, msg: Message);
     async fn build_chat_request(
@@ -831,7 +825,6 @@ L3 仅保留最近 W 条非 system 消息 + 全部 system 消息；L4 按 token 
 Hook 是"工具调用生命周期"的拦截器，介于"LLM 决定调用工具"与"工具真正执行"之间；也是会话/轮次/压缩等关键节点的观察+注入点。完整协议（JSON stdio）、10 类事件、配置见 `hooks.md`，此处仅给出 Rust trait。
 
 ```rust
-#[trait_variant::make(Hook: Send)]
 pub trait Hook {
     fn name(&self) -> &str;
     fn matcher(&self) -> &HookMatcher;
@@ -893,7 +886,6 @@ impl HookRegistry {
 OS 级沙箱是应用层权限（§3.6）之外的第二道防线。`SandboxDriver` 抽象平台差异，Runtime 在派发 `Command`/`Network` 类工具前应用策略。
 
 ```rust
-#[trait_variant::make(SandboxDriver: Send)]
 pub trait SandboxDriver {
     /// 在子进程 exec 前应用沙箱策略（pre-main hardening，见 security.md §8.3）。
     fn apply(&self, policy: &SandboxPolicy, cmd: &mut std::process::Command) -> Result<(), SandboxError>;
@@ -948,7 +940,6 @@ pub enum SandboxError {
 ### 3.10 `ProjectDocLoader`（AGENTS.md 分层加载，见 `design.md` §8.6）
 
 ```rust
-#[trait_variant::make(ProjectDocLoader: Send)]
 pub trait ProjectDocLoader {
     /// 加载并拼接 AGENTS.md 指令层（全局 + repo_root→cwd 逐级 + override + fallback）。
     /// 返回拼接后的字符串，超过 max_bytes 静默截断。
@@ -969,7 +960,6 @@ pub struct LoadContext {
 ### 3.11 `Journal`（文件改动事务，见 `design.md` §17）
 
 ```rust
-#[trait_variant::make(Journal: Send)]
 pub trait Journal {
     /// 记录一次 turn 的文件改动（fs.write/edit/delete 成功后调用）。
     async fn record(&self, entry: ChangeEntry) -> Result<(), JournalError>;
@@ -1863,7 +1853,6 @@ Runtime 派发前强制校验：`can_spawn_subagent == false` 时移除子 Agent
 `McpClient` 抽象 MCP 消费侧，由 Runtime 在启动时根据 `[mcp_servers.*]` 配置构建实例并注入 `RuntimeBuilder`。
 
 ```rust
-#[trait_variant::make(McpClient: Send)]
 pub trait McpClient {
     /// 启动所有已配置且 enabled 的 MCP server，握手 + list_tools。
     /// required server 启动失败返回 Err，Runtime 拒绝启动。

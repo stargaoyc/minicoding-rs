@@ -491,7 +491,6 @@ token budget 与 §3.4 的预算分配独立——post-compact 重注入占用 h
 ### 4.1 Tool trait
 
 ```rust
-#[trait_variant::make(Tool: Send)]
 pub trait Tool {
     /// 唯一名（如 "fs.read"）
     fn name(&self) -> &str;
@@ -1841,10 +1840,9 @@ pub enum FileChange {
 
 ### 17.4 接口
 
-> 权威定义见 `api.md` §3.11（含 `#[trait_variant::make(Journal: Send)]`）。本节仅展示核心签名与冲突检测语义。
+> 权威定义见 `api.md` §3.11。本节仅展示核心签名与冲突检测语义。
 
 ```rust
-#[trait_variant::make(Journal: Send)]
 pub trait Journal {
     /// 记录一次 turn 的文件改动（fs.write/edit/delete 成功后调用）。
     async fn record(&self, entry: ChangeEntry) -> Result<(), JournalError>;

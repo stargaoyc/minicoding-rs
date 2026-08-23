@@ -141,10 +141,18 @@ minicoding-core/src/
 ├── lib.rs                 # prelude 再导出
 ├── runtime/
 │   ├── mod.rs             # Runtime 聚合根 + AgentLoop 主循环（并行/串行分桶，见 design.md §2.3）
-│   ├── rt.rs              # Runtime 实现（聚合各 trait，含 register_dynamic_tool/journal/subagent_runner）
+│   ├── rt.rs              # Runtime 主链（run_turn/stream_llm/execute_tool_calls/register_dynamic_tool 等，2026-08-23 审查 §3 后内聚单元下沉至下列模块）
 │   ├── builder.rs         # RuntimeBuilder（链式注入 provider/ctx/policy/sandbox/hooks/journal/...）
+│   ├── permission.rs      # 权限决策 + Hook 管道（策略判定→PreToolUse→改写重查取严→prompter→审计，见 design.md §9）
+│   ├── denial.rs          # 沙箱拒绝检测/熔断回灌 + 初始化失败沙箱外回退（C-30/C-22，见 security.md §8）
+│   ├── sourcing.rs        # 事件溯源（init_event_stream/persist_event/create_snapshot/durable_seq，见 design.md §25）
+│   ├── hot_config.rs      # turn 边界白名单配置热更新 + 热更新基线（M-12/S-22，见 tech-stack.md §13）
+│   ├── workdir.rs         # 工作区切换（W-11 switch_workdir）
 │   ├── event.rs           # Event / EventBus（仅通知，含 TaskUpdated/HookRun/PermissionResolved/FileUndone/ConfigChanged）
-│   └── accumulator.rs     # 流式 delta 聚合
+│   ├── accumulator.rs     # 流式 delta 聚合
+│   ├── repair.rs          # 悬空 tool_call 修复（resume 幂等重建，proptest 覆盖）
+│   ├── repeat_guard.rs    # 循环打断器（软提醒/硬停止，C-13 防死循环）
+│   └── plan_handle.rs     # PlanModeController 适配器（plan.exit 反向调用 Runtime）
 ├── agent/
 │   ├── mod.rs
 │   ├── runner.rs          # SubagentRunner trait + NoopSubagentRunner 兜底（见 design.md §7.3）
@@ -244,7 +252,7 @@ pub mod prelude {
 
 - **零实现逻辑**：core 不含压缩算法、黑名单正则、landlock ruleset、rmcp 调用、JSONL 写入等任何实现。`Runtime` 只编排：调 `ContextManager::build_chat_request` → `LlmProvider::chat_stream` → `ToolRegistry::dispatch`（其内调 `PermissionPolicy::check` → `SandboxDriver::apply`）。
 - **trait 定义集中**：所有领域 trait 在 core 定义，领域 crate 实现 trait。这样 Runtime 持有 `Arc<dyn ContextManager>` 等不需知道具体实现 crate，依赖方向干净。
-- **轻量依赖**（A9 对齐实际清单，2026-08）：`tokio`/`tokio-util`/`futures`/`serde`/`serde_json`/`toml`/`tracing`/`thiserror`/`camino`/`uuid`/`ulid`/`time`/`home`/`trait-variant`/`semver`/`notify`(ConfigWatcher)/`ts-rs`(optional, feature `ts`)。守卫测试 `tests/architecture.rs` 白名单与此同步；无 `reqwest`/`landlock`/`rmcp` 等重依赖。
+- **轻量依赖**（A9 对齐实际清单，2026-08）：`tokio`/`tokio-util`/`futures`/`serde`/`serde_json`/`toml`/`tracing`/`thiserror`/`camino`/`uuid`/`ulid`/`time`/`home`/`semver`/`notify`(ConfigWatcher)/`ts-rs`(optional, feature `ts`)。守卫测试 `tests/architecture.rs` 白名单与此同步；无 `reqwest`/`landlock`/`rmcp` 等重依赖。
 - **NoopDriver 兜底**：core 提供 `SandboxDriver` 的 `NoopDriver` 实现（无操作），供未启用 `minicoding-sandbox` feature 时使用。其他 trait 的默认实现（如 `JsonlStorage`）移到对应领域 crate，core 不提供。
 - **Denial 抽象（M-05）**：`SandboxDenialDetector`/`SandboxDenialTracker` trait 与 `BreakerState`/`DenialMatch` 数据在 core（`sandbox/breaker.rs`），平台签名库与熔断实现在 `minicoding-sandbox`（`denial.rs`），core 默认注入 `NoopDenialDetector`/`NoopDenialTracker` 兜底（与 NoopDriver 同哲学）。事件重放（`replay_session_state` 等）M-05 后位于 `minicoding-storage`，core 不再导出。
 - **熔断去重（M-05）**：沙箱拒绝熔断（C-30）与压缩熔断（C-29）共享 `util::CircuitBreaker` 通用骨架（单计数器 + 双阈值 + Closed/SoftTripped/HardTripped 状态）；压缩侧在骨架之上另维护 thrash 计数器（`consecutive_oversize`）表达其特有失效模式，两者状态语义各自映射，不互相耦合。
@@ -975,7 +983,7 @@ Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M
 
 ### 20.6 依赖治理
 
-- core 的依赖必须是"轻量 + 无平台/网络"的（tokio/serde/tracing/thiserror/uuid/time/camino/trait-variant）。
+- core 的依赖必须是"轻量 + 无平台/网络"的（tokio/serde/tracing/thiserror/uuid/time/camino）。
 - 重依赖（reqwest/landlock/libseccomp/rmcp/ratatui/tauri）只能出现在对应实现 crate。
 - `cargo audit` + `cargo deny` 接入 CI，许可证限制为 MIT/Apache-2.0/BSD/ISC。
 - `Cargo.lock` 提交到仓库（CLI 项目）。

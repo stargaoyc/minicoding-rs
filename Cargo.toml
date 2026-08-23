@@ -38,7 +38,6 @@ tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "fs", "proc
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
-trait-variant = "0.1"
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }
@@ -104,7 +103,8 @@ flate2 = "1"
 tiktoken-rs = "0.6"
 
 # 配置（见 tech-stack.md §8）
-figment = { version = "0.10", features = ["toml", "env"] }
+# 手写 TOML 解析（`toml` + `std::env`）：单一 config.toml 场景下 figment 收益不足，
+# 不引入重依赖（2026-08-23 审查 §3 死依赖清理）。
 
 # 文件监听（S-22 配置热更新，见 tech-stack.md §8、features.md S-22）
 # 仅 core 引入；默认 features 含 macos_fsevent（macOS 原生后端），其余平台用 inotify/kqueue/ReadDirectoryChanges。

@@ -2219,7 +2219,7 @@ export OTEL_TRACES_SAMPLER_ARG="0.1"  # 10% 采样
 
 - 冷启动目标 < 50ms（`docs/design.md` §13）；
 - 重依赖惰性初始化，不在 `main` 入口同步加载；
-- 配置分层加载（CLI args > env > project > user > defaults），按需读取；
+- 配置加载（CLI args > env > config.toml > 默认，单一 user 级文件），按需读取；
 - 记忆文件 mtime 缓存（`memory/auto.rs`），无变更零 IO；
 - OTel SDK 仅在配置导出端点时初始化；
 - `cargo build --release` 用 `lto = "thin"`（`Cargo.toml` `[profile.release]`）优化二进制；

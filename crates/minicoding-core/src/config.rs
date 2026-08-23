@@ -1,5 +1,8 @@
-//! 配置加载与合并（分层：`MINICODING_HOME` > project > user > 默认）。
+//! 配置加载与合并（单一 user 级文件：`MINICODING_HOME/config.toml`；project 层
+//! 分层加载为规划项，见 `roadmap.md`）。
 //!
+//! 运行期优先级：CLI 参数 > 环境变量 > config.toml > 内置默认（env/flag 叠加在
+//! `load_config` 结果之上，由 frontend 完成）。
 //! 支持 `env:VAR_NAME` / `env:VAR:-fallback` 环境变量语法（见 `tech-stack.md` §12）。
 //! 支持 last-known-good 回退（解析失败时用上次成功的配置，见 `design.md` §12）。
 

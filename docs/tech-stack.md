@@ -31,7 +31,7 @@
 | 用途 | crate | 版本 | 备选 | 理由 |
 |------|-------|------|------|------|
 | 运行时 | `tokio` | 1.x | `async-std` | 生态最广，HTTP/IO 生态默认依赖 |
-| 异步 trait | 原生 `async fn in trait` + `trait-variant` | - | `async-trait` | edition 2024 + MSRV 1.85 后原生稳定；`trait-variant` 生成 Send 变体使 trait 可作 `dyn` 对象（Runtime 需 `Arc<dyn Trait>`） |
+| 异步 trait | 原生 `async fn in trait` + 手写 `Pin<Box<dyn Future + Send>>` 返回类型（BoxFuture/BoxStream） | - | `trait-variant` 宏 / `async-trait` | edition 2024 后原生稳定；`dyn` 兼容由手写返回类型保证——更显式、不引入过程宏依赖（决策记录见 §13.1；`trait-variant` 曾评估、未采用） |
 | 并发原语 | `tokio::sync` | - | `futures` | 与运行时一致 |
 | 通道 | `tokio::sync::mpsc` / `broadcast` | - | `flume` | 满足流式与事件广播需求 |
 
@@ -169,8 +169,8 @@ OpenTelemetry 是**一等公民**（非后续可选），从 M0 起接入。业�
 | 用途 | crate | 理由 |
 |------|-------|------|
 | 配置文件 | `toml` + `serde` | `Cargo.toml` 同源，Rust 生态首选 |
-| 配置加载 | 自实现 layered config | 项目 / 用户 / 环境变量 / CLI 参数分层合并 |
-| 环境变量 | `std::env` + `figment`（评估） | 简单场景手写，复杂场景用 `figment` |
+| 配置加载 | 自实现（`toml` 直接解析） | 单一 user 级 `config.toml` + env/CLI 叠加；project 分层为规划项（见 `roadmap.md`） |
+| 环境变量 | `std::env` | `env:VAR` / `env:VAR:-fallback` 语法内置解析；`figment` 曾评估、未采用（单一文件场景收益不足，避免重依赖） |
 | 时间 | `time` | 比 `chrono` 更轻、更现代 |
 | UUID | `uuid` | 会话/消息 ID |
 
@@ -283,36 +283,32 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | 文件锁 | `fs2` | `flock` 裸调 | 跨平台封装、API 稳定 |
 | 配置热更新策略（M-12，R-04） | **白名单 + turn 边界生效**：`ConfigWatcher` 仅探测变更并广播 `Event::ConfigChanged`；`Runtime` 在每次 `run_turn` 开头读 config.toml，**仅当文件中显式存在**白名单 key（`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）时才覆盖运行期配置；非白名单字段变更仅 warn 提示重启 | 全量热重载 / 完全不做热更新 | **不做全量热重载**：C-29 压缩熔断状态机与 provider 重建依赖构造时配置，热换不安全；白名单 presence 判断避免 serde default（文件缺字段补默认值）覆盖 CLI/env 覆盖值。`provider.model` 热生效依赖 `build_request_body` 改用 `req.params.model`（tokenizer 仍为构造时快照，接受此限制）。`Runtime.config` 用 `std::sync::RwLock` 锁保护（`build_dispatch_config` 是同步 fn 无法 `read().await`），读取点均为短临界区、guard 不跨 await |
 
-### 13.1 `trait-variant` 宏的风险管理
+### 13.1 异步 trait 的 dyn 兼容：手写 `Pin<Box<dyn Future + Send>>`（决策记录）
 
-`#[trait_variant::make(Trait: Send)]` 在全项目 trait（LlmProvider/Tool/PermissionPolicy/PermissionPrompter/ContextManager/Hook/HookRegistry/SandboxDriver/ProjectDocLoader/Journal/McpClient/Storage）上使用，存在以下风险，需显式管理：
+**现状（与代码一致）**：全项目含 `async fn` 的 trait（LlmProvider/Tool/PermissionPolicy/PermissionPrompter/
+ContextManager/Hook/HookRegistry/SandboxDriver/ProjectDocLoader/Journal/McpClient/Storage）均以
+手写 `Pin<Box<dyn Future + Send>>` / `BoxStream` 返回类型定义（范式见 `minicoding-core`
+`provider/trait.rs` 头注），Runtime 据此持有 `Arc<dyn Trait>` 做运行时装配。
 
-**为何必须用**：Rust 2024 稳定了 `async fn in trait`，但**未稳定 `dyn` 兼容的 async trait**。Runtime 需持有 `Arc<dyn Trait>` 做动态派发（运行时装配实现 crate），原生 `async fn in trait` 的 trait 不是 object-safe。`trait-variant` 生成 Send 变体使 trait 可作 `dyn` 对象，是目前唯一不引入运行时开销（对比 `async-trait` 的 box future）的方案。
+**为何必须特殊处理**：Rust 2024 稳定了 `async fn in trait`，但**未稳定 `dyn` 兼容的 async trait**。
+Runtime 需要动态派发（feature gate 按需装配实现 crate），原生 `async fn in trait` 不是 object-safe，
+必须在 trait 定义处显式擦除为 boxed future。
 
-**风险清单**：
+**方案对比**：
 
-| 风险 | 说明 | 缓解 |
+| 方案 | 结论 | 理由 |
 |------|------|------|
-| 第三方宏依赖 | `trait-variant` crate 版本锁定 | 锁定在 `1.x`，CI `cargo audit` 监控；宏本身轻量（纯过程宏，无运行时依赖） |
-| 双 trait 生成 | 每个 trait 编译期生成原始 + Send 变体 | 编译开销可接受；`cargo check` 时间未显著劣化 |
-| 迁移成本 | Rust 原生支持后需移除宏 | 迁移点集中：trait 定义处 + Runtime 持有 `Arc<dyn>` 处；影响面可控 |
-| 语法侵入 | `#[trait_variant::make]` 注解散布全项目 | 集中在 `minicoding-core` 的 trait 定义模块（11 个文件），不扩散到实现 crate |
+| 手写 `Pin<Box<dyn Future + Send>>` 返回类型 | **采用** | 显式可见、零宏依赖、签名即真相；噪声通过"每个 trait 集中在一个文件 + 头注说明范式"控制 |
+| `trait-variant` 宏 | 曾评估、未采用 | 签名处宏生成双 trait，实际形态不可见；为一个纯编译期变换引入过程宏依赖不划算（2026-08-23 审查 §3 清理死依赖时确认实现从未使用该宏） |
+| `async-trait` | 否决 | box future 运行时堆分配 + 属性宏侵入；已属废弃路径 |
+| 不用 `dyn` 全用泛型 | 否决 | 编译时间长、二进制体积大、Runtime 无法运行时装配实现 crate |
 
-**迁移路径**：当 Rust 原生支持 `dyn*` 或 object-safe async trait（RFC 3668 `dyn*` 或后续）稳定后：
-1. 移除 `#[trait_variant::make]` 注解；
-2. trait 直接定义 `async fn`，保持 object-safe；
-3. Runtime 持有 `Arc<dyn Trait>` 不变；
-4. 验证：`cargo test` 全量回归 + `cargo bench` 确认无性能回退。
+**迁移路径**：当 Rust 原生支持 object-safe async trait（RFC 3668 `dyn*` 或后续）稳定后：
+1. trait 直接定义 `async fn`，移除手写返回类型；
+2. Runtime 持有 `Arc<dyn Trait>` 不变；
+3. 验证：`cargo test` 全量回归 + `cargo bench` 确认无性能回退。
 
-**替代方案对比**（已否决）：
-
-| 方案 | 否决理由 |
-|------|---------|
-| `async-trait` | box future 运行时堆分配，热路径（Agent 循环每轮调用）性能差；已属废弃路径 |
-| 手写 `Pin<Box<dyn Future>>` 返回类型 | 侵入性强、噪声大、易错 |
-| 不用 `dyn` 全用泛型 | 编译时间长、二进制体积大、Runtime 无法运行时装配实现 crate（feature gate 失效） |
-
-**决策**：M0-M5 使用 `trait-variant`；在 `roadmap.md` M6 评审节点检查 Rust 官方进展，若原生方案稳定则纳入 M7 迁移 task。`AGENTS.md` §2.1 已约束不引入 `async-trait`。
+`AGENTS.md` §2.1 已同步此约定。
 
 ### 13.2 消息追加 fsync 策略：保持逐条 fsync，暂不做 turn 级批量（M-13 评估）
 

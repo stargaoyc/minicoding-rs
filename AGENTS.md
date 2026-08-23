@@ -72,7 +72,7 @@ minicoding-rs (workspace)
 ### 2.1 edition 与 MSRV
 
 - `edition = "2024"`，`rust-version = "1.99"`
-- `async fn in trait` 直接用；trait 需作 `dyn` 对象时用 `#[trait_variant::make(Trait: Send)]` 生成 Send 变体（Runtime 需 `Arc<dyn Trait>`）
+- `async fn in trait` 直接用；trait 需作 `dyn` 对象时手写 `Pin<Box<dyn Future + Send>>` 返回类型（BoxFuture/BoxStream，见 `minicoding-core` `provider/trait.rs` 头注）——不引入 `trait-variant` 宏（曾评估、未采用），也不引入 `async-trait`（已废弃路径）
 - 不引入 `async-trait`（已废弃路径）
 
 ### 2.2 命名
@@ -253,7 +253,7 @@ windows = { version = "...", features = ["..."] }
 ### 3.8 配置
 
 - 统一 `RuntimeConfig`（core 定义）
-- 分层加载优先级：`MINICODING_HOME` > project > user > 默认
+- 加载优先级：CLI 参数 > 环境变量 > `MINICODING_HOME/config.toml` > 内置默认；project 级分层加载未实现（规划项，见 `docs/roadmap.md`）
 - 路径约定：`~/.minicoding/`（见 `docs/modules.md` §1.2 `paths.rs`）
 - profiles 支持切换（如 `default`/`strict`/`danger`）
 

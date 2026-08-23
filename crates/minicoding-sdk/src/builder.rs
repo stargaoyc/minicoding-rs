@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::{ContextManagerImpl, SimpleContextManager};
-use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
+use minicoding_core::config::{ProviderConfig, SmallProviderConfig, config_hash};
 use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
@@ -118,8 +118,12 @@ pub fn build_runtime(
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
 ) -> Result<Runtime> {
-    // 1. 加载配置
-    let mut config = RuntimeConfig::default();
+    // 1. 加载配置（config.toml > last-known-good > 内置默认），env/CLI flag 在其上
+    //    叠加。与 serve/server 对齐的优先级：CLI 参数 > 环境变量 > config.toml >
+    //    内置默认（README §6、getting-started.md）。此前交互主链路从 default 起步，
+    //    文件配置（含 hooks 段）静默失效（2026-08-23 审查 §3-P1）；解析失败且无
+    //    LKG 时降级默认值，与 `serve.rs` 的容错口径一致。
+    let mut config = minicoding_core::config::load_config().unwrap_or_default();
     // 环境变量快捷覆盖
     if let Ok(base) = std::env::var("OPENAI_API_BASE") {
         config.provider.api_base = base;

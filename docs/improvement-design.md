@@ -246,13 +246,13 @@ pub enum GuardDecision {
 
 #### 现状
 
-- `RuntimeConfig` 分层：MINICODING_HOME > project > user > 默认；profiles 支持；W-19 已新增 `GET /config` 只读端点与 `[context]` 段读写。
+- `RuntimeConfig` 单一 user 级文件（`MINICODING_HOME/config.toml`；project 层为规划项）+ profiles；白名单热重载已实现（M-12/S-22）；W-19 已新增 `GET /config` 只读端点与 `[context]` 段读写。
 - `[tools]` 段大量字段无消费方（死配置，对比报告 v2 §2.1 指出）。
 
 #### 目标
 
 1. 清理 `[tools]` 死配置或全部接入消费方（R-03 已接入 `repeat_guard_thresholds`，其余逐项审计）；
-2. **不做热重载**（明确决策）：Rust 静态组合 + 熔断状态机（C-29）下热重载收益低风险高，写入 `docs/tech-stack.md` §13 权衡记录；
+2. ~~不做热重载~~（已被 M-12/S-22 推翻）：实际落地为**白名单 + turn 边界**热重载（`ConfigWatcher` + `reload_safe_config`），权衡记录见 `docs/tech-stack.md` §13；
 3. `GET /config` 扩展为返回完整生效配置（含 `[tools]`），供前端设置面板后续迭代。
 
 #### 实现要点
