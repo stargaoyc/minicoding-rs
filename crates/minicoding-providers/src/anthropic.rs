@@ -13,7 +13,6 @@
 //! HTTP 状态码映射同 `OpenAI`：429 → `RateLimited`（携带 `Retry-After`），5xx → `Server`，
 //! 其它 4xx → `Client`。重试由 `RetryProvider` 装饰（T-M6-3）。
 
-use futures::stream::{self, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
@@ -204,35 +203,22 @@ impl LlmProvider for AnthropicProvider {
                 model = %self.model, url = %url, "POST v1/messages stream"
             );
 
-            let resp = self
+            // Q4：发送/状态检查/行解码统一走 common::stream_runner
+            let request = self
                 .client
                 .post(&url)
                 .headers(self.auth_headers()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::Network(e.to_string()))?;
+                .json(&body);
+            let resp =
+                crate::common::stream_runner::send_and_check(request, |status, body, headers| {
+                    map_status_error(status, body, retry_after_ms(headers))
+                })
+                .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let retry_after_ms = retry_after_ms(resp.headers());
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(map_status_error(status.as_u16(), body_text, retry_after_ms));
-            }
-
-            // SSE 解析复用 common::sse，data payload 为字符串，此处解析 JSON 后按 `type` 分派。
-            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束（见 openai.rs 同样注释）。
+            // SSE data payload 按 `type` 分派（message_stop 等在 parse_event 内处理）
             let sse = crate::common::sse::from_response(resp);
-            let delta_stream = sse.flat_map(|ev| {
-                let items: Vec<Result<Delta, LlmError>> = match ev {
-                    Ok(data) => match serde_json::from_str::<Value>(&data) {
-                        Ok(json) => parse_event(&json).into_iter().map(Ok).collect(),
-                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                    },
-                    Err(e) => vec![Err(e)],
-                };
-                stream::iter(items)
-            });
+            let delta_stream =
+                crate::common::stream_runner::lines_to_deltas(Box::pin(sse), parse_event);
 
             Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })

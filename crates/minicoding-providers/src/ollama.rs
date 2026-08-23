@@ -14,7 +14,6 @@
 //! HTTP 状态码映射同 `OpenAI`：429 → `RateLimited`，5xx → `Server`，其它 4xx → `Client`。
 //! 重试由 `RetryProvider` 装饰（T-M6-3）。
 
-use futures::stream::{self, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
@@ -199,34 +198,17 @@ impl LlmProvider for OllamaProvider {
                 model = %self.model, url = %url, "POST api/chat stream"
             );
 
-            let resp = self
-                .client
-                .post(&url)
-                .headers(Self::headers())
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::Network(e.to_string()))?;
+            // Q4：统一管道；Ollama 不解析 Retry-After（恒 None）
+            let request = self.client.post(&url).headers(Self::headers()).json(&body);
+            let resp = crate::common::stream_runner::send_and_check(request, |status, body, _| {
+                map_status_error(status, body)
+            })
+            .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(map_status_error(status.as_u16(), body_text));
-            }
-
-            // NDJSON 解析：每行一个 JSON 对象，按 `done` 字段判断结束
-            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束（见 openai.rs 同样注释）。
+            // NDJSON 解析：每行一个 JSON 对象，`done` 字段判断结束
             let ndjson = crate::common::ndjson::from_response(resp);
-            let delta_stream = ndjson.flat_map(|ev| {
-                let items: Vec<Result<Delta, LlmError>> = match ev {
-                    Ok(line) => match serde_json::from_str::<Value>(&line) {
-                        Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
-                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                    },
-                    Err(e) => vec![Err(e)],
-                };
-                stream::iter(items)
-            });
+            let delta_stream =
+                crate::common::stream_runner::lines_to_deltas(Box::pin(ndjson), parse_chunk);
 
             Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
