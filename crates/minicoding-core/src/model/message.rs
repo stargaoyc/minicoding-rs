@@ -3,8 +3,6 @@
 //! 与 `OpenAI` / `Anthropic` 消息格式兼容，跨 provider 共享。所有类型支持 `serde`
 //! 序列化，用于 JSONL 持久化与跨进程协议。
 
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 

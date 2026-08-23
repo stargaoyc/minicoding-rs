@@ -65,9 +65,7 @@ pub fn repair_dangling_tool_calls(msgs: Vec<Message>) -> Vec<Message> {
 #[cfg(test)]
 mod proptests {
     use super::repair_dangling_tool_calls;
-    use crate::model::{
-        ContentBlock, Message, MessageMeta, MessageSource, Role, ToolCall, ToolContent,
-    };
+    use crate::model::{ContentBlock, Message, MessageMeta, MessageSource, Role};
     use proptest::prelude::*;
     use time::OffsetDateTime;
 
@@ -141,7 +139,6 @@ mod proptests {
         use crate::model::{
             ContentBlock, Message, MessageMeta, MessageSource, Role, ToolCall, ToolContent,
         };
-        use proptest::prelude::*;
         use time::OffsetDateTime;
 
         fn asst_with_calls(ids: &[&str]) -> Message {

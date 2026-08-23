@@ -39,6 +39,7 @@ pub mod cred;
 mod store;
 mod stream;
 
+#[allow(deprecated)]
 pub use store::InMemoryStorage;
 pub use stream::DeltaStream;
 
