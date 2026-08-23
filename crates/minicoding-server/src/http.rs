@@ -178,6 +178,8 @@ struct CreateSessionBody {
     provider_name: Option<String>,
     #[serde(default)]
     api_base: Option<String>,
+    /// S20/C-04：接受但**忽略**（wire 兼容旧客户端）——凭证由 server 持有，
+    /// 不经前端传入。传入时打 warn。
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
@@ -540,7 +542,7 @@ async fn create_session(
             .unwrap_or_else(|| default.provider_kind.clone()),
         provider_name: body.provider_name.or(default.provider_name.clone()),
         api_base: body.api_base.unwrap_or_else(|| default.api_base.clone()),
-        api_key: body.api_key.unwrap_or_else(|| default.api_key.clone()),
+        api_key: default.api_key.clone(),
         model: body.model.unwrap_or_else(|| default.model.clone()),
         workdir: body
             .workdir
@@ -554,6 +556,11 @@ async fn create_session(
         turn_timeout_sec: body.turn_timeout_sec.unwrap_or(default.turn_timeout_sec),
         compress: body.compress.unwrap_or(default.compress),
     };
+    // S20/C-04：api_key 字段接受但忽略——凭证由 server 持有，不经前端传入
+    if body.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        tracing::warn!("CreateSessionBody.api_key ignored (S20/C-04: credentials are server-held)");
+    }
+
     // preset 解析（会话级覆盖）：`full-access` 强制 `BypassPermissions` 全自动 +
     // `DangerFullAccess` 沙箱外运行（C-22：显式选定 + red 警告，见 build_preset_policy）
     if let Some(preset_str) = body.preset.as_deref() {

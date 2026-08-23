@@ -8,7 +8,12 @@ export type CreateSessionBody = { provider: string | null,
 /**
  * 自定义 provider 显示名（覆盖 server 默认，`None` 用 `default_params.provider_name`）。
  */
-provider_name: string | null, api_base: string | null, api_key: string | null, model: string | null, workdir: string | null, system: string | null, permission_mode: PermissionMode | null, 
+provider_name: string | null, api_base: string | null, 
+/**
+ * S20/C-04：接受但**忽略**（wire 兼容旧客户端）——凭证由 server 持有，
+ * 不经前端传入。传入时打 warn。
+ */
+api_key: string | null, model: string | null, workdir: string | null, system: string | null, permission_mode: PermissionMode | null, 
 /**
  * 安全预设（`auto`/`read-only`/`external-sandbox`/`full-access`，见 `Preset`）。
  * `full-access` = 沙箱外全自动运行（仅受信容器内，C-22 red 警告）。

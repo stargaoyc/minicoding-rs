@@ -13,34 +13,23 @@ use minicoding_core::model::ToolError;
 /// 路径越界返回 `ToolError::PathEscaped`；父目录不存在返回 `ToolError::NotFound`；
 /// 其他 IO 失败返回 `ToolError::Io`。
 pub fn resolve_path(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, ToolError> {
-    let candidate = if std::path::Path::new(input).is_absolute() {
-        Utf8PathBuf::from(input)
-    } else {
-        workdir.join(input)
-    };
+    use minicoding_policy::PathSandboxError;
 
-    let canon_workdir = workdir.canonicalize_utf8().map_err(ToolError::Io)?;
-
-    let resolved = if let Ok(c) = candidate.canonicalize_utf8() {
-        c
-    } else {
-        // 目标不存在：规范化父目录后拼接文件名，确保符号链接被解析
-        let parent = candidate
-            .parent()
-            .ok_or_else(|| ToolError::InvalidInput(format!("invalid path: {input}")))?;
-        let file_name = candidate
-            .file_name()
-            .ok_or_else(|| ToolError::InvalidInput(format!("invalid path: {input}")))?;
-        let canon_parent = parent
-            .canonicalize_utf8()
-            .map_err(|_| ToolError::NotFound(input.to_string()))?;
-        canon_parent.join(file_name)
-    };
-
-    if !resolved.starts_with(&canon_workdir) {
-        return Err(ToolError::PathEscaped(input.to_string()));
+    // S15：核心判定委托 `minicoding-policy::path_sandbox`（单一实现，消除双版本
+    // 漂移——审查 §1.10）。此处仅保留调用方契约：错误映射 + "父目录不存在 →
+    // NotFound"（write.rs 的 mkdir -p 重试依赖该信号）。
+    match minicoding_policy::resolve_under(workdir, input) {
+        Ok(resolved) => {
+            let target_exists = resolved.exists();
+            let parent_is_dir = resolved.parent().is_some_and(camino::Utf8Path::is_dir);
+            if !target_exists && !parent_is_dir {
+                return Err(ToolError::NotFound(input.to_string()));
+            }
+            Ok(resolved)
+        }
+        Err(PathSandboxError::Escaped { .. }) => Err(ToolError::PathEscaped(input.to_string())),
+        Err(PathSandboxError::NotFound { .. }) => Err(ToolError::NotFound(input.to_string())),
     }
-    Ok(resolved)
 }
 
 /// 确保 `path` 指向一个已存在的目录。

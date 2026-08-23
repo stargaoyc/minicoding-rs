@@ -147,6 +147,13 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
       const { state, effects } = applyChatEvent(chatStateRef.current, event);
       chatStateRef.current = state;
       setChatState(state);
+      // P8：真实用户消息已落盘——先剥乐观占位再失效，消除短暂重复渲染窗口
+      if (event.type === "message_appended") {
+        qc.setQueryData<import("../api/generated").Message[]>(
+          ["messages", sessionId],
+          (old) => old?.filter((m) => !m.id.startsWith("optimistic-")),
+        );
+      }
       runEffects(effects);
       if (event.type === "permission_requested") {
         waitingRef.current = state.waitingPermission;

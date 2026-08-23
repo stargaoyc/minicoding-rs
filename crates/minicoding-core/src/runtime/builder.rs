@@ -441,6 +441,7 @@ impl RuntimeBuilder {
             sandbox_driver: self.sandbox_driver.unwrap_or_else(|| Arc::new(NoopDriver)),
             sandbox_policy,
             journal: self.journal,
+            current_turn: std::sync::atomic::AtomicU32::new(0),
             denial_detector: self
                 .denial_detector
                 .unwrap_or_else(|| Arc::new(crate::sandbox::NoopDenialDetector)),

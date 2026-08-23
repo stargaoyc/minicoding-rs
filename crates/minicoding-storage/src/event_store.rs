@@ -105,11 +105,12 @@ impl EventStore for JsonlEventStore {
         Box::pin(async move {
             let line = serde_json::to_string(&record)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
-            let mut file = tokio::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(&path)
-                .await?;
+            // S19/C-04：事件流同样可能含敏感输出，0600 创建
+            let mut opts = tokio::fs::OpenOptions::new();
+            opts.append(true).create(true);
+            #[cfg(unix)]
+            opts.mode(0o600); // S19/C-04（tokio 自带该方法）
+            let mut file = opts.open(&path).await?;
             file.write_all(line.as_bytes()).await?;
             file.write_all(b"\n").await?;
             file.flush().await?;

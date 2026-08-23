@@ -565,11 +565,14 @@ impl Storage for JsonlStorage {
             .await
             .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
 
-            let mut file = tokio::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(&path)
-                .await?;
+            // S19/C-04：会话转录可能含 shell 输出等敏感内容，0600 创建
+            let mut opts = tokio::fs::OpenOptions::new();
+            opts.append(true).create(true);
+            #[cfg(unix)]
+            opts.mode(0o600); // S19/C-04（tokio 自带该方法）
+            let mut file = opts.open(&path).await?;
+            #[cfg(unix)]
+            tighten_existing(&file, &path).await;
             // 首次创建（空文件）时先写格式头（M-02）。
             if file.metadata().await?.len() == 0 {
                 let header = format!(
@@ -666,6 +669,20 @@ impl Storage for JsonlStorage {
         let session_id = session.clone();
         let summary = summary.to_string();
         Box::pin(async move { self.update_summary_sync(&session_id, &summary) })
+    }
+}
+
+/// S19：已存在文件的权限兜底收紧到 0600（历史文件可能是宽权限创建）。
+#[cfg(unix)]
+async fn tighten_existing(file: &tokio::fs::File, path: &camino::Utf8PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = file.metadata().await {
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            let mut perm = meta.permissions();
+            perm.set_mode(0o600);
+            let _ = tokio::fs::set_permissions(path, perm).await;
+        }
     }
 }
 

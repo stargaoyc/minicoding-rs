@@ -59,7 +59,14 @@ impl JsonlSnapshotStore {
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         {
             use std::io::Write;
-            let mut file = std::fs::File::create(tmp.as_std_path())?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600); // S19/C-04
+            }
+            let mut file = opts.open(tmp.as_std_path())?;
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
         }
@@ -97,7 +104,11 @@ impl SnapshotStore for JsonlSnapshotStore {
             let tmp: Utf8PathBuf = path.with_extension("json.tmp");
             let json = serde_json::to_string_pretty(&snapshot)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
-            let mut file = tokio::fs::File::create(&tmp).await?;
+            let mut aopts = tokio::fs::OpenOptions::new();
+            aopts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            aopts.mode(0o600); // S19/C-04（tokio 自带该方法）
+            let mut file = aopts.open(&tmp).await?;
             file.write_all(json.as_bytes()).await?;
             file.sync_all().await?;
             drop(file);
