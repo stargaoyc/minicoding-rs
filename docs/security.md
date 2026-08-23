@@ -202,6 +202,13 @@ pub fn resolve_under(workdir: &Utf8Path, input: &str) -> Result<Utf8PathBuf, Too
 
 ---
 
+### 3.x TOCTOU 固有局限（S17 披露）
+
+路径沙箱为"先 canonicalize 校验、后另行打开"两段式：本地攻击者在两段之间置换
+符号链接理论上可逃逸（TOCTOU）。彻底消除需 `openat2(REQUIRE_NO_SYMLINKS)` /
+同 fd 操作——待 Rust 生态成熟后评估。当前以目录 0700/项目物理访问边界缓解；
+**威胁模型不含本机攻击者**（见 §1.2 T1-T11）。
+
 ## 4. Shell 执行安全
 
 ### 4.1 执行模型

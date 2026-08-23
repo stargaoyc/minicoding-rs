@@ -34,6 +34,8 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+pub mod builder;
+pub mod cred;
 mod store;
 mod stream;
 

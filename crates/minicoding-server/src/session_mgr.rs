@@ -300,7 +300,10 @@ impl SessionManager {
     ) -> Arc<ServerSession> {
         let session_id = runtime.session().id.clone();
         {
-            let guard = self.sessions.lock().expect("sessions mutex poisoned");
+            let guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(existing) = guard.get(&session_id) {
                 return existing.clone();
             }
@@ -320,7 +323,7 @@ impl SessionManager {
                     let mut state = subscriber
                         .task_state
                         .lock()
-                        .expect("task_state mutex poisoned");
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(existing) = state.iter_mut().find(|t| t.id == task.id) {
                         *existing = task;
                     } else {
@@ -330,7 +333,10 @@ impl SessionManager {
             }
         });
 
-        let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
+        let mut guard = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.insert(session_id, session.clone());
         // Metrics：活跃会话数 gauge
         metrics::set_active_sessions(guard.len() as u64);
@@ -346,7 +352,10 @@ impl SessionManager {
     /// 内部 `sessions` Mutex poisoned 时 panic。
     #[must_use]
     pub fn get(&self, session_id: &str) -> Option<Arc<ServerSession>> {
-        let guard = self.sessions.lock().expect("sessions mutex poisoned");
+        let guard = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.get(session_id).cloned()
     }
 
@@ -368,7 +377,10 @@ impl SessionManager {
             .unwrap_or_default();
 
         let mut metas = Vec::new();
-        let guard = self.sessions.lock().expect("sessions mutex poisoned");
+        let guard = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for session in guard.values() {
             let runtime = &session.runtime;
             let session_model = runtime.session();
@@ -383,7 +395,7 @@ impl SessionManager {
                 tasks: session
                     .task_state
                     .lock()
-                    .expect("task_state mutex poisoned")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
             });
         }
@@ -531,7 +543,10 @@ impl SessionManager {
     /// # Panics
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn delete(&self, session_id: &str) -> bool {
-        let mut guard = self.sessions.lock().expect("sessions mutex poisoned");
+        let mut guard = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let removed = guard.remove(session_id).is_some();
         if removed {
             // Metrics：活跃会话数 gauge

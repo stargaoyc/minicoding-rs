@@ -20,7 +20,10 @@ path = "src/main.rs"
 [dependencies]
 minicoding-core = { workspace = true }
 minicoding-policy = { workspace = true }
-minicoding-cli = { workspace = true }
+# TUI 不需要 keyring（凭证由 CLI/serve 管理）——去掉 cred-keyring
+minicoding-sdk = { workspace = true, default-features = false, features = [
+    "sandbox", "hooks", "file-undo", "web", "extensions",
+] }
 minicoding-storage = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -169,14 +169,13 @@ mod tests {
     #[test]
     fn detect_driver_returns_hardened_only_when_real_driver_active() {
         // 当前平台若降级到 NoopDriver，则 is_hardened 必为 false（C-22）；
-        // 若是真实驱动（Landlock/Seatbelt/WindowsToken），is_hardened 为 true。
+        // Landlock/Seatbelt 有文件系统隔离 → true；WindowsToken 仅进程遏制
+        // 无文件系统隔离 → S25 起如实返回 false。
         let driver = detect_driver();
         let kind = detect_driver_kind();
         match kind {
-            DriverKind::Noop => assert!(!driver.is_hardened()),
-            DriverKind::Landlock | DriverKind::Seatbelt | DriverKind::WindowsToken => {
-                assert!(driver.is_hardened());
-            }
+            DriverKind::Noop | DriverKind::WindowsToken => assert!(!driver.is_hardened()),
+            DriverKind::Landlock | DriverKind::Seatbelt => assert!(driver.is_hardened()),
         }
     }
 

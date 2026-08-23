@@ -11,7 +11,7 @@
 //!
 //! ## 临时文件生命周期
 //!
-//! Profile 写入 `/tmp/minicoding-seatbelt-<pid>-<nanos>.sb`，`pre_exec` 内
+//! Profile 写入 tempfile 随机名 `.sb`，`pre_exec` 内
 //! `sandbox_init` 成功读取后立即删除（profile 已加载进内核，文件不再需要）。
 //! 若 `sandbox_init` 失败也删除临时文件并返回错误。
 //!
@@ -25,7 +25,6 @@ use crate::hardening::vcs_protected_dirs;
 use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `SANDBOX_NAMED_EXTERNAL`：从文件路径加载 profile（见 `<sandbox.h>`）。
 const SANDBOX_NAMED_EXTERNAL: u64 = 0x2;
@@ -102,14 +101,27 @@ fn apply_seatbelt(
 ) -> Result<(), SandboxError> {
     let profile = build_profile(policy);
 
-    // 写入临时文件（父进程，apply 返回前完成）。
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let tmp_path = format!("/tmp/minicoding-seatbelt-{pid}-{nanos}.sb");
-    std::fs::write(&tmp_path, &profile)?;
+    // tempfile 随机名 + 0600——消除 `/tmp` 可预测名的符号链接竞争窗口。
+    // NamedTempFile 不 drop（disable_cleanup 等价：保留路径），由 pre_exec 内
+    // sandbox_init 成功后删除；失败路径随 TempPath drop 清理。
+    let tmp_file = tempfile::Builder::new()
+        .prefix("minicoding-seatbelt")
+        .suffix(".sb")
+        .tempfile()
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    // 写入 profile 后保留路径（into_temp_path().keep() → io::Result<PathBuf>）
+    use std::io::Write as _;
+    write!(tmp_file.as_file(), "{profile}")
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    tmp_file
+        .as_file()
+        .sync_all()
+        .map_err(|e| SandboxError::Io(std::io::Error::other(e.to_string())))?;
+    let tmp_path_buf = tmp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|e| SandboxError::Io(e.into()))?;
+    let tmp_path = tmp_path_buf.to_string_lossy().into_owned();
 
     // pre_exec 闭包：子进程内调 sandbox_init，成功后删除临时文件。
     let profile_path = tmp_path;

@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use minicoding_cli::builder::{self, SessionLoadMode};
 use minicoding_core::policy::{PermissionPrompter, TuiPermissionRequest};
 use minicoding_core::storage::SessionMeta;
 use minicoding_policy::TuiPrompter;
+use minicoding_sdk::builder::{self, SessionLoadMode};
 use minicoding_storage::JsonlStorage;
 use minicoding_tui::{App, AppEvent, UiCommand, spawn_runtime_bridge};
 use std::io::IsTerminal;
