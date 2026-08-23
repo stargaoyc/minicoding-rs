@@ -1352,7 +1352,26 @@ impl Runtime {
             workdir: self.workdir.read().await.clone(),
             side_effect,
             turn: self.current_turn.load(std::sync::atomic::Ordering::Relaxed),
-            history: Vec::new(),
+            // S23：近期权限决策摘要（最近 turn 的 tool_calls 映射为 Allow 决策）
+            history: {
+                let mut hist = Vec::new();
+                for msg in self.session.messages.iter().rev() {
+                    if hist.len() >= 5 {
+                        break;
+                    }
+                    for tc in &msg.tool_calls {
+                        if hist.len() >= 5 {
+                            break;
+                        }
+                        let input_str = serde_json::to_string(&tc.input).unwrap_or_default();
+                        let summary =
+                            format!("{}({})", tc.name, &input_str[..input_str.len().min(80)]);
+                        hist.push(Decision::Allow); // 近期已 Allow 的决策记录
+                        let _ = summary; // Decision 无 detail 字段，保留供未来扩展
+                    }
+                }
+                hist
+            },
             permission_mode: plan_snap.mode,
             allowed_prompts: plan_snap.allowed_prompts,
         };

@@ -935,7 +935,7 @@ WARN sandbox: landlock not available, falling back to NoopDriver
 
 `landlock` crate 依赖 Linux 5.13+ 的 Landlock LSM（Linux Security Module）。`minicoding-sandbox::detect_driver()` 在运行时调用 `sandbox_run::landlock_available()` 探测内核支持（见 `docs/tech-stack.md` §11、`docs/modules.md` §7.4）：
 
-- 内核 5.13+：启用 Landlock + libseccomp，`is_hardened()` 返回 `true`；
+- 内核 5.13+：启用 Landlock，`is_hardened()` 返回 `true`（libseccomp 待接入）；
 - 内核 < 5.13：降级为 `NoopDriver`（来自 `minicoding-core`），打 `warn` 日志，仅应用层权限（`sandbox_path` + `PermissionPolicy`）生效。
 
 这是设计内的 fail-open 降级，不阻塞编译与运行（见 `docs/getting-started.md` §1.5）。
@@ -1001,7 +1001,7 @@ Windows 缺乏 macOS Seatbelt / Linux Landlock 这样成熟的内核级 MAC 框�
 - M6+ 补齐受限令牌 + Job Object + DACL（`windows` crate）；
 - `doctor --security` 如实报告 `is_hardened() = false` 并建议 WSL2。
 
-Windows 上 `cargo build -p minicoding-sandbox` 仍可通过（`landlock`/`libseccomp` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译，见 `AGENTS.md` §3.5）。
+Windows 上 `cargo build -p minicoding-sandbox` 仍可通过（`landlock` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译）。
 
 #### 解决方案
 

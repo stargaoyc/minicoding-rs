@@ -230,8 +230,8 @@ windows = { version = "...", features = ["..."] }
 
 | 能力 | 选型 | 禁止自研 |
 |------|------|---------|
-| 沙箱统一 API | `sandbox-run` | 不自研 seatbelt profile + landlock ruleset 胶水 |
-| Linux 文件沙箱 | `landlock`（由 sandbox-run 调用） | 不裸调 syscall |
+| 沙箱统一 API | 自研驱动（landlock 已接，seccomp 待接入）——原选 sandbox-run 因 EUPL-1.2 弃用，见 tech-stack.md §13 |
+| Linux 文件沙箱 | `landlock`（直接调用，自研 pre_exec 胶水） | 不手写 BPF |
 | Linux syscall 过滤 | `libseccomp` | 不手写 BPF |
 | MCP client/server | `rmcp` 2.2 | 不自实现 stdio/http 薄封装 |
 | HTTP | `reqwest` | 不裸用 hyper |
@@ -440,7 +440,7 @@ windows = { version = "...", features = ["..."] }
 
 ### 7.4 解释决策
 
-- 选择方案时说明 **why**（为什么用 `sandbox-run` 而非自研、为什么 trait 定义在 core、为什么用 `Utf8PathBuf`）
+- 选择方案时说明 **why**（为什么沙箱驱动自研而非用弃用的 sandbox-run、为什么 trait 定义在 core、为什么用 `Utf8PathBuf`）
 - 不只贴代码不解释
 - 关键设计决策参考 `docs/tech-stack.md` §13 与 `docs/modules.md` §0.3 的权衡记录
 
@@ -569,7 +569,7 @@ minicoding-web/src/
 - [ ] 新 crate 职责单一（见 `docs/modules.md`）？
 - [ ] trait 定义在 core，实现在领域 crate（见 §3.3）？
 - [ ] 重依赖在对应 crate 隔离（feature gate / target cfg，见 §3.5）？
-- [ ] 沙箱用 `sandbox-run`（不自研，见 §3.6）？MCP 用 `rmcp` 2.2（不自研）？
+- [ ] MCP 用 `rmcp` 2.2（不自研）？HTTP 用 `reqwest`（不自研）？
 - [ ] 公共 API 有 doc comment（`///`）？
 - [ ] 错误用 `thiserror`（库）/ `anyhow`（边界）？不 panic？
 - [ ] 不 `unsafe`（除非 FFI + `// SAFETY:` 注释 + review）？
