@@ -36,13 +36,21 @@ pub struct BackgroundShellStatus {
 ///
 /// 三个 shell 后台工具（`shell.background`/`output`/`kill`）共享同一个 store
 /// 实例（`Arc<dyn BackgroundShellStore>`），通过 `shell_id` 索引。
+/// 沙箱注入参数（`shell.run` 同款：spawn 前 `apply`，spawn 后 `post_spawn`）。
+pub struct SpawnSandbox {
+    pub driver: std::sync::Arc<dyn minicoding_core::sandbox::SandboxDriver>,
+    pub policy: minicoding_core::sandbox::SandboxPolicy,
+}
+
 pub trait BackgroundShellStore: Send + Sync {
-    /// Spawn 命令到后台，返回 `shell_id`。
+    /// Spawn 命令到后台，返回 `shell_id`。`max_output_bytes` 为每路输出缓冲上限。
     fn spawn(
         &self,
         command: String,
         workdir: String,
         env: HashMap<String, String>,
+        sandbox: Option<SpawnSandbox>,
+        max_output_bytes: usize,
     ) -> BoxFuture<'_, Result<String, ToolError>>;
     /// 非阻塞读取已累积的输出 + 退出状态。
     fn output(&self, shell_id: String) -> BoxFuture<'_, Result<BackgroundShellStatus, ToolError>>;
@@ -50,14 +58,16 @@ pub trait BackgroundShellStore: Send + Sync {
     fn kill(&self, shell_id: String) -> BoxFuture<'_, Result<(), ToolError>>;
 }
 
-/// 单个后台 shell 条目（缓冲区 + 退出码）。
+/// 单个后台 shell 条目（缓冲区 + 退出码 + child 句柄）。
 ///
-/// `child` 句柄由后台 wait task 持有（用于 `wait`），store 端不保留——
-/// `kill` 通过 `kill_on_drop` 语义保证（store drop 时清理所有后台进程）。
+/// child 句柄经 `Arc<Mutex<Option<Child>>>` 共享：wait task 以 `try_wait` 轮询
+/// （临界区极短，不阻塞 kill）；`kill` 取锁后 `killpg`/`start_kill`——此前 store
+/// 端不保留句柄导致 kill 是空操作（2026-08-23 审查 §6-P1）。
 struct ShellEntry {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     exit_code: Arc<Mutex<Option<i32>>>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 /// 内存后台 shell 存储（默认实现，非持久化）。
@@ -86,12 +96,14 @@ impl InMemoryBackgroundShellStore {
 }
 
 impl BackgroundShellStore for InMemoryBackgroundShellStore {
-    #[tracing::instrument(skip(self), fields(otel.name = span_name::SHELL_BG_SPAWN))]
+    #[tracing::instrument(skip(self, sandbox), fields(otel.name = span_name::SHELL_BG_SPAWN))]
     fn spawn(
         &self,
         command: String,
         workdir: String,
         env: HashMap<String, String>,
+        sandbox: Option<SpawnSandbox>,
+        max_output_bytes: usize,
     ) -> BoxFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             // 1. 构造命令（与 shell.run 一致：Unix 用 sh -c，Windows 用 cmd /C）
@@ -112,10 +124,52 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             // SAFETY: 不依赖 pre_exec hook 的安全不变式（`pre_exec` 未设置）。
             cmd.kill_on_drop(true);
 
+            // S9 对齐（2026-08-23 审查 §6-P1）：后台 spawn 同样自成进程组长，
+            // kill 时可 killpg 整树清理（此前仅 run 有，后台路径是旁路）。
+            #[cfg(unix)]
+            // SAFETY: pre_exec 闭包在 fork 后 exec 前的子进程上下文运行；
+            // setpgid(0,0) 仅设置自身进程组，纯 syscall，async-signal-safe。
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+
+            // C-22 对齐（2026-08-23 审查 §6-P1）：后台 spawn 与 run 同权限等级，
+            // 必须经同一 OS 沙箱第二道防线——apply 失败视为执行错误上交
+            // Runtime 的 denial/fallback 链路处理。
+            let has_sandbox = sandbox.as_ref().is_some();
+            if let Some(sb) = sandbox.as_ref() {
+                let span = tracing::debug_span!(
+                    "sandbox.apply",
+                    otel.name = span_name::SANDBOX_APPLY,
+                    driver = sb.driver.id(),
+                );
+                let _enter = span.enter();
+                sb.driver
+                    .apply(&sb.policy, cmd.as_std_mut())
+                    .map_err(|e| ToolError::Exec(format!("sandbox apply failed: {e}")))?;
+            }
+
             // 2. Spawn 子进程
             let mut child = cmd
                 .spawn()
                 .map_err(|e| ToolError::Exec(format!("spawn 失败: {e}")))?;
+
+            // Windows Job Object post_spawn（与 run.rs 一致；Linux/macOS no-op）
+            if has_sandbox
+                && let Some(sb) = sandbox.as_ref()
+                && let Some(pid) = child.id()
+            {
+                sb.driver.post_spawn(pid).map_err(|e| {
+                    let _ = child.start_kill();
+                    ToolError::Exec(format!("sandbox post_spawn failed: {e}"))
+                })?;
+            }
 
             // 3. 取出 stdout/stderr handle（spawn 后 piped 必有）
             let stdout = child
@@ -130,28 +184,52 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             // 4. 生成 shell_id（ULID，与 task_id 一致策略）
             let shell_id = ulid::Ulid::new().to_string();
 
-            // 5. 共享缓冲区 + 退出码
+            // 5. 共享缓冲区 + 退出码 + child 句柄（kill 用，2026-08-23 审查 §6-P1）
             let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
             let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
             let exit_code: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+            let child_handle: Arc<Mutex<Option<tokio::process::Child>>> =
+                Arc::new(Mutex::new(Some(child)));
 
-            // 6. 后台 task：持续读 stdout → 追加缓冲区
+            // 6. 后台 task：持续读 stdout/stderr → 追加缓冲区（带字节上限）
             let stdout_buf_clone = Arc::clone(&stdout_buf);
             tokio::spawn(async move {
-                read_to_buffer(stdout, stdout_buf_clone).await;
+                read_capped_to_buffer(stdout, stdout_buf_clone, max_output_bytes).await;
             });
-            // 后台 task：持续读 stderr → 追加缓冲区
             let stderr_buf_clone = Arc::clone(&stderr_buf);
             tokio::spawn(async move {
-                read_to_buffer(stderr, stderr_buf_clone).await;
+                read_capped_to_buffer(stderr, stderr_buf_clone, max_output_bytes).await;
             });
 
-            // 7. 后台 task：wait 子进程 → 设退出码
+            // 7. 后台 task：try_wait 轮询子进程退出码。不用阻塞 `wait()`——那会
+            //    长期持有 child 锁导致 kill 无法取到句柄；100ms 轮询对快照式
+            //    `shell.output` 语义足够。
             let exit_code_clone = Arc::clone(&exit_code);
+            let wait_child = Arc::clone(&child_handle);
             tokio::spawn(async move {
-                let code = child.wait().await.ok().and_then(|s| s.code());
-                if let Some(c) = code {
-                    *exit_code_clone.lock().await = Some(c);
+                loop {
+                    let done = {
+                        let mut guard = wait_child.lock().await;
+                        match guard.as_mut() {
+                            Some(c) => match c.try_wait() {
+                                Ok(Some(status)) => {
+                                    // 信号终止（killpg/SIGKILL）无退出码——记 -1，
+                                    // 保证"已退出"语义成立（此前 killed 进程永远
+                                    // 显示未退出，2026-08-23 审查 §6-P1 测试暴露）
+                                    let code = status.code().unwrap_or(-1);
+                                    *exit_code_clone.lock().await = Some(code);
+                                    true
+                                }
+                                Ok(None) => false,
+                                Err(_) => true, // wait 失败（进程已被杀等）→ 终止轮询
+                            },
+                            None => true, // 句柄被 kill 端取走（理论不发生）
+                        }
+                    };
+                    if done {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             });
 
@@ -160,6 +238,7 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                 stdout: stdout_buf,
                 stderr: stderr_buf,
                 exit_code,
+                child: child_handle,
             };
             let mut shells = self.shells.lock().await;
             shells.insert(shell_id.clone(), entry);
@@ -198,32 +277,57 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
         Box::pin(async move {
             let shells = self.shells.lock().await;
             let entry = shells.get(&shell_id).ok_or(ToolError::NotFound(shell_id))?;
-            // child 句柄在 wait task 中，无法直接 kill；改用进程组信号
-            // InMemory 实现下 kill_on_drop + 进程组管理依赖 OS 行为；
-            // 此处标记语义：若已退出则无操作，否则返回 Ok（实际 kill 由 kill_on_drop 保证）
             let exit_code = *entry.exit_code.lock().await;
             if exit_code.is_some() {
-                return Ok(()); // 已退出
+                return Ok(()); // 已退出，幂等
             }
-            // 进程仍在运行：InMemory 实现下 child 句柄已被 wait task 持有，
-            // 无法从 store 端 kill；依赖 kill_on_drop 在 store drop 时清理。
-            // 生产实现应保留 child 句柄（见 trait 文档）。
+            // 真实现（2026-08-23 审查 §6-P1）：store 侧持有 child 句柄。
+            // Unix 先 killpg 整树（spawn 前 setpgid(0,0)，pgid == pid），再
+            // start_kill 兜底；Windows 直接 start_kill。
+            let mut guard = entry.child.lock().await;
+            if let Some(child) = guard.as_mut() {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    let _ = tokio::task::spawn_blocking(move || unsafe {
+                        libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL)
+                    })
+                    .await;
+                }
+                let _ = child.start_kill();
+            }
             Ok(())
         })
     }
 }
 
-/// 持续读取 `AsyncRead` 到共享缓冲区（直到 EOF）。
-async fn read_to_buffer<R: tokio::io::AsyncRead + Unpin>(mut reader: R, buf: Arc<Mutex<String>>) {
+/// 持续读取 `AsyncRead` 到共享缓冲区，累计超过 `cap` 字节后**丢弃**后续数据
+/// （追加一次性截断标记）但保持读取直到 EOF——不能停止读：管道写端阻塞会让
+/// 长驻进程（如 dev server）被 SIGPIPE 杀死或卡住（2026-08-23 审查 §6-P1：
+/// 此前无上限累积可 OOM）。
+async fn read_capped_to_buffer<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    buf: Arc<Mutex<String>>,
+    cap: usize,
+) {
     let mut chunk = [0u8; 4096];
+    let mut total = 0usize;
+    let mut marked = false;
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break, // EOF 或读错误（管道关闭等）→ 停止
             Ok(n) => {
-                // SAFETY: 从进程 stdout/stderr 读取的字节流按 UTF-8 解码；
-                // 非完整 UTF-8 边界可能产生 replacement char，可接受（输出展示用）。
-                let text = String::from_utf8_lossy(&chunk[..n]);
-                buf.lock().await.push_str(&text);
+                total += n;
+                if total <= cap {
+                    // SAFETY: 从进程 stdout/stderr 读取的字节流按 UTF-8 解码；
+                    // 非完整 UTF-8 边界可能产生 replacement char，可接受（输出展示用）。
+                    let text = String::from_utf8_lossy(&chunk[..n]);
+                    buf.lock().await.push_str(&text);
+                } else if !marked {
+                    marked = true;
+                    buf.lock()
+                        .await
+                        .push_str("\n...[output truncated: 超过后台输出上限，进程继续运行]");
+                }
             }
         }
     }
@@ -278,13 +382,20 @@ impl Tool for ShellBackground {
         let store = Arc::clone(&self.store);
         let workdir = ctx.workdir.to_string();
         let env = ctx.env.clone();
+        let sandbox = match (ctx.sandbox_driver.clone(), ctx.sandbox_policy.clone()) {
+            (Some(driver), Some(policy)) => Some(SpawnSandbox { driver, policy }),
+            _ => None,
+        };
+        let max_output_bytes = ctx.max_output_bytes;
         Box::pin(async move {
             let command: String = params
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::InvalidInput("command 缺失".into()))?
                 .to_string();
-            let shell_id = store.spawn(command, workdir, env).await?;
+            let shell_id = store
+                .spawn(command, workdir, env, sandbox, max_output_bytes)
+                .await?;
             Ok(ToolResult::ok_text(format!(
                 "后台 shell 已启动 (shell_id={shell_id})。用 shell.output 读取输出。"
             )))
@@ -311,7 +422,13 @@ mod tests {
         }
 
         let shell_id = store
-            .spawn("echo hello".to_string(), "/tmp".to_string(), env)
+            .spawn(
+                "echo hello".to_string(),
+                "/tmp".to_string(),
+                env,
+                None,
+                1024 * 1024,
+            )
             .await
             .expect("spawn");
 
@@ -345,6 +462,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_kill_stops_running_process() {
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        // 长驻进程：sleep 30s
+        let shell_id = store
+            .spawn(
+                "sleep 30".to_string(),
+                "/tmp".to_string(),
+                env,
+                None,
+                1024 * 1024,
+            )
+            .await
+            .expect("spawn");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        assert!(
+            !store.output(shell_id.clone()).await.expect("output").exited,
+            "sleep 应仍在运行"
+        );
+
+        store.kill(shell_id.clone()).await.expect("kill");
+
+        // killpg(SIGKILL) 后 wait task 应在轮询间隔内记录退出（2026-08-23 审查 §6-P1）
+        for _ in 0..30 {
+            if store.output(shell_id.clone()).await.expect("output").exited {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("进程在 kill 后 3s 内仍未退出");
+    }
+
+    #[tokio::test]
+    async fn store_output_truncates_beyond_cap() {
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        // 输出远超极小 cap；缓冲应截断并带标记（进程本身正常退出）
+        let shell_id = store
+            .spawn(
+                "head -c 20000 /dev/zero | tr '\\0' 'x'".to_string(),
+                "/tmp".to_string(),
+                env,
+                None,
+                4096,
+            )
+            .await
+            .expect("spawn");
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let status = store.output(shell_id).await.expect("output");
+        assert!(status.stdout.contains("[output truncated"), "应有截断标记");
+        assert!(status.stdout.len() < 20000, "缓冲不应无上限累积");
+    }
+
+    #[tokio::test]
     async fn store_kill_exited_is_idempotent() {
         let store = InMemoryBackgroundShellStore::new();
         let mut env = HashMap::new();
@@ -353,7 +532,13 @@ mod tests {
         }
 
         let shell_id = store
-            .spawn("true".to_string(), "/tmp".to_string(), env)
+            .spawn(
+                "true".to_string(),
+                "/tmp".to_string(),
+                env,
+                None,
+                1024 * 1024,
+            )
             .await
             .expect("spawn");
 
@@ -374,7 +559,13 @@ mod tests {
         }
 
         let shell_id = store
-            .spawn("echo err >&2".to_string(), "/tmp".to_string(), env)
+            .spawn(
+                "echo err >&2".to_string(),
+                "/tmp".to_string(),
+                env,
+                None,
+                1024 * 1024,
+            )
             .await
             .expect("spawn");
 

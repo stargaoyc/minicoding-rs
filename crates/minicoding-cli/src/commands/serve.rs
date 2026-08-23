@@ -362,17 +362,22 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
     //      server 模式下，OS 沙箱由调用方进程负责；本 server 仅做工具执行）；
     //    - 不注入 journal：fs.write/edit/delete 不记录改动（无 /undo 需求）；
     //    - timeout 用 `--permission-timeout-sec`（复用既有 flag，避免新增参数）；
-    //    - max_output_bytes 用默认 1 MiB（与 Runtime 默认一致）。
+    //    - max_output_bytes 用默认 1 MiB（与 Runtime 默认一致）；
+    //    - env 用白名单子集（C-04）：此前 `std::env::vars().collect()` 全量透传，
+    //      会把凭证变量经 ctx.env 下传 git/shell 子进程（2026-08-23 审查 §6-P1
+    //      单一来源化时发现的旁路，一并修复）。
     let ctx_template = ToolContext {
         workdir: workdir.clone(),
         session_id: "mcp-stdio".to_string(),
         canceller: CancellationToken::new(),
-        env: std::env::vars().collect(),
+        env: minicoding_core::tool::sanitized_env(),
         timeout: std::time::Duration::from_secs(cmd.permission_timeout_sec),
         max_output_bytes: 1024 * 1024,
         sandbox_driver: None,
         sandbox_policy: None,
         journal: None,
+        prompter: None,
+        events: None,
     };
 
     // 4. 启动 MCP server（阻塞至 client 断开 stdin）

@@ -360,6 +360,7 @@ pub fn build_runtime(
     let event_bus = minicoding_core::runtime::EventBus::new();
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
+    minicoding_tools::register_ui_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
     // T-M8-5：git 工具组（git.diff 只读 / git.apply 写入）

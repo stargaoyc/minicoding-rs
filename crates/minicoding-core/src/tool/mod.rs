@@ -6,4 +6,4 @@ mod r#trait;
 
 pub use registry::{ToolGroup, ToolRegistry};
 pub use render::{ListItem, ListKind, RenderIntent, ToolOutputSchema};
-pub use r#trait::{CancellationToken, Tool, ToolContext};
+pub use r#trait::{CancellationToken, SAFE_ENV_WHITELIST, Tool, ToolContext, sanitized_env};

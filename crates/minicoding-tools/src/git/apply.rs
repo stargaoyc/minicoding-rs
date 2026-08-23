@@ -8,6 +8,53 @@ use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{RenderIntent, Tool};
 use tokio::process::Command;
 
+/// 解析 unified diff 的目标路径并校验全部落在 workdir 内（2026-08-23 审查
+/// §6-P2：patch 内容 LLM 可控，`../` 相对路径/绝对路径不应直接交给
+/// `git apply`——此前仅靠 git 自身行为约束，是路径沙箱的第二道防线缺口）。
+///
+/// 规则（保守词法校验）：`--- `/`+++ `/`diff --git ` 行提取目标；`/dev/null`
+/// （新增/删除文件的空端）放行；其余目标剥 `a/`、`b/` 前缀后必须为相对路径
+/// 且不含 `..` 组件与引号包裹。
+fn validate_patch_paths(patch: &str) -> Result<(), ToolError> {
+    let mut bad: Option<String> = None;
+    'outer: for line in patch.lines() {
+        let target = if let Some(rest) = line.strip_prefix("--- ") {
+            Some(rest.trim())
+        } else {
+            line.strip_prefix("+++ ").map(str::trim)
+        };
+        let Some(raw) = target else { continue };
+        // 时间戳后缀（"--- a/x\t2024-01-01"）截断
+        let raw = raw.split('\t').next().unwrap_or(raw);
+        // 引号包裹路径（含特殊字符时 git 会加引号）一律拒绝——保守处理
+        if raw.starts_with('"') {
+            bad = Some(raw.to_string());
+            break;
+        }
+        if raw == "/dev/null" {
+            continue;
+        }
+        let rel = raw
+            .strip_prefix("a/")
+            .or_else(|| raw.strip_prefix("b/"))
+            .unwrap_or(raw);
+        if rel.starts_with('/')
+            || rel.split('/').any(|seg| seg == "..")
+            || rel.contains('\\')
+            || rel.is_empty()
+        {
+            bad = Some(rel.to_string());
+            break 'outer;
+        }
+    }
+    match bad {
+        Some(p) => Err(ToolError::InvalidInput(format!(
+            "patch 目标路径越界（拒绝应用）: `{p}`——patch 仅允许修改工作目录内的相对路径"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `git.apply` 工具。
 pub struct GitApply {
     schema: ToolSchema,
@@ -65,6 +112,7 @@ impl Tool for GitApply {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::InvalidInput("patch 缺失".into()))?
                 .to_string();
+            validate_patch_paths(&patch)?;
             let mut cmd = Command::new("git");
             cmd.current_dir(workdir.as_std_path());
             cmd.arg("apply").arg("--whitespace=nowarn");
@@ -159,6 +207,26 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn patch_with_parent_dir_target_rejected() {
+        // ../ 越界目标 → 拒绝（2026-08-23 审查 §6-P2）
+        let patch = "--- a/../etc/passwd\n+++ b/../etc/passwd\n@@ -1 +1 @@\n-x\n+y\n";
+        assert!(validate_patch_paths(patch).is_err());
+    }
+
+    #[test]
+    fn patch_with_absolute_target_rejected() {
+        let patch = "--- /etc/passwd\n+++ /etc/passwd\n@@ -1 +1 @@\n-x\n+y\n";
+        assert!(validate_patch_paths(patch).is_err());
+    }
+
+    #[test]
+    fn patch_with_devnull_and_relative_targets_accepted() {
+        // 新增文件：--- 端为 /dev/null，+++ 端为相对路径 → 放行
+        let patch = "--- /dev/null\n+++ b/new_file.txt\n@@ -0,0 +1 @@\n+hello\n";
+        assert!(validate_patch_paths(patch).is_ok());
     }
 
     #[tokio::test]

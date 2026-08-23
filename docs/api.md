@@ -490,9 +490,18 @@ pub struct ToolContext {
     pub workdir: Utf8PathBuf,
     pub session_id: SessionId,
     pub canceller: CancellationToken,
+    /// 白名单安全子集（`SAFE_ENV_WHITELIST`：PATH/HOME/USER/LANG/LC_ALL/TERM/TMPDIR，
+    /// C-04 凭证不下传）；Runtime 构造时从进程环境填充（2026-08-23 审查 §6-P1）。
     pub env: HashMap<String, String>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    /// 可选注入（M4+）：沙箱驱动/策略、journal、点对点 prompter + 事件总线
+    /// （`ui.ask` 主动提问用，见 `design.md` §9.1）。
+    pub sandbox_driver: Option<Arc<dyn SandboxDriver>>,
+    pub sandbox_policy: Option<SandboxPolicy>,
+    pub journal: Option<Arc<dyn Journal>>,
+    pub prompter: Option<Arc<dyn PermissionPrompter>>,
+    pub events: Option<EventBus>,
 }
 ```
 
@@ -1812,6 +1821,22 @@ pub enum WorkspaceFileChange {
 调用后广播 `Event::TaskUpdated`，UI 据此渲染任务面板。
 
 > **废弃别名 `todo.write`**：旧版全量替换工具 `todo.write`（`TodoWriteInput { todos: Vec<Todo> }`）作为兼容别名保留一个版本，内部转为"先批量 `task.create`，再差异 `task.update`"。新代码与新提示词应直接用 `task.*` 三件套（见 `design.md` §18.9）。`Event::TodoUpdated` 同步更名为 `Event::TaskUpdated`。
+
+### 10.1a 主动提问工具 `ui.ask`（2026-08-23 审查 §6-P2 补齐）
+
+LLM 主动向用户提问（对标 Claude Code AskUserQuestion），走
+`PermissionPrompter` 点对点通道并广播 `PermissionRequested`/`PermissionResolved`
+事件（与权限链同一 UX 通路）。`SideEffect::None`（只读桶，Plan 模式可用）。
+
+| 项 | 值 |
+|----|----|
+| 输入 | `{ question: String }` |
+| 输出 | `用户回答: yes / no (<reason>)` 文本 |
+
+**v1 边界**：二值问答。多选自定义选项需扩展 `PermissionPrompt.options`
+协议并贯通四端前端，为后续项。**已知限制**：工具路径的提问不落 audit.log、
+不持久化事件（问答结果经 LLM 转述随对话落盘）。无 prompter 注入时返回
+错误文本引导 LLM 自行决策并说明。
 
 ### 10.2 `plan.exit`（ExitPlanMode，见 `design.md` §16.4）
 

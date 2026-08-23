@@ -18,11 +18,8 @@ use tokio::process::Command;
 /// 合并后输出字符上限（C-07 资源不可耗尽）。
 const MAX_OUTPUT_CHARS: usize = 10_000;
 
-/// 子进程 env 白名单（C-04 凭证不下传子进程）。
-///
-/// 仅传递基础环境变量；`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`*_KEY`/`*_TOKEN`/`*_SECRET`
-/// 等凭证变量绝不传递（`env_clear` 后只 `env` 插入白名单项）。
-const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM"];
+// 子进程 env 白名单（C-04）已上移 `minicoding_core::tool::SAFE_ENV_WHITELIST`
+// 单一事实来源（2026-08-23 审查 §6-P1：与 `ToolContext::env` 共用）。
 
 /// 执行 shell 命令的工具。
 pub struct ShellRun {
@@ -138,7 +135,7 @@ impl Tool for ShellRun {
                 });
             }
             // C-04：仅传递白名单 env，凭证变量绝不下传子进程。
-            for name in ENV_WHITELIST {
+            for name in minicoding_core::tool::SAFE_ENV_WHITELIST {
                 if let Ok(value) = std::env::var(name) {
                     command.env(name, value);
                 }

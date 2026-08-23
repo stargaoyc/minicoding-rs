@@ -101,6 +101,14 @@ impl Tool for WebSearch {
 
             // 2. 解析结果（DDG HTML 结果页的 result__a / result__snippet class）
             let results = parse_ddg_results(&html, max_results);
+            if results.is_empty() {
+                // 结构化报错而非空成功（2026-08-23 审查 §6-P2）：解析依赖 DDG
+                // 页面结构，改版即碎——空"成功"会让 LLM 误判"确实无结果"。
+                return Ok(ToolResult::err_text(
+                    "搜索解析得到 0 条结果：可能是查询确实无匹配，或 DuckDuckGo 结果页\
+                     结构变更导致解析失败（可稍后重试，或改用 web.fetch 直接访问已知来源）",
+                ));
+            }
 
             // 3. 格式化为可读文本
             let mut text = String::new();
@@ -114,9 +122,6 @@ impl Tool for WebSearch {
                     r.url,
                     r.snippet
                 );
-            }
-            if text.is_empty() {
-                text.push_str("无搜索结果");
             }
 
             Ok(ToolResult::ok_text(text))

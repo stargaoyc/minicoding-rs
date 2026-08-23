@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 工具组（用于特性门控与批量启用，也作为子 Agent 工具子集的粗粒度开关）。
+///
+/// **reserved（2026-08-23 审查 §6-P2）**：当前注册 API 未消费 group，
+/// 子 Agent 工具子集裁剪未落地；保留枚举作为后续 `schemas()` 过滤与
+/// `task.spawn` 按类型收敛工具面的契约占位。在接入前不得据此假设
+/// "某 group 已被排除"。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolGroup {
     Core,

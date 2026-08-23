@@ -906,10 +906,13 @@ impl Runtime {
         &self,
         calls: &[ToolCall],
     ) -> Result<Vec<(ToolCallId, ToolResult)>, RuntimeError> {
-        // 构造 ToolContext：注入沙箱驱动/策略/journal（M4，shell.run/fs 用）
+        // 构造 ToolContext：注入沙箱驱动/策略/journal（M4，shell.run/fs 用）+
+        // 点对点 prompter（`ui.ask` 主动提问用，与权限链同一实例）
         let ctx = ToolContext::new(self.workdir.read().await.clone(), self.session.id.clone())
             .with_sandbox(self.sandbox_driver.clone(), self.sandbox_policy.clone())
-            .with_journal_opt(self.journal.clone());
+            .with_journal_opt(self.journal.clone())
+            .with_prompter_opt(Some(self.prompter.clone()))
+            .with_events_opt(Some(self.events.clone()));
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
         // S14：查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch

@@ -20,7 +20,7 @@ impl FsEdit {
     pub fn new() -> Self {
         let schema = ToolSchema {
             name: "fs.edit".to_string(),
-            description: "精确字符串替换：在文件中查找 old_string 并替换为 new_string，要求 old_string 在文件中唯一匹配（提供足够上下文以消除歧义）。"
+            description: "精确字符串替换：在文件中查找 old_string 并替换为 new_string。默认要求唯一匹配；replace_all=true 时替换全部。"
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -36,6 +36,10 @@ impl FsEdit {
                     "new_string": {
                         "type": "string",
                         "description": "替换后的新字符串。"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "为 true 时替换全部匹配（默认 false：要求唯一匹配，多处匹配报错）。"
                     }
                 },
                 "required": ["path", "old_string", "new_string"]
@@ -56,6 +60,8 @@ struct EditInput {
     path: String,
     old_string: String,
     new_string: String,
+    #[serde(default)]
+    replace_all: bool,
 }
 
 impl Tool for FsEdit {
@@ -105,15 +111,20 @@ impl Tool for FsEdit {
                     args.path
                 )));
             }
-            if count > 1 {
+            if count > 1 && !args.replace_all {
+                // 唯一性强制（默认）：多处匹配要求更多上下文，防止误替换
                 return Ok(ToolResult::err_text(format!(
-                    "old_string is not unique ({} matches) in {}: provide more context",
+                    "old_string is not unique ({} matches) in {}: provide more context or set replace_all=true",
                     count, args.path
                 )));
             }
 
             let before_bytes = content.as_bytes().to_vec();
-            let new_content = content.replacen(&args.old_string, &args.new_string, 1);
+            let new_content = if args.replace_all {
+                content.replace(&args.old_string, &args.new_string)
+            } else {
+                content.replacen(&args.old_string, &args.new_string, 1)
+            };
             let after_bytes = new_content.as_bytes().to_vec();
             tokio::fs::write(&path, new_content.as_bytes())
                 .await
