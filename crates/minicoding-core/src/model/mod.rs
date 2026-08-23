@@ -13,7 +13,6 @@ pub use error::{
     ExtensionError, JournalError, LlmError, McpError, MemoryError, PolicyError, PromptError,
     RuntimeError, StorageError, ToolError,
 };
-pub use message::repair_dangling_tool_calls;
 pub use message::{CompressedRange, ContentBlock, Message, MessageMeta, MessageSource, Role};
 pub use session::{
     Attachment, ContextHint, Session, SessionId, SessionMeta, StopReason, TurnOutcome, UserInput,

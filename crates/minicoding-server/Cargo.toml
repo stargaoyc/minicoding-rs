@@ -69,7 +69,6 @@ otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk
 # LSP 适配器（T-M8-8，tower-lsp 重依赖，feature gate）
 lsp = ["dep:tower-lsp"]
 # ACP 适配器（T-M8-7）
-acp = []
 
 # 可选重依赖（feature gate 才引入）
 [dependencies.tower-lsp]

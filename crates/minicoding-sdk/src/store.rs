@@ -22,6 +22,7 @@ use time::OffsetDateTime;
 /// 线程安全：`Mutex` 保护内部映射，`Arc<InMemoryStorage>` 可多线程共享。
 /// 不持久化：进程退出后数据丢失（SDK 默认行为；如需持久化用 `JsonlStorage`）。
 #[derive(Debug, Default)]
+#[deprecated(note = "A13: use minicoding-storage InMemoryStorage instead (planned)")]
 pub struct InMemoryStorage {
     sessions: Mutex<HashMap<SessionId, Vec<Message>>>,
 }

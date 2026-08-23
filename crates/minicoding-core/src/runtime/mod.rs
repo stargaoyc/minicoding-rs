@@ -9,6 +9,7 @@ mod accumulator;
 mod builder;
 mod event;
 mod plan_handle;
+pub mod repair;
 pub mod repeat_guard;
 mod rt;
 

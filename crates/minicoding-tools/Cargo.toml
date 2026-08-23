@@ -27,15 +27,7 @@ ulid = { workspace = true }
 time = { workspace = true }
 
 # 组合层可按需依赖多个领域 crate（见 modules.md §11.3）
-# M0 阶段仅占位骨架，不引入领域 crate（T-M0-1）
-# minicoding-context = { workspace = true }
 minicoding-policy = { workspace = true }
-# minicoding-memory = { workspace = true, optional = true }
-# minicoding-hooks = { workspace = true, optional = true }
-# minicoding-journal = { workspace = true, optional = true }
-# minicoding-sandbox = { workspace = true, optional = true }
-# minicoding-mcp = { workspace = true, optional = true }
-# minicoding-storage = { workspace = true }
 
 # reqwest 仅 web.fetch/search 工具需要（T-M8-5，feature gate `web`）
 reqwest = { workspace = true, optional = true }

@@ -423,7 +423,7 @@ impl Runtime {
         // 防御修复（M-03，D-05）：历史中仍悬空的 tool_calls 补合成错误结果
         // （防"崩溃发生在 persist 之前"的极端情况）。磁盘消息不动，仅在 ctx 层
         // 修复——每次 resume 幂等重建，保证发给 provider 的历史对严格 provider 合法。
-        let repaired = crate::model::repair_dangling_tool_calls(self.session.messages.clone());
+        let repaired = super::repair::repair_dangling_tool_calls(self.session.messages.clone());
         for msg in &repaired {
             self.ctx.append(msg.clone()).await;
         }

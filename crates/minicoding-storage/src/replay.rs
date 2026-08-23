@@ -165,7 +165,8 @@ pub fn replay_session_state(
     // 防御修复（M-03，D-05）：重放历史中仍悬空的 tool_calls 补合成错误结果，
     // 保证重建出的会话对严格 provider 合法（幂等：已齐不动）。
     let mut session = session;
-    session.messages = minicoding_core::model::repair_dangling_tool_calls(session.messages);
+    session.messages =
+        minicoding_core::runtime::repair::repair_dangling_tool_calls(session.messages);
     Ok(ReplayedSession {
         session,
         audit_trail,
@@ -188,7 +189,7 @@ pub fn session_from_messages(
     messages: Vec<Message>,
 ) -> Session {
     // 防御修复（M-03，D-05）：旧会话回退路径同样补齐悬空 tool_calls 的合成结果。
-    let messages = minicoding_core::model::repair_dangling_tool_calls(messages);
+    let messages = minicoding_core::runtime::repair::repair_dangling_tool_calls(messages);
     let created_at = messages
         .first()
         .map_or_else(time::OffsetDateTime::now_utc, |m| m.created_at);
