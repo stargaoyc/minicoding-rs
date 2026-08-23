@@ -25,7 +25,6 @@ use crate::hardening::vcs_protected_dirs;
 use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `SANDBOX_NAMED_EXTERNAL`：从文件路径加载 profile（见 `<sandbox.h>`）。
 const SANDBOX_NAMED_EXTERNAL: u64 = 0x2;
