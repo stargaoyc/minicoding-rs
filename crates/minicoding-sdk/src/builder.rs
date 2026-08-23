@@ -311,8 +311,10 @@ pub fn build_runtime(
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
-                // 128K 上下文窗口（gpt-4o 系列）；TODO: 按 model 精确查询 context window
-                let context_window = 128_000;
+                // 上下文窗口取 provider 声明的 capability（Claude 200K 等；
+                // 2026-08-23 审查 §8-P1：此前硬编码 128K，Claude 白白浪费 35%
+                // 预算提前压缩，小窗口模型则预算虚高直接超限）
+                let context_window = summary_provider.capabilities().context_window;
                 let mut mgr = ContextManagerImpl::new(
                     system_prompt.clone(),
                     Arc::new(tokenizer),

@@ -300,17 +300,28 @@ fn evict_until_fit(entries: &mut Vec<AutoEntry>) {
     if entries.is_empty() {
         return;
     }
-    // 按 confidence asc, updated asc 排序（低置信度旧条目在前，优先淘汰）。
-    entries.sort_by(|a, b| {
-        a.confidence
-            .partial_cmp(&b.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.updated.cmp(&b.updated))
-    });
-
-    // 从头部淘汰（低置信度旧条目），直至满足容量限。
+    // 淘汰序：confidence asc, updated asc（低置信度旧条目优先；同序取先插入）。
+    // 2026-08-23 审查 §8-P2：此前对 `entries` 本身 sort——淘汰后残留条目的渲染
+    // 顺序被永久变为"置信度升序"，auto.md 的语义分组被打乱。改为每轮在当前
+    // 条目中选"最差者"移除，`entries` 始终保持原插入序。
     while entries.len() > 1 && exceeds_limits(entries) {
-        entries.remove(0);
+        let worst = entries
+            .iter()
+            .enumerate()
+            .min_by(|(ia, a), (ib, b)| {
+                a.confidence
+                    .partial_cmp(&b.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.updated.cmp(&b.updated))
+                    .then_with(|| ia.cmp(ib))
+            })
+            .map(|(i, _)| i);
+        match worst {
+            Some(i) => {
+                entries.remove(i);
+            }
+            None => break,
+        }
     }
 }
 
@@ -318,56 +329,6 @@ fn evict_until_fit(entries: &mut Vec<AutoEntry>) {
 fn exceeds_limits(entries: &[AutoEntry]) -> bool {
     let rendered = render_entries(entries);
     rendered.lines().count() > MAX_LINES || rendered.len() > MAX_BYTES
-}
-
-/// 检测内容是否含指令性模式（C-27：降级 `Ask`）。
-///
-/// 命中以下任一模式则返回 `true`：
-/// - 英文祈使/模态：`Always use`、`Never`、`Must`、`Do not`、`Don't`、`Should`（行首）；
-/// - 中文祈使：`总是`、`永远`、`禁止`、`必须`、`不要`、`不得`、`应当`、`应`（行首或含）；
-/// - `AGENTS.md` 风格 section 头：`## 规则`、`## Rules`、`## 约束`、`## Constraints`。
-///
-/// 检测以行为单位，忽略大小写（英文部分）。
-#[must_use]
-pub fn is_instructional(content: &str) -> bool {
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let lower = line.to_ascii_lowercase();
-        // 英文祈使（行首，忽略大小写）。
-        if lower.starts_with("always use")
-            || lower.starts_with("never ")
-            || lower.starts_with("must ")
-            || lower.starts_with("do not ")
-            || lower.starts_with("don't ")
-            || lower.starts_with("should ")
-        {
-            return true;
-        }
-        // 中文祈使（行首或包含）。
-        if line.starts_with("总是")
-            || line.starts_with("永远")
-            || line.starts_with("禁止")
-            || line.starts_with("必须")
-            || line.starts_with("不要")
-            || line.starts_with("不得")
-            || line.starts_with("应当")
-            || line.starts_with("应")
-        {
-            return true;
-        }
-        // AGENTS.md 风格 section 头。
-        if lower.starts_with("## rules")
-            || lower.starts_with("## constraints")
-            || line.starts_with("## 规则")
-            || line.starts_with("## 约束")
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// 锁定 `Mutex`，忽略 poison（与 `LongTermMemory::guard` 同语义）。
@@ -581,37 +542,61 @@ mod tests {
 
     #[test]
     fn is_instructional_detects_imperative_english() {
-        assert!(is_instructional("Always use cargo fmt"));
-        assert!(is_instructional("Never commit secrets"));
-        assert!(is_instructional("Must run tests before push"));
-        assert!(is_instructional("Do not use unwrap"));
-        assert!(is_instructional("should handle errors"));
+        assert!(minicoding_core::util::contains_directive(
+            "Always use cargo fmt"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "Never commit secrets"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "Must run tests before push"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "Do not use unwrap"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "should handle errors"
+        ));
     }
 
     #[test]
     fn is_instructional_detects_imperative_chinese() {
-        assert!(is_instructional("总是使用 cargo fmt"));
-        assert!(is_instructional("禁止提交密钥"));
-        assert!(is_instructional("必须运行测试"));
-        assert!(is_instructional("不要使用 unwrap"));
-        assert!(is_instructional("应当处理错误"));
+        assert!(minicoding_core::util::contains_directive(
+            "总是使用 cargo fmt"
+        ));
+        assert!(minicoding_core::util::contains_directive("禁止提交密钥"));
+        assert!(minicoding_core::util::contains_directive("必须运行测试"));
+        assert!(minicoding_core::util::contains_directive("不要使用 unwrap"));
+        assert!(minicoding_core::util::contains_directive("应当处理错误"));
     }
 
     #[test]
     fn is_instructional_detects_section_headers() {
-        assert!(is_instructional("## Rules\n- rule 1"));
-        assert!(is_instructional("## 规则\n- 规则 1"));
-        assert!(is_instructional("## Constraints"));
-        assert!(is_instructional("## 约束"));
+        assert!(minicoding_core::util::contains_directive(
+            "## Rules\n- rule 1"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "## 规则\n- 规则 1"
+        ));
+        assert!(minicoding_core::util::contains_directive("## Constraints"));
+        assert!(minicoding_core::util::contains_directive("## 约束"));
     }
 
     #[test]
     fn is_instructional_negative_for_descriptive() {
-        assert!(!is_instructional("prefer cargo fmt"));
-        assert!(!is_instructional("the project uses rust"));
-        assert!(!is_instructional("a note about testing"));
-        assert!(!is_instructional("记录：用户喜欢深色主题"));
-        assert!(!is_instructional(""));
+        assert!(!minicoding_core::util::contains_directive(
+            "prefer cargo fmt"
+        ));
+        assert!(!minicoding_core::util::contains_directive(
+            "the project uses rust"
+        ));
+        assert!(!minicoding_core::util::contains_directive(
+            "a note about testing"
+        ));
+        assert!(!minicoding_core::util::contains_directive(
+            "记录：用户喜欢深色主题"
+        ));
+        assert!(!minicoding_core::util::contains_directive(""));
     }
 
     #[test]
@@ -900,30 +885,44 @@ mod tests {
 
     #[test]
     fn is_instructional_case_insensitive_english() {
-        assert!(is_instructional("ALWAYS USE cargo fmt"));
-        assert!(is_instructional("NEVER commit secrets"));
-        assert!(is_instructional("MUST run tests"));
-        assert!(is_instructional("DO NOT use unwrap"));
-        assert!(is_instructional("DON'T panic"));
-        assert!(is_instructional("SHOULD handle errors"));
+        assert!(minicoding_core::util::contains_directive(
+            "ALWAYS USE cargo fmt"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "NEVER commit secrets"
+        ));
+        assert!(minicoding_core::util::contains_directive("MUST run tests"));
+        assert!(minicoding_core::util::contains_directive(
+            "DO NOT use unwrap"
+        ));
+        assert!(minicoding_core::util::contains_directive("DON'T panic"));
+        assert!(minicoding_core::util::contains_directive(
+            "SHOULD handle errors"
+        ));
     }
 
     // === 指令性检测：纯空白行不误判 ===
 
     #[test]
     fn is_instructional_skips_blank_lines() {
-        assert!(!is_instructional("\n\n  \n"));
-        assert!(!is_instructional("   "));
-        assert!(!is_instructional("\n\t\n"));
+        assert!(!minicoding_core::util::contains_directive("\n\n  \n"));
+        assert!(!minicoding_core::util::contains_directive("   "));
+        assert!(!minicoding_core::util::contains_directive("\n\t\n"));
     }
 
     // === 指令性检测：中文祈使词行首带标点 ===
 
     #[test]
     fn is_instructional_detects_chinese_with_colon() {
-        assert!(is_instructional("必须：完成所有测试"));
-        assert!(is_instructional("禁止：硬编码凭证"));
-        assert!(is_instructional("不得：使用 unwrap"));
+        assert!(minicoding_core::util::contains_directive(
+            "必须：完成所有测试"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "禁止：硬编码凭证"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "不得：使用 unwrap"
+        ));
     }
 
     // === 渲染多条 entry 包含所有 topic ===

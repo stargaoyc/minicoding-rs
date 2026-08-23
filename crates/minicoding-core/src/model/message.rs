@@ -182,6 +182,39 @@ impl Message {
         }
     }
 
+    /// 全量文本视图（2026-08-23 审查 §8-P0/P1）。
+    ///
+    /// `Text` 块 + `ToolResult` 内容 + `tool_calls` 的 `name(args)` 摘要，按出现顺序
+    /// 拼接。供 token 计数与 L2 压缩摘要使用——此前两处只用 [`Self::text`]，
+    /// 工具结果（编码会话的上下文大头）完全不可见：预算系统性低估导致压缩
+    /// 永不触发；摘要失忆式续写。C-05 边界由调用方负责包裹。
+    #[must_use]
+    pub fn full_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for block in &self.content {
+            match block {
+                ContentBlock::Text { text } => parts.push(text.clone()),
+                ContentBlock::ToolResult { content, .. } => match content {
+                    crate::model::ToolContent::Text(t) => parts.push(t.clone()),
+                    crate::model::ToolContent::Json(v) => parts.push(v.to_string()),
+                    crate::model::ToolContent::Image { .. } => {}
+                    crate::model::ToolContent::Mixed(items) => {
+                        for it in items {
+                            if let crate::model::ToolContent::Text(t) = it {
+                                parts.push(t.clone());
+                            }
+                        }
+                    }
+                },
+                ContentBlock::ToolUse(_) | ContentBlock::Image { .. } => {}
+            }
+        }
+        for tc in &self.tool_calls {
+            parts.push(format!("{}({})", tc.name, tc.input));
+        }
+        parts.join("\n")
+    }
+
     /// 提取所有文本块拼为单个字符串。
     #[must_use]
     pub fn text(&self) -> String {

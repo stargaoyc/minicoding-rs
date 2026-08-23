@@ -22,7 +22,7 @@ pub mod project_doc;
 pub mod session_sum;
 pub mod vector;
 
-pub use auto::{AutoCategory, AutoMemory, is_instructional};
+pub use auto::{AutoCategory, AutoMemory};
 pub use inject::{inject_auto_memory, inject_memory};
 pub use long_term::LongTermMemory;
 pub use minicoding_core::memory::{MemoryStore, ProjectDocLoader};

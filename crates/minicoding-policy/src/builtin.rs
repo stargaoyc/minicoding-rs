@@ -184,7 +184,7 @@ fn check_memory_write(tool: &str, input: &Value) -> Verdict {
             full_options(),
         )),
         Some("auto") => {
-            if is_instructional_content(content) {
+            if minicoding_core::util::contains_directive(content) {
                 Verdict::Ask(make_prompt(
                     tool,
                     "写入 Auto memory：内容含指令性模式，需确认（C-27）".to_string(),
@@ -202,48 +202,6 @@ fn check_memory_write(tool: &str, input: &Value) -> Verdict {
             full_options(),
         )),
     }
-}
-
-/// 检测内容是否含指令性模式（C-27 降级用）。
-///
-/// 与 `minicoding-memory::auto::is_instructional` 同语义：检测祈使/模态/规则头。
-/// 此处独立实现避免 `minicoding-policy` 依赖 `minicoding-memory`（领域 crate 不交叉）。
-fn is_instructional_content(content: &str) -> bool {
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("always use")
-            || lower.starts_with("never ")
-            || lower.starts_with("must ")
-            || lower.starts_with("do not ")
-            || lower.starts_with("don't ")
-            || lower.starts_with("should ")
-        {
-            return true;
-        }
-        if line.starts_with("总是")
-            || line.starts_with("永远")
-            || line.starts_with("禁止")
-            || line.starts_with("必须")
-            || line.starts_with("不要")
-            || line.starts_with("不得")
-            || line.starts_with("应当")
-            || line.starts_with("应")
-        {
-            return true;
-        }
-        if lower.starts_with("## rules")
-            || lower.starts_with("## constraints")
-            || line.starts_with("## 规则")
-            || line.starts_with("## 约束")
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// 判定是否命中内置黑名单（C-02/C-23）。
@@ -616,9 +574,13 @@ mod tests {
 
     #[test]
     fn is_instructional_content_negative_descriptive() {
-        assert!(!is_instructional_content("user prefers dark theme"));
-        assert!(!is_instructional_content("the project uses rust 2024"));
-        assert!(!is_instructional_content(""));
+        assert!(!minicoding_core::util::contains_directive(
+            "user prefers dark theme"
+        ));
+        assert!(!minicoding_core::util::contains_directive(
+            "the project uses rust 2024"
+        ));
+        assert!(!minicoding_core::util::contains_directive(""));
     }
 
     // Plan 模式硬门测试（C-25，design.md §16.1）
@@ -1367,46 +1329,62 @@ mod tests {
 
     #[test]
     fn is_instructional_content_english_positive_all_branches() {
-        assert!(is_instructional_content("Always use cargo fmt"));
-        assert!(is_instructional_content("never commit secrets"));
-        assert!(is_instructional_content("must run tests"));
-        assert!(is_instructional_content("do not push to main"));
-        assert!(is_instructional_content("don't use unwrap"));
-        assert!(is_instructional_content("should be tested"));
-        assert!(is_instructional_content("## Rules"));
-        assert!(is_instructional_content("## Constraints"));
+        assert!(minicoding_core::util::contains_directive(
+            "Always use cargo fmt"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "never commit secrets"
+        ));
+        assert!(minicoding_core::util::contains_directive("must run tests"));
+        assert!(minicoding_core::util::contains_directive(
+            "do not push to main"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "don't use unwrap"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "should be tested"
+        ));
+        assert!(minicoding_core::util::contains_directive("## Rules"));
+        assert!(minicoding_core::util::contains_directive("## Constraints"));
     }
 
     #[test]
     fn is_instructional_content_chinese_positive_all_branches() {
-        assert!(is_instructional_content("总是使用 cargo fmt"));
-        assert!(is_instructional_content("永远不要提交密钥"));
-        assert!(is_instructional_content("禁止使用 unwrap"));
-        assert!(is_instructional_content("必须运行测试"));
-        assert!(is_instructional_content("不要直接修改"));
-        assert!(is_instructional_content("不得绕过权限"));
-        assert!(is_instructional_content("应当遵循规范"));
-        assert!(is_instructional_content("应保持简洁"));
-        assert!(is_instructional_content("## 规则"));
-        assert!(is_instructional_content("## 约束"));
+        assert!(minicoding_core::util::contains_directive(
+            "总是使用 cargo fmt"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "永远不要提交密钥"
+        ));
+        assert!(minicoding_core::util::contains_directive("禁止使用 unwrap"));
+        assert!(minicoding_core::util::contains_directive("必须运行测试"));
+        assert!(minicoding_core::util::contains_directive("不要直接修改"));
+        assert!(minicoding_core::util::contains_directive("不得绕过权限"));
+        assert!(minicoding_core::util::contains_directive("应当遵循规范"));
+        assert!(minicoding_core::util::contains_directive("应保持简洁"));
+        assert!(minicoding_core::util::contains_directive("## 规则"));
+        assert!(minicoding_core::util::contains_directive("## 约束"));
     }
 
     #[test]
     fn is_instructional_content_case_insensitive_english() {
-        assert!(is_instructional_content("NEVER commit secrets"));
-        assert!(is_instructional_content("MUST RUN TESTS"));
-        assert!(is_instructional_content("## RULES"));
+        assert!(minicoding_core::util::contains_directive(
+            "NEVER commit secrets"
+        ));
+        assert!(minicoding_core::util::contains_directive("MUST RUN TESTS"));
+        assert!(minicoding_core::util::contains_directive("## RULES"));
     }
 
     #[test]
     fn is_instructional_content_multiline_with_one_matching_line() {
         let content = "project uses rust 2024\n\nmust run tests before commit\n";
-        assert!(is_instructional_content(content));
+        assert!(minicoding_core::util::contains_directive(content));
     }
 
     #[test]
     fn is_instructional_content_only_empty_lines_returns_false() {
-        assert!(!is_instructional_content("\n\n\n"));
+        assert!(!minicoding_core::util::contains_directive("\n\n\n"));
     }
 
     // === full_options / project_doc_options ===

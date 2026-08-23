@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use minicoding_core::model::{ContentBlock, Message, Role};
+use minicoding_core::model::{Message, Role};
 use minicoding_core::provider::Tokenizer;
 
 /// C-09 post-compact 恢复配置。
@@ -53,18 +53,19 @@ pub fn extract_read_files(messages: &[Message], max_files: usize) -> Vec<String>
         if msg.role != Role::Assistant {
             continue;
         }
-        for block in &msg.content {
-            if let ContentBlock::ToolUse(tool_call) = block {
-                if tool_call.name != "fs.read" {
-                    continue;
-                }
-                if let Some(path) = tool_call.input.get("path").and_then(|v| v.as_str())
-                    && seen.insert(path.to_string())
-                {
-                    result.push(path.to_string());
-                    if result.len() >= max_files {
-                        return result;
-                    }
+        // 运行时 assistant 消息的工具调用存于 `msg.tool_calls` 字段
+        // （DeltaAccumulator::finalize 构造），content 里只有 Text——
+        // 此前扫描 ContentBlock::ToolUse 恒为空（死代码，2026-08-23 审查 §8-P0）。
+        for tool_call in &msg.tool_calls {
+            if tool_call.name != "fs.read" {
+                continue;
+            }
+            if let Some(path) = tool_call.input.get("path").and_then(|v| v.as_str())
+                && seen.insert(path.to_string())
+            {
+                result.push(path.to_string());
+                if result.len() >= max_files {
+                    return result;
                 }
             }
         }
@@ -194,12 +195,12 @@ mod tests {
         Message {
             id: ulid::Ulid::new().to_string(),
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse(ToolCall {
+            content: Vec::new(),
+            tool_calls: vec![ToolCall {
                 id: ToolCallId::new(),
                 name: tool_name.to_string(),
                 input: serde_json::json!({"path": path}),
-            })],
-            tool_calls: Vec::new(),
+            }],
             tool_call_id: None,
             created_at: time::OffsetDateTime::now_utc(),
             metadata: minicoding_core::model::MessageMeta::default(),

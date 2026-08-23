@@ -39,6 +39,11 @@ pub struct CircuitBreakerConfig {
     pub force_end_threshold: usize,
     /// 连续"压缩完即超阈值"达到此阈值后判定 Thrash 并熔断（默认 2）。
     pub thrash_threshold: usize,
+    /// 熔断后的半开冷却窗口：超过此时长允许放行一次请求探测
+    /// （2026-08-23 审查 §8-P1：此前熔断后无任何恢复路径，会话在进程内
+    /// 永久锁死——文档建议的 `/clear` 也不存在）。再次失败立即重新熔断。
+    /// 默认 60s；置零退化为旧语义（永不放行）。
+    pub cooldown: std::time::Duration,
 }
 
 impl Default for CircuitBreakerConfig {
@@ -47,6 +52,7 @@ impl Default for CircuitBreakerConfig {
             fail_threshold: 3,
             force_end_threshold: 5,
             thrash_threshold: 2,
+            cooldown: std::time::Duration::from_secs(60),
         }
     }
 }
@@ -65,6 +71,8 @@ pub struct CircuitBreaker {
     fail: CountBreaker,
     consecutive_oversize: usize,
     thrash_threshold: usize,
+    cooldown: std::time::Duration,
+    last_trip: Option<std::time::Instant>,
 }
 
 impl Default for CircuitBreaker {
@@ -90,6 +98,8 @@ impl CircuitBreaker {
             }),
             consecutive_oversize: 0,
             thrash_threshold: config.thrash_threshold,
+            cooldown: config.cooldown,
+            last_trip: None,
         }
     }
 
@@ -99,14 +109,36 @@ impl CircuitBreaker {
         self.consecutive_oversize = 0;
     }
 
-    /// 压缩失败（降级链全失败）：`fail_count += 1`。
+    /// 压缩失败（降级链全失败）：`fail_count += 1`；进入熔断态时刷新冷却起点。
     pub fn record_failure(&mut self) {
         let _ = self.fail.record();
+        if self.fail.state() != CountState::Closed {
+            self.last_trip = Some(std::time::Instant::now());
+        }
     }
 
-    /// 压缩成功但 token 仍超阈值（Thrash 前兆）：`consecutive_oversize += 1`。
+    /// 压缩成功但 token 仍超阈值（Thrash 前兆）：`consecutive_oversize += 1`；
+    /// 达到 thrash 阈值时刷新冷却起点。
+    ///
+    /// 注意此处用**无门控**的 [`Self::thrash_threshold_reached`]——若用带冷却
+    /// 门控的 [`Self::is_thrashing`]，首次越过阈值时（`last_trip` 尚为 `None`，
+    /// 门恒开）虽能置位，但任何"先判后置"的调用序都会被门拦住，trip 点永远
+    /// 无法登记（鸡生蛋，测试暴露）。
     pub fn record_oversize(&mut self) {
         self.consecutive_oversize = self.consecutive_oversize.saturating_add(1);
+        if self.thrash_threshold_reached() {
+            self.last_trip = Some(std::time::Instant::now());
+        }
+    }
+
+    /// 纯阈值判定（无冷却门控）：`consecutive_oversize >= thrash_threshold`。
+    fn thrash_threshold_reached(&self) -> bool {
+        self.consecutive_oversize >= self.thrash_threshold
+    }
+
+    /// 冷却窗口是否已过（半开放行条件）。未熔断过恒为 true。
+    fn cooldown_elapsed(&self) -> bool {
+        self.last_trip.is_none_or(|t| t.elapsed() >= self.cooldown)
     }
 
     /// 当前失败计数。
@@ -129,7 +161,7 @@ impl CircuitBreaker {
         matches!(
             self.fail.state(),
             CountState::SoftTripped | CountState::HardTripped
-        )
+        ) && !self.cooldown_elapsed()
     }
 
     /// 是否应强制 `TurnEnd`（`fail_count >= force_end_threshold`）。
@@ -137,7 +169,7 @@ impl CircuitBreaker {
     /// 比熔断更严重：保留现场供 `/resume`（见 §3.6）。
     #[must_use]
     pub fn should_force_end(&self) -> bool {
-        self.fail.state() == CountState::HardTripped
+        self.fail.state() == CountState::HardTripped && !self.cooldown_elapsed()
     }
 
     /// 是否检测到 Thrash（`consecutive_oversize >= thrash_threshold`）。
@@ -146,13 +178,49 @@ impl CircuitBreaker {
     /// 触发后熔断，同 `should_trip` 处理（见 §3.6）。
     #[must_use]
     pub fn is_thrashing(&self) -> bool {
-        self.consecutive_oversize >= self.thrash_threshold
+        self.consecutive_oversize >= self.thrash_threshold && !self.cooldown_elapsed()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooldown_allows_probe_after_window() {
+        let mut cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            fail_threshold: 3,
+            force_end_threshold: 5,
+            thrash_threshold: 2,
+            cooldown: std::time::Duration::from_millis(30),
+        });
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        assert!(cb.should_trip(), "冷却窗口内应保持熔断");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        // 半开放行一次：判定翻转，允许压缩重试
+        assert!(!cb.should_trip());
+        assert!(!cb.should_force_end());
+        // 再次失败 → 立即重新熔断（last_trip 刷新）
+        cb.record_failure();
+        assert!(cb.should_trip());
+    }
+
+    #[test]
+    fn thrash_respects_cooldown() {
+        let mut cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            fail_threshold: 3,
+            force_end_threshold: 5,
+            thrash_threshold: 2,
+            cooldown: std::time::Duration::from_millis(30),
+        });
+        cb.record_oversize();
+        cb.record_oversize();
+        assert!(cb.is_thrashing());
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        assert!(!cb.is_thrashing(), "冷却后应放行探测");
+    }
 
     #[test]
     fn new_starts_clean() {
@@ -251,6 +319,7 @@ mod tests {
         let cb = CircuitBreaker::with_config(CircuitBreakerConfig {
             fail_threshold: 1,
             force_end_threshold: 2,
+            cooldown: std::time::Duration::from_secs(60),
             thrash_threshold: 1,
         });
         let mut cb = cb;
@@ -262,6 +331,7 @@ mod tests {
         let mut cb2 = CircuitBreaker::with_config(CircuitBreakerConfig {
             fail_threshold: 10,
             force_end_threshold: 20,
+            cooldown: std::time::Duration::from_secs(60),
             thrash_threshold: 1,
         });
         cb2.record_oversize();

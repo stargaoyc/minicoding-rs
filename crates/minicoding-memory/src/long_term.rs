@@ -45,6 +45,10 @@ pub struct LongTermMemory {
     cached_content: Mutex<Option<String>>,
     /// 缓存的 mtime（命中判定基准）。
     cached_mtime: Mutex<Option<OffsetDateTime>>,
+    /// save 串行化锁（2026-08-23 审查 §8-P2）：正文与索引分两次 rename，并发
+    /// save 交错可产生"正文 A + 索引 B"错配（仅靠 load 时 hash warn 兜底）。
+    /// 进程内互斥消除该窗口；跨进程一致性由 index hash 校验兜底。
+    save_lock: tokio::sync::Mutex<()>,
 }
 
 impl LongTermMemory {
@@ -67,6 +71,7 @@ impl LongTermMemory {
             index_path,
             cached_content: Mutex::new(None),
             cached_mtime: Mutex::new(None),
+            save_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -159,6 +164,8 @@ impl MemoryStore for LongTermMemory {
         // （`BoxFuture<'_>` 生命周期绑定 `&self`，borrowed content 不可跨越）。
         let content = content.to_owned();
         Box::pin(async move {
+            // 串行化并发 save（2026-08-23 审查 §8-P2，见字段注释）
+            let _save_guard = self.save_lock.lock().await;
             // 确保目录存在（首次写入）。
             if let Some(parent) = self.path.parent() {
                 fs::create_dir_all(parent).await?;

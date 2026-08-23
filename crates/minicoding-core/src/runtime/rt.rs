@@ -482,7 +482,7 @@ impl Runtime {
                     self.current_turn
                         .store(iter, std::sync::atomic::Ordering::Relaxed);
                     // 2. 构建请求（system + tools + 压缩后的历史）
-                    let req = match self.ctx.build_chat_request(&self.tools, &config_snapshot).await {
+                    let mut req = match self.ctx.build_chat_request(&self.tools, &config_snapshot).await {
                         Ok(r) => r,
                         Err(e) => {
                             metrics::record_error("context");
@@ -491,6 +491,10 @@ impl Runtime {
                     };
 
                     // 3. 流式调用 LLM
+                    // 配对完整性最后防线（§8-P0-2）：压缩管道丢弃边界可能切断
+                    // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
+                    // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。
+                    req.messages = super::repair::repair_request_messages(req.messages);
                     let (assistant_msg, llm_stop_reason) = match self.stream_llm(req).await {
                         Ok(msg) => msg,
                         Err(e) => {

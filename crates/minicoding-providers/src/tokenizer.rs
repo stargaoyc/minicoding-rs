@@ -117,11 +117,11 @@ impl Tokenizer for TiktokenTokenizer {
         for m in msgs {
             total += TOKENS_PER_MESSAGE + TOKENS_PER_NAME;
             total += self.count_text(role_str(&m.role));
-            total += self.count_text(&m.text());
-            for tc in &m.tool_calls {
-                total += self.count_text(&tc.name);
-                total += self.count_text(&tc.input.to_string());
-            }
+            // full_text 含 Text + ToolResult 内容 + tool_calls name/args——与
+            // wire 序列化实际发送给 API 的内容对齐（2026-08-23 审查 §8-P0：
+            // 此前 text() 不计工具结果，工具输出占大头的会话被严重低估，
+            // 压缩永不触发直至 context length 400）。
+            total += self.count_text(&m.full_text());
         }
         total += TOKENS_REPLY_PRIMING;
         total
@@ -144,6 +144,39 @@ fn role_str(role: &Role) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn count_messages_includes_tool_result_content() {
+        // 2026-08-23 审查 §8-P0 回归：工具结果内容必须计入——此前只用 text()，
+        // 100KB 工具输出被记为 ~7 token，预算系统性低估、压缩永不触发。
+        let big = "x".repeat(10_000);
+        let mut m = Message::assistant_text("read file");
+        m.tool_calls = vec![minicoding_core::model::ToolCall {
+            id: "c1".into(),
+            name: "fs.read".into(),
+            input: serde_json::json!({"path": "a.rs"}),
+        }];
+        let result = Message {
+            id: "r1".into(),
+            role: minicoding_core::model::Role::Tool,
+            content: vec![minicoding_core::model::ContentBlock::ToolResult {
+                call_id: "c1".into(),
+                content: minicoding_core::model::ToolContent::text(big.clone()),
+                is_error: false,
+                metadata: minicoding_core::model::ToolResultMeta::default(),
+            }],
+            tool_calls: vec![],
+            tool_call_id: None,
+            // 测试构造：时间戳仅满足类型，不影响 token 计数断言
+            created_at: minicoding_core::util::test_now_utc(),
+            metadata: minicoding_core::model::MessageMeta::default(),
+        };
+        let tok = TiktokenTokenizer::new_for_model("gpt-4o").expect("tokenizer");
+        let n = Tokenizer::count_messages(&tok, &[m, result]);
+        // 10k 重复字符 BPE 后 ≈1.2k token（若不计 ToolResult 则仅 ~20）
+        assert!(n > 1000, "工具结果应计入 token 预算，实际 {n}");
+    }
+
     use super::*;
     use minicoding_core::model::Message;
 
