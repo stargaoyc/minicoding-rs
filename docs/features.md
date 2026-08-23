@@ -35,7 +35,7 @@
 | L-02 | Anthropic | `/v1/messages` 事件流 + system 分离 | M6 | 已实现 |
 | L-03 | Ollama（本地模型） | `/api/chat` NDJSON | M6 | 已实现 |
 | L-04 | 流式增量解析 | 文本 + 工具调用分片聚合 | M1 | 已实现 |
-| L-05 | 重试与限流 | 指数退避、429 Retry-After | M6 | 已实现 |
+| L-05 | 重试与限流 | 指数退避（±20% 抖动防 thundering herd）、429 Retry-After、Client 读超时 300s 防停发挂起 | M6 | 已实现 |
 | L-06 | 模型路由（Router） | `Router` trait + `StaticRouter` 骨架（`core::provider::router`），按任务类型选模型；M6 交付骨架，M7+ 实现按 `Task::kind` 路由 | M6 | 已实现（骨架） |
 | L-07 | 多模态（Vision） | 图片输入 | M6 | 已实现 |
 | L-08 | 独立小 LLM | 为摘要/compact/memory 提取配置独立 provider（`[provider.small]`），未设置时与主 provider 相同，可配更便宜模型降本（见 `design.md` §3.8、`modules.md` §10.3） | M3 | 已实现 |

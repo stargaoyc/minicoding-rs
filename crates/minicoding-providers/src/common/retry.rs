@@ -83,14 +83,22 @@ impl RetryProvider {
 
     /// 计算第 `attempt` 次重试的退避时长（0-based attempt）。
     ///
-    /// 指数退避：`initial * 2^attempt`，上限 `max_backoff_ms`。
+    /// 指数退避：`initial * 2^attempt`，上限 `max_backoff_ms`；叠加 ±20% 抖动
+    /// （2026-08-23 审查 §5-P2）：多实例同时被 429 后若按同一节拍重试会形成
+    /// thundering herd。抖动源取时钟纳秒——退避场景无需密码学随机性，
+    /// 不为此引入 `rand` 依赖。
     fn backoff(&self, attempt: u32) -> Duration {
         let raw = self
             .config
             .initial_backoff_ms
             .saturating_mul(2u64.saturating_pow(attempt));
         let capped = raw.min(self.config.max_backoff_ms);
-        Duration::from_millis(capped)
+        // 抖动因子 80..120%（整数运算避免浮点）：nanos % 41 ∈ [0, 40]
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let percent = u64::from(80 + (nanos % 41));
+        Duration::from_millis(capped.saturating_mul(percent) / 100)
     }
 
     /// 单次尝试 + 超时包裹。返回 `Ok(stream)` / `Err(llm_error)`。

@@ -81,7 +81,12 @@ impl OpenAiProvider {
     ) -> Result<Self, LlmError> {
         let model_str = model.into();
         let tokenizer = TiktokenTokenizer::new_for_model(&model_str).map_err(LlmError::Parse)?;
+        // 读超时（2026-08-23 审查 §5-P2）：此前未设任何超时——服务端建立连接
+        // 后停止发送数据会导致消费端永久挂起（RetryProvider 的超时仅覆盖建立
+        // 阶段）。取宽裕值 300s：容忍推理模型静默思考期；空闲超过即判死。
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         let resolver = crate::common::CredentialResolver::from_env();
@@ -290,7 +295,14 @@ fn message_to_openai(m: &Message) -> Value {
     json!({"role": role, "content": text})
 }
 
-/// 从 `ContentBlock` 列表提取文本（含 `ToolResult` 内容；忽略 `Image` 与冗余 `ToolUse`）。
+/// 不支持视觉的 provider 收到图片块时的占位文本（C-05：显式告知而非静默丢弃）。
+const IMAGE_OMITTED_PLACEHOLDER: &str = "[image omitted: 当前模型通道不支持图片输入]";
+
+/// 从 `ContentBlock` 列表提取文本（含 `ToolResult` 内容；忽略冗余 `ToolUse`）。
+///
+/// `Image` 块替换为占位文本而非静默丢弃（2026-08-23 审查 §5-P2）：静默丢弃
+/// 会让 LLM 看到的对话凭空少一块内容且无任何提示，模型可能对"未提供的图"
+/// 产生幻觉应答。
 fn extract_text(blocks: &[ContentBlock]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
@@ -299,7 +311,10 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
             ContentBlock::ToolResult { content, .. } => {
                 parts.push(tool_content_to_string(content));
             }
-            ContentBlock::ToolUse(_) | ContentBlock::Image { .. } => {}
+            ContentBlock::Image { .. } => {
+                parts.push(IMAGE_OMITTED_PLACEHOLDER.to_string());
+            }
+            ContentBlock::ToolUse(_) => {}
         }
     }
     parts.join("\n")

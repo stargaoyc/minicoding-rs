@@ -16,7 +16,11 @@ use super::sse::ByteStream;
 /// NDJSON 解析流：逐行 yield JSON 字符串（已 trim，空行跳过）。
 pub struct NdjsonStream {
     inner: ByteStream,
-    buffer: String,
+    /// 字节缓冲区（非 String）：与 `SseStream` 同理（2026-08-23 审查 §5-P1），
+    /// 避免 chunk 边界切断多字节 UTF-8 字符导致 `from_utf8_lossy` 产生 U+FFFD
+    /// 乱码。仅在行边界（`\n`）解码——完整行的字节序列已收齐，跨 chunk 字符
+    /// 此时必然完整。
+    buffer: Vec<u8>,
     done: bool,
 }
 
@@ -26,7 +30,7 @@ impl NdjsonStream {
     pub fn new(inner: ByteStream) -> Self {
         Self {
             inner,
-            buffer: String::new(),
+            buffer: Vec::new(),
             done: false,
         }
     }
@@ -34,8 +38,9 @@ impl NdjsonStream {
     /// 从 buffer 取出一行（以 `\n` 分隔），返回 trim 后的字符串。
     /// 空行返回 `None`（调用方继续拉取）。
     fn take_line(&mut self) -> Option<String> {
-        let pos = self.buffer.find('\n')?;
-        let line: String = self.buffer.drain(..=pos).collect();
+        let pos = self.buffer.iter().position(|&b| b == b'\n')?;
+        let line_bytes: Vec<u8> = self.buffer.drain(..=pos).collect();
+        let line = String::from_utf8_lossy(&line_bytes);
         let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
             None
@@ -58,7 +63,10 @@ impl Stream for NdjsonStream {
             // 2) buffer 不完整时尝试 flush 末尾残留（流结束后）
             if self.done {
                 if !self.buffer.is_empty() {
-                    let line = std::mem::take(&mut self.buffer);
+                    // 末尾残留行：正常情况是完整 JSON 行（无 `\n` 结尾）；若恰好
+                    // 截断在多字节字符中间则 lossy 兜底（消费方 JSON 解析会报错）。
+                    let line_bytes = std::mem::take(&mut self.buffer);
+                    let line = String::from_utf8_lossy(&line_bytes);
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
                         return Poll::Ready(None);
@@ -71,7 +79,7 @@ impl Stream for NdjsonStream {
             // 3) 拉取底层流
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(LlmError::Network(e.to_string()))));
@@ -100,10 +108,18 @@ mod tests {
 
     /// 构造合成字节流：把字符串切片逐个转为 `Ok(Vec<u8>)`，模拟 `reqwest` 的 `bytes_stream`。
     fn byte_stream(chunks: Vec<&str>) -> ByteStream {
-        let items: Vec<Result<Vec<u8>, reqwest::Error>> = chunks
-            .into_iter()
-            .map(|s| Ok(s.as_bytes().to_vec()))
-            .collect();
+        raw_byte_stream(
+            chunks
+                .into_iter()
+                .map(str::as_bytes)
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
+    }
+
+    /// 构造原始字节 chunk 流（多字节字符截断测试用）。
+    fn raw_byte_stream(chunks: Vec<Vec<u8>>) -> ByteStream {
+        let items: Vec<Result<Vec<u8>, reqwest::Error>> = chunks.into_iter().map(Ok).collect();
         stream::iter(items).boxed()
     }
 
@@ -138,6 +154,24 @@ mod tests {
         // 单行跨多个字节 chunk 边界，buffer 应正确拼接
         let stream = NdjsonStream::new(byte_stream(vec!["{\"par", "t\":1}\n"]));
         assert_eq!(collect_ok(stream).await, vec!["{\"part\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn multibyte_char_across_chunks() {
+        // 多字节 UTF-8 字符（"中" = E4 B8 AD）被 TCP chunk 边界切断时，
+        // 字节缓冲应正确拼接而非产生 U+FFFD（2026-08-23 审查 §5-P1 回归测试）
+        let mut line_bytes = Vec::from(&b"{\"msg\":\""[..]);
+        line_bytes.extend_from_slice("中文内容".as_bytes());
+        line_bytes.extend_from_slice(&b"\"}\n"[..]);
+        // 在 "中" 的三字节（E4 B8 AD）中间切开
+        let split = line_bytes
+            .iter()
+            .position(|&b| b == 0xB8)
+            .expect("0xB8 byte");
+        let head = line_bytes[..split].to_vec();
+        let tail = line_bytes[split..].to_vec();
+        let stream = NdjsonStream::new(raw_byte_stream(vec![head, tail]));
+        assert_eq!(collect_ok(stream).await, vec!["{\"msg\":\"中文内容\"}"]);
     }
 
     #[tokio::test]

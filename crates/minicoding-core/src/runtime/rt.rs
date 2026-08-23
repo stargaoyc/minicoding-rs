@@ -823,7 +823,25 @@ impl Runtime {
         let mut reasoning_chars = 0usize;
         let mut tool_calls = 0usize;
         while let Some(delta) = stream.next().await {
-            let delta = delta?;
+            // 流中错误（2026-08-23 审查 §5-P1）：若已累积**纯文本**内容（UI 已通过
+            // Token 事件展示），直接上抛会把它连同 acc 一起丢弃——重放/审计与会话
+            // 不一致。此时记错误指标后降级为 `StopReason::Stopped` 的部分消息返回；
+            // 工具调用中途出错则参数完整性无法保证，维持原语义上抛。
+            let delta = match delta {
+                Ok(d) => d,
+                Err(e) => {
+                    if !acc.has_tool_calls() && !acc.text().is_empty() {
+                        metrics::record_error("llm");
+                        tracing::warn!(
+                            error = %e,
+                            salvaged_chars = text_chars,
+                            "llm stream error mid-turn; salvaging partial text output (stop_reason=Stopped)"
+                        );
+                        return Ok((acc.finalize(), Some(StopReason::Stopped)));
+                    }
+                    return Err(e);
+                }
+            };
             match &delta {
                 Delta::Text(s) => {
                     text_chars += s.chars().count();

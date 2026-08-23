@@ -159,12 +159,10 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
         body
     };
 
-    // 截断
-    let truncated = if markdown.len() > max_bytes {
-        markdown[..max_bytes].to_string()
-    } else {
-        markdown
-    };
+    // 截断：经 `truncate_output` 在 UTF-8 字符边界上截断——直接字节切片
+    // `&markdown[..max_bytes]` 会在多字节字符中间 panic（远程内容可控，
+    // 中文长页面必现；2026-08-23 审查 §5-P0/§6-P0）
+    let (truncated, _was_truncated) = crate::util::truncate_output(markdown, max_bytes);
 
     Ok(ToolResult::ok_text(truncated))
 }
@@ -441,8 +439,15 @@ mod tests {
             .await
             .expect("fetch should succeed");
         let text = result_text(&result);
-        assert_eq!(text.len(), 1024);
-        assert!(text.chars().all(|c| c == 'A'));
+        // 截断经 truncate_output：字符边界截断 + 追加截断标记（2026-08-23 审查
+        // §5-P0：原字节切片在多字节字符中间会 panic）
+        assert!(
+            text.len() <= 1024,
+            "截断后不应超过 max_bytes: {}",
+            text.len()
+        );
+        assert!(text.starts_with('A'));
+        assert!(text.ends_with("\n...[output truncated]"));
     }
 
     #[tokio::test]
