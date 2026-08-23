@@ -16,7 +16,7 @@ use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
     Usage,
 };
-use minicoding_core::storage::{EventRecord, EventStore, SessionMeta, Storage, StorageError};
+use minicoding_core::storage::{EventRecord, EventStore, SessionListItem, Storage, StorageError};
 use minicoding_core::tool::{Tool, ToolContext};
 
 /// 简单分词器（按字符数估算，仅用于测试）。
@@ -251,13 +251,13 @@ impl Storage for InMemoryStorage {
             .map_or_else(Vec::new, |e| e.messages.clone());
         Box::pin(async move { Ok(msgs) })
     }
-    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>> {
-        let metas: Vec<SessionMeta> = self
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionListItem>, StorageError>> {
+        let metas: Vec<SessionListItem> = self
             .sessions
             .lock()
             .expect("storage poisoned")
             .iter()
-            .map(|(id, e)| SessionMeta {
+            .map(|(id, e)| SessionListItem {
                 id: id.clone(),
                 created_at: time::OffsetDateTime::now_utc(),
                 message_count: e.messages.len(),

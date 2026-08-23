@@ -17,5 +17,5 @@ pub use snapshot::{
     NoopSnapshotStore, SNAPSHOT_INTERVAL, SessionSnapshot, SessionState, SnapshotStore,
 };
 pub use r#trait::{
-    AuditKind, AuditRecord, AuditSink, NoopAudit, SessionMeta, Storage, StorageError,
+    AuditKind, AuditRecord, AuditSink, NoopAudit, SessionListItem, Storage, StorageError,
 };

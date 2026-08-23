@@ -9,7 +9,7 @@
 
 use minicoding_core::model::{Message, SessionId, StorageError};
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::storage::{SessionMeta, Storage};
+use minicoding_core::storage::{SessionListItem, Storage};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use time::OffsetDateTime;
@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 /// 内存存储（SDK 默认）。
 ///
 /// `Mutex<HashMap<SessionId, Vec<Message>>>` 持有所有会话消息。
-/// `SessionMeta` 在 `list_sessions` 时从 `Vec<Message>` 现算。
+/// `SessionListItem` 在 `list_sessions` 时从 `Vec<Message>` 现算。
 ///
 /// 线程安全：`Mutex` 保护内部映射，`Arc<InMemoryStorage>` 可多线程共享。
 /// 不持久化：进程退出后数据丢失（SDK 默认行为；如需持久化用 `JsonlStorage`）。
@@ -62,7 +62,7 @@ impl Storage for InMemoryStorage {
         })
     }
 
-    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>> {
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionListItem>, StorageError>> {
         Box::pin(async move {
             let guard = self.sessions.lock().expect("mutex poisoned");
             let metas = guard
@@ -74,7 +74,7 @@ impl Storage for InMemoryStorage {
                     let first = msgs
                         .first()
                         .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
-                    SessionMeta {
+                    SessionListItem {
                         id: id.clone(),
                         created_at: first,
                         message_count: msgs.len(),

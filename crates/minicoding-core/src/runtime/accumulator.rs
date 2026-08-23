@@ -63,14 +63,32 @@ impl DeltaAccumulator {
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_values()
-            .map(|acc| ToolCall {
-                id: acc.id.unwrap_or_default(),
-                name: acc.name.unwrap_or_default(),
-                input: if acc.args.is_empty() {
+            .map(|acc| {
+                // 坏 args JSON 不静默吞掉（2026-08-23 审查 §4-P2）：Null 会导致
+                // dispatch 报 InvalidInput，但排障时需要知道根因是 provider 输出了
+                // 畸形增量参数。
+                let input = if acc.args.is_empty() {
                     serde_json::Value::Object(serde_json::Map::new())
                 } else {
-                    serde_json::from_str(&acc.args).unwrap_or(serde_json::Value::Null)
-                },
+                    match serde_json::from_str(&acc.args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = ?acc.name,
+                                call_id = ?acc.id,
+                                args = %acc.args,
+                                error = %e,
+                                "malformed tool_call args JSON from provider; dispatching with null input"
+                            );
+                            serde_json::Value::Null
+                        }
+                    }
+                };
+                ToolCall {
+                    id: acc.id.unwrap_or_default(),
+                    name: acc.name.unwrap_or_default(),
+                    input,
+                }
             })
             .collect();
 

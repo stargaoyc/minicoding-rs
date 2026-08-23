@@ -41,6 +41,10 @@ pub enum RuntimeError {
     Prompt(#[from] PromptError),
     #[error("interrupted")]
     Interrupted,
+    /// 同一 Runtime 并发发起第二个 turn（单 turn 不变量，见 `Runtime::run_turn`
+    /// 入口 `turn_gate`；2026-08-23 审查 §4-P2）。调用方应串行化 turn 调用。
+    #[error("another turn is already in progress for this session")]
+    TurnInProgress,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

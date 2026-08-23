@@ -7,7 +7,7 @@
 //! - **JSONL**：每行一条 `Message`（与 `.jsonl` 存储格式一致），便于回灌或迁移。
 
 use minicoding_core::model::{Message, Role};
-use minicoding_core::storage::SessionMeta;
+use minicoding_core::storage::SessionListItem;
 use std::fmt::Write as _;
 use time::format_description::well_known::Rfc3339;
 
@@ -25,7 +25,7 @@ pub enum ExportFormat {
 /// 格式：标题含会话 ID 与元数据，正文按消息顺序逐条分节（角色 + 时间 + 文本）。
 /// 非文本块（图片/工具调用/工具结果）以占位标记表示，避免泄露 base64 数据。
 #[must_use]
-pub fn export_session_md(messages: &[Message], meta: &SessionMeta) -> String {
+pub fn export_session_md(messages: &[Message], meta: &SessionListItem) -> String {
     let created = meta.created_at.format(&Rfc3339).unwrap_or_default();
     let last = meta.last_message_at.format(&Rfc3339).unwrap_or_default();
     let mut out = String::new();
@@ -92,8 +92,8 @@ mod tests {
     use minicoding_core::model::Message;
     use time::OffsetDateTime;
 
-    fn sample_meta() -> SessionMeta {
-        SessionMeta {
+    fn sample_meta() -> SessionListItem {
+        SessionListItem {
             id: "01TEST".to_string(),
             created_at: OffsetDateTime::now_utc(),
             message_count: 2,

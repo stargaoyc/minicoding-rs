@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use minicoding_core::policy::{PermissionPrompter, TuiPermissionRequest};
-use minicoding_core::storage::SessionMeta;
+use minicoding_core::storage::SessionListItem;
 use minicoding_policy::TuiPrompter;
 use minicoding_sdk::builder::{self, SessionLoadMode};
 use minicoding_storage::JsonlStorage;
@@ -118,7 +118,7 @@ fn build_and_start(
 }
 
 /// 加载最近会话列表（按 `last_message_at` 倒序，最多 50 条）。
-fn load_sessions() -> Vec<SessionMeta> {
+fn load_sessions() -> Vec<SessionListItem> {
     let Ok(sessions_dir) = minicoding_core::paths::sessions_dir() else {
         return Vec::new();
     };

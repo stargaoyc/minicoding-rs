@@ -199,7 +199,7 @@ pub struct App {
     pending_permission: Option<PendingPermission>,
     status_msg: String,
     // T-M7-2：多会话侧栏
-    sessions: Vec<minicoding_core::storage::SessionMeta>,
+    sessions: Vec<minicoding_core::storage::SessionListItem>,
     current_session_id: String,
     sidebar_visible: bool,
     sidebar_state: ratatui::widgets::ListState,
@@ -222,7 +222,7 @@ impl App {
     #[must_use]
     pub fn new(
         ui_tx: mpsc::Sender<UiCommand>,
-        sessions: Vec<minicoding_core::storage::SessionMeta>,
+        sessions: Vec<minicoding_core::storage::SessionListItem>,
         current_session_id: String,
     ) -> Self {
         let mut sidebar_state = ratatui::widgets::ListState::default();

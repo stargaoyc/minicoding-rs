@@ -97,6 +97,12 @@ pub struct PermissionContext {
     pub workdir: Utf8PathBuf,
     pub side_effect: SideEffect,
     pub turn: u32,
+    /// 近期决策历史（**reserved，当前恒为空**）。
+    ///
+    /// 设计意图：供策略参考最近 N 条真实决策（如 allowlist 启发式）。运行期
+    /// 消息不回写 `session.messages`（storage 为事实源），真实决策需从
+    /// `AuditSink` 回读——接入前 Runtime 填充空 `Vec`，**不得**伪造值
+    /// （2026-08-23 审查 §4-P1：此前无条件填 `Allow` 会误导基于历史的策略）。
     pub history: Vec<Decision>,
     /// 当前权限模式（`Plan` 模式触发硬门，见 `design.md` §16.1）。
     pub permission_mode: PermissionMode,

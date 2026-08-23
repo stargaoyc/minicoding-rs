@@ -175,6 +175,10 @@ pub struct Runtime {
     ///
     /// `Arc<TokioMutex>` 因 `--replay`/SSE handler 需读取此值判断 `durable_seq`。
     pub(crate) durable_seq: Arc<TokioMutex<u64>>,
+    /// 单 turn 门闩（2026-08-23 审查 §4-P2）：`run_turn` 入口 `try_lock`，
+    /// 并发第二个 turn 返回 `RuntimeError::TurnInProgress`。tokio Mutex（无锁
+    /// 争用时零开销）；guard 持有至 turn 结束（含取消/超时路径，随 future drop 释放）。
+    pub(crate) turn_gate: TokioMutex<()>,
 }
 
 impl Runtime {
@@ -419,6 +423,16 @@ impl Runtime {
         // 使用 `.instrument(span)` 而非 `span.enter()`——`Entered` guard 是 `!Send`，
         // 跨 await 持有会导致 future 非 `Send`（axum / `tokio::spawn` 需要 `Send`）。
         async move {
+            // 单 turn 不变量（2026-08-23 审查 §4-P2）：同一 Runtime 任意时刻至多
+            // 一个 turn 在执行——event_seq/durable_seq/turn_active 等状态均非并发
+            // 安全设计。此前安全性完全依赖 server 的 session 级 turn_lock 或 REPL
+            // 串行调用，SDK 直连两次 spawn 即可交错破坏。`try_lock` 失败立即报错
+            // 而非排队：并发发起第二个 turn 是编程错误，静默等待会掩盖竞态。
+            let _turn_gate = self
+                .turn_gate
+                .try_lock()
+                .map_err(|_| RuntimeError::TurnInProgress)?;
+
             // turn 开始：标记运行中（`cancel()` 仅在 turn 运行时生效，
             // 见字段注释）；guard drop 时复位（含 `?` 早退/panic 路径）。
             self.turn_active.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -477,7 +491,7 @@ impl Runtime {
                     };
 
                     // 3. 流式调用 LLM
-                    let assistant_msg = match self.stream_llm(req).await {
+                    let (assistant_msg, llm_stop_reason) = match self.stream_llm(req).await {
                         Ok(msg) => msg,
                         Err(e) => {
                             metrics::record_error("llm");
@@ -495,10 +509,12 @@ impl Runtime {
                     self.persist_event(&event).await;
                     self.events.emit(event);
 
-                    // 5. 无工具调用 → 终止
+                    // 5. 无工具调用 → 终止。stop_reason 优先采用 provider 报告值
+                    //    （如 MaxTokens 截断），缺省回退 EndTurn——前端/审计不再把
+                    //    截断误读为正常结束（2026-08-23 审查 §4-P1）。
                     if assistant_msg.tool_calls.is_empty() {
                         let event = Event::TurnEnd {
-                            stop_reason: StopReason::EndTurn,
+                            stop_reason: llm_stop_reason.unwrap_or(StopReason::EndTurn),
                         };
                         self.persist_event(&event).await;
                         self.events.emit(event);
@@ -767,9 +783,16 @@ impl Runtime {
 
     /// 流式调用 LLM 并聚合为 assistant 消息。
     ///
+    /// 返回 `(Message, Option<StopReason>)`：`stop_reason` 为 provider 报告的停止
+    /// 原因（`MaxTokens` 截断等），供 `run_turn` 透传到 `Event::TurnEnd`——不再
+    /// 硬编码 `EndTurn`（2026-08-23 审查 §4-P1）。
+    ///
     /// `OTel`：`llm_call` span 包裹整次 provider 调用（design.md §15.1），字段不含
     /// 凭证（C-04：仅记 model 与消息数，不记 input 原文）。
-    async fn stream_llm(&self, req: ChatRequest) -> Result<Message, crate::model::LlmError> {
+    async fn stream_llm(
+        &self,
+        req: ChatRequest,
+    ) -> Result<(Message, Option<StopReason>), crate::model::LlmError> {
         let timer = metrics::start_timer();
         let model_name = req.params.model.clone();
         let provider_id = self.provider.id();
@@ -848,7 +871,8 @@ impl Runtime {
         }
         // Metrics: 记录 LLM 调用延迟
         metrics::record_elapsed("llm_call_duration_ms", "model", &model_name, timer);
-        Ok(acc.finalize())
+        let stop_reason = acc.stop_reason().cloned();
+        Ok((acc.finalize(), stop_reason))
     }
 
     /// 执行工具调用（无副作用并行、有副作用串行 + 权限检查）。

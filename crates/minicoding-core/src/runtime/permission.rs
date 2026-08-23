@@ -38,6 +38,22 @@ fn merge_verdicts_stricter(a: &Verdict, b: Verdict) -> Verdict {
 }
 
 impl Runtime {
+    /// 发送被拒绝调用的生命周期事件对（Started + Finished，2026-08-23 审查 §4-P2）。
+    ///
+    /// 拒绝/权限错误路径不经过 `execute_allowed_call`（其内含正常的事件发射），
+    /// 由本辅助补齐同一语义：SSE 消费者可见"卡片出现 → 以错误结果终结"，
+    /// 与只读桶、Allow 路径的生命周期事件保持一致。
+    fn emit_denied_lifecycle(&self, call_id: &ToolCallId, tool: &str, result: &ToolResult) {
+        self.events.emit(Event::ToolCallStarted {
+            call_id: call_id.clone(),
+            tool: tool.to_string(),
+        });
+        self.events.emit(Event::ToolCallFinished {
+            call_id: call_id.clone(),
+            result: result.clone(),
+        });
+    }
+
     /// 执行一个副作用工具调用（权限链完整入口，C-01）。
     ///
     /// 流程：
@@ -87,26 +103,10 @@ impl Runtime {
             workdir: self.workdir.read().await.clone(),
             side_effect,
             turn: self.current_turn.load(std::sync::atomic::Ordering::Relaxed),
-            // S23：近期权限决策摘要（最近 turn 的 tool_calls 映射为 Allow 决策）
-            history: {
-                let mut hist = Vec::new();
-                for msg in self.session.messages.iter().rev() {
-                    if hist.len() >= 5 {
-                        break;
-                    }
-                    for tc in &msg.tool_calls {
-                        if hist.len() >= 5 {
-                            break;
-                        }
-                        let input_str = serde_json::to_string(&tc.input).unwrap_or_default();
-                        let summary =
-                            format!("{}({})", tc.name, &input_str[..input_str.len().min(80)]);
-                        hist.push(Decision::Allow); // 近期已 Allow 的决策记录
-                        let _ = summary; // Decision 无 detail 字段，保留供未来扩展
-                    }
-                }
-                hist
-            },
+            // S23（reserved）：近期决策历史。运行期消息不回写 `session.messages`
+            // （storage 为事实源），真实决策需从 AuditSink 回读——接入前恒为空，
+            // 不再填充伪造的 Allow 序列（2026-08-23 审查 §4-P1/P0）。
+            history: Vec::new(),
             permission_mode: plan_snap.mode,
             allowed_prompts: plan_snap.allowed_prompts,
         };
@@ -115,13 +115,12 @@ impl Runtime {
         let verdict = match self.policy.check(&call.name, &call.input, &perm_ctx).await {
             Ok(v) => v,
             Err(e) => {
+                let result = ToolResult::err_text(format!("permission error: {e}"));
+                self.emit_denied_lifecycle(&call.id, &call.name, &result);
                 self.record_permission_audit(&call.name, &Decision::Deny(e.to_string()), None)
                     .await;
                 tracing::warn!(tool = %call.name, error = %e, "policy check failed");
-                return Ok((
-                    call.id.clone(),
-                    ToolResult::err_text(format!("permission error: {e}")),
-                ));
+                return Ok((call.id.clone(), result));
             }
         };
 
@@ -152,13 +151,12 @@ impl Runtime {
             {
                 Ok(rechecked) => merge_verdicts_stricter(&verdict, rechecked),
                 Err(e) => {
+                    let result = ToolResult::err_text(format!("permission error: {e}"));
+                    self.emit_denied_lifecycle(&call.id, &call.name, &result);
                     self.record_permission_audit(&call.name, &Decision::Deny(e.to_string()), None)
                         .await;
                     tracing::warn!(tool = %call.name, error = %e, "policy recheck on modified input failed");
-                    return Ok((
-                        call.id.clone(),
-                        ToolResult::err_text(format!("permission error: {e}")),
-                    ));
+                    return Ok((call.id.clone(), result));
                 }
             }
         } else {
@@ -224,10 +222,13 @@ impl Runtime {
         };
         let tool_timer = metrics::start_timer();
         let result = match decision {
-            Decision::Deny(msg) => Ok((
-                call.id.clone(),
-                ToolResult::err_text(format!("permission denied: {msg}")),
-            )),
+            Decision::Deny(msg) => {
+                // 拒绝路径同样发 ToolCallStarted/Finished（2026-08-23 审查 §4-P2）：
+                // SSE 消费者视角此前"凭空出现一条错误结果"，无卡片/终态事件。
+                let result = ToolResult::err_text(format!("permission denied: {msg}"));
+                self.emit_denied_lifecycle(&call.id, &call.name, &result);
+                Ok((call.id.clone(), result))
+            }
             Decision::Allow => {
                 self.execute_allowed_call(call, &effective_call, side_effect, ctx)
                     .await

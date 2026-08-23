@@ -9,9 +9,16 @@ use crate::provider::BoxFuture;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-/// 会话元数据（轻量列出）。
+/// 会话列表项（存储层轻量列出，不加载消息）。
+///
+/// 与 `model::SessionMeta`（含 `tasks` 字段、前端 DTO/ts 导出）**同名异型**
+/// 曾造成混淆（2026-08-23 审查 §4-P2），故改名区分：本类型仅服务
+/// `Storage::list_sessions` 的磁盘索引场景；需要任务列表时使用
+/// `model::SessionMeta` / `Session`。命名亦与 `minicoding-storage` 的
+/// 磁盘索引条目类型 `SessionIndexEntry` 区分（后者含 `parent_uuid` 等
+/// 索引专有字段，经 `to_meta` 转换为本类型）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
+pub struct SessionListItem {
     pub id: SessionId,
     pub created_at: OffsetDateTime,
     pub message_count: usize,
@@ -29,7 +36,7 @@ pub trait Storage: Send + Sync {
     fn append(&self, session: &SessionId, msg: &Message)
     -> BoxFuture<'_, Result<(), StorageError>>;
     fn load(&self, session: &SessionId) -> BoxFuture<'_, Result<Vec<Message>, StorageError>>;
-    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>>;
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionListItem>, StorageError>>;
     fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>>;
     /// 更新会话摘要（写入 `index.json`，T-M3-6）。
     ///
@@ -90,13 +97,13 @@ impl AuditSink for NoopAudit {
 
 #[cfg(test)]
 mod tests {
-    //! `SessionMeta` / `AuditRecord` / `AuditKind` / `NoopAudit` 测试（覆盖率补全）。
+    //! `SessionListItem` / `AuditRecord` / `AuditKind` / `NoopAudit` 测试（覆盖率补全）。
 
     use super::*;
     use crate::model::SessionId;
 
-    fn sample_meta() -> SessionMeta {
-        SessionMeta {
+    fn sample_meta() -> SessionListItem {
+        SessionListItem {
             id: SessionId::from("01TEST"),
             created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
             message_count: 5,
@@ -109,7 +116,7 @@ mod tests {
     fn session_meta_serde_roundtrip() {
         let meta = sample_meta();
         let json = serde_json::to_string(&meta).expect("serialize");
-        let decoded: SessionMeta = serde_json::from_str(&json).expect("deserialize");
+        let decoded: SessionListItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.id, meta.id);
         assert_eq!(decoded.message_count, meta.message_count);
     }

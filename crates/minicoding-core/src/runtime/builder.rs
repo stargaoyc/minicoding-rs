@@ -477,6 +477,7 @@ impl RuntimeBuilder {
             event_seq: Arc::new(TokioMutex::new(1)),
             message_since_snapshot: AtomicU64::new(0),
             durable_seq: Arc::new(TokioMutex::new(0)),
+            turn_gate: TokioMutex::new(()),
         })
     }
 }

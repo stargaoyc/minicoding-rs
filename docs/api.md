@@ -526,15 +526,19 @@ pub enum ToolGroup { Core, Fs, Shell, Web, Git, Task, Plan, Mcp }
 pub trait Storage {
     async fn append(&self, session: &SessionId, msg: &Message) -> Result<(), StorageError>;
     async fn load(&self, session: &SessionId) -> Result<Vec<Message>, StorageError>;
-    async fn list_sessions(&self) -> Result<Vec<SessionMeta>, StorageError>;
+    async fn list_sessions(&self) -> Result<Vec<SessionListItem>, StorageError>;
     async fn delete(&self, session: &SessionId) -> Result<(), StorageError>;
     /// 会话摘要落盘（T-M3-6；D4 补录：此前 api.md 漏列第 5 方法）。
-    /// `SessionMeta.summary` 同步更新，`list_sessions` 可见。
+    /// `SessionListItem.summary` 同步更新，`list_sessions` 可见。
     async fn update_summary(&self, session: &SessionId, summary: &str)
         -> Result<(), StorageError>;
 }
 
-pub struct SessionMeta {
+/// 存储层会话列表项（轻量，不含 `tasks`）。
+///
+/// 与 `model::SessionMeta`（前端 DTO，含任务列表）同名异型曾造成混淆，
+/// 2026-08-23 审查 §4-P2 改名区分。
+pub struct SessionListItem {
     pub id: SessionId,
     pub created_at: time::OffsetDateTime,
     pub message_count: usize,
@@ -580,7 +584,7 @@ impl SessionLock {
 
 // 会话导出（C-04：凭证由工具层保证不入消息，导出层不额外过滤）
 pub enum ExportFormat { Markdown, Jsonl }
-pub fn export_session_md(messages: &[Message], meta: &SessionMeta) -> String;
+pub fn export_session_md(messages: &[Message], meta: &SessionListItem) -> String;
 pub fn export_session_jsonl(messages: &[Message]) -> String;
 
 impl JsonlStorage {
@@ -604,6 +608,9 @@ pub enum PersistedEvent {
     PermissionResolved { id: String, decision: Decision },
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
     TaskUpdated { task: Task },
+    /// `stop_reason` 优先采用 provider 报告值（如 `MaxTokens` 截断），
+    /// 缺省回退 `EndTurn`；取消/超时路径分别为 `Interrupted`/`Stopped`
+    /// （2026-08-23 审查 §4-P1：不再把截断误报为正常结束）。
     TurnEnd { stop_reason: StopReason },
 }
 
@@ -732,7 +739,9 @@ pub struct PermissionContext {
     pub workdir: Utf8PathBuf,
     pub side_effect: SideEffect,
     pub turn: u32,
-    pub history: Vec<Decision>,   // 本会话已有决策，便于去重询问
+    /// 近期决策历史（**reserved，当前恒为空**）：真实决策需从 `AuditSink`
+    /// 回读，接入前 Runtime 填充空 `Vec`（2026-08-23 审查 §4-P1）。
+    pub history: Vec<Decision>,
 }
 
 /// 点对点交互器（非广播）。由 frontend 注入实现。

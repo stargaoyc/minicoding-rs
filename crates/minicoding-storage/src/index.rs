@@ -6,7 +6,7 @@
 //! - **原子写**：先写 `.tmp` 再 `rename`，崩溃时索引文件不会半写。
 
 use camino::{Utf8Path, Utf8PathBuf};
-use minicoding_core::storage::{SessionMeta, StorageError};
+use minicoding_core::storage::{SessionListItem, StorageError};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -47,12 +47,12 @@ impl SessionIndexEntry {
         }
     }
 
-    /// 转为 `SessionMeta`。
+    /// 转为 `SessionListItem`。
     ///
     /// 时间字段已是 `OffsetDateTime`，直接使用无需解析。
     #[must_use]
-    pub fn to_meta(&self) -> SessionMeta {
-        SessionMeta {
+    pub fn to_meta(&self) -> SessionListItem {
+        SessionListItem {
             id: self.session_id.clone(),
             created_at: self.created_at,
             message_count: self.message_count,
@@ -177,9 +177,9 @@ impl SessionIndex {
         &self.entries
     }
 
-    /// 返回全部索引项转换后的 `SessionMeta` 列表。
+    /// 返回全部索引项转换后的 `SessionListItem` 列表。
     #[must_use]
-    pub fn to_metas(&self) -> Vec<SessionMeta> {
+    pub fn to_metas(&self) -> Vec<SessionListItem> {
         self.entries
             .iter()
             .map(SessionIndexEntry::to_meta)
