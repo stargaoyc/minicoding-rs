@@ -165,11 +165,10 @@ export function applyChatEvent(
     case "permission_mode_changed":
     case "session_created":
     case "config_changed":
-    case "sessions_listed":
-    case "session_retrieved":
-    case "command_error":
       effects.push("invalidate-messages");
       break;
+    // P3：sessions_listed/session_retrieved/command_error 为 NDJSON 专用
+    //（NdjsonCommandKind），SSE 流永不出现——死分支已随类型拆分移除
   }
   return { state: next, effects };
 }

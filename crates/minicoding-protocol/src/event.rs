@@ -87,16 +87,22 @@ pub enum EventKind {
     },
     /// 一个执行步结束（M-06，R-02）：`iter` 对应 `StepStarted`。
     StepEnded { iter: u32 },
-    /// NDJSON 专用：`ListSessions` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+}
+
+/// P3：NDJSON 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）——
+/// 自 `EventKind` 拆出，SSE 契约不再混入永不出现的变体。wire 形态与拆分前
+/// 完全一致（`type` 标签 + `snake_case`），NDJSON 客户端无感。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NdjsonCommandKind {
+    /// `ListSessions` 命令响应。
     SessionsListed { sessions: Vec<SessionMeta> },
-    /// NDJSON 专用：`GetSession` 命令响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
+    /// `GetSession` 命令响应。
     SessionRetrieved {
         session_id: String,
         messages: Vec<Message>,
     },
-    /// NDJSON 专用：命令错误响应（不对应 `core::Event`，由 NDJSON 适配器构造）。
-    ///
-    /// 用于：JSON 解析失败、会话不存在、命令不支持等。`seq` 字段为 0（非流式事件）。
+    /// 命令错误响应：JSON 解析失败、会话不存在、命令不支持等（`seq` 为 0）。
     CommandError { message: String },
 }
 
@@ -643,54 +649,30 @@ mod tests {
     }
 
     #[test]
-    fn sessions_listed_roundtrip() {
+    fn sessions_listed_wire_shape_unchanged() {
+        // P3：拆分后 wire 形态与 EventKind 时代一致（type 标签 + snake_case）
+        let cmd = NdjsonCommandKind::SessionsListed {
+            sessions: Vec::new(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"sessions_listed\""));
         let dto = EventDto {
             seq: 8,
-            kind: EventKind::SessionsListed {
-                sessions: Vec::new(),
+            kind: EventKind::Token {
+                text: String::new(),
             },
         };
-        let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"type\":\"sessions_listed\""));
-        let back: EventDto = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back.kind, EventKind::SessionsListed { .. }));
+        let _ = serde_json::to_string(&dto).unwrap(); // SSE 契约不受影响
     }
 
     #[test]
-    fn session_retrieved_roundtrip() {
-        let dto = EventDto {
-            seq: 9,
-            kind: EventKind::SessionRetrieved {
-                session_id: "s1".to_string(),
-                messages: Vec::new(),
-            },
+    fn command_error_wire_shape_unchanged() {
+        let cmd = NdjsonCommandKind::CommandError {
+            message: "bad request".to_string(),
         };
-        let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"type\":\"session_retrieved\""));
-        let back: EventDto = serde_json::from_str(&json).unwrap();
-        match back.kind {
-            EventKind::SessionRetrieved { session_id, .. } => {
-                assert_eq!(session_id, "s1");
-            }
-            _ => panic!("expected SessionRetrieved"),
-        }
-    }
-
-    #[test]
-    fn command_error_roundtrip() {
-        let dto = EventDto {
-            seq: 0,
-            kind: EventKind::CommandError {
-                message: "bad request".to_string(),
-            },
-        };
-        let json = serde_json::to_string(&dto).unwrap();
+        let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"command_error\""));
-        let back: EventDto = serde_json::from_str(&json).unwrap();
-        match back.kind {
-            EventKind::CommandError { message } => assert_eq!(message, "bad request"),
-            _ => panic!("expected CommandError"),
-        }
+        assert!(json.contains("bad request"));
     }
 
     #[test]

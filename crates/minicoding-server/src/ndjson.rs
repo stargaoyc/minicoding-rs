@@ -42,7 +42,7 @@ use crate::runtime_builder::ServerRuntimeParams;
 use crate::session_mgr::{SessionManager, SessionManagerError};
 use minicoding_core::model::TurnOutcome;
 use minicoding_protocol::command::Command;
-use minicoding_protocol::event::{EventDto, EventKind};
+use minicoding_protocol::event::{EventDto, EventKind, NdjsonCommandKind};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
@@ -106,10 +106,10 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
             let cmd: Command = match serde_json::from_str(&line) {
                 Ok(c) => c,
                 Err(e) => {
-                    write_event(
+                    write_command(
                         &reader_stdout,
                         0,
-                        &EventKind::CommandError {
+                        &NdjsonCommandKind::CommandError {
                             message: format!("invalid command JSON: {e}"),
                         },
                     )
@@ -129,10 +129,10 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
     while let Some(cmd) = cmd_rx.recv().await {
         if let Err(e) = dispatch_command(mgr.clone(), &stdout, &mut cmd_rx, cmd).await {
             tracing::warn!(error = %e, "NDJSON command dispatch failed");
-            write_event(
+            write_command(
                 &stdout,
                 0,
-                &EventKind::CommandError {
+                &NdjsonCommandKind::CommandError {
                     message: e.to_string(),
                 },
             )
@@ -146,6 +146,26 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
 }
 
 /// 写一个 `EventDto` 到 stdout（JSON + 换行 + flush）。
+async fn write_command(
+    stdout: &SharedStdout,
+    seq: u64,
+    kind: &minicoding_protocol::event::NdjsonCommandKind,
+) -> Result<(), NdjsonError> {
+    // P3：命令响应走独立枚举，wire 形态与 EventDto 一致（seq + flatten kind）
+    #[derive(serde::Serialize)]
+    struct Envelope<'a> {
+        seq: u64,
+        #[serde(flatten)]
+        kind: &'a minicoding_protocol::event::NdjsonCommandKind,
+    }
+    let json = serde_json::to_string(&Envelope { seq, kind })?;
+    let mut out = stdout.lock().await;
+    out.write_all(json.as_bytes()).await?;
+    out.write_all(b"\n").await?;
+    out.flush().await?;
+    Ok(())
+}
+
 async fn write_event(stdout: &SharedStdout, seq: u64, kind: &EventKind) -> Result<(), NdjsonError> {
     let dto = EventDto {
         seq,
@@ -195,10 +215,10 @@ async fn handle_turn_command(
                 }
             }
             if !resolved {
-                write_event(
+                write_command(
                     stdout,
                     0,
-                    &EventKind::CommandError {
+                    &NdjsonCommandKind::CommandError {
                         message: format!("permission {id} not found in any session"),
                     },
                 )
@@ -212,10 +232,10 @@ async fn handle_turn_command(
             }
         }
         other => {
-            write_event(
+            write_command(
                 stdout,
                 0,
-                &EventKind::CommandError {
+                &NdjsonCommandKind::CommandError {
                     message: format!(
                         "turn in progress, command not accepted: {}",
                         command_name(&other)
@@ -266,14 +286,14 @@ async fn dispatch_command(
         }
         Command::ListSessions => {
             let sessions = mgr.list_sessions();
-            write_event(stdout, 0, &EventKind::SessionsListed { sessions }).await
+            write_command(stdout, 0, &NdjsonCommandKind::SessionsListed { sessions }).await
         }
         Command::GetSession { session_id } => {
             let messages = mgr.get_messages(&session_id).await?;
-            write_event(
+            write_command(
                 stdout,
                 0,
-                &EventKind::SessionRetrieved {
+                &NdjsonCommandKind::SessionRetrieved {
                     session_id,
                     messages,
                 },
@@ -304,10 +324,10 @@ async fn dispatch_command(
                     return Ok(());
                 }
             }
-            write_event(
+            write_command(
                 stdout,
                 0,
-                &EventKind::CommandError {
+                &NdjsonCommandKind::CommandError {
                     message: format!("permission {id} not found in any session"),
                 },
             )
@@ -318,10 +338,10 @@ async fn dispatch_command(
             // Undo 需要 `file-undo` feature 与 Journal 注入，M8 server 端未启用。
             // 返回 CommandError 让客户端知道命令不支持。
             let _ = (session_id, steps);
-            write_event(
+            write_command(
                 stdout,
                 0,
-                &EventKind::CommandError {
+                &NdjsonCommandKind::CommandError {
                     message: "undo not supported in NDJSON mode (requires file-undo feature)"
                         .to_string(),
                 },
@@ -381,17 +401,17 @@ async fn handle_send_user_message(
                     // （Runtime 在 `run_turn` 返回前发 `TurnEnd`，drain 阶段捕获）
                     Ok(Ok(TurnOutcome::Finished(_) | TurnOutcome::Interrupted(_))) => {}
                     Ok(Ok(TurnOutcome::Failed(e))) => {
-                        write_event(stdout, 0, &EventKind::CommandError {
+                        write_command(stdout, 0, &NdjsonCommandKind::CommandError {
                             message: format!("turn failed: {e}"),
                         }).await?;
                     }
                     Ok(Err(e)) => {
-                        write_event(stdout, 0, &EventKind::CommandError {
+                        write_command(stdout, 0, &NdjsonCommandKind::CommandError {
                             message: format!("turn error: {e}"),
                         }).await?;
                     }
                     Err(e) => {
-                        write_event(stdout, 0, &EventKind::CommandError {
+                        write_command(stdout, 0, &NdjsonCommandKind::CommandError {
                             message: format!("turn task panicked: {e}"),
                         }).await?;
                     }
