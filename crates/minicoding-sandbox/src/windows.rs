@@ -34,6 +34,12 @@ const CREATE_SUSPENDED: u32 = 0x00000004;
 pub struct WindowsJobDriver {
     /// 最近一次 `apply` 的策略快照（供 `post_spawn` 读取）。
     /// 使用 `Mutex` 保证线程安全（`SandboxDriver: Send + Sync`）。
+    ///
+    /// S24 已知限制（文档化）：共享同一 driver 实例**并发** spawn 时，
+    /// apply(A)/apply(B)/post_spawn(A) 交错会使 A 拿到 B 的策略。实际无风险：
+    /// Runtime 对副作用工具严格串行（design.md §2.3 规则 2），且 builder 每个
+    /// Runtime 独立 `detect_driver()`——不存在跨 Runtime 共享 driver 的路径。
+    /// 若未来引入并发 spawn 场景，需改为 pid→policy 映射或 apply 返回句柄。
     last_policy: std::sync::Mutex<Option<SandboxPolicy>>,
 }
 

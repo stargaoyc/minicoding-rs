@@ -352,7 +352,7 @@ minicoding-memory/src/
 - **Auto memory 物理隔离**：`auto.md` 与 `long_term.md` 分离存储，对 `long_term.md` 写入走 `Ask`，对 `auto.md` 隐式写入 `Allow`（C-27）。
 - **指令性内容检测**：`auto.rs` 检测 `auto.md` 中含 `AGENTS.md` 风格指令性内容时降级 `Ask`（防绕过 C-23）。
 - **mtime 缓存**：`long_term.rs` 用 mtime 判断文件变更，无变更零 IO/分词（M-04）。
-- **依赖**：`minicoding-core` + `serde`/`serde_json`（index）+ `camino`。摘要需调 LLM，通过 trait 注入。
+- **依赖**：仅 `minicoding-core` + `serde`/`serde_json`/`camino`/`time`。摘要需调 LLM，通过 trait 注入；摘要落盘经 `Storage::update_summary`（A7：不再直接依赖 `minicoding-storage`）。
 
 ---
 

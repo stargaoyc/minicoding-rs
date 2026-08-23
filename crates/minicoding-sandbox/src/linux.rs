@@ -19,7 +19,8 @@
 //!
 //! Landlock 规则是"白名单并集"语义：workdir 可写会让其下 `.git` 也继承可写
 //! （无法在可写父目录下做子目录只读）。故 VCS 目录（`.git`/`.hg`/`.svn`）的
-//! 写保护由应用层 `policy::builtin` 黑名单补充（见 `security.md` §3），landlock
+//! 写保护由应用层 `policy::builtin` 黑名单补充（S5 已落地：fs/shell 写 .git
+//! 与约束文件硬 Deny，见 `security.md` §16.1），landlock
 //! 仅做粗粒度"workdir 可写、其余只读"隔离。这是 OS 层第二道防线与应用层第一道
 //! 防线的分工（见 `security.md` §8）。
 
@@ -148,7 +149,7 @@ fn apply_landlock(
 /// - `ReadOnly`：workdir 只读，所有路径只读放行；
 /// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录列入只读
 ///   （注：landlock 并集语义下 workdir 可写会使 .git 继承可写，VCS 实际写保护
-///   由应用层 builtin 黑名单补充，见模块文档）。
+///   由应用层 builtin 黑名单补充（S5 已落地），见模块文档）。
 fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, SandboxError> {
     use landlock::{Access, Ruleset, path_beneath_rules};
 

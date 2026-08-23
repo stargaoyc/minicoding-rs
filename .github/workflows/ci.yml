@@ -86,6 +86,14 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      # Q7：排除层（cli/server/tui）覆盖率可见性——逐 crate summary-only，
+      # 不计门禁仅供趋势观察；desktop 需 GUI 系统库，不在 CI 覆盖
+      - name: coverage visibility (excluded crates)
+        run: |
+          for p in minicoding-cli minicoding-server minicoding-tui; do
+            echo "=== $p ==="
+            cargo llvm-cov -p $p --summary-only || true
+          done
       - name: cargo llvm-cov
         # 排除前端层（与 AGENTS.md §2.8 库 crate 覆盖率目标 ≥80% 对齐）：
         # - minicoding-tui：终端渲染，需 TTY 仿真

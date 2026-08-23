@@ -269,16 +269,20 @@ fn validate_restore_path(
             return Err(JournalError::PathEscaped(path.to_string()));
         }
     }
-    // 若有 workdir，相对路径规范化后检查是否越界
-    if let Some(wd) = workdir
-        && path.is_relative()
-    {
-        let joined = wd.join(path);
-        // 简化检查：规范化后不以 workdir 开头则越界
-        // （canonicalize 需要文件存在，这里用逻辑比对）
-        let joined_str = joined.as_str();
-        let wd_str = wd.as_str();
-        if !joined_str.starts_with(wd_str) {
+    // 若有 workdir：组件级前缀包容检查（S18 升级——
+    // ①字符串 starts_with 有 `/tmp/abc` vs `/tmp/abc-evil` 边界误判；
+    // ②原实现仅覆盖相对路径，绝对路径完全绕过包容检查）
+    if let Some(wd) = workdir {
+        let joined = if path.is_relative() {
+            wd.join(path)
+        } else {
+            path.clone()
+        };
+        let wd_components: Vec<_> = wd.components().collect();
+        let joined_components: Vec<_> = joined.components().collect();
+        if joined_components.len() < wd_components.len()
+            || joined_components[..wd_components.len()] != wd_components[..]
+        {
             return Err(JournalError::PathEscaped(path.to_string()));
         }
     }
@@ -469,6 +473,30 @@ mod tests {
         j.record(entry("op1", vec![])).await.unwrap();
         j.reset_to_initial().await.unwrap();
         assert!(j.is_empty(), "expected empty: j");
+    }
+
+    #[test]
+    fn validate_restore_path_rejects_sibling_prefix_and_absolute_escape() {
+        // S18（升级）：①绝对路径不再绕过包容检查；②组件级比较消除
+        // 字符串 starts_with 的兄弟目录边界误判
+        let wd = Utf8PathBuf::from("/tmp/abc");
+
+        // 绝对越界（此前完全绕过检查）
+        let err = super::validate_restore_path(&Utf8PathBuf::from("/tmp/abc-evil/x"), Some(&wd));
+        assert!(err.is_err(), "绝对兄弟目录应被判越界");
+
+        // 相对形式等价命中（含 .. 前置拒绝之外的组件级判定）
+        let err = super::validate_restore_path(&Utf8PathBuf::from("../abc-evil/x"), Some(&wd));
+        assert!(err.is_err(), "兄弟目录应被判越界");
+
+        // 真实子路径放行（相对与绝对两种形态）
+        assert!(
+            super::validate_restore_path(&Utf8PathBuf::from("sub/file.txt"), Some(&wd)).is_ok()
+        );
+        assert!(
+            super::validate_restore_path(&Utf8PathBuf::from("/tmp/abc/sub/file.txt"), Some(&wd))
+                .is_ok()
+        );
     }
 
     #[tokio::test]
