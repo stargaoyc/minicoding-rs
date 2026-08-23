@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 minicoding-core = { workspace = true }
+minicoding-sdk = { workspace = true }
 minicoding-context = { workspace = true }
 minicoding-policy = { workspace = true }
 minicoding-storage = { workspace = true }
@@ -65,15 +66,15 @@ flate2 = { workspace = true }
 [features]
 default = ["memory", "sandbox", "serve", "mcp"]
 memory = ["dep:minicoding-memory"]
-hooks = ["dep:minicoding-hooks"]
-file-undo = ["dep:minicoding-journal"]
-sandbox = ["dep:minicoding-sandbox"]
+hooks = ["dep:minicoding-hooks", "minicoding-sdk/hooks"]
+file-undo = ["dep:minicoding-journal", "minicoding-sdk/file-undo"]
+sandbox = ["dep:minicoding-sandbox", "minicoding-sdk/sandbox"]
 mcp = ["dep:minicoding-mcp"]
 serve = ["dep:minicoding-server"]
 # 扩展系统（PromptPipeline + BundledExtensionHost，T-M8-2）
-extensions = ["dep:minicoding-extension-sdk"]
+extensions = ["dep:minicoding-extension-sdk", "minicoding-sdk/extensions"]
 # Web 工具组（web.fetch/web.search，启用 `minicoding-tools` 的 `web` feature）
-web = ["minicoding-tools/web"]
+web = ["minicoding-sdk/web"]
 # LSP stdio 适配器（T-M8-8，启用 `minicoding-server` 的 `lsp` feature）
 lsp = ["serve", "minicoding-server/lsp"]
 # OTLP 导出（需 reqwest，按需启用；未启用时降级为纯 fmt 日志，见 core::otel）

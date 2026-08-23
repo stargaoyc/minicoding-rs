@@ -8,12 +8,31 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# A11：builder 组装 feature 矩阵（与原 cli/builder.rs cfg 门控对齐）
+default = ["sandbox", "hooks", "file-undo", "web", "extensions", "cred-keyring"]
+hooks = ["dep:minicoding-hooks"]
+file-undo = ["dep:minicoding-journal"]
+sandbox = ["dep:minicoding-sandbox"]
+extensions = ["dep:minicoding-extension-sdk"]
+web = ["minicoding-tools/web"]
+cred-keyring = ["dep:keyring"]
+
 [dependencies]
 minicoding-core = { workspace = true }
 minicoding-policy = { workspace = true }
 minicoding-tools = { workspace = true }
 minicoding-context = { workspace = true }
 minicoding-storage = { workspace = true }
+minicoding-providers = { workspace = true }
+minicoding-memory = { workspace = true }
+# A11 以下为 builder 组装的可选领域 crate（feature 名与 cli 对齐）
+minicoding-hooks = { workspace = true, optional = true }
+minicoding-journal = { workspace = true, optional = true }
+minicoding-sandbox = { workspace = true, optional = true }
+minicoding-extension-sdk = { workspace = true, optional = true }
+keyring = { workspace = true, optional = true }
+
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
@@ -25,6 +44,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
 time = { workspace = true }
+ulid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
