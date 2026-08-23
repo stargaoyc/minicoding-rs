@@ -1,12 +1,17 @@
 //! `ToolRegistry`：工具注册与按 `side_effect` 调度。
 
-use crate::model::{SideEffect, ToolCall, ToolError, ToolResult, ToolSchema};
+use crate::model::{ToolCall, ToolError, ToolResult, ToolSchema};
 use crate::tool::{Tool, ToolContext};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 工具组（用于特性门控与批量启用，也作为子 Agent 工具子集的粗粒度开关）。
+///
+/// **reserved**：当前注册 API 未消费 group，
+/// 子 Agent 工具子集裁剪未落地；保留枚举作为后续 `schemas()` 过滤与
+/// `task.spawn` 按类型收敛工具面的契约占位。在接入前不得据此假设
+/// "某 group 已被排除"。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolGroup {
     Core,
@@ -57,10 +62,17 @@ impl ToolRegistry {
     /// 派发工具调用。
     ///
     /// M1 简化：不包含权限检查与沙箱应用（M2 接入 `PermissionPolicy`/`SandboxDriver`）。
-    /// 工具执行超时由 `ctx.timeout` 控制。
+    ///
+    /// **C-07 超时兜底**：以 `ctx.timeout` 为单工具调用
+    /// 硬上限统一包装——此前仅靠各工具自律读取 `ctx.timeout`，第三方扩展工具若
+    /// 无视之则只剩 turn 级超时兜底（且会丢弃整个 turn）。自律工具（如 `shell.run`
+    /// 内部 clamp + 进程组终止）自身的超时 ≤ `ctx.timeout`，先行优雅终止不受影响；
+    /// 兜底路径放弃 future 后工具可能仍在后台运行至自然结束（无 kill 句柄可及），
+    /// 这是无进程句柄下的最后防线取舍。`ctx.timeout` 为零视为不限制（测试用）。
     ///
     /// # Errors
-    /// 工具未注册时返回 `ToolError::NotFound`；工具执行失败时返回对应 `ToolError`。
+    /// 工具未注册时返回 `ToolError::NotFound`；工具执行失败或超时时返回对应
+    /// `ToolError`（超时为 `ToolError::Timeout`）。
     pub async fn dispatch(
         &self,
         call: &ToolCall,
@@ -70,9 +82,13 @@ impl ToolRegistry {
             .tools
             .get(&call.name)
             .ok_or_else(|| ToolError::NotFound(call.name.clone()))?;
-        let _ = tool.side_effect(); // M2 用于调度策略
-        let _ = SideEffect::None; // 标记 M2 将使用
-        tool.execute(call.input.clone(), ctx).await
+        if ctx.timeout.is_zero() {
+            return tool.execute(call.input.clone(), ctx).await;
+        }
+        match tokio::time::timeout(ctx.timeout, tool.execute(call.input.clone(), ctx)).await {
+            Ok(result) => result,
+            Err(_) => Err(ToolError::Timeout(ctx.timeout)),
+        }
     }
 
     /// 已注册工具数。

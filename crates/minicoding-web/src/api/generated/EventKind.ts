@@ -3,7 +3,6 @@ import type { Decision } from "./Decision";
 import type { Message } from "./Message";
 import type { PermissionMode } from "./PermissionMode";
 import type { Risk } from "./Risk";
-import type { SessionMeta } from "./SessionMeta";
 import type { StopReason } from "./StopReason";
 import type { Task } from "./Task";
 import type { ToolResult } from "./ToolResult";
@@ -11,4 +10,4 @@ import type { ToolResult } from "./ToolResult";
 /**
  * 事件种类（与 `core::Event` 一一映射，但序列化为 tagged enum）。
  */
-export type EventKind = { "type": "token", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "message_appended", message: Message, } | { "type": "turn_streaming_started" } | { "type": "turn_end", stop_reason: StopReason, } | { "type": "tool_call_started", call_id: string, tool: string, } | { "type": "tool_call_finished", call_id: string, result: ToolResult, } | { "type": "session_created", id: string, } | { "type": "permission_requested", id: string, tool: string, summary: string, risk: Risk, } | { "type": "permission_resolved", id: string, decision: Decision, } | { "type": "permission_mode_changed", from: PermissionMode, to: PermissionMode, } | { "type": "task_updated", task: Task, } | { "type": "config_changed" } | { "type": "step_started", iter: number, tool_call_ids: Array<string>, } | { "type": "step_ended", iter: number, } | { "type": "sessions_listed", sessions: Array<SessionMeta>, } | { "type": "session_retrieved", session_id: string, messages: Array<Message>, } | { "type": "command_error", message: string, };
+export type EventKind = { "type": "token", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "message_appended", message: Message, } | { "type": "turn_streaming_started" } | { "type": "turn_end", stop_reason: StopReason, } | { "type": "tool_call_started", call_id: string, tool: string, } | { "type": "tool_call_finished", call_id: string, result: ToolResult, } | { "type": "session_created", id: string, } | { "type": "permission_requested", id: string, tool: string, summary: string, risk: Risk, } | { "type": "permission_resolved", id: string, decision: Decision, } | { "type": "permission_mode_changed", from: PermissionMode, to: PermissionMode, } | { "type": "task_updated", task: Task, } | { "type": "config_changed" } | { "type": "step_started", iter: number, tool_call_ids: Array<string>, } | { "type": "step_ended", iter: number, };

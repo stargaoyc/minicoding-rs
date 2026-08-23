@@ -38,7 +38,7 @@ pub async fn summarize_with_fallback(
     // 渲染待摘要消息为 LLM 输入文本
     let input = messages
         .iter()
-        .map(|m| format!("[{}] {}", role_label(&m.role), m.text()))
+        .map(|m| format!("[{}] {}", role_label(&m.role), m.full_text()))
         .collect::<Vec<_>>()
         .join("\n\n");
 

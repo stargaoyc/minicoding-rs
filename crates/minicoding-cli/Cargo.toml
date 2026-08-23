@@ -64,12 +64,15 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 
 [features]
+# serve/mcp 默认开：CLI 是主入口，serve 子命令和 MCP stdio 是高频场景；
+# hooks/file-undo 非默认：需显式 --features file-undo 启用 /undo，
+# hooks 需用户主动配置 hooks.toml 才有意义。与 AGENTS.md §3.5 的差异为有意设计。
 default = ["memory", "sandbox", "serve", "mcp"]
 memory = ["dep:minicoding-memory"]
 hooks = ["dep:minicoding-hooks", "minicoding-sdk/hooks"]
 file-undo = ["dep:minicoding-journal", "minicoding-sdk/file-undo"]
 sandbox = ["dep:minicoding-sandbox", "minicoding-sdk/sandbox"]
-mcp = ["dep:minicoding-mcp"]
+mcp = ["dep:minicoding-mcp", "minicoding-sdk/mcp"]
 serve = ["dep:minicoding-server"]
 # 扩展系统（PromptPipeline + BundledExtensionHost）
 extensions = ["dep:minicoding-extension-sdk", "minicoding-sdk/extensions"]

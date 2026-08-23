@@ -26,7 +26,6 @@ const ALLOWED_DEPS: &[&str] = &[
     "ulid",
     "time",
     "home",
-    "trait-variant",
     "semver",
     "notify",
     "ts-rs",

@@ -11,7 +11,7 @@
 //! 切换到历史会话等价于 `--resume <id>`：保留原会话 ID，新消息追加写入原
 //! JSONL 文件。当前会话不自动 summarize（避免阻塞 UI），用户可手动 `/summary`。
 
-use minicoding_core::storage::SessionMeta;
+use minicoding_core::storage::SessionListItem;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -27,7 +27,7 @@ use time::OffsetDateTime;
 pub fn render_sidebar(
     frame: &mut Frame,
     area: Rect,
-    sessions: &[SessionMeta],
+    sessions: &[SessionListItem],
     current_id: &str,
     state: &mut ListState,
 ) {

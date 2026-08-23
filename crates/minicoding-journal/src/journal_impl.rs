@@ -96,20 +96,42 @@ impl Journal for FileChangeJournal {
                 ..Default::default()
             };
 
-            // 反向遍历：先撤销最近的 entry，再撤销更早的（LIFO）
-            for entry in to_undo.into_iter().rev() {
+            // 反向遍历：先撤销最近的 entry，再撤销更早的（LIFO）。
+            // 失败的 entry 回推账本头部：此前
+            // split_off 已把条目移出账本，用户解决外部冲突后无法再次 /undo。
+            let mut failed_entries: Vec<ChangeEntry> = Vec::new();
+            for mut entry in to_undo.into_iter().rev() {
                 // entry 内文件也反向（恢复到该 entry 执行前的状态）
-                for change in entry.files.into_iter().rev() {
+                // 全量尝试（保持原"单文件失败不中断整批撤销"语义，C-28）；
+                // 失败的 change 收集回 entry——该 entry 整体回推账本，可重试
+                let mut retry_changes: Vec<FileChange> = Vec::new();
+                for change in entry.files.drain(..).rev() {
                     match restore_file(&change, self.workdir.as_ref()).await {
                         Ok(path) => report.restored_files.push(path),
                         Err(e) => {
                             let path = change.path().clone();
-                            // 冲突错误记入 failed_files 不强行覆盖（C-28），
-                            // 其他错误（越界/IO）也记入 failed_files 而非中断整批撤销
+                            // 冲突错误记入 failed_files 不强行覆盖（C-28）
                             report.failed_files.push((path, e.to_string()));
+                            retry_changes.push(change);
                         }
                     }
                 }
+                if !retry_changes.is_empty() {
+                    entry.files = retry_changes;
+                    failed_entries.push(entry);
+                }
+            }
+
+            if !failed_entries.is_empty() {
+                let mut guard = self
+                    .entries
+                    .lock()
+                    .map_err(|e| JournalError::Conflict(format!("journal lock poisoned: {e}")))?;
+                let mut merged = failed_entries;
+                let undone = report.undone_entries - merged.len();
+                report.undone_entries = undone;
+                merged.extend(guard.split_off(0));
+                *guard = merged;
             }
 
             Ok(report)
@@ -269,16 +291,20 @@ fn validate_restore_path(
             return Err(JournalError::PathEscaped(path.to_string()));
         }
     }
-    // 若有 workdir，相对路径规范化后检查是否越界
-    if let Some(wd) = workdir
-        && path.is_relative()
-    {
-        let joined = wd.join(path);
-        // 简化检查：规范化后不以 workdir 开头则越界
-        // （canonicalize 需要文件存在，这里用逻辑比对）
-        let joined_str = joined.as_str();
-        let wd_str = wd.as_str();
-        if !joined_str.starts_with(wd_str) {
+    // 若有 workdir：组件级前缀包容检查（升级——
+    // ①字符串 starts_with 有 `/tmp/abc` vs `/tmp/abc-evil` 边界误判；
+    // ②原实现仅覆盖相对路径，绝对路径完全绕过包容检查）
+    if let Some(wd) = workdir {
+        let joined = if path.is_relative() {
+            wd.join(path)
+        } else {
+            path.clone()
+        };
+        let wd_components: Vec<_> = wd.components().collect();
+        let joined_components: Vec<_> = joined.components().collect();
+        if joined_components.len() < wd_components.len()
+            || joined_components[..wd_components.len()] != wd_components[..]
+        {
             return Err(JournalError::PathEscaped(path.to_string()));
         }
     }
@@ -367,7 +393,10 @@ mod tests {
             .await
             .unwrap();
         let report = j.undo(1).await.unwrap();
-        assert_eq!(report.undone_entries, 1);
+        // 语义更新：失败 entry 回推账本可重试，
+        // 故未计入 undone_entries（此前 split_off 后不可重试，记 1）
+        assert_eq!(report.undone_entries, 0);
+        assert!(!j.is_empty(), "失败的 entry 应保留在账本中供再次 /undo");
         assert!(
             report.restored_files.is_empty(),
             "expected empty: report.restored_files"
@@ -377,6 +406,14 @@ mod tests {
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
         assert_eq!(cur, b"externally-changed");
+        // 解决冲突后可重试：恢复为 after 内容后再次 /undo 成功
+        fs::write(file.as_std_path(), b"new").await.unwrap();
+        let retry = j.undo(1).await.unwrap();
+        assert_eq!(retry.undone_entries, 1);
+        assert!(retry.failed_files.is_empty());
+        let restored = fs::read(file.as_std_path()).await.unwrap();
+        assert_eq!(restored, b"old");
+        assert!(j.is_empty());
     }
 
     #[tokio::test]
@@ -469,6 +506,30 @@ mod tests {
         j.record(entry("op1", vec![])).await.unwrap();
         j.reset_to_initial().await.unwrap();
         assert!(j.is_empty(), "expected empty: j");
+    }
+
+    #[test]
+    fn validate_restore_path_rejects_sibling_prefix_and_absolute_escape() {
+        // （升级）：①绝对路径不再绕过包容检查；②组件级比较消除
+        // 字符串 starts_with 的兄弟目录边界误判
+        let wd = Utf8PathBuf::from("/tmp/abc");
+
+        // 绝对越界（此前完全绕过检查）
+        let err = super::validate_restore_path(&Utf8PathBuf::from("/tmp/abc-evil/x"), Some(&wd));
+        assert!(err.is_err(), "绝对兄弟目录应被判越界");
+
+        // 相对形式等价命中（含 .. 前置拒绝之外的组件级判定）
+        let err = super::validate_restore_path(&Utf8PathBuf::from("../abc-evil/x"), Some(&wd));
+        assert!(err.is_err(), "兄弟目录应被判越界");
+
+        // 真实子路径放行（相对与绝对两种形态）
+        assert!(
+            super::validate_restore_path(&Utf8PathBuf::from("sub/file.txt"), Some(&wd)).is_ok()
+        );
+        assert!(
+            super::validate_restore_path(&Utf8PathBuf::from("/tmp/abc/sub/file.txt"), Some(&wd))
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -644,12 +705,13 @@ mod tests {
         // 文件被外部修改
         fs::write(file.as_std_path(), b"modified").await.unwrap();
         let report = j.undo(1).await.unwrap();
-        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.undone_entries, 0);
         assert!(
             report.restored_files.is_empty(),
             "expected empty: report.restored_files"
         );
         assert_eq!(report.failed_files.len(), 1);
+        assert!(!j.is_empty(), "失败 entry 回推账本可重试");
         // 文件未被删除
         assert!(file.as_std_path().exists());
         let cur = fs::read(file.as_std_path()).await.unwrap();
@@ -675,12 +737,13 @@ mod tests {
         // 文件已存在（模拟删除后被重建）
         fs::write(file.as_std_path(), b"recreated").await.unwrap();
         let report = j.undo(1).await.unwrap();
-        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.undone_entries, 0);
         assert!(
             report.restored_files.is_empty(),
             "expected empty: report.restored_files"
         );
         assert_eq!(report.failed_files.len(), 1);
+        assert!(!j.is_empty(), "失败 entry 回推账本可重试");
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
         assert_eq!(cur, b"recreated");
@@ -707,12 +770,13 @@ mod tests {
         // 外部修改为 v3（不是 after=v2）
         fs::write(file.as_std_path(), b"v3").await.unwrap();
         let report = j.undo(1).await.unwrap();
-        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.undone_entries, 0);
         assert!(
             report.restored_files.is_empty(),
             "expected empty: report.restored_files"
         );
         assert_eq!(report.failed_files.len(), 1);
+        assert!(!j.is_empty(), "失败 entry 回推账本可重试");
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
         assert_eq!(cur, b"v3");
@@ -786,7 +850,8 @@ mod tests {
         fs::write(f1.as_std_path(), b"v2").await.unwrap();
         fs::write(f2.as_std_path(), b"v3").await.unwrap();
         let report = j.undo(1).await.unwrap();
-        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.undone_entries, 0);
+        // 部分失败的 entry 整体回推账本（含已恢复的文件），可整体重试
         // f1 恢复成功，f2 冲突
         assert_eq!(report.restored_files.len(), 1);
         assert!(report.restored_files.contains(&f1));

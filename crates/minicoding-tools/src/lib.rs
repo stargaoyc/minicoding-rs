@@ -35,6 +35,7 @@ mod memory;
 mod plan;
 mod shell;
 mod task;
+mod ui;
 mod util;
 mod worktree;
 
@@ -59,6 +60,7 @@ pub use task::{
     InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskSpawn, TaskStore, TaskUpdate,
     register_spawn_tool, register_task_tools,
 };
+pub use ui::{UiAsk, register_ui_tools};
 pub use util::{ensure_dir, resolve_path, truncate_output};
 pub use worktree::WorktreeSubagentRunner;
 

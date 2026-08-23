@@ -11,6 +11,7 @@ pub mod credential;
 pub mod ndjson;
 pub mod retry;
 pub mod sse;
+pub(crate) mod stream_runner;
 
 pub use credential::CredentialResolver;
 pub use ndjson::NdjsonStream;

@@ -491,7 +491,6 @@ token budget 与 §3.4 的预算分配独立——post-compact 重注入占用 h
 ### 4.1 Tool trait
 
 ```rust
-#[trait_variant::make(Tool: Send)]
 pub trait Tool {
     /// 唯一名（如 "fs.read"）
     fn name(&self) -> &str;
@@ -1841,10 +1840,9 @@ pub enum FileChange {
 
 ### 17.4 接口
 
-> 权威定义见 `api.md` §3.11（含 `#[trait_variant::make(Journal: Send)]`）。本节仅展示核心签名与冲突检测语义。
+> 权威定义见 `api.md` §3.11。本节仅展示核心签名与冲突检测语义。
 
 ```rust
-#[trait_variant::make(Journal: Send)]
 pub trait Journal {
     /// 记录一次 turn 的文件改动（fs.write/edit/delete 成功后调用）。
     async fn record(&self, entry: ChangeEntry) -> Result<(), JournalError>;
@@ -2640,6 +2638,16 @@ pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Com
 ---
 
 ## 24. 前后端协议与多前端接入
+
+### 24.x 会话并发语义（P7，2026-08 补录）
+
+- **同会话并发 `POST /sessions/{id}/messages`**：`Runtime` 以 `turn_active` 原子标记
+  + guard（drop 复位）保证单飞行 turn——第二个发送方在 guard 存续期间收到
+  `RuntimeError::TurnInProgress`（HTTP 映射 409），不排队不静默丢弃；
+- **`cancel()` 竞态**：取消经 CancellationToken 广播，turn 在下一个检查点
+  （流式 chunk / 工具边界）退出；`StepEnded` 缺失即中断点定位（M-06）；
+- **多客户端订阅同一 SSE 流**：广播语义，各自独立 cursor；重放走
+  Last-Event-ID 三级回退（§25.5）。
 
 §1 的 Runtime 是单进程内聚合根，CLI/TUI/SDK 直接持有 `Arc<Runtime>` 调用方法。但当需要"远程前端"（如浏览器、移动端、IDE 插件通过 HTTP 接入）或"嵌入式前端"（如 Zed 编辑器通过 ACP 协议嵌入、VS Code/Neovim 通过 LSP 协议嵌入）时，进程内调用不够。本节定义前后端协议，使 Runtime 可被多前端共享。
 

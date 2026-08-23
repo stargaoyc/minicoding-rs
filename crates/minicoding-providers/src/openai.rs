@@ -4,7 +4,7 @@
 //! 协议解析响应，转换为 [`Delta`]。HTTP 状态码映射到 [`LlmError`]：
 //! 429 → `RateLimited`（携带 `Retry-After`），5xx → `Server`，其它 4xx → `Client`。
 
-use futures::stream::{self, StreamExt};
+use futures::StreamExt;
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
@@ -81,7 +81,12 @@ impl OpenAiProvider {
     ) -> Result<Self, LlmError> {
         let model_str = model.into();
         let tokenizer = TiktokenTokenizer::new_for_model(&model_str).map_err(LlmError::Parse)?;
+        // 读超时：此前未设任何超时——服务端建立连接
+        // 后停止发送数据会导致消费端永久挂起（RetryProvider 的超时仅覆盖建立
+        // 阶段）。取宽裕值 300s：容忍推理模型静默思考期；空闲超过即判死。
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         let resolver = crate::common::CredentialResolver::from_env();
@@ -204,38 +209,27 @@ impl LlmProvider for OpenAiProvider {
 
             debug!(target: "minicoding::provider::openai", model = %self.model, url = %url, "POST chat/completions stream");
 
-            let resp = self
+            // 发送/状态检查/行解码统一走 common::stream_runner；
+            // `[DONE]` 哨兵是 OpenAI 特有语义，保留在 provider 侧过滤。
+            let request = self
                 .client
                 .post(&url)
                 .headers(self.auth_headers()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::Network(e.to_string()))?;
+                .json(&body);
+            let resp =
+                crate::common::stream_runner::send_and_check(request, |status, body, headers| {
+                    map_status_error(status, body, retry_after_ms(headers))
+                })
+                .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let retry_after_ms = retry_after_ms(resp.headers());
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(map_status_error(status.as_u16(), body_text, retry_after_ms));
-            }
-
-            // SSE 解析复用 common::sse，data payload 为字符串，此处再解析为 JSON。
-            // `[DONE]` 是 OpenAI 流结束哨兵（Anthropic 用 message_stop 事件，无此哨兵）。
-            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束，使 `Runtime::run_turn` future
-            // 是 `Send`（axum handler / `tokio::spawn` 需要）。
+            // SSE data payload：先滤 `[DONE]` 哨兵（OpenAI 特有），其余交共享管道解析
             let sse = crate::common::sse::from_response(resp);
-            let delta_stream = sse.flat_map(|ev| {
-                let items: Vec<Result<Delta, LlmError>> = match ev {
-                    Ok(data) if data == "[DONE]" => vec![],
-                    Ok(data) => match serde_json::from_str::<Value>(&data) {
-                        Ok(json) => parse_chunk(&json).into_iter().map(Ok).collect(),
-                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                    },
-                    Err(e) => vec![Err(e)],
-                };
-                stream::iter(items)
+            let filtered = sse.filter(|ev| {
+                let keep = !matches!(ev, Ok(data) if data == "[DONE]");
+                std::future::ready(keep)
             });
+            let delta_stream =
+                crate::common::stream_runner::lines_to_deltas(Box::pin(filtered), parse_chunk);
 
             Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
@@ -301,7 +295,14 @@ fn message_to_openai(m: &Message) -> Value {
     json!({"role": role, "content": text})
 }
 
-/// 从 `ContentBlock` 列表提取文本（含 `ToolResult` 内容；忽略 `Image` 与冗余 `ToolUse`）。
+/// 不支持视觉的 provider 收到图片块时的占位文本（C-05：显式告知而非静默丢弃）。
+const IMAGE_OMITTED_PLACEHOLDER: &str = "[image omitted: 当前模型通道不支持图片输入]";
+
+/// 从 `ContentBlock` 列表提取文本（含 `ToolResult` 内容；忽略冗余 `ToolUse`）。
+///
+/// `Image` 块替换为占位文本而非静默丢弃：静默丢弃
+/// 会让 LLM 看到的对话凭空少一块内容且无任何提示，模型可能对"未提供的图"
+/// 产生幻觉应答。
 fn extract_text(blocks: &[ContentBlock]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
@@ -310,7 +311,10 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
             ContentBlock::ToolResult { content, .. } => {
                 parts.push(tool_content_to_string(content));
             }
-            ContentBlock::ToolUse(_) | ContentBlock::Image { .. } => {}
+            ContentBlock::Image { .. } => {
+                parts.push(IMAGE_OMITTED_PLACEHOLDER.to_string());
+            }
+            ContentBlock::ToolUse(_) => {}
         }
     }
     parts.join("\n")

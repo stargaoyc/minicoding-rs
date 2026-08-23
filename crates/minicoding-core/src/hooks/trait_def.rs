@@ -1,5 +1,9 @@
 //! `Hook` trait + `HookRegistry` trait + 事件/输入输出 DTO。
 
+//! **已知豁免**：本模块手写 glob 匹配（`glob_match`），与 AGENTS.md §3.6
+//! "不自研 glob" 条目偏离——原因见 `docs/modules.md` §hooks（core 不引
+//! globset 重依赖），属已记录的架构决策而非遗漏。
+
 use crate::model::{SideEffect, ToolCall};
 use crate::provider::BoxFuture;
 use camino::Utf8PathBuf;

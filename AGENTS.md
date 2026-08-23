@@ -72,7 +72,7 @@ minicoding-rs (workspace)
 ### 2.1 edition 与 MSRV
 
 - `edition = "2024"`，`rust-version = "1.99"`
-- `async fn in trait` 直接用；trait 需作 `dyn` 对象时用 `#[trait_variant::make(Trait: Send)]` 生成 Send 变体（Runtime 需 `Arc<dyn Trait>`）
+- `async fn in trait` 直接用；trait 需作 `dyn` 对象时手写 `Pin<Box<dyn Future + Send>>` 返回类型（BoxFuture/BoxStream，见 `minicoding-core` `provider/trait.rs` 头注）——不引入 `trait-variant` 宏（曾评估、未采用），也不引入 `async-trait`（已废弃路径）
 - 不引入 `async-trait`（已废弃路径）
 
 ### 2.2 命名
@@ -230,8 +230,8 @@ windows = { version = "...", features = ["..."] }
 
 | 能力 | 选型 | 禁止自研 |
 |------|------|---------|
-| 沙箱统一 API | `sandbox-run` | 不自研 seatbelt profile + landlock ruleset 胶水 |
-| Linux 文件沙箱 | `landlock`（由 sandbox-run 调用） | 不裸调 syscall |
+| 沙箱统一 API | 自研驱动（landlock 已接，seccomp 待接入）——原选 sandbox-run 因 EUPL-1.2 弃用，见 tech-stack.md §13 |
+| Linux 文件沙箱 | `landlock`（直接调用，自研 pre_exec 胶水） | 不手写 BPF |
 | Linux syscall 过滤 | `libseccomp` | 不手写 BPF |
 | MCP client/server | `rmcp` 2.2 | 不自实现 stdio/http 薄封装 |
 | HTTP | `reqwest` | 不裸用 hyper |
@@ -253,7 +253,7 @@ windows = { version = "...", features = ["..."] }
 ### 3.8 配置
 
 - 统一 `RuntimeConfig`（core 定义）
-- 分层加载优先级：`MINICODING_HOME` > project > user > 默认
+- 加载优先级：CLI 参数 > 环境变量 > `MINICODING_HOME/config.toml` > 内置默认；project 级分层加载未实现（规划项，见 `docs/roadmap.md`）
 - 路径约定：`~/.minicoding/`（见 `docs/modules.md` §1.2 `paths.rs`）
 - profiles 支持切换（如 `default`/`strict`/`danger`）
 
@@ -440,7 +440,7 @@ windows = { version = "...", features = ["..."] }
 
 ### 7.4 解释决策
 
-- 选择方案时说明 **why**（为什么用 `sandbox-run` 而非自研、为什么 trait 定义在 core、为什么用 `Utf8PathBuf`）
+- 选择方案时说明 **why**（为什么沙箱驱动自研而非用弃用的 sandbox-run、为什么 trait 定义在 core、为什么用 `Utf8PathBuf`）
 - 不只贴代码不解释
 - 关键设计决策参考 `docs/tech-stack.md` §13 与 `docs/modules.md` §0.3 的权衡记录
 
@@ -480,7 +480,7 @@ windows = { version = "...", features = ["..."] }
 | 框架 | React + React Compiler | 19.2 |
 | 语言 | TypeScript | 7.0 |
 | 构建 | Vite (Rolldown) | 8.1 |
-| 路由 | TanStack Router | 1.170 |
+| 路由 | TanStack Router | 1.170（**未采用**，单页状态切换；引入前需修订本表）|
 | 数据获取 | TanStack Query | 5.101 |
 | 客户端状态 | Zustand | 5.0 |
 | Schema 校验 | Zod | 4.4 |
@@ -569,7 +569,7 @@ minicoding-web/src/
 - [ ] 新 crate 职责单一（见 `docs/modules.md`）？
 - [ ] trait 定义在 core，实现在领域 crate（见 §3.3）？
 - [ ] 重依赖在对应 crate 隔离（feature gate / target cfg，见 §3.5）？
-- [ ] 沙箱用 `sandbox-run`（不自研，见 §3.6）？MCP 用 `rmcp` 2.2（不自研）？
+- [ ] MCP 用 `rmcp` 2.2（不自研）？HTTP 用 `reqwest`（不自研）？
 - [ ] 公共 API 有 doc comment（`///`）？
 - [ ] 错误用 `thiserror`（库）/ `anyhow`（边界）？不 panic？
 - [ ] 不 `unsafe`（除非 FFI + `// SAFETY:` 注释 + review）？

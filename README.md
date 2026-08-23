@@ -6,6 +6,11 @@
 
 ---
 
+> **定位**：与 Claude Code / Codex CLI / dsh 同类的终端 AI Coding 助手，差异化在——
+> OS 级沙箱一等公民（Landlock/Seatbelt/Job Object 三平台原生）、事件溯源存储
+> （JSONL + snapshot + 契约测试）、多前端同核（CLI/TUI/Web/Desktop 共享一个
+> Runtime）、全链路可审计（权限决策/压缩/回滚均落 audit.log）。
+
 ## 1. 项目目标
 
 | 维度 | 目标 |

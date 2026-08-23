@@ -20,7 +20,7 @@ impl FsGrep {
     pub fn new() -> Self {
         let schema = ToolSchema {
             name: "fs.grep".to_string(),
-            description: "按正则搜索文件内容（尊重 .gitignore），返回 file:line:content 匹配行。"
+            description: "按正则搜索文件内容（尊重 .gitignore），返回 file:line:content 匹配行；支持上下文行与匹配数上限。"
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -36,6 +36,16 @@ impl FsGrep {
                     "include": {
                         "type": "string",
                         "description": "文件名 glob 过滤（如 \"*.rs\"），仅搜索匹配文件。"
+                    },
+                    "context": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "每个匹配行前后各附带的上下文行数（默认 0，类似 grep -C）。"
+                    },
+                    "head_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "最多返回的匹配行数（超出截断，防止大仓库输出爆炸；默认无限制，仍受全局字节上限约束）。"
                     }
                 },
                 "required": ["pattern"]
@@ -56,6 +66,19 @@ struct GrepInput {
     pattern: String,
     path: Option<String>,
     include: Option<String>,
+    #[serde(default)]
+    context: usize,
+    head_limit: Option<usize>,
+}
+
+/// 截断输出并包装为成功结果（walker 循环内提前返回与正常收尾共用）。
+fn finish(out: String, max_output_bytes: usize) -> ToolResult {
+    let (text, truncated) = truncate_output(out, max_output_bytes);
+    let bytes = text.len();
+    let mut result = ToolResult::ok_text(text);
+    result.metadata.truncated = truncated;
+    result.metadata.bytes = bytes;
+    result
 }
 
 impl Tool for FsGrep {
@@ -71,6 +94,9 @@ impl Tool for FsGrep {
         SideEffect::None
     }
 
+    // context/head_limit 分支使函数体略超 100 行；拆分反而打断
+    // "解析→遍历→格式化"的线性可读性。
+    #[allow(clippy::too_many_lines)]
     fn execute(
         &self,
         input: serde_json::Value,
@@ -101,6 +127,9 @@ impl Tool for FsGrep {
             ensure_dir(&base).await?;
 
             let mut out = String::new();
+            let ctx_lines = args.context;
+            let head_limit = args.head_limit;
+            let mut matches_emitted = 0usize;
             let walker = ignore::WalkBuilder::new(&base).build();
             for entry in walker {
                 let entry =
@@ -127,19 +156,59 @@ impl Tool for FsGrep {
                 let Ok(content) = tokio::fs::read_to_string(entry.path()).await else {
                     continue;
                 };
-                for (i, line) in content.lines().enumerate() {
-                    if re.is_match(line) {
-                        let _ = writeln!(out, "{rel}:{}:{}", i + 1, line);
+
+                if ctx_lines == 0 {
+                    for (i, line) in content.lines().enumerate() {
+                        if re.is_match(line) {
+                            match head_limit {
+                                Some(limit) if matches_emitted >= limit => {
+                                    return Ok(finish(out, max_output_bytes));
+                                }
+                                _ => {}
+                            }
+                            let _ = writeln!(out, "{rel}:{}:{}", i + 1, line);
+                            matches_emitted += 1;
+                        }
+                    }
+                } else {
+                    // 带上下文行（grep -C 语义）：收集命中行号 → 合并区间 → 输出
+                    // 命中行 + 前后各 ctx 行，区间间以 `--` 分隔（同文件内）。
+                    let lines: Vec<&str> = content.lines().collect();
+                    let mut ranges: Vec<(usize, usize)> = Vec::new();
+                    for (i, line) in lines.iter().enumerate() {
+                        if re.is_match(line) {
+                            let start = i.saturating_sub(ctx_lines);
+                            let end = (i + ctx_lines).min(lines.len().saturating_sub(1));
+                            if let Some(last) = ranges.last_mut()
+                                && start <= last.1.saturating_add(1)
+                            {
+                                last.1 = last.1.max(end);
+                            } else {
+                                ranges.push((start, end));
+                            }
+                        }
+                    }
+                    'outer: for (start, end) in ranges {
+                        for (i, line) in lines.iter().enumerate().skip(start).take(end - start + 1)
+                        {
+                            match head_limit {
+                                Some(limit) if matches_emitted >= limit => break 'outer,
+                                _ => {}
+                            }
+                            let marker = if re.is_match(line) { ':' } else { '-' };
+                            let _ = writeln!(out, "{rel}:{}{marker}{}", i + 1, line);
+                            if marker == ':' {
+                                matches_emitted += 1;
+                            }
+                        }
+                        if end < lines.len().saturating_sub(1) {
+                            let _ = writeln!(out, "--");
+                        }
                     }
                 }
             }
 
-            let (text, truncated) = truncate_output(out, max_output_bytes);
-            let bytes = text.len();
-            let mut result = ToolResult::ok_text(text);
-            result.metadata.truncated = truncated;
-            result.metadata.bytes = bytes;
-            Ok(result)
+            Ok(finish(out, max_output_bytes))
         })
     }
 
@@ -322,6 +391,47 @@ mod tests {
             .await
             .expect("grep ok");
         assert!(text_of(&result).contains("a.txt:1:findme"));
+    }
+
+    #[tokio::test]
+    async fn grep_context_lines_included() {
+        let (tmp, workdir) = make_workdir();
+        std::fs::write(tmp.path().join("a.txt"), "l1\nl2\nHIT\nl4\nl5\n").expect("write");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsGrep::new();
+        let result = tool
+            .execute(json!({"pattern": "HIT", "path": ".", "context": 1}), &ctx)
+            .await
+            .expect("grep ok");
+        let text = text_of(&result);
+        // 命中行用 ':'，上下文行用 '-'（grep -C 惯例）
+        assert!(text.contains("a.txt:2-l2"));
+        assert!(text.contains("a.txt:3:HIT"));
+        assert!(text.contains("a.txt:4-l4"));
+        assert!(!text.contains("a.txt:1-"));
+        assert!(!text.contains("a.txt:5-"));
+    }
+
+    #[tokio::test]
+    async fn grep_head_limit_truncates_matches() {
+        let (tmp, workdir) = make_workdir();
+        std::fs::write(tmp.path().join("a.txt"), "m1\nm2\nm3\n").expect("write");
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = FsGrep::new();
+        let result = tool
+            .execute(
+                json!({"pattern": "m[0-9]", "path": ".", "head_limit": 2}),
+                &ctx,
+            )
+            .await
+            .expect("grep ok");
+        let text = text_of(&result);
+        assert!(text.contains("a.txt:1:m1"));
+        assert!(text.contains("a.txt:2:m2"));
+        assert!(
+            !text.contains("a.txt:3:m3"),
+            "超出 head_limit 的匹配应被截断"
+        );
     }
 
     #[test]

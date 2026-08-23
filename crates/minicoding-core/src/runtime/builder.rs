@@ -19,6 +19,7 @@ use crate::policy::{
 use crate::provider::LlmProvider;
 use crate::runtime::EventBus;
 use crate::runtime::Runtime;
+use crate::runtime::hot_config::HotReloadBaseline;
 use crate::sandbox::{NoopDriver, SandboxDriver, SandboxPolicy};
 use crate::storage::{
     AuditSink, EventStore, NoopAudit, NoopEventStore, NoopSnapshotStore, SnapshotStore, Storage,
@@ -420,6 +421,11 @@ impl RuntimeBuilder {
                 writable: Vec::new(),
             });
 
+        // 热更新基线：以组装完成的最终配置为快照（须在 self.config move 前捕获）——
+        // CLI flag/env 的显式覆盖已在此前叠加完毕，基线即"未被覆盖时的文件/默认链
+        // 值"。
+        let hot_reload_baseline = HotReloadBaseline::capture(&self.config);
+
         Ok(Runtime {
             provider,
             ctx,
@@ -429,6 +435,7 @@ impl RuntimeBuilder {
             config: std::sync::RwLock::new(self.config),
             config_path: self.config_path,
             last_non_whitelist_sig: std::sync::Mutex::new(None),
+            hot_reload_baseline,
             session,
             events: self.events,
             workdir: tokio::sync::RwLock::new(workdir),
@@ -470,6 +477,7 @@ impl RuntimeBuilder {
             event_seq: Arc::new(TokioMutex::new(1)),
             message_since_snapshot: AtomicU64::new(0),
             durable_seq: Arc::new(TokioMutex::new(0)),
+            turn_gate: TokioMutex::new(()),
         })
     }
 }

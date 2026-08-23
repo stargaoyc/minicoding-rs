@@ -18,11 +18,8 @@ use tokio::process::Command;
 /// 合并后输出字符上限（C-07 资源不可耗尽）。
 const MAX_OUTPUT_CHARS: usize = 10_000;
 
-/// 子进程 env 白名单（C-04 凭证不下传子进程）。
-///
-/// 仅传递基础环境变量；`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`*_KEY`/`*_TOKEN`/`*_SECRET`
-/// 等凭证变量绝不传递（`env_clear` 后只 `env` 插入白名单项）。
-const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM"];
+// 子进程 env 白名单（C-04）已上移 `minicoding_core::tool::SAFE_ENV_WHITELIST`
+// 单一事实来源。
 
 /// 执行 shell 命令的工具。
 pub struct ShellRun {
@@ -138,7 +135,7 @@ impl Tool for ShellRun {
                 });
             }
             // C-04：仅传递白名单 env，凭证变量绝不下传子进程。
-            for name in ENV_WHITELIST {
+            for name in minicoding_core::tool::SAFE_ENV_WHITELIST {
                 if let Ok(value) = std::env::var(name) {
                     command.env(name, value);
                 }
@@ -227,6 +224,11 @@ impl Tool for ShellRun {
                 combined.push_str(&stderr);
             }
 
+            // C-04：敏感模式脱敏——子进程输出中可能含 `.env` 泄露、
+            // API key 赋值等（fs.read 有文件名级脱敏，shell 是旁路，此处补齐）。
+            // 模式保守：仅匹配明确赋值/声明形态，避免误杀普通输出。
+            let combined = redact_secrets(&combined);
+
             // 流式上限截断标记（cap 触顶即视为截断）+ 显示层二次截断
             let stream_truncated = out_bytes.len() >= cap || err_bytes.len() >= cap;
             let (text, truncated) = {
@@ -299,6 +301,49 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: &mut R, cap: usize) -> 
         }
     }
     buf
+}
+
+/// C-04：shell 输出中的常见凭证赋值形态脱敏（替换为 `***`）。
+///
+/// 匹配 `KEY=value` 形式且 KEY 含敏感关键词（`PASSWORD`/`SECRET`/`TOKEN`/`API_KEY`/`PRIVATE_KEY`）。
+/// 或 value 以知名 key 前缀开头（sk-/ghp_/AKIA）。保守策略：
+/// 仅处理行首赋值或 JSON 字段，不碰普通文本。
+fn redact_secrets(text: &str) -> String {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "private_key",
+        "access_key",
+    ];
+    const KEY_PREFIXES: &[&str] = &["sk-", "ghp_", "github_pat_", "AKIA", "xoxb-"];
+
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_sensitive_assignment = SENSITIVE_KEYS.iter().any(|k| {
+            (lower.starts_with(k)
+                || lower.contains(&format!("\"{k}\""))
+                || lower.contains(&format!("'{k}'")))
+                && (trimmed.contains('=') || trimmed.contains(':'))
+        });
+        let has_known_prefix = KEY_PREFIXES.iter().any(|prefix| trimmed.contains(prefix));
+
+        if is_sensitive_assignment || has_known_prefix {
+            out.push_str("[REDACTED]");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // 原文无尾部换行则不补
+    if !text.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -574,5 +619,19 @@ mod tests {
         let (result, truncated) = truncate_chars(String::new(), 10);
         assert_eq!(result, "");
         assert!(!truncated);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_output_redacts_api_keys() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        let result = tool
+            .execute(json!({"command": "echo sk-test-key-12345"}), &ctx)
+            .await
+            .expect("run ok");
+        let text = text_of(&result);
+        assert!(text.contains("[REDACTED]"), "API key 应被脱敏: {text}");
+        assert!(!text.contains("sk-test-key-12345"), "原始 key 不应出现");
     }
 }

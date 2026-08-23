@@ -35,7 +35,7 @@
 | L-02 | Anthropic | `/v1/messages` 事件流 + system 分离 | M6 | 已实现 |
 | L-03 | Ollama（本地模型） | `/api/chat` NDJSON | M6 | 已实现 |
 | L-04 | 流式增量解析 | 文本 + 工具调用分片聚合 | M1 | 已实现 |
-| L-05 | 重试与限流 | 指数退避、429 Retry-After | M6 | 已实现 |
+| L-05 | 重试与限流 | 指数退避（±20% 抖动防 thundering herd）、429 Retry-After、Client 读超时 300s 防停发挂起 | M6 | 已实现 |
 | L-06 | 模型路由（Router） | `Router` trait + `StaticRouter` 骨架（`core::provider::router`），按任务类型选模型；M6 交付骨架，M7+ 实现按 `Task::kind` 路由 | M6 | 已实现（骨架） |
 | L-07 | 多模态（Vision） | 图片输入 | M6 | 已实现 |
 | L-08 | 独立小 LLM | 为摘要/compact/memory 提取配置独立 provider（`[provider.small]`），未设置时与主 provider 相同，可配更便宜模型降本（见 `design.md` §3.8、`modules.md` §10.3） | M3 | 已实现 |
@@ -56,7 +56,8 @@
 | T-08 | `shell.run` | 执行命令（超时+截断+SandboxDriver） | Command | M2 | 已实现 |
 | T-08b | `shell.background` | 启动后台命令，返回 shell_id（参考 CC） | Command | M8 | 已实现 |
 | T-08c | `shell.output` | 读取后台命令累积输出（非阻塞） | None | M8 | 已实现 |
-| T-08d | `shell.kill` | 终止后台命令 | Command | M8 | 已实现 |
+| T-08d | `shell.kill` | 终止后台命令（killpg 整树 + start_kill；信号终止记退出码 -1） | Command | M8 | 已实现 |
+| T-12a | `ui.ask` | LLM 主动二值提问（经 PermissionPrompter 点对点 + PermissionRequested/Resolved 事件广播；多选项为后续项） | None | M8+ | 已实现（v1） |
 | T-09 | `web.fetch` | URL→Markdown，SSRF 防护（拒绝私有/loopback IP） | Network | M8 | 已实现 |
 | T-10 | `web.search` | 网页搜索（DuckDuckGo HTML，无需 API key） | Network | M8 | 已实现 |
 | T-11 | `git.diff` | 查看 diff（只读，路径沙箱） | None | M8 | 已实现 |
@@ -297,7 +298,7 @@
 |------|:---:|
 | Agent 运行时 | 16 |
 | LLM Provider | 9 |
-| 工具系统 | 24 |
+| 工具系统 | 25 |
 | 上下文管理 | 10 |
 | 记忆 | 8 |
 | 权限与安全 | 28 |
@@ -311,7 +312,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 20 |
-| **合计** | **203** |
+| **合计** | **204** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 38 项；M3–M5 扩展与安全约 55 项；M6–M8 高级形态约 55 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 

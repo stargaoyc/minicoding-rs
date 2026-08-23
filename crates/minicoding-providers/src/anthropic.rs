@@ -13,7 +13,6 @@
 //! HTTP 状态码映射同 `OpenAI`：429 → `RateLimited`（携带 `Retry-After`），5xx → `Server`，
 //! 其它 4xx → `Client`。重试由 `RetryProvider` 装饰。
 
-use futures::stream::{self, StreamExt};
 use minicoding_core::model::{ContentBlock, LlmError, Message, Role, StopReason, ToolContent};
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer, ToolCallDelta,
@@ -84,7 +83,12 @@ impl AnthropicProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Result<Self, LlmError> {
+        // 读超时：此前未设任何超时——服务端建立连接
+        // 后停止发送数据会导致消费端永久挂起（RetryProvider 的超时仅覆盖建立
+        // 阶段）。取宽裕值 300s：容忍推理模型静默思考期；空闲超过即判死。
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
         let resolver = crate::common::CredentialResolver::from_env();
@@ -204,35 +208,22 @@ impl LlmProvider for AnthropicProvider {
                 model = %self.model, url = %url, "POST v1/messages stream"
             );
 
-            let resp = self
+            // 发送/状态检查/行解码统一走 common::stream_runner
+            let request = self
                 .client
                 .post(&url)
                 .headers(self.auth_headers()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| LlmError::Network(e.to_string()))?;
+                .json(&body);
+            let resp =
+                crate::common::stream_runner::send_and_check(request, |status, body, headers| {
+                    map_status_error(status, body, retry_after_ms(headers))
+                })
+                .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let retry_after_ms = retry_after_ms(resp.headers());
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(map_status_error(status.as_u16(), body_text, retry_after_ms));
-            }
-
-            // SSE 解析复用 common::sse，data payload 为字符串，此处解析 JSON 后按 `type` 分派。
-            // `Box::pin`（非 `.boxed()`）保留 `Send` 约束（见 openai.rs 同样注释）。
+            // SSE data payload 按 `type` 分派（message_stop 等在 parse_event 内处理）
             let sse = crate::common::sse::from_response(resp);
-            let delta_stream = sse.flat_map(|ev| {
-                let items: Vec<Result<Delta, LlmError>> = match ev {
-                    Ok(data) => match serde_json::from_str::<Value>(&data) {
-                        Ok(json) => parse_event(&json).into_iter().map(Ok).collect(),
-                        Err(e) => vec![Err(LlmError::Parse(e.to_string()))],
-                    },
-                    Err(e) => vec![Err(e)],
-                };
-                stream::iter(items)
-            });
+            let delta_stream =
+                crate::common::stream_runner::lines_to_deltas(Box::pin(sse), parse_event);
 
             Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
@@ -494,20 +485,50 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
-/// 近似分词器（Anthropic 未公开分词器，按 4 字符 ≈ 1 token 估算，`design.md` §4.4）。
+/// 近似分词器（Anthropic 未公开分词器，`design.md` §4.4）。
+///
+/// 估算策略：CJK 字符按 **1 token/字** 计权
+/// （Claude 分词器对汉字实测约 1~1.5 token/字），其余字符按 4 字符 ≈ 1 token。
+/// 此前统一 `chars / 4` 对中文低估约 4 倍，导致压缩预算判定显著滞后、长中文
+/// 会话在真实超限后才触发压缩。
 #[derive(Debug, Default)]
 pub struct ApproxTokenizer;
 
+impl ApproxTokenizer {
+    /// 单文本估算：CJK 字符逐字计 1 token，其余字符 4 字符 ≈ 1 token。
+    fn count_str(text: &str) -> usize {
+        let cjk = text.chars().filter(|c| is_cjk_char(*c)).count();
+        let other = text.chars().count() - cjk;
+        cjk + other.div_ceil(4)
+    }
+}
+
+/// 判断字符是否为 CJK（中日韩表意文字/假名/谚文/CJK 标点/全角形式）。
+///
+/// 覆盖常用区间即可——token 估算用途，不追求 Unicode 全集；
+/// std 无 `char::is_cjk`，手写区间避免引入 `unicode-script` 类重依赖。
+fn is_cjk_char(c: char) -> bool {
+    matches!(c as u32,
+        0x3000..=0x303F     // CJK 符号与标点
+        | 0x3040..=0x30FF   // 平假名/片假名
+        | 0x3400..=0x4DBF   // 表意文字扩展 A
+        | 0x4E00..=0x9FFF   // CJK 统一表意文字基本区
+        | 0xAC00..=0xD7AF   // 谚文音节
+        | 0xF900..=0xFAFF   // CJK 兼容表意文字
+        | 0xFF00..=0xFFEF   // 全角形式
+        | 0x20000..=0x2FA1F // 表意文字扩展 B–F
+    )
+}
+
 impl Tokenizer for ApproxTokenizer {
     fn count(&self, text: &str) -> usize {
-        // 4 字符 ≈ 1 token（英文经验值；中文偏低估但不影响熔断判定）
-        text.chars().count().div_ceil(4)
+        Self::count_str(text)
     }
     fn count_messages(&self, msgs: &[Message]) -> usize {
         msgs.iter()
             .map(|m| {
                 // 每条消息加 4 token overhead（角色标记等），与 tiktoken 习惯对齐
-                4 + extract_text(&m.content).chars().count().div_ceil(4)
+                4 + Self::count_str(&extract_text(&m.content))
             })
             .sum()
     }
@@ -1385,6 +1406,18 @@ mod tests {
         let n = tok.count_messages(&[Message::user_text("abcdefgh")]);
         // 8 字符 / 4 = 2 token + 4 overhead = 6
         assert_eq!(n, 6);
+    }
+
+    #[test]
+    fn approx_tokenizer_cjk_weighting() {
+        let tok = ApproxTokenizer;
+        // CJK 每字 1 token：4 个汉字 = 4 token（此前 chars/4 仅算 1，低估 4 倍）
+        assert_eq!(tok.count("你好世界"), 4);
+        // 混合文本：2 CJK + 8 ASCII → 2 + ceil(8/4) = 4
+        assert_eq!(tok.count("你好abcdefgh"), 4);
+        // count_messages 同口径
+        let n = tok.count_messages(&[Message::user_text("你好世界")]);
+        assert_eq!(n, 4 + 4);
     }
 
     // --- provider 基本方法 ---

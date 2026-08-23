@@ -22,7 +22,7 @@ use camino::Utf8PathBuf;
 use minicoding_core::model::{Message, Role, SessionId};
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
-use minicoding_core::storage::{SessionMeta, Storage, StorageError};
+use minicoding_core::storage::{SessionListItem, Storage, StorageError};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
@@ -92,7 +92,7 @@ impl JsonlStorage {
     ///
     /// # Errors
     /// 索引文件读取失败或目录扫描失败时返回错误。
-    pub fn list_sessions_sync(&self) -> Result<Vec<SessionMeta>, StorageError> {
+    pub fn list_sessions_sync(&self) -> Result<Vec<SessionListItem>, StorageError> {
         // 1. 尝试缓存
         {
             let guard = self.lock_index();
@@ -268,7 +268,7 @@ impl JsonlStorage {
         }
         let first = &messages[0];
         let last = &messages[messages.len() - 1];
-        let meta = SessionMeta {
+        let meta = SessionListItem {
             id: id.clone(),
             created_at: first.created_at,
             message_count: messages.len(),
@@ -609,7 +609,7 @@ impl Storage for JsonlStorage {
         })
     }
 
-    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionMeta>, StorageError>> {
+    fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionListItem>, StorageError>> {
         Box::pin(async move {
             // 1. 尝试缓存（短锁，不跨 await）
             {
@@ -1108,7 +1108,7 @@ mod tests {
         // 从索引读取并验证摘要已更新
         let metas = st.list_sessions_sync().unwrap();
         assert_eq!(metas.len(), 1);
-        // SessionMeta 没有 summary 字段，但索引内部应有；通过重新构建索引验证
+        // SessionListItem 没有 summary 字段，但索引内部应有；通过重新构建索引验证
         // 删除索引缓存 + 文件，强制重新扫描
         let _ = tokio::fs::remove_file(st.index_path()).await;
         {

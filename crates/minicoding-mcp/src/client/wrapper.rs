@@ -189,6 +189,8 @@ mod tests {
             sandbox_driver: None,
             sandbox_policy: None,
             journal: None,
+            prompter: None,
+            events: None,
         }
     }
 

@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::model::{Message, SessionId};
-use crate::storage::{SessionMeta, Storage};
+use crate::storage::{SessionListItem, Storage};
 
 use futures::StreamExt;
 use futures::stream;
@@ -88,7 +88,7 @@ pub async fn update_summary_visible_in_list(s: &dyn Storage) {
     s.update_summary(&sid, "会话摘要内容")
         .await
         .expect("update_summary");
-    let metas: Vec<SessionMeta> = s.list_sessions().await.expect("list_sessions");
+    let metas: Vec<SessionListItem> = s.list_sessions().await.expect("list_sessions");
     let meta = metas
         .iter()
         .find(|m| m.id == sid)
