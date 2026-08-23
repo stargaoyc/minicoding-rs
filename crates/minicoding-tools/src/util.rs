@@ -253,21 +253,25 @@ pub fn assert_within_workdir(
         .unwrap_or_else(|_| workdir.clone());
     let cand = candidate.canonicalize_utf8().or_else(|_| {
         // 目标不存在：对最长存在祖先规范化后拼回剩余段
-        let mut anc = candidate.clone();
+        let mut ancestor = candidate.clone();
         let mut suffix = Vec::new();
         loop {
-            anc = anc.parent().map(Utf8PathBuf::from).unwrap_or(anc.clone());
+            ancestor = ancestor
+                .parent()
+                .map(Utf8PathBuf::from)
+                .unwrap_or(ancestor.clone());
             suffix.push(
                 candidate
-                    .strip_prefix(&anc)
+                    .strip_prefix(&ancestor)
                     .map(std::string::ToString::to_string)
                     .unwrap_or_default(),
             );
-            if anc.canonicalize_utf8().is_ok() || anc.parent().is_none() {
+            if ancestor.canonicalize_utf8().is_ok() || ancestor.parent().is_none() {
                 break;
             }
         }
-        anc.canonicalize_utf8()
+        ancestor
+            .canonicalize_utf8()
             .map(|canon| suffix.iter().rev().fold(canon, |acc, seg| acc.join(seg)))
             .map_err(|e| ToolError::Exec(format!("path normalize failed: {e}")))
     })?;
