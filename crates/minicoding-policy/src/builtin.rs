@@ -307,10 +307,14 @@ fn tokenize_command(cmd: &str) -> Vec<String> {
 }
 
 /// S5：路径是否位于 VCS 元数据目录内（.git/.hg/.svn 任一组件）。
+///
+/// 组件比较做大小写折叠（2026-08-23 审查 §9-P1：大小写不敏感 FS 上
+/// `.GIT/hooks/pre-commit` 此前可绕过）。
 fn in_vcs_metadata(path: &str) -> bool {
-    Utf8Path::new(path)
-        .components()
-        .any(|c| matches!(c.as_str(), ".git" | ".hg" | ".svn"))
+    Utf8Path::new(path).components().any(|c| {
+        let lower = c.as_str().to_ascii_lowercase();
+        matches!(lower.as_str(), ".git" | ".hg" | ".svn")
+    })
 }
 
 /// 文件写入类工具的权限判定。
@@ -362,7 +366,15 @@ fn check_file_write(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdi
 /// 判定路径是否指向项目约束文件（`AGENTS.md`/`CLAUDE.md`）。
 fn targets_project_doc(path: &str) -> bool {
     match Utf8Path::new(path).file_name() {
-        Some(name) => name == "AGENTS.md" || name == "CLAUDE.md",
+        // C-23 保护面（2026-08-23 审查 §9-P1）：与 memory crate 的 ProjectDocLoader
+        // 实际读取的文件名集合同步（AGENTS.override.md 为 AGENTS.md 加载器的
+        // override 变体，.cursorrules/.claude 为 fallback）。文件名比较做大小写
+        // 折叠——macOS APFS/Windows NTFS 大小写不敏感，`.GIT`/`agents.md` 变体
+        // 此前可绕过黑名单在 AcceptEdits 下免弹窗写入。
+        Some(name) => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "agents.md" | "agents.override.md" | "claude.md" | ".cursorrules" | ".clinerules"
+        ),
         None => false,
     }
 }
@@ -1205,7 +1217,10 @@ mod tests {
     #[test]
     fn targets_project_doc_rejects_other_files() {
         assert!(!targets_project_doc("README.md"));
-        assert!(!targets_project_doc("agents.md")); // 大小写敏感
+        assert!(
+            targets_project_doc("agents.md"),
+            "大小写不敏感 FS 上变体必须拦截"
+        ); // 大小写敏感
         assert!(!targets_project_doc("AGENTS.txt"));
         assert!(!targets_project_doc("src/main.rs"));
     }

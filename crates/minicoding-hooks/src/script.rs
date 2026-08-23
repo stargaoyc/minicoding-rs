@@ -94,6 +94,21 @@ async fn run_script_hook(
     input: HookInput,
 ) -> Result<HookOutput, HookError> {
     // 1. 展开 ${TOOL_INPUT_<KEY>} 占位符（经 shell 转义防注入）。
+    //
+    // Windows 禁用占位符展开（2026-08-23 审查 §9-P1 命令注入修复）：`shell_escape`
+    // 是 POSIX 单引号方案，而 `cmd /C` 对单引号无任何特殊语义——`&`/`|`/`^` 保持
+    // 活动字符，LLM 可控参数（如 `path = "\" & calc & echo \""`）直接拼接执行。
+    // 完整输入已通过 stdin JSON 下发（步骤 5），脚本应从 stdin 取参而非命令行；
+    // 模板中残留的占位符按字面传递（由脚本自行处理）。
+    #[cfg(windows)]
+    {
+        if command_template.contains("${TOOL_INPUT_") {
+            tracing::warn!(
+                hook = %name,
+                "hook template contains ${{TOOL_INPUT_*}} placeholders; expansion is disabled on                  Windows (cmd.exe does not honor POSIX quoting). Read input from stdin JSON instead."
+            );
+        }
+    }
     let expanded = expand_placeholders(command_template, &input);
 
     // 2. 构造子进程命令（Unix: sh -c，Windows: cmd /C）。

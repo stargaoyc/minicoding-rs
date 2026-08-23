@@ -95,11 +95,28 @@ pub fn seatbelt_available() -> bool {
 }
 
 /// 在子进程 `pre_exec` 内应用 Seatbelt 限制。
+/// Seatbelt profile 字符串转义（2026-08-23 审查 §9-P2）：workdir/writable 来自
+/// CLI/config，含 `"` 或 `)` 的路径可闭合 `(subpath "...")` 表达式注入新指令
+/// （如把任意目录加入可写白名单）。Seatbelt 无标准转义机制——含 `(`/`)` 的
+/// 路径直接拒绝（fail-closed），反斜杠/双引号转义。
+fn seatbelt_escape(path: &str) -> std::io::Result<String> {
+    for bad in ['(', ')'] {
+        if path.contains(bad) {
+            return Err(std::io::Error::other(format!(
+                "sandbox: 路径含 Seatbelt 元字符 `{bad}`，拒绝生成 profile: {path}"
+            )));
+        }
+    }
+    Ok(path.replace('"', "\\\""))
+}
 fn apply_seatbelt(
     policy: &SandboxPolicy,
     cmd: &mut std::process::Command,
 ) -> Result<(), SandboxError> {
-    let profile = build_profile(policy);
+    let profile = build_profile(policy).map_err(|e| {
+        tracing::error!(error = %e, "seatbelt profile 构建失败");
+        e
+    })?;
 
     // S26：tempfile 随机名 + 0600——消除 `/tmp` 可预测名的符号链接竞争窗口。
     // NamedTempFile 不 drop（disable_cleanup 等价：保留路径），由 pre_exec 内
@@ -169,7 +186,7 @@ fn apply_seatbelt(
 ///
 /// - `ReadOnly`：全盘只读，仅允许 exec 系统路径；
 /// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录保护。
-fn build_profile(policy: &SandboxPolicy) -> String {
+fn build_profile(policy: &SandboxPolicy) -> std::io::Result<String> {
     let mut p = String::new();
 
     // 基础：允许读、允许 exec 系统路径、允许必要系统操作。
@@ -191,16 +208,16 @@ fn build_profile(policy: &SandboxPolicy) -> String {
             // ReadOnly：不额外放行任何写路径（workdir 只读）
         }
         SandboxPolicy::WorkspaceWrite { workdir, writable } => {
-            // workdir 可写（使用 as_str() 直接引用路径）
+            // workdir 可写（路径经 seatbelt_escape 防元字符注入）
             p.push_str(&format!(
                 "(allow file-write* (subpath \"{}\"))\n",
-                workdir.as_str()
+                seatbelt_escape(workdir.as_str())?
             ));
             // 额外 writable 可写
             for w in writable {
                 p.push_str(&format!(
                     "(allow file-write* (subpath \"{}\"))\n",
-                    w.as_str()
+                    seatbelt_escape(w.as_str())?
                 ));
             }
             // VCS 目录写保护（deny 优先级高于 allow，确保 .git 等不可写）
@@ -208,7 +225,7 @@ fn build_profile(policy: &SandboxPolicy) -> String {
             for vcs in vcs_dirs {
                 p.push_str(&format!(
                     "(deny file-write* (subpath \"{}\"))\n",
-                    vcs.to_string_lossy()
+                    seatbelt_escape(&vcs.to_string_lossy())?
                 ));
             }
         }

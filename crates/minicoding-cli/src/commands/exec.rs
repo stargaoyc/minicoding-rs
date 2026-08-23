@@ -4,8 +4,8 @@
 //! 适用于 CI/脚本场景：`minicoding exec --sandbox read-only "读 README 并总结"`。
 //!
 //! 与默认单次模式（`minicoding "prompt"`）的区别：
-//! - 显式 `--sandbox` 指定沙箱策略（不依赖默认 `WorkspaceWrite`）；
-//! - 强制非交互（`NonInteractivePrompter`，副作用工具被拒绝，CI 安全默认）；
+//! - 默认沙箱 `read-only`（security.md §9.1），`--sandbox` 显式放宽；
+//! - 非交互：Ask 默认拒绝，`--auto-approve` 显式启用自动放行（§9-P0）；
 //! - 退出码语义与单次模式一致（0 成功 / 1 错误 / 130 中断）。
 
 use anyhow::{Context, Result};
@@ -50,9 +50,22 @@ impl SandboxArg {
 /// `exec` 子命令选项。
 #[derive(Args, Debug)]
 pub struct ExecCommand {
-    /// 沙箱策略（默认 `workspace-write`）。
-    #[arg(long, value_enum, default_value_t = SandboxArg::WorkspaceWrite)]
+    /// 沙箱策略（默认 `read-only`，与 security.md §9.1 一致——CI 中恶意仓库
+    /// AGENTS.md 注入 + workspace-write 是供应链攻击面；需要写权限时显式
+    /// `--sandbox workspace-write`。2026-08-23 审查 §9-P0）。
+    #[arg(long, value_enum, default_value_t = SandboxArg::ReadOnly)]
     pub sandbox: SandboxArg,
+
+    /// 自动批准所有 Ask 级权限请求（批量执行语义）。**缺省时一切 Ask 均拒绝**
+    /// （fail-closed：黑名单外的写操作在无人值守场景不应静默放行，
+    /// 2026-08-23 审查 §9-P0）。每次决策仍落 audit.log（C-01）。
+    #[arg(long)]
+    pub auto_approve: bool,
+
+    /// 显式确认 danger-full-access 的机器可脚本化等价物（C-22 二次确认）：
+    /// 非交互场景无法 stdin 读取 y/N，以此旗标替代人工确认；缺失时退出非零。
+    #[arg(long)]
+    pub i_understand_full_access: bool,
 
     /// 提问内容（必填，非交互）。
     #[arg(required = true)]
@@ -96,7 +109,15 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
 
     let sandbox_policy = cmd.sandbox.to_policy(workdir_path.clone());
 
-    // DangerFullAccess 需 red 警告 + 二次确认（C-22）
+    // C-22：danger-full-access 需 red 警告 + 二次确认。非交互场景以
+    // `--i-understand-full-access` 旗标作为确认等价物，缺失即拒绝执行
+    // （2026-08-23 审查 §9-P1：此前仅打印红字照常运行，无人值守零隔离）。
+    if matches!(cmd.sandbox, SandboxArg::DangerFullAccess) && !cmd.i_understand_full_access {
+        eprintln!(
+            "\x1b[31m错误: --sandbox danger-full-access 需同时传入 --i-understand-full-access 以确认放弃 OS 级隔离（C-22）。\x1b[0m"
+        );
+        return Ok(2);
+    }
     if matches!(cmd.sandbox, SandboxArg::DangerFullAccess) {
         eprintln!("\x1b[31m警告: --sandbox danger-full-access 已选定，不应用任何隔离。\x1b[0m");
         eprintln!("副作用工具（文件写、shell 执行）将不受 OS 沙箱约束。");
@@ -118,7 +139,11 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
         // exec 显式声明"批量执行"：非 TTY 下不再恒 Deny（否则 exec 形同虚设），
         // 改由 AutoApprovePrompter 自动放行；越界/黑名单仍被 BuiltinPolicy + 沙箱
         // 策略拦截（C-03/C-02），每次决策仍落 audit.log（C-01 实现层不被绕过）。
-        Some(Arc::new(AutoApprovePrompter::new())),
+        if cmd.auto_approve {
+            Some(Arc::new(AutoApprovePrompter::new()))
+        } else {
+            None // builder 非 TTY 默认 NonInteractivePrompter（恒 Deny，fail-closed）
+        },
     )
     .context("构建 Runtime 失败")?;
 

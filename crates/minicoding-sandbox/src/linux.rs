@@ -171,6 +171,23 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
         ))
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
 
+    // HOME 只读 + TMPDIR 读写（2026-08-23 审查 §9-P2 可用性修复）：landlock
+    // 未列入规则的路径**连读都拒绝**——此前 $HOME/.cargo、~/.ssh 全不可读，
+    // /tmp 不可写，cargo build/编译器/测试框架大概率直接失败，把用户推向
+    // external-sandbox/danger-full-access 的安全侵蚀压力。HOME 只读满足
+    // registry 缓存/配置读取；TMPDIR 读写满足编译临时目录。
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        ruleset = ruleset
+            .add_rules(path_beneath_rules([home.as_str()], ro_access))
+            .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
+    }
+    let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    ruleset = ruleset
+        .add_rules(path_beneath_rules([tmpdir.as_str()], write_access))
+        .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
+
     // 按策略放行 workdir / writable
     let (workdir, writable): (PathBuf, Vec<PathBuf>) = match policy {
         SandboxPolicy::ReadOnly => {
