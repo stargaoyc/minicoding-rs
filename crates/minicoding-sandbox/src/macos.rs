@@ -120,7 +120,7 @@ fn apply_seatbelt(
     let tmp_path_buf = tmp_file
         .into_temp_path()
         .keep()
-        .map_err(|e| SandboxError::Io(e))?;
+        .map_err(|e| SandboxError::Io(e.into()))?;
     let tmp_path = tmp_path_buf.to_string_lossy().into_owned();
 
     // pre_exec 闭包：子进程内调 sandbox_init，成功后删除临时文件。
