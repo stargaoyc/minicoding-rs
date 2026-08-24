@@ -386,3 +386,32 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
 
 修复清单高度集中且多数改动在数十行以内。完成上述 P0 冲刺并把文档对齐现实之后，该项目完全有能力从
 "架构示范品"跨入"日用工具"，并在沙箱与可审计性这两个维度做出真正的差异化。
+
+---
+
+## 附录：修复状态（2026-08-23 修复批次后更新）
+
+> 基线 v0.2.33 → HEAD。逐章修复均已通过 fmt/clippy -D warnings/56 测试套件全绿并独立提交。
+
+| 章节 | 状态 | 主要修复（commit） |
+|------|------|-------------------|
+| §3 模块化架构 | ✅ 全部 | 守卫查 dev-deps；CLI 接入 config.toml + 热更新基线；figment/trait-variant 清理 + 文档同步；rt.rs 2334→1073 行拆分 5 模块（617eb65） |
+| §4 Runtime 正确性 | ✅ 全部 | 权限路径 panic/假 history 移除；StopReason 透传；单 turn 门闩；dispatch 超时兜底；Deny 补发事件；SessionListItem 改名（d03db67） |
+| §5 Provider | ✅ 问题清单全项 | web.fetch panic；Ollama NDJSON UTF-8；流错误保文；读超时；CJK 计权；num_ctx；图片占位；退避 jitter（aee62c1） |
+| §6 工具系统 | ✅ 问题清单全项 | shell.kill 真实现；后台沙箱对齐；SAFE_ENV_WHITELIST 单一来源（含 serve.rs 旁路修复）；git.apply 路径预检；grep context/head_limit；edit replace_all；新增 ui.ask（00687a7） |
+| §7 MCP | ✅ P0 接线完成 | 配置加载迁 mcp crate；tool_hints 采集；sdk attach_mcp_tools（C-24 批准→启动→注册）；cli/exec 接入。P2（schema 校验/断线重启/annotations）遗留（162ed99） |
+| §8 上下文与记忆 | ✅ P0×3 + P1/P2 | tokenizer 计 ToolResult；repair_request_messages 最后防线；post-compact 扫描修正；熔断 cooldown 半开；context_window capability 化；L2 摘要 full_text；evict 排序副作用；save 锁；C-27 下沉 core（4d238b0） |
+| §9 安全与沙箱 | ✅ 高优先级项 | exec 默认 ReadOnly + --auto-approve/--i-understand-full-access；黑名单大小写折叠 + 保护面补齐；SSRF mapped/NAT64/CGNAT；Hook Windows 禁占位符展开；Seatbelt 转义；landlock HOME/TMPDIR。**网络隔离三平台仍未实现**（security.md 已诚实标注）（f702a68） |
+| §10 存储/Hook | ✅ 清单项 | undo 失败条目可重试；HookInput.turn 真实值；next_seq 注释；snapshot 目录 fsync；hooks/observability 文档诚实化（39782ea） |
+| §11 前端一致性 | ✅ 高优先级项 | TUI Ctrl-C 取消；TUI 恢复历史渲染；Web 假 Always 收敛为两值；CI gen-types 门禁；AGENTS Router 标注。TUI 渲染 O(n)/帧、scrollback、Zod、Desktop CSP 遗留（7219a67） |
+| §12 工程化/文档 | ✅ 本批 | repository URL 统一 stargaoyc；security.md §8 网络矩阵诚实注记；本附录 |
+
+### 明确遗留（后续里程碑候选）
+
+1. OS 级网络隔离（landlock ABI≥4 AccessNet / Seatbelt deny network* / WFP）——安全文档核心支柱；
+2. prompt caching 发送端 + extended thinking 配置端 + count_tokens 校准；
+3. AllowAlways/DenyAlways 决策持久化层（policy.toml）四端贯通；
+4. TUI 渲染增量重建 + scrollback；Web Zod 运行时校验；Desktop CSP unsafe-inline；
+5. MCP schema JSON Schema 校验、断线重启 supervisor、server annotations；
+6. asyncRewake / inject_context Runtime 接线；
+7. 斜杠命令框架 + token/cost 计量展示（UX 地基）。

@@ -26,8 +26,8 @@ members = [
 edition = "2024"
 rust-version = "1.99"
 license = "AGPL-3.0-only"
-repository = "https://github.com/minicoding/minicoding-rs"
-homepage = "https://github.com/minicoding/minicoding-rs"
+repository = "https://github.com/stargaoyc/minicoding-rs"
+homepage = "https://github.com/stargaoyc/minicoding-rs"
 version = "0.2.33"
 authors = ["stargaoyc"]
 
