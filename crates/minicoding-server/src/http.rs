@@ -526,6 +526,19 @@ async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<CreateSessionBody>,
 ) -> Result<Json<CreateSessionResponse>, HttpError> {
+    // 工作目录预校验（2026-08-24 用户反馈）：目录不存在时立即 400 并给出可读
+    // 错误，而非照常建会话、首个 turn 才在沙箱路径层报错（用户感知为
+    // "创建成功但一发消息就坏"）。
+    if let Some(wd) = body.workdir.as_deref().filter(|s| !s.trim().is_empty())
+        && std::fs::canonicalize(wd).is_err()
+    {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: format!(
+                "工作目录不存在或不可访问：{wd}（请检查路径拼写，或使用目录选择器选择真实存在的目录）"
+            ),
+        });
+    }
     let default = state.mgr.default_params();
     let mut params = ServerRuntimeParams {
         provider_kind: body

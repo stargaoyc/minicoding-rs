@@ -145,16 +145,11 @@ fn main() {
             }
             log::info!("minicoding-desktop 启动完成");
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            // 关闭窗口时隐藏到托盘而非退出（保持 sidecar 运行）
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && let Some(main_window) = window.get_webview_window("main")
-            {
-                let _ = main_window.hide();
-                api.prevent_close();
-            }
         });
+    // 关闭窗口 = 退出应用（2026-08-24 用户反馈：原"隐藏到托盘、sidecar 常驻"
+    // 行为让用户误以为已退出，sidecar 进程残留）。不再 prevent_close：最后一个
+    // 窗口关闭 → 事件循环结束 → `RunEvent::Exit` → [`sidecar::kill_sidecar`]
+    // 终止 sidecar。托盘"显示窗口/退出"与 Ctrl+Alt+M 隐藏/恢复在运行期仍可用。
 
     // 用 `build` + `App::run(callback)` 而非 `Builder::run` 的简写形式：
     // 需要在 `RunEvent::Exit` 时终止 sidecar 进程（tauri-plugin-shell 的
@@ -364,13 +359,15 @@ async fn select_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, S
     rx.await.map_err(|_| "目录选择器未返回结果".to_string())
 }
 
-/// `restart_app`：重启应用（编辑模式保存配置后调用）。///
-/// Tauri `AppHandle::restart()` 会重启当前进程；`RunEvent::Exit` 处理中
-/// 会 kill 旧 sidecar（见 `app.run` 回调），新进程启动后由前端重新
-/// `start_session` 拉起新 sidecar。
+/// `restart_app`：重启应用（编辑模式保存配置后调用）。
+///
+/// Tauri `AppHandle::restart()` 在部分平台走 `exec` 替换进程镜像，**不触发**
+/// `RunEvent::Exit`（旧 sidecar 会变孤儿），因此重启前先显式 kill sidecar；
+/// 新进程启动后由前端重新 `start_session` 拉起新 sidecar。
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri command 签名要求 AppHandle 按值传递
 fn restart_app(app: tauri::AppHandle) {
     log::info!("用户请求重启应用以应用新 sidecar 配置");
+    sidecar::kill_sidecar(&app);
     app.restart();
 }

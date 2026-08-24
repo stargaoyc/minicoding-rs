@@ -51,9 +51,13 @@ export function Sidebar() {
     if (workdir) {
       body = { ...body, workdir };
     }
-    setNewSessionOpen(false);
     createSession.mutate(body, {
-      onSuccess: (resp) => setActiveSession(resp.session_id),
+      // 创建成功才关对话框并切换会话；失败时保持打开并显示错误
+      // （2026-08-24 用户反馈：此前失败被静默吞掉，表现为"点了确认没反应"）
+      onSuccess: (resp) => {
+        setNewSessionOpen(false);
+        setActiveSession(resp.session_id);
+      },
     });
   };
 
@@ -148,6 +152,7 @@ export function Sidebar() {
       <NewSessionDialog
         open={newSessionOpen}
         creating={createSession.isPending}
+        error={createSession.error instanceof Error ? createSession.error.message : null}
         onConfirm={handleNewSession}
         onClose={() => setNewSessionOpen(false)}
       />

@@ -3090,9 +3090,9 @@ async fn start_session(app: tauri::AppHandle) -> Result<SessionInfo, String> {
 
 **sidecar 生命周期（防孤儿进程）**：`tauri-plugin-shell` 的 `CommandChild` **没有 Drop 清理**（无 kill_on_drop 等价物），若应用退出时不显式终止，sidecar 会残留为孤儿进程继续监听端口。方案：
 
-- `SidecarProcess`（managed state）持有 `CommandChild` 句柄，`spawn_sidecar` 存入、`kill_sidecar` 取出并 `kill()`（`CommandChild::kill` 消费自身，幂等）；
-- 应用以 `Builder::build` + `App::run(callback)` 形式启动，`RunEvent::Exit`（托盘"退出"、`restart_app` 重启）时调用 `kill_sidecar`；
-- 窗口关闭仅隐藏到托盘（`prevent_close`，设计意图：后台保持服务），不触发 Exit，sidecar 继续运行。
+- `SidecarProcess`（managed state）持有 `CommandChild` 句柄，`spawn_sidecar` 存入、`kill_sidecar` 取出并 `kill()`（`CommandChild::kill` 消费自身，幂等）；kill 后追加按 PID 的 OS 级兜底强杀（Windows `taskkill /T /F`、unix `kill -9`，对已退出 PID 为无害 no-op）；
+- 应用以 `Builder::build` + `App::run(callback)` 形式启动，`RunEvent::Exit`（关窗退出、托盘"退出"）时调用 `kill_sidecar`；`restart_app` 在部分平台走 `exec` 替换进程镜像不触发 Exit，故重启前显式 kill；
+- **关闭窗口即退出应用**（2026-08-24 用户反馈修订：原"隐藏到托盘保持服务"让用户误以为已退出，sidecar 残留被感知为 bug），窗口关闭 → 事件循环结束 → Exit → sidecar 终止。运行期托盘与 `Ctrl+Alt+M` 隐藏/恢复仍可用。
 
 ### 26.6 安全考量（前端）
 
