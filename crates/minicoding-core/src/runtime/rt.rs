@@ -183,6 +183,10 @@ pub struct Runtime {
     /// AllowAlways/DenyAlways 持久化存储（`None` 时 Always 决策折叠
     /// 但不落盘）。sdk 默认注入 `~/.minicoding/policy.toml`。
     pub(crate) policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
+    /// asyncRewake 调度器（全量接线；默认 Noop 拒绝 spawn）。
+    pub(crate) rewake: Arc<dyn crate::hooks::AsyncRewakeScheduler>,
+    /// `SessionStart` Hook 是否已派发（每会话恰一次）。
+    pub(crate) session_start_done: std::sync::atomic::AtomicBool,
     /// 单 turn 门闩：`run_turn` 入口 `try_lock`，
     /// 并发第二个 turn 返回 `RuntimeError::TurnInProgress`。tokio Mutex（无锁
     /// 争用时零开销）；guard 持有至 turn 结束（含取消/超时路径，随 future drop 释放）。
@@ -194,6 +198,36 @@ impl Runtime {
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// 当前模型名（`/model` 查看用）。
+    #[must_use]
+    pub fn model(&self) -> String {
+        self.config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider
+            .model
+            .clone()
+    }
+
+    /// 运行期切换模型（遗留：`/model <name>` 命令）。
+    ///
+    /// 写运行期配置锁，下一 `build_chat_request` 即生效（model 取自
+    /// `req.params.model`）。会话级生效，不回写 config.toml；同时刷新热更新
+    /// 基线，避免 turn 边界被文件值回退覆盖。
+    pub fn set_model(&self, model: &str) {
+        {
+            let mut cfg = self
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.provider.model.clone_from(&model.to_string());
+        }
+        if let Ok(mut b) = self.hot_reload_baseline.lock() {
+            b.set_model(model);
+        }
+        tracing::info!(model, "runtime model switched");
     }
 
     /// 返回审计 sink（只读浏览审计，`workspace.rs` 用）。
@@ -453,6 +487,33 @@ impl Runtime {
             // turn 边界白名单配置热更新（ConfigWatcher 仅探测变更并
             // 广播 `Event::ConfigChanged`，具体应用在本方法执行，见 tech-stack.md §13）。
             self.reload_safe_config().await;
+
+            // 全量接线：SessionStart（每会话恰一次）
+            if !self
+                .session_start_done
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.run_lifecycle_hook(crate::hooks::HookEvent::SessionStart, serde_json::Value::Null)
+                    .await;
+            }
+
+            // 全量接线：UserPromptSubmit（携带 prompt 文本）
+            self.run_lifecycle_hook(
+                crate::hooks::HookEvent::UserPromptSubmit,
+                serde_json::json!({ "prompt": user_input.text }),
+            )
+            .await;
+
+            // 全量接线：asyncRewake 完成结果注入下一请求 system 头部
+            for r in self.rewake.poll_completed().await {
+                self.pending_hook_contexts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!(
+                        "<async_rewake hook=\"{}\">\n{}\n</async_rewake>",
+                        r.hook_name, r.context
+                    ));
+            }
 
             // 1. 构造用户消息并入库
             let user_msg = Message::user_text(user_input.text);

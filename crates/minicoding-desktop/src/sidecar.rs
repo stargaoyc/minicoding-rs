@@ -7,6 +7,8 @@
 
 use crate::SessionInfo;
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -79,6 +81,10 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Windows：sidecar 是控制台子系统程序，不加此标志会随 GUI 主程序弹出
+    // 第二个控制台窗口（tauri shell sidecar 路径由插件内置同款标志）
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = cmd
         .spawn()

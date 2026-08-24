@@ -389,7 +389,7 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
 
 ---
 
-## 附录：修复状态（2026-08-23 修复批次后更新）
+## 附录：修复状态（2026-08-24 第五批次后更新）
 
 > 基线 v0.2.33 → HEAD。逐章修复均已通过 fmt/clippy -D warnings/56 测试套件全绿并独立提交。
 
@@ -399,16 +399,16 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
 | §4 Runtime 正确性 | ✅ 全部 | 权限路径 panic/假 history 移除；StopReason 透传；单 turn 门闩；dispatch 超时兜底；Deny 补发事件；SessionListItem 改名（d03db67） |
 | §5 Provider | ✅ 问题清单全项 | web.fetch panic；Ollama NDJSON UTF-8；流错误保文；读超时；CJK 计权；num_ctx；图片占位；退避 jitter（aee62c1） |
 | §6 工具系统 | ✅ 问题清单全项 | shell.kill 真实现；后台沙箱对齐；SAFE_ENV_WHITELIST 单一来源（含 serve.rs 旁路修复）；git.apply 路径预检；grep context/head_limit；edit replace_all；新增 ui.ask（00687a7） |
-| §7 MCP | ✅ P0 接线完成 | 配置加载迁 mcp crate；tool_hints 采集；sdk attach_mcp_tools（C-24 批准→启动→注册）；cli/exec 接入。P2（schema 校验/断线重启/annotations）遗留（162ed99） |
+| §7 MCP | ✅ 全部（含 P2） | 配置加载迁 mcp crate；tool_hints 采集；sdk attach_mcp_tools（C-24 批准→启动→注册）；cli/exec 接入（162ed99）；required 预检/restart/annotations（cfa0d34）；jsonschema 0.51 全量入参校验 + 60s 健康监督 + serve 默认只读暴露（e9680b5） |
 | §8 上下文与记忆 | ✅ P0×3 + P1/P2 | tokenizer 计 ToolResult；repair_request_messages 最后防线；post-compact 扫描修正；熔断 cooldown 半开；context_window capability 化；L2 摘要 full_text；evict 排序副作用；save 锁；C-27 下沉 core（4d238b0） |
-| §9 安全与沙箱 | ✅ 高优先级项 | exec 默认 ReadOnly + --auto-approve/--i-understand-full-access；黑名单大小写折叠 + 保护面补齐；SSRF mapped/NAT64/CGNAT；Hook Windows 禁占位符展开；Seatbelt 转义；landlock HOME/TMPDIR。**网络隔离三平台仍未实现**（security.md 已诚实标注）（f702a68） |
+| §9 安全与沙箱 | ✅ 高优先级项 + 网络隔离 | exec 默认 ReadOnly + --auto-approve/--i-understand-full-access；黑名单大小写折叠 + 保护面补齐；SSRF mapped/NAT64/CGNAT；Hook Windows 禁占位符展开；Seatbelt 转义；landlock HOME/TMPDIR（f702a68）；Linux landlock AccessNet + macOS Seatbelt deny network*，Windows Job Object 无过滤原语如实标注（ec5fe43） |
 | §10 存储/Hook | ✅ 清单项 | undo 失败条目可重试；HookInput.turn 真实值；next_seq 注释；snapshot 目录 fsync；hooks/observability 文档诚实化（39782ea） |
-| §11 前端一致性 | ✅ 高优先级项 | TUI Ctrl-C 取消；TUI 恢复历史渲染；Web 假 Always 收敛为两值；CI gen-types 门禁；AGENTS Router 标注。TUI 渲染 O(n)/帧、scrollback、Zod、Desktop CSP 遗留（7219a67） |
+| §11 前端一致性 | ✅ 全部 | TUI Ctrl-C 取消；TUI 恢复历史渲染；Web 假 Always 收敛为两值；CI gen-types 门禁；AGENTS Router 标注（7219a67）；scrollback 渲染 + Desktop CSP（e8b4ca4）；Zod 4.4.3 运行时校验 + Plan 面板（e9680b5） |
 | §12 工程化/文档 | ✅ 本批 | repository URL 统一 stargaoyc；security.md §8 网络矩阵诚实注记；本附录 |
 
-### 明确遗留（2026-08-23 第二修复批次后更新）
+### 明确遗留（2026-08-24 第五批次后全部收口）
 
-第一批七类遗留已落地六类半（各含独立提交，fmt/clippy/test 全绿维持）：
+第一批七类遗留已全部落地（各含独立提交，fmt/clippy/test 全绿维持，CI 三平台矩阵通过）：
 
 1. ✅ OS 网络隔离：Linux landlock AccessNet + macOS Seatbelt deny network*
    （ReadOnly/WorkspaceWrite 子进程默认禁 TCP/UDP；Windows Job Object 无
@@ -421,15 +421,24 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
    粒度 allow/deny 双表互斥覆盖）；resolve_decision 在 prompt 提供 Always
    选项时查表命中即免弹窗、弹窗返回 Always 后落盘并折叠执行（C-23 受保护
    文件 restricted ask 不查不落，防绕过）；CLI 提示层支持 y/a/n、TUI `a`
-   键按选项集映射、Web 恢复四按钮并回传新 Decision；ts DTO 再生成。
-   完整 JSON Schema 维度校验仍待 jsonschema crate（同 MCP 项）。
-4. ✅ TUI scrollback+可见区渲染；Web EventDto 手写运行时守卫（Zod 依赖待
-   评审，等价实现）；Desktop CSP script-src 收紧（e8b4ca4）;
+   键按选项集映射、Web 恢复四按钮并回传新 Decision；ts DTO 再生成
+   （b791071）。路径粒度升级：`tool@路径前缀` 两级键、最长前缀优先、deny
+   胜 allow（49b9d10）。
+4. ✅ TUI scrollback+可见区渲染；Desktop CSP script-src 收紧（e8b4ca4）；
+   Web 运行时校验升级为 Zod 4.4.3（event-guard.ts 全量 eventDtoSchema，
+   替换手写守卫）（e9680b5）;
 5. ✅ MCP：required 入参预检、restart 一次性断线重试、list_tools annotations
-   （cfa0d34）。完整 JSON Schema 校验待引入 jsonschema crate；
-6. ◐ Hook 接线：PreToolUse inject_context 已接线（缓冲→下轮 system 头部，
-   包裹 `<hook_context>`）；SessionStart/UserPromptSubmit 注入与 asyncRewake
-   后台执行仍待 executor 集成设计（cfa0d34 + hooks.md 标注）；
+   （cfa0d34）；jsonschema 0.51 全量 JSON Schema 校验替换 required 预检；
+   60s 健康监督自动重启；serve 模式默认只读暴露（--expose-write-tools 显式
+   opt-in 写工具）（e9680b5）；
+6. ✅ Hook 全量接线：SessionStart（每会话一次）+ UserPromptSubmit 派发注入
+   （pending_hook_contexts 缓冲→下轮 system 头部 `<hook_context>` 边界）；
+   AsyncRewakeScheduler trait + Noop 兜底 + hooks ManagedRewakeScheduler
+   适配器，PreToolUse async_rewake 后台子进程重派发，turn 边界 poll 注入
+   `<async_rewake>` 边界（e9680b5）；
 7. ✅ UX 地基：斜杠命令 /status //tokens //clear；token 计量贯通
    （Usage.output_tokens → MessageMeta.tokens → REPL 展示与会话累计）
-   （b4c37df）。
+   （b4c37df）；/model 切换模型（Runtime::model/set_model）、@文件引用
+   Tab 补全 + `<file_ref>` 边界注入、斜杠命令补全（49b9d10）；Plan 模式
+   可视化面板 PlanPanel（permission_mode_changed 驱动）、POST /messages
+   改 202 Accepted 异步 turn（e9680b5）。

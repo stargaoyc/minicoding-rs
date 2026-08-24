@@ -4,4 +4,4 @@ import type { Decision } from "./Decision";
 /**
  * `ResolvePermission` 请求 body。
  */
-export type ResolvePermissionBody = { decision: Decision, };
+export type ResolvePermissionBody = { decision: Decision };

@@ -1,6 +1,6 @@
 {
   "name": "minicoding-web",
-  "version": "0.2.33",
+  "version": "0.3.0",
   "private": true,
   "description": "minicoding-rs Web 前端（React 19 + Vite + Tailwind v4，M9）",
   "type": "module",
@@ -30,6 +30,7 @@
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "tailwind-merge": "^3.6.0",
+    "zod": "^4.4.3",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

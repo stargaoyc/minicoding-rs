@@ -54,6 +54,48 @@ impl Runtime {
         });
     }
 
+    /// 派发生命周期 Hook（SessionStart/UserPromptSubmit，全量接线）。
+    ///
+    /// `inject_context` 收集进 pending 缓冲（下一请求 system 头部）；fatal 错误
+    /// 仅 warn——生命周期阶段失败不阻塞会话。
+    pub(crate) async fn run_lifecycle_hook(
+        &self,
+        event: crate::hooks::HookEvent,
+        extras: serde_json::Value,
+    ) {
+        let input = crate::hooks::HookInput {
+            event,
+            session_id: self.session.id.clone(),
+            turn: self.current_turn.load(std::sync::atomic::Ordering::Relaxed),
+            tool: None,
+            side_effect: None,
+            verdict: None,
+            cwd: self.workdir.read().await.clone(),
+            extras,
+        };
+        let cfg = {
+            let c = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::hooks::DispatchConfig {
+                on_error: c.hooks.on_hook_error,
+                timeout: std::time::Duration::from_secs(c.hooks.default_timeout_sec),
+                builtin_deny: None,
+            }
+        };
+        let result = self.hook_registry.dispatch(input, cfg).await;
+        if let Some(fatal) = result.fatal_error {
+            tracing::warn!(error = %fatal, "lifecycle hook fatal error (ignored)");
+        }
+        for ctx_text in &result.inject_contexts {
+            self.pending_hook_contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ctx_text.clone());
+        }
+    }
+
     /// 执行一个副作用工具调用（权限链完整入口，C-01）。
     ///
     /// 流程：
@@ -360,6 +402,37 @@ impl Runtime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(ctx_text.clone());
         }
+        // asyncRewake 接线（全量）：hook 声明后台继续时，经调度器在
+        // 后台重新派发同一 hook 收集最终输出（C-26/C-32 由调度器与脚本层保证）。
+        if let Some(spec) = result.async_rewake.clone() {
+            let hook_input = self
+                .build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict))
+                .await;
+            let cfg2 = dispatch_cfg.clone();
+            let registry = std::sync::Arc::clone(&self.hook_registry);
+            let fut: crate::provider::BoxFuture<'static, Result<String, String>> =
+                Box::pin(async move {
+                    // 后台重跑同一 hook；输出以 exit_messages 汇总（fatal 已由
+                    // dispatch 按 on_error 策略折入 fatal_error 字段）
+                    let out = registry.dispatch(hook_input, cfg2).await;
+                    if out.fatal_error.is_some() {
+                        Err(out
+                            .fatal_error
+                            .map_or_else(|| "unknown".to_string(), |e| e.to_string()))
+                    } else {
+                        Ok(out.exit_messages.join("\n"))
+                    }
+                });
+            let accepted = self.rewake.try_spawn(
+                &call.name,
+                spec.estimated_duration_sec,
+                spec.description.clone(),
+                fut,
+            );
+            if !accepted {
+                tracing::debug!(tool = %call.name, "asyncRewake rejected by scheduler");
+            }
+        }
         Ok(pre_decision)
     }
 
@@ -411,11 +484,14 @@ impl Runtime {
                     _ => {
                         // 持久化规则查表（仅当本 prompt 提供 Always 选项——
                         // C-23 受保护文件的 restricted ask 不查，防绕过）
+                        // 路径感知查询（升级）：fs.* 类工具取 input.path
+                        // 相对路径，命中 `tool@前缀` 规则按最长前缀优先
+                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
                         if prompt
                             .options
                             .contains(&crate::policy::PromptOption::AllowAlways)
                             && let Some(store) = &self.policy_persist
-                            && let Some(allow) = store.decision_for(&call.name)
+                            && let Some(allow) = store.decision_for_path(&call.name, rule_path)
                         {
                             tracing::info!(
                                 tool = %call.name,

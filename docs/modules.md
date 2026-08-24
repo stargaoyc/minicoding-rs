@@ -919,6 +919,7 @@ minicoding-extension-sdk/src/
 - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信走 HTTP/SSE（同源，无 CORS 问题）；
 - **文件打开（W-11）**：`invoke('open_workspace_file', { path })` 用系统默认编辑器打开工作区文件（`app.shell().open`，Rust 侧不做路径解析，路径由前端拼接 root 绝对路径）；
 - **目录选择（W-11）**：`invoke('select_workspace_dir')` 原生目录选择器（`tauri-plugin-dialog` 的 `file().pick_folder` + oneshot 桥接 async），新建会话时选定目录随 `POST /sessions` 作为 `workdir` 提交；
+- **单窗口 + 文件日志**（2026-08-23 用户反馈）：`main.rs` 以 `windows_subsystem = "windows"` 编译，启动仅打开应用窗（不再弹日志控制台）；tauri-plugin-log 目标改为 `<安装目录>/logs/minicoding.log`（Webview devtools 目标保留），sidecar 子进程在 Windows 加 `CREATE_NO_WINDOW`；
 - **系统托盘**（W-07）：右键菜单"显示窗口/退出"，关闭窗口时隐藏到托盘而非退出（`tray.rs`）；
 - **全局快捷键**（W-07）：`Ctrl+Alt+M` 切换窗口显示/隐藏（`tauri-plugin-global-shortcut`）；
 - **自动更新**：Tauri updater 配置签名公钥，更新包需签名校验通过才安装；

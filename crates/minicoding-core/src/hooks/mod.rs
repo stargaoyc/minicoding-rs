@@ -20,6 +20,7 @@
 pub mod trait_def;
 
 pub use trait_def::{
-    AsyncRewakeSpec, DispatchConfig, DispatchResult, Hook, HookDecision, HookError, HookEvent,
-    HookInput, HookMatcher, HookOutput, HookRegistry, NoopHookRegistry, OnHookError, VerdictSerde,
+    AsyncRewakeScheduler, AsyncRewakeSpec, DispatchConfig, DispatchResult, Hook, HookDecision,
+    HookError, HookEvent, HookInput, HookMatcher, HookOutput, HookRegistry,
+    NoopAsyncRewakeScheduler, NoopHookRegistry, OnHookError, RewakeOutcome, VerdictSerde,
 };
