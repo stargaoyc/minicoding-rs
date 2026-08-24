@@ -18,9 +18,23 @@ use crate::render::markdown::parse_markdown;
 ///
 /// `lines` 为已固化的聊天历史，`streaming` 为未固化的 assistant token 流。
 /// 各角色前缀使用固定颜色（user=cyan/assistant=green/tool=magenta/system=gray）。
-pub fn render_chat(frame: &mut Frame, area: Rect, lines: &[ChatLine], streaming: &str) {
+pub fn render_chat(
+    frame: &mut Frame,
+    area: Rect,
+    lines: &[ChatLine],
+    streaming: &str,
+    scroll_offset: usize,
+) {
+    // 可见区渲染（2026-08-23 审查遗留#4 性能）：仅解析并渲染 scroll 窗口内的
+    // ChatLine——此前每帧全量 Markdown 重建 O(总行数)，长会话必然卡顿。
+    let start = scroll_offset.min(lines.len());
+    let visible: &[ChatLine] = if scroll_offset == 0 {
+        lines
+    } else {
+        &lines[start..]
+    };
     let mut render_lines: Vec<Line> = Vec::new();
-    for line in lines {
+    for line in visible {
         match line {
             ChatLine::User(text) => {
                 render_lines.push(Line::from(vec![
@@ -90,7 +104,13 @@ pub fn render_chat(frame: &mut Frame, area: Rect, lines: &[ChatLine], streaming:
     // 自动滚到底部：计算 scroll 偏移使最后一行可见
     let visible_height = usize::from(area.height.saturating_sub(2)); // 减边框
     let total = render_lines.len();
-    let scroll = u16::try_from(total.saturating_sub(visible_height)).unwrap_or(u16::MAX);
+    // 用户回看偏移：从底部向上抵消 scroll_offset 行；为 0 时即吸底
+    let scroll = u16::try_from(
+        total
+            .saturating_sub(visible_height)
+            .saturating_sub(scroll_offset),
+    )
+    .unwrap_or(u16::MAX);
 
     let block = Block::default().borders(Borders::TOP).title(" 对话 ");
     let para = Paragraph::new(render_lines)

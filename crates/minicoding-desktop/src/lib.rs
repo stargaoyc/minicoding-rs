@@ -11,7 +11,9 @@
 //! - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信
 //!   走 HTTP/SSE（同源，无 CORS 问题）；
 //! - **凭证**：复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04）；
-//! - **安全**：Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格（`script-src 'self'`）。
+//! - **安全**：Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP `script-src
+//!   'self'`（2026-08-23 审查遗留#4 收紧，移除 unsafe-inline）；style-src 保留
+//!   'unsafe-inline'（前端内联样式所需）。
 //!
 //! ## Feature gate
 //!

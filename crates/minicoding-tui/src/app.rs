@@ -214,6 +214,8 @@ pub struct App {
     /// 此前仅设状态文案不调 cancel，长 turn 唯一手段是杀进程）。turn 间隙为
     /// `None`（`cancel()` 对非运行 turn 本就不生效）。
     cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// 回看偏移（0=吸底；PgUp 增/PgDn 减，2026-08-23 审查遗留#4 scrollback）
+    scroll_offset: usize,
     // T-M7-4：主题配色（未来 Ctrl+Shift+T 切换深/浅色）
     theme: Theme,
 }
@@ -251,6 +253,7 @@ impl App {
             tasks: Vec::new(),
             task_panel_state: ratatui::widgets::ListState::default(),
             cancel_token: None,
+            scroll_offset: 0,
             theme: Theme::default(),
         }
     }
@@ -329,6 +332,7 @@ impl App {
                     Role::User => {
                         let text = msg.text();
                         if !text.is_empty() {
+                            self.scroll_offset = 0;
                             self.lines.push(ChatLine::User(text));
                         }
                     }
@@ -443,6 +447,19 @@ impl App {
                 }
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.should_exit = true,
+            // scrollback（遗留#4）：PgUp 上翻 / PgDn 下翻（减到 0 即吸底）
+            (KeyCode::PageUp, _) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+                self.status_msg = format!("↑ 回看 {} 行", self.scroll_offset);
+            }
+            (KeyCode::PageDown, _) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.status_msg = if self.scroll_offset == 0 {
+                    "↓ 已回到底部".to_string()
+                } else {
+                    format!("↑ 回看 {} 行", self.scroll_offset)
+                };
+            }
             // T-M7-2：F2 切换侧栏显示
             (KeyCode::F(2), _) => {
                 self.sidebar_visible = true;
@@ -568,6 +585,7 @@ impl App {
         }
         if let Some(text) = self.input.submit() {
             // 立即在 UI 显示用户消息（不等待 MessageAppended 事件，提升响应感）
+            self.scroll_offset = 0;
             self.lines.push(ChatLine::User(text.clone()));
             let _ = self.ui_tx.try_send(UiCommand::Submit(text));
             self.is_turning = true;
@@ -623,7 +641,13 @@ impl App {
     fn render_chat_with_panel(&mut self, frame: &mut Frame, area: Rect) {
         match self.panel_mode {
             PanelMode::Off => {
-                crate::view::chat::render_chat(frame, area, &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    area,
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
             }
             PanelMode::Tool => {
                 let chunks = Layout::vertical([
@@ -631,7 +655,13 @@ impl App {
                     Constraint::Length(8), // 工具面板
                 ])
                 .split(area);
-                crate::view::chat::render_chat(frame, chunks[0], &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    chunks[0],
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
                 crate::view::tool_panel::render_tool_panel(frame, chunks[1], &self.lines);
             }
             PanelMode::Task => {
@@ -640,7 +670,13 @@ impl App {
                     Constraint::Length(8), // 任务面板
                 ])
                 .split(area);
-                crate::view::chat::render_chat(frame, chunks[0], &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    chunks[0],
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
                 crate::view::task_panel::render_task_panel(
                     frame,
                     chunks[1],
