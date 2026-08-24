@@ -39,6 +39,7 @@
 - **执行模式**：`同步` = Hook 必须在 `timeout_sec`（默认 30s）内返回，主流程阻塞等待；`异步可选` = 默认仍同步，Hook 可在 `HookOutput.async_rewake` 声明后台执行（§11.3），主流程继续。`PreToolUse`/`PermissionRequest` 等"事前"事件**不支持**异步（必须同步决策，否则权限门无法闭合）。
 - **可否阻断**：`是` = Hook 可返回 `deny`（或 `Stop` 事件的"要求继续"）改变主流程走向；`否` = Hook 只能观察/改写/注入，不能阻止该阶段发生（事后事件本身已发生）。
 - **可否改写**：`是` = Hook 可改写工具 `input`（PreToolUse）或工具 `result`/`error`（PostToolUse/PostToolUseFailure）；`否` = 该事件无载荷可改写。
+> **实现状态（2026-08-23 审查 §10）**：`inject_context` 字段协议已定义、registry 已聚合，但 Runtime 侧消费**尚未接线**（收集后忽略）；`asyncRewake` 管理器实现完毕但未接入 turn 边界。两者在接线前均不产生实际效果，本节其余内容为协议设计说明。
 - **可否注入上下文**：`是` = Hook 返回 `inject_context` 字段，Runtime 包裹 `<hook_context>` 边界后追加到 system/上下文（声明非指令，见 §7）；`否` = 该阶段不产生上下文注入。
 - **计数澄清**：10 类事件 = 7 类纯同步（SessionStart/UserPromptSubmit/PreToolUse/PreCompact/PostCompact/SubagentStop/PermissionRequest）+ 3 类同步/异步可选（PostToolUse/PostToolUseFailure/Stop）。`asyncRewake` 不是第 11 类事件，而是这 3 类事件的子模式。
 

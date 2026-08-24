@@ -45,7 +45,7 @@
 | 关键路径 span | turn / llm_call / tool_call / permission / compress(4级) / hook.run / undo | `rt.rs`、`context/manager.rs`、`hooks/trait_def.rs` |
 | EventBus 事件 | Token/MessageAppended/TurnEnd/ToolCallStarted-Finished 等 10 种 | `runtime/event.rs` |
 | 审计落盘 | JSONL audit.log，0600 权限 | `storage/audit.rs` |
-| span 命名规范 | core/otel.rs 统一定义 21 个 span 名 + 32 个属性键 | `otel.rs:18-110` |
+| span 命名规范 | core/otel.rs 统一定义 20 个 span 名 + 30 个属性键（2026-08-23 审查核对） | `otel.rs:18-110` |
 | Metrics 接口 | Counter/Histogram/Gauge 共 14 个指标函数 | `core/metrics.rs` |
 | Span 断裂修复 | 13 处断裂全部补齐（memory/journal/storage/mcp/sandbox/event 等） | 见 §4.3 |
 | Span 属性完整 | llm_call/tool_call/permission/compress 四类 span 属性已补全 | `rt.rs`、`context/manager.rs` |

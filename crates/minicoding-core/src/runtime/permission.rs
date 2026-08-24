@@ -495,7 +495,9 @@ impl Runtime {
         HookInput {
             event,
             session_id: self.session.id.clone(),
-            turn: 0,
+            // S23：真实轮次（此前恒 0，Hook 脚本拿到的轮次信息无效——
+            // 2026-08-23 审查 §10-P2）
+            turn: self.current_turn.load(std::sync::atomic::Ordering::Relaxed),
             tool: Some(call.clone()),
             side_effect: Some(side_effect),
             verdict: verdict_serde,
