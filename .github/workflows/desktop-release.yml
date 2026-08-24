@@ -65,10 +65,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # 交叉编译目标（如 macos-x86_64 在 arm runner 上）的 std 必须在"实际执行
-      # cargo 的工具链"上存在：后续步骤的裸 cargo 解析到 nightly 还是 stable 取决
-      # 于 dtolnay action 的安装顺序（上游行为曾变化，v0.3.0 曾因此 E0463 失败），
-      # 因此对 stable 也显式补齐 ${{ matrix.target }}（host 目标时为幂等空操作）；
-      # nightly 已由上方 targets 参数覆盖。
+      # cargo 的工具链"上存在。dtolnay 双工具链安装后，裸 cargo 解析到哪个具体
+      # 版本不可控（v0.3.0 曾因解析到未装目标 std 的版本而 E0463），因此：
+      #   1. 对字面名 stable 显式补齐 ${{ matrix.target }}（host 目标时为幂等空操作）；
+      #   2. 所有编译步骤一律 `rustup run stable` 显式指定工具链，不依赖隐式解析。
       - name: Ensure target std on stable toolchain
         run: rustup target add --toolchain stable ${{ matrix.target }}
 
@@ -118,7 +118,7 @@ jobs:
           pnpm run build
 
       - name: Build minicoding-server binary
-        run: cargo build --release -p minicoding-server --target ${{ matrix.target }}
+        run: rustup run stable cargo build --release -p minicoding-server --target ${{ matrix.target }}
 
       - name: Place sidecar binary (Unix)
         if: runner.os != 'Windows'
@@ -138,7 +138,7 @@ jobs:
 
       - name: Tauri build
         working-directory: crates/minicoding-desktop
-        run: cargo tauri build --target ${{ matrix.target }} --features desktop
+        run: rustup run stable cargo tauri build --target ${{ matrix.target }} --features desktop
 
       - name: List bundle output
         # 调试：显示 Tauri 产出的 bundle 文件（cargo tauri build 使用 workspace target/）
