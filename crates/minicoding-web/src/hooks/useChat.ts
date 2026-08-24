@@ -40,7 +40,8 @@ export function useMessages(sessionId: string | null) {
 export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (text: string) => sendMessage(sessionId!, text),
+    // 遗留#4：POST /messages 改 202 Accepted——结果走 SSE，不消费 final_text
+    mutationFn: (text: string) => sendMessage(sessionId!, text).then((r) => r as unknown as { stop_reason: string; final_text: string }),
     // 乐观更新：发送时立即在 UI 显示用户消息（不等 POST 完成）
     onMutate: async (text: string) => {
       if (!sessionId) return {};
@@ -90,7 +91,7 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
   const qc = useQueryClient();
   // SSE 归约状态集中在单一对象（M-14：归约逻辑在 chatReducer.ts，可 record/replay 测试）
   const [chatState, setChatState] = useState<ChatStreamState>(initialChatState);
-  const { streamingText, streamingReasoning, isStreaming, activeTools, waitingPermission, permissionDeniedMsg } =
+  const { streamingText, streamingReasoning, isStreaming, activeTools, waitingPermission, permissionDeniedMsg, planActive } =
     chatState;
   // 归约用最新状态引用（handleEvent 闭包稳定，不随状态重建订阅）
   const chatStateRef = useRef<ChatStreamState>(initialChatState);
@@ -246,5 +247,6 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
     elapsedSec,
     waitingPermission,
     permissionDeniedMsg,
+    planActive,
   };
 }

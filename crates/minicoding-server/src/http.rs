@@ -243,17 +243,8 @@ struct SendMessageBody {
     text: String,
 }
 
-/// `SendUserMessage` 响应。
-#[derive(Debug, Serialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "ts",
-    ts(export, export_to = "../../minicoding-web/src/api/generated/")
-)]
-struct SendMessageResponse {
-    stop_reason: String,
-    final_text: String,
-}
+// `SendMessageResponse` 已移除（遗留#4：POST /messages 改 202 Accepted，
+// 响应用 json! 宏内联 `{accepted,stop_reason,final_text}`，不再需要结构体）。
 
 /// `ResolvePermission` 请求 body。
 #[derive(Debug, Deserialize)]
@@ -693,31 +684,46 @@ async fn get_session(
     }))
 }
 
-/// `POST /sessions/{id}/messages` — 发送用户消息（阻塞至 turn 完成）。
+/// `POST /sessions/{id}/messages` — 发送用户消息（202 Accepted，turn 异步执行）。
 ///
-/// 调用 `SessionManager::send_message_boxed`（返回 `BoxFuture<'static>`）避免
-/// `async fn(&self, ..)` 的 future 借用 `&self` 与 axum `Handler` trait 的 HRTB 冲突。
+/// 2026-08-23 审查遗留#4：此前阻塞至 turn 完成——长 turn 占死 HTTP 连接，
+/// 客户端超时风险高。改为立即返回 202 + `{ accepted: true }`；结果经 SSE
+/// `MessageAppended`/`TurnEnd` 事件推送（前端已订阅）。`SendMessageResponse`
+/// 仅保留协议兼容字段（客户端不再消费 `final_text`）。
+#[allow(clippy::too_many_lines)]
 async fn send_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(body): Json<SendMessageBody>,
-) -> Result<Json<SendMessageResponse>, HttpError> {
-    let outcome =
-        SessionManager::send_message_boxed(state.mgr.clone(), session_id, body.text).await?;
-    match outcome {
-        TurnOutcome::Finished(msg) => Ok(Json(SendMessageResponse {
-            stop_reason: "end_turn".to_string(),
-            final_text: msg.text(),
+) -> Result<(StatusCode, Json<serde_json::Value>), HttpError> {
+    // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）
+    let mgr = state.mgr.clone();
+    let sid = session_id.clone();
+    tokio::spawn(async move {
+        match SessionManager::send_message_boxed(mgr, sid.clone(), body.text).await {
+            Ok(TurnOutcome::Finished(msg)) => {
+                tracing::info!(session = %sid, chars = msg.text().chars().count(), "turn finished");
+            }
+            Ok(TurnOutcome::Interrupted(msg)) => {
+                tracing::info!(session = %sid, "turn interrupted");
+                drop(msg);
+            }
+            Ok(TurnOutcome::Failed(e)) => {
+                tracing::error!(session = %sid, error = %e, "turn failed");
+            }
+            Err(e) => {
+                tracing::error!(session = %sid, error = %e, "send_message failed");
+            }
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "accepted": true,
+            "stop_reason": "",
+            "final_text": ""
         })),
-        TurnOutcome::Interrupted(msg) => Ok(Json(SendMessageResponse {
-            stop_reason: "interrupted".to_string(),
-            final_text: msg.text(),
-        })),
-        TurnOutcome::Failed(e) => Err(HttpError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: e.to_string(),
-        }),
-    }
+    ))
 }
 
 /// `POST /sessions/{id}/cancel` — 取消当前 turn。

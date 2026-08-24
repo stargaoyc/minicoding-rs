@@ -95,18 +95,19 @@ impl Tool for McpToolWrapper {
         let tool = self.tool.clone();
         let input_schema = self.schema.input_schema.clone();
         Box::pin(async move {
-            // 轻量入参预检（2026-08-23 审查遗留#5）：远端 inputSchema 的
-            // `required` 键在本地校验，缺参直接报 InvalidInput——省一次
-            // 网络往返（完整 JSON Schema 校验待引入 jsonschema crate）。
-            if let Some(required) = input_schema.get("required").and_then(|v| v.as_array()) {
-                for key in required {
-                    if let Some(k) = key.as_str()
-                        && input.get(k).is_none()
-                    {
-                        return Err(ToolError::InvalidInput(format!(
-                            "mcp {server}__{tool}: 缺少必填参数 `{k}`"
-                        )));
-                    }
+            // JSON Schema 全量校验（2026-08-23 审查遗留#5 升级：jsonschema crate）
+            // 此前仅 required 键预检，type/enum/pattern 等约束不生效。
+            // 校验失败 → InvalidInput（LLM 可自行修正参数重试）。
+            if let Ok(compiled) = jsonschema::validator_for(&input_schema) {
+                let errors: Vec<String> = compiled
+                    .iter_errors(&input)
+                    .map(|e| format!("  {}: {}", e.instance_path(), e))
+                    .collect();
+                if !errors.is_empty() {
+                    return Err(ToolError::InvalidInput(format!(
+                        "mcp {server}__{tool}: 入参不符合 schema:\n{}",
+                        errors.join("\n")
+                    )));
                 }
             }
             // OTel `mcp.call` span（T-M5-8，O-08）：记录 server/tool，elapsed 由 span 自动携带。

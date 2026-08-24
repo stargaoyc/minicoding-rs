@@ -4,5 +4,6 @@
   "isStreaming": false,
   "activeTools": [],
   "waitingPermission": null,
-  "permissionDeniedMsg": null
+  "permissionDeniedMsg": null,
+  "planActive": false
 }

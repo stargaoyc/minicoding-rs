@@ -185,7 +185,9 @@ export function getSession(sessionId: string): Promise<{
   }>(`/sessions/${sessionId}`);
 }
 
+// 遗留#4：POST /messages 改 202 Accepted——结果走 SSE 推送
 export interface SendMessageResponse {
+  accepted: boolean;
   stop_reason: string;
   final_text: string;
 }

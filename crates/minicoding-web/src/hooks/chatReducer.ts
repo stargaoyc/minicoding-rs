@@ -28,6 +28,8 @@ export interface ChatStreamState {
   activeTools: ActiveTool[];
   waitingPermission: WaitingPermission | null;
   permissionDeniedMsg: string | null;
+  /** Plan 模式是否激活（`permission_mode_changed` 驱动，遗留：Plan 可视化） */
+  planActive: boolean;
 }
 
 export const initialChatState: ChatStreamState = {
@@ -37,6 +39,7 @@ export const initialChatState: ChatStreamState = {
   activeTools: [],
   waitingPermission: null,
   permissionDeniedMsg: null,
+  planActive: false,
 };
 
 /**
@@ -168,7 +171,17 @@ export function applyChatEvent(
     case "task_updated":
       effects.push("invalidate-sessions");
       break;
-    case "permission_mode_changed":
+    case "permission_mode_changed": {
+      // Plan 模式可视化（遗留）：跟踪 mode 切换
+      const ev = event as { to?: string };
+      if (ev.to === "plan") {
+        set({ planActive: true });
+      } else {
+        set({ planActive: false });
+        effects.push("invalidate-messages");
+      }
+      break;
+    }
     case "session_created":
     case "config_changed":
       effects.push("invalidate-messages");

@@ -34,6 +34,7 @@ rmcp = { version = "2.0", default-features = false, features = [
 ] }
 # http 类型（HeaderName/HeaderValue），与 rmcp/reqwest 共用同一版本。
 http = "1"
+jsonschema = "0.51.0"
 
 [dev-dependencies]
 # A8 架构守卫：复用 core 的 manifest 断言

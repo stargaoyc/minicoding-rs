@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
+import { PlanPanel } from "./components/chat/PlanPanel";
 import { ChatInput } from "./components/chat/ChatInput";
 import { PermissionDialog } from "./components/permission/PermissionDialog";
 import { TaskPanel } from "./components/tasks/TaskPanel";
@@ -125,6 +126,7 @@ function AppInner() {
     elapsedSec,
     waitingPermission,
     permissionDeniedMsg,
+    planActive,
   } = useSSEStream(activeSessionId, {
     onPermissionRequested: (e) => {
       if (activeSessionId) {
@@ -189,6 +191,7 @@ function AppInner() {
         {/* Messages */}
         {activeSessionId ? (
           <>
+            <PlanPanel active={planActive} />
             <MessageList
               sessionId={activeSessionId}
               messages={messages}
