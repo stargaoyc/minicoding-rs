@@ -134,4 +134,26 @@
 - 文档：security.md 网络矩阵按实现对齐；hooks.md 接线状态诚实化；审查报告
   附录全程跟踪修复状态
 
+## [0.3.1] - 2026-08-24
+
+### Fixed
+
+- **desktop：关闭应用即终止 sidecar**（用户反馈：`minicoding-server-sidecar`
+  不随应用退出）。根因：窗口 X 关闭被拦截为"隐藏到托盘"应用未真正退出；
+  `restart_app` 走 exec 替换进程镜像不触发 `RunEvent::Exit`。修复：关闭窗口
+  即退出应用并 kill sidecar；重启前显式 kill；`kill_sidecar` 增加 PID OS 级
+  兜底强杀（Windows `taskkill /T /F` / unix `kill -9`）。运行期托盘与
+  `Ctrl+Alt+M` 隐藏/恢复保留
+- **desktop/web：新建会话失败可见化**（用户反馈：填路径点确认后前端无反应）。
+  根因：创建接口失败（典型为 API key 未配置/keyring 不可用返回 500）被前端
+  静默吞掉。修复：对话框红色展示服务端错误原文、成功才切换会话
+- **server：`POST /sessions` 对 `workdir` 预校验**：目录不存在立即返回 400
+  可读报错，不再照常建会话、首个 turn 才在沙箱路径层报错；空白串视为未提供
+
+### Changed
+
+- desktop 发布工具链：Desktop Release workflow 统一钉住
+  `nightly-2026-08-18` 编译项目代码（stable 频道 1.98 不满足 MSRV 1.99）、
+  tauri-cli 用 runner 预装 stable 安装（外部工具不受项目 MSRV 约束）
+
 [Unreleased]: 后续变更见各 commit（Conventional Commits）。
