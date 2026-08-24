@@ -317,3 +317,22 @@ CI 9 道门禁与 pre-commit 11 hook 完全同构；pedantic clippy 全绿零 al
 | R7 工程 | E-1,E-4,E-5 | 发布兑底、pnpm 钉版、node 对齐、ignore 矛盾、死依赖、脚本包管理器 |
 
 **明确延期项**（需立项而非修补，记入 roadmap 建议）：seccomp 接入、DNS 解析-连接 IP pinning、HOME 白名单细粒度化、EventBus 双通道拆分、Tauri 自动更新、TUI 斜杠命令体系、evals 框架、多 provider 故障切换、成本核算。
+
+---
+
+## 13. 修复执行记录（2026-08-25 当日收口）
+
+R1–R7 全部阶段已实施并逐批提交，全量验证通过（`cargo fmt --check` / `clippy --workspace -D warnings` pedantic 全绿 / 56 个测试目标全绿 / web 侧 gen-types+oxlint+tsc+vitest 通过）：
+
+| 阶段 | 提交 | 覆盖发现 |
+|---|---|---|
+| R0 报告 | c00c11b | 本报告基线 |
+| R1 安全 | 68a7f07 | S-1(AllowAlways 目录粒度+会话级)、S-2(换行绕过)、S-3/S-4(诚实边界注释)、S-5(BREAKAWAY_OK/JobHandle)、S-7(journal LIFO)、S-8(event_store 原子写)、S-9(redact 多赋值)、S-10(尾随点空格)、S-12(persist 边界)、L1/L2(audit/fork/index 0600) |
+| R2 core | bac1792 | A-P1(调度保序回退)、A-P2(终态消息落盘)、A-P3(instrument)、A-2(hard deny 澄清)、A-5(杂物清理)、T-1 配套(SubagentSpec.workdir) |
+| R3 context/memory | 16e577b | CT-1(L2 超时)、CT-2(tool_group 配对组扩展)、CT-3(O(N) 截断)、CT-4(熔断可配构建参数)、CT-5(post_compact 异步化)、MM-1(CJK panic)、MM-5(save 锁) |
+| R4 providers/tools/mcp/sdk/cli | 2caabb2 | PR-1~PR-4/PR-6、T-1(worktree 注入+契约文档+真实断言测试)/T-2/T-3/T-4/T-5/T-6/T-8、MC-2/MC-3/MC-4(serve 旗标)、sdk Reasoning 透传 |
+| R5 前端 | d1635c8 | F-1(guard 管线再生成)、F-2(seq 单一写者)、F-3(/undo+/permission-mode 路由)、F-4(token env 下传)、F-5(expect/202 瘦身)、F-6(proxy/类型逃逸) |
+| R6 文档 | e93eebb | D-1 六处对齐、D-2 编号说明、D-3 统一 204、D-4 命名/编号重建、D-5/D-6 标注闭环 |
+| R7 工程 | 84ce5d9 | E-1 发布兑底、E-4 钉版对齐、E-5(ignore 矛盾/死依赖/脚本包管理器/CHANGELOG 倒序) |
+
+**仍开放的已知项**（详见 roadmap"2026-08-25 审查遗留"）：seccomp、DNS IP pinning、HOME 细粒度白名单、EventBus 双通道、denial echo 触发、journal 内存上限、auto memory 注入接线、BM25 接线、loader 扩展层、SDK semver 校验、extension permissions 接线核实、TUI 命令体系、tauri updater、MSRV 可达性（stable 1.98<1.99）、31 处 sleep 测试时钟改造。
