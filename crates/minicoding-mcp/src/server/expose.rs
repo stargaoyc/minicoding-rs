@@ -104,12 +104,25 @@ impl ServerHandler for ToolExposer {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>>
     + rmcp::service::MaybeSendFuture
     + '_ {
-        let tools: Vec<rmcp::model::Tool> = self
-            .registry
-            .schemas()
-            .into_iter()
-            .map(convert_schema_to_mcp_tool)
-            .collect();
+        // annotations（2026-08-23 审查遗留#5）：按本地 side_effect 填 readOnlyHint
+        // ——此前恒 None，外部 client 无法做只读优化/提示。
+        let tools: Vec<rmcp::model::Tool> =
+            self.registry
+                .schemas()
+                .into_iter()
+                .map(|schema| {
+                    let read_only = self.registry.get(&schema.name).is_some_and(|t| {
+                        t.side_effect() == minicoding_core::model::SideEffect::None
+                    });
+                    let mut tool = convert_schema_to_mcp_tool(schema);
+                    // ToolAnnotations 为 #[non_exhaustive]：default + 字段赋值
+                    let mut ann = rmcp::model::ToolAnnotations::default();
+                    ann.read_only_hint = Some(read_only);
+                    ann.destructive_hint = Some(!read_only);
+                    tool.annotations = Some(ann);
+                    tool
+                })
+                .collect();
         std::future::ready(Ok(ListToolsResult {
             tools,
             ..Default::default()

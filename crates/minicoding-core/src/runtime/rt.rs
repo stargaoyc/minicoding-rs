@@ -175,6 +175,11 @@ pub struct Runtime {
     ///
     /// `Arc<TokioMutex>` 因 `--replay`/SSE handler 需读取此值判断 `durable_seq`。
     pub(crate) durable_seq: Arc<TokioMutex<u64>>,
+    /// Hook 注入上下文缓冲（2026-08-23 审查遗留#6 接线）：PreToolUse Hook 的
+    /// `inject_context` 在工具调用间隙**不能**直接 append（会插入
+    /// `assistant(tool_calls)` 与 `tool_result` 之间，破坏配对）——先缓冲，
+    /// 下一请求构建时包裹 `<hook_context>` 边界并入 system 段头部。
+    pub(crate) pending_hook_contexts: std::sync::Mutex<Vec<String>>,
     /// 单 turn 门闩（2026-08-23 审查 §4-P2）：`run_turn` 入口 `try_lock`，
     /// 并发第二个 turn 返回 `RuntimeError::TurnInProgress`。tokio Mutex（无锁
     /// 争用时零开销）；guard 持有至 turn 结束（含取消/超时路径，随 future drop 释放）。
@@ -491,6 +496,23 @@ impl Runtime {
                     };
 
                     // 3. 流式调用 LLM
+                    // Hook 注入上下文消费（遗留#6）：包裹 `<hook_context>` 边界
+                    // （声明非指令，C-05 精神）并入 system 头部；不落盘不进历史。
+                    {
+                        let drained: Vec<String> = self
+                            .pending_hook_contexts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .drain(..)
+                            .collect();
+                        for c in drained.iter().rev() {
+                            req.system.insert_str(
+                                0,
+                                &format!("<hook_context>\n{c}\n</hook_context>\n"),
+                            );
+                        }
+                    }
+
                     // 配对完整性最后防线（§8-P0-2）：压缩管道丢弃边界可能切断
                     // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
                     // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。

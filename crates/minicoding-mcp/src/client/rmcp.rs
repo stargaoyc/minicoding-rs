@@ -98,6 +98,8 @@ pub struct RmcpClient {
     connections: Arc<RwLock<HashMap<String, ServerConnection>>>,
     /// Inflight 请求合并（X-14）：同 server+tool+input 的并发调用共享一次实际请求。
     inflight: Arc<RwLock<HashMap<RequestKey, SharedCallFuture>>>,
+    /// 最近一次 `start` 的配置（2026-08-23 审查遗留#5：断线重启重试用）。
+    last_configs: Arc<std::sync::Mutex<Vec<McpServerConfig>>>,
 }
 
 impl RmcpClient {
@@ -107,6 +109,7 @@ impl RmcpClient {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             inflight: Arc::new(RwLock::new(HashMap::new())),
+            last_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -379,6 +382,10 @@ impl Default for RmcpClient {
 impl McpClient for RmcpClient {
     fn start(&self, configs: &[McpServerConfig]) -> BoxFuture<'_, Result<(), McpError>> {
         let configs = configs.to_vec();
+        // 记录配置供断线重启（2026-08-23 审查遗留#5）
+        if let Ok(mut guard) = self.last_configs.lock() {
+            guard.clone_from(&configs);
+        }
         Box::pin(async move {
             // 并发启动各 server（设计 §19.6）；required 失败收集后返回首个错误
             let mut required_errors: Vec<McpError> = Vec::new();
@@ -424,6 +431,15 @@ impl McpClient for RmcpClient {
                 .flat_map(|c| c.tools.clone())
                 .collect()
         })
+    }
+
+    fn restart(&self) -> BoxFuture<'_, Result<(), McpError>> {
+        let configs = self
+            .last_configs
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        self.start(&configs)
     }
 
     fn tool_hints(&self) -> BoxFuture<'_, HashMap<String, minicoding_core::mcp::ToolHint>> {

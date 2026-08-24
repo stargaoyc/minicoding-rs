@@ -347,6 +347,14 @@ impl Runtime {
         for msg in &result.exit_messages {
             tracing::info!(tool = %call.name, hook_msg = %msg, "PreToolUse hook exit message");
         }
+        // inject_context 接线（2026-08-23 审查遗留#6）：缓冲至下一请求 system 段
+        //（不能在此 append——会切断 `tool_use`/`tool_result` 配对）
+        for ctx_text in &result.inject_contexts {
+            self.pending_hook_contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ctx_text.clone());
+        }
         Ok(pre_decision)
     }
 

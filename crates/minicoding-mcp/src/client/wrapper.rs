@@ -93,7 +93,22 @@ impl Tool for McpToolWrapper {
         let client = self.client.clone();
         let server = self.server.clone();
         let tool = self.tool.clone();
+        let input_schema = self.schema.input_schema.clone();
         Box::pin(async move {
+            // 轻量入参预检（2026-08-23 审查遗留#5）：远端 inputSchema 的
+            // `required` 键在本地校验，缺参直接报 InvalidInput——省一次
+            // 网络往返（完整 JSON Schema 校验待引入 jsonschema crate）。
+            if let Some(required) = input_schema.get("required").and_then(|v| v.as_array()) {
+                for key in required {
+                    if let Some(k) = key.as_str()
+                        && input.get(k).is_none()
+                    {
+                        return Err(ToolError::InvalidInput(format!(
+                            "mcp {server}__{tool}: 缺少必填参数 `{k}`"
+                        )));
+                    }
+                }
+            }
             // OTel `mcp.call` span（T-M5-8，O-08）：记录 server/tool，elapsed 由 span 自动携带。
             // 与 `hook.run` span 同构（见 `core::hooks::HookRegistry::dispatch`），
             // 便于在 collector 侧按 otel.name 聚合 MCP 调用延迟。
@@ -104,10 +119,21 @@ impl Tool for McpToolWrapper {
                 otel.name = "mcp.call",
             );
             let _enter = span.enter();
-            client
-                .call(&server, &tool, input)
-                .await
-                .map_err(|e| ToolError::Exec(format!("mcp {server}__{tool}: {e}")))
+            match client.call(&server, &tool, input.clone()).await {
+                Ok(r) => Ok(r),
+                // 断线一次性重启重试（2026-08-23 审查遗留#5）：连接级故障
+                // （进程退出/管道断开）经 restart 重建后重试；业务错误不重试。
+                Err(e) => match client.restart().await {
+                    Ok(()) => client.call(&server, &tool, input).await.map_err(|e2| {
+                        ToolError::Exec(format!(
+                            "mcp {server}__{tool}: 重启后仍失败: {e2}（首次: {e}）"
+                        ))
+                    }),
+                    Err(restart_err) => Err(ToolError::Exec(format!(
+                        "mcp {server}__{tool}: {e}（重启失败: {restart_err}）"
+                    ))),
+                },
+            }
         })
     }
 }

@@ -119,6 +119,19 @@ pub trait McpClient: Send + Sync {
     ///
     /// 供 wrapper 决定 `side_effect`/`is_read_only`（S13/C-25：hint 是远端
     /// 自我声明，默认不信任）。未实现时返回空 map（全部按 Unknown 处理）。
+    /// 断线重启（2026-08-23 审查遗留#5）：用最近一次 `start` 的配置重建全部
+    /// 连接。默认不支持（`NoopMcpClient` 等返回 `Unsupported`）。
+    ///
+    /// # Errors
+    /// 重启失败（含无历史配置）时返回 `McpError`。
+    fn restart(&self) -> BoxFuture<'_, Result<(), McpError>> {
+        Box::pin(async {
+            Err(McpError::Config(
+                "restart not supported by this client".into(),
+            ))
+        })
+    }
+
     fn tool_hints(&self) -> BoxFuture<'_, std::collections::HashMap<String, ToolHint>> {
         Box::pin(async { std::collections::HashMap::new() })
     }

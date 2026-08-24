@@ -436,6 +436,7 @@ impl RuntimeBuilder {
             config_path: self.config_path,
             last_non_whitelist_sig: std::sync::Mutex::new(None),
             hot_reload_baseline,
+            pending_hook_contexts: std::sync::Mutex::new(Vec::new()),
             session,
             events: self.events,
             workdir: tokio::sync::RwLock::new(workdir),
