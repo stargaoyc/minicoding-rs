@@ -11,9 +11,18 @@
 //! ```
 //!
 //! 降级时记 `tracing::warn!` 日志。启发式兜底标注 `[heuristic fallback]`。
+//!
+//! CT-1（2026-08-25 审查）：每次 provider 调用包 `tokio::time::timeout`（默认 30s，
+//! 对齐 `memory/session_sum.rs`），超时按失败进入降级链。此前无超时——调用方
+//! `ContextManagerImpl::compress` 持 messages 写锁跨整个管道，provider 挂起会
+//! 无限期阻塞所有消息读写。曾评估"快照→放锁→压缩→回写"的锁收窄方案：放锁窗口
+//! 内并发 append/restore 与回写竞态会丢失增量（append 尾插、restore 整表换血），
+//! 正确合并需引入版本号协议，超出缺陷修复范围；现以超时封顶锁持有时长兜底。
+
+use std::time::Duration;
 
 use futures::StreamExt;
-use minicoding_core::model::{Message, RuntimeError};
+use minicoding_core::model::{LlmError, Message, RuntimeError};
 use minicoding_core::provider::{ChatRequest, Delta, GenerationParams, LlmProvider};
 
 use super::summarize::SummarizeConfig;
@@ -43,16 +52,16 @@ pub async fn summarize_with_fallback(
         .join("\n\n");
 
     // 1. 主 provider
-    match call_llm_summary(primary, &input, config).await {
+    match call_llm_summary_with_timeout(primary, &input, config).await {
         Ok(summary) => return Ok(summary),
         Err(e) => {
-            tracing::warn!(error = %e, provider = primary.id(), "L2 主 provider 摘要失败，尝试降级");
+            tracing::warn!(error = %e, provider = primary.id(), "L2 主 provider 摘要失败或超时，尝试降级");
         }
     }
 
     // 2. 备用 provider（如有）
     if let Some(secondary) = secondary {
-        match call_llm_summary(secondary, &input, config).await {
+        match call_llm_summary_with_timeout(secondary, &input, config).await {
             Ok(summary) => {
                 tracing::warn!(
                     provider = secondary.id(),
@@ -63,7 +72,7 @@ pub async fn summarize_with_fallback(
             Err(e) => tracing::warn!(
                 error = %e,
                 provider = secondary.id(),
-                "L2 备用 provider 摘要失败，降级到启发式兜底"
+                "L2 备用 provider 摘要失败或超时，降级到启发式兜底"
             ),
         }
     }
@@ -75,6 +84,28 @@ pub async fn summarize_with_fallback(
         "L2 启发式兜底摘要（不调 LLM）：降级链终端"
     );
     Ok(summary)
+}
+
+/// 带超时的单次 LLM 摘要调用（CT-1，2026-08-25 审查）。
+///
+/// 超时映射为 `LlmError::Timeout` → `RuntimeError`，由降级链处理（语义与
+/// provider 自身失败一致，见 `session_sum.rs` 同构实现）。
+async fn call_llm_summary_with_timeout(
+    provider: &dyn LlmProvider,
+    input: &str,
+    config: &SummarizeConfig,
+) -> Result<String, RuntimeError> {
+    let timeout = Duration::from_secs(config.llm_timeout_secs);
+    let fut = call_llm_summary(provider, input, config);
+    if let Ok(res) = tokio::time::timeout(timeout, fut).await {
+        return res;
+    }
+    tracing::warn!(
+        provider = provider.id(),
+        timeout_secs = config.llm_timeout_secs,
+        "L2 摘要 LLM 调用超时"
+    );
+    Err(LlmError::Timeout(timeout).into())
 }
 
 /// 调 LLM 生成摘要，返回摘要文本。
@@ -166,6 +197,8 @@ mod tests {
     enum MockBehavior {
         Ok(&'static str),
         Err,
+        /// 永不产出增量的挂起流（CT-1 超时测试用）。
+        Hang,
     }
 
     impl MockProvider {
@@ -181,6 +214,14 @@ mod tests {
             Self {
                 id,
                 behavior: MockBehavior::Err,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn hanging(id: &'static str) -> Self {
+            Self {
+                id,
+                behavior: MockBehavior::Hang,
                 call_count: AtomicUsize::new(0),
             }
         }
@@ -220,6 +261,11 @@ mod tests {
                         Ok(Box::pin(stream) as BoxStream<'static, _>)
                     }
                     MockBehavior::Err => Err(LlmError::Network("mock failure".into())),
+                    MockBehavior::Hang => {
+                        // 永远 pending：模拟 provider 挂起（无响应也无错误）
+                        let stream = futures::stream::pending::<Result<Delta, LlmError>>();
+                        Ok(Box::pin(stream) as BoxStream<'static, _>)
+                    }
                 }
             })
         }
@@ -356,5 +402,51 @@ mod tests {
         let empty: Vec<&Message> = Vec::new();
         let summary = heuristic_summary(&empty);
         assert_eq!(summary, "[heuristic fallback] ");
+    }
+
+    // === CT-1 回归（2026-08-25 审查）：LLM 挂起时超时降级，不无限阻塞 ===
+
+    #[tokio::test]
+    async fn hanging_provider_times_out_to_heuristic_fallback() {
+        let primary = MockProvider::hanging("primary");
+        // 测试用 1s 超时（生产默认 30s），验证超时路径而非真实等待
+        let config = SummarizeConfig {
+            llm_timeout_secs: 1,
+            ..SummarizeConfig::default()
+        };
+        let msgs = make_messages();
+
+        let started = std::time::Instant::now();
+        let result = summarize_with_fallback(&refs(&msgs), &primary, None, &config)
+            .await
+            .expect("降级链终端恒成功");
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.starts_with("[heuristic fallback]"),
+            "超时应降级到启发式兜底: {result}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "挂起调用应被超时打断: {elapsed:?}"
+        );
+        assert_eq!(primary.call_count(), 1, "主 provider 恰被调用一次");
+    }
+
+    #[tokio::test]
+    async fn hanging_primary_falls_through_to_secondary() {
+        let primary = MockProvider::hanging("primary");
+        let secondary = MockProvider::ok("secondary", "backup summary");
+        let config = SummarizeConfig {
+            llm_timeout_secs: 1,
+            ..SummarizeConfig::default()
+        };
+        let msgs = make_messages();
+
+        let result = summarize_with_fallback(&refs(&msgs), &primary, Some(&secondary), &config)
+            .await
+            .expect("备用 provider 应成功");
+
+        assert_eq!(result, "backup summary", "主 provider 超时后应由备用接管");
     }
 }

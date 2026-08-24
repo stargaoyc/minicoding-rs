@@ -23,6 +23,12 @@ pub struct SummarizeConfig {
     pub ratio: f64,
     /// 摘要最大 token 数（默认 200）。
     pub max_summary_tokens: usize,
+    /// 单次 LLM 摘要调用超时秒数（默认 30，对齐 `memory/session_sum.rs`）。
+    ///
+    /// CT-1（2026-08-25 审查）：此前无超时——provider 挂起时 `ContextManagerImpl`
+    /// 持有的 messages 写锁被无限期占用，阻塞所有 `append`/`build_chat_request`。
+    /// 超时按该 provider 失败处理，进入降级链（C-29 不可跳过）。
+    pub llm_timeout_secs: u64,
 }
 
 impl Default for SummarizeConfig {
@@ -30,6 +36,7 @@ impl Default for SummarizeConfig {
         Self {
             ratio: 0.5,
             max_summary_tokens: 200,
+            llm_timeout_secs: 30,
         }
     }
 }
@@ -40,6 +47,9 @@ impl Default for SummarizeConfig {
 /// 调 `summarize_with_fallback`（含降级链）生成摘要，替换为单条标注
 /// `[summarized @ ts]` 的 assistant 消息（`metadata.summarized = true`）。
 /// 替换数记入 `result.summarized_count`；降级到启发式兜底时记 `result.fallback_used`。
+///
+/// CT-2（2026-08-25 审查）：选取集经配对组扩展——`assistant(tool_calls)` 与其后
+/// 紧随的 `Role::Tool` 结果原子替换，实际替换数可能大于 N。
 ///
 /// system 消息权重恒 ≥ 1.0（见 `weight.rs`），不会被选中。
 ///
@@ -82,6 +92,11 @@ pub async fn summarize_old_messages(
     weighted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut to_summarize: Vec<usize> = weighted.iter().take(n).map(|(i, _)| *i).collect();
     to_summarize.sort_unstable();
+
+    // CT-2（2026-08-25 审查）：配对组扩展——选中组内任一成员则整组纳入替换，
+    // 避免"摘要掉 tool_call、留下孤儿 tool_result"（或反向）破坏后续请求；
+    // 替换产物是纯文本 assistant 消息，不含任何工具引用。扩展后索引仍升序去重。
+    let to_summarize = super::tool_group::expand_to_groups(messages, &to_summarize);
 
     // 收集待摘要消息的引用（供降级链渲染与启发式兜底使用）
     let selected: Vec<&Message> = to_summarize
@@ -141,12 +156,159 @@ pub async fn summarize_old_messages(
         },
     };
 
-    // 从后向前删除被摘要消息（避免索引偏移），再在原首位置插入摘要
+    // 从后向前删除被摘要消息（索引升序，逆序 remove 不偏移），再在原首位置插入摘要
     for &i in to_summarize.iter().rev() {
         messages.remove(i);
     }
     messages.insert(insert_pos, summary_msg);
 
-    result.summarized_count += n;
+    // CT-2：实际替换数 = 组扩展后的集合大小（可能大于权重选取的 n）
+    result.summarized_count += to_summarize.len();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! 最小单元测试：CT-2 配对组原子替换（2026-08-25 审查）。
+
+    use super::*;
+    use minicoding_core::model::{LlmError, StopReason, ToolCall};
+    use minicoding_core::provider::{BoxFuture, BoxStream, Capabilities, ChatRequest, Delta};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 按字符数计数的分词器。
+    struct CharTokenizer;
+    impl Tokenizer for CharTokenizer {
+        fn count(&self, text: &str) -> usize {
+            text.chars().count()
+        }
+        fn count_messages(&self, msgs: &[Message]) -> usize {
+            msgs.iter().map(|m| m.text().chars().count()).sum()
+        }
+        fn id(&self) -> &'static str {
+            "char-test"
+        }
+    }
+
+    /// mock provider：恒返回固定摘要文本。
+    struct MockSummaryProvider {
+        call_count: AtomicUsize,
+    }
+    impl MockSummaryProvider {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl LlmProvider for MockSummaryProvider {
+        fn id(&self) -> &'static str {
+            "mock-summary"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                supports_tool_call: false,
+                supports_vision: false,
+                supports_streaming: true,
+                supports_json_mode: false,
+                context_window: 4096,
+                max_output: 1024,
+            }
+        }
+        fn tokenizer(&self) -> Arc<dyn Tokenizer> {
+            Arc::new(CharTokenizer)
+        }
+        fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let stream = futures::stream::iter(vec![
+                    Ok(Delta::Text("summary".to_string())),
+                    Ok(Delta::Stop(StopReason::EndTurn)),
+                ]);
+                Ok(Box::pin(stream) as BoxStream<'static, _>)
+            })
+        }
+        fn count_tokens(&self, messages: &[Message]) -> BoxFuture<'_, usize> {
+            let n = messages.len();
+            Box::pin(async move { n })
+        }
+    }
+
+    /// 构造带单个 `tool_call` 的 assistant 消息（组头）。
+    fn assistant_with_call(call_id: &str) -> Message {
+        Message {
+            id: ulid::Ulid::new().to_string(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "calling".into(),
+            }],
+            tool_calls: vec![ToolCall {
+                id: call_id.to_string(),
+                name: "fs.read".into(),
+                input: serde_json::json!({"path": "a.rs"}),
+            }],
+            tool_call_id: None,
+            created_at: OffsetDateTime::now_utc(),
+            metadata: MessageMeta::default(),
+        }
+    }
+
+    /// 构造 `Role::Tool` 结果消息（组成员）。
+    fn tool_result(call_id: &str) -> Message {
+        Message {
+            id: ulid::Ulid::new().to_string(),
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: call_id.to_string(),
+                content: minicoding_core::model::ToolContent::Text("done".into()),
+                is_error: false,
+                metadata: minicoding_core::model::ToolResultMeta::default(),
+            }],
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.to_string()),
+            created_at: OffsetDateTime::now_utc(),
+            metadata: MessageMeta::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_expands_tool_group_atomically() {
+        // 权重选取会命中低 base 的 tool 结果（0.4），而其 assistant 组头未必入选；
+        // 扩展后整组替换为单条摘要消息，不残留孤儿。
+        // [0]=user 长(拉低权重) [1]=A(tc) [2]=T [3]=user 短
+        let mut msgs = vec![
+            Message::user_text("x".repeat(600)),
+            assistant_with_call("c1"),
+            tool_result("c1"),
+            Message::user_text("recent question"),
+        ];
+        let tokenizer = CharTokenizer;
+        let provider = MockSummaryProvider::new();
+        let mut result = CompressResult::default();
+
+        summarize_old_messages(
+            &mut msgs,
+            &tokenizer,
+            &provider,
+            &SummarizeConfig::default(),
+            &mut result,
+            Some(4),
+        )
+        .await
+        .expect("summarize 应成功");
+
+        assert!(
+            !msgs.iter().any(|m| m.role == Role::Tool),
+            "不允许残留孤儿 tool_result"
+        );
+        assert_eq!(result.summarized_count, 3, "user + A + T 整组替换");
+        // 摘要消息插入原首位置，其后是未选中的新消息
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].metadata.summarized, "首条应为摘要消息");
+        assert_eq!(msgs[1].text(), "recent question");
+    }
 }

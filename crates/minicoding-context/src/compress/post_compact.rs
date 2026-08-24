@@ -79,9 +79,13 @@ pub fn extract_read_files(messages: &[Message], max_files: usize) -> Vec<String>
 /// 拼接成 `<post_compact_context>` 块追加到 system 段末尾。
 /// 文件读取失败静默跳过。
 ///
+/// CT-5（2026-08-25 审查）：文件读取用 `tokio::fs`——本函数在
+/// `build_chat_request` 的 async 路径上执行，`std::fs` 阻塞读会卡住 executor
+/// worker 线程。
+///
 /// # 返回
 /// 注入后的新 system 段。若无文件可注入，返回原 system 段不变。
-pub fn inject_post_compact(
+pub async fn inject_post_compact(
     system_prompt: &str,
     file_paths: &[String],
     config: &PostCompactConfig,
@@ -102,7 +106,7 @@ pub fn inject_post_compact(
             workdir.join(path_str)
         };
 
-        let content = match std::fs::read_to_string(&full_path) {
+        let content = match tokio::fs::read_to_string(&full_path).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!(
@@ -254,16 +258,16 @@ mod tests {
         assert!(files.is_empty(), "expected empty: files");
     }
 
-    #[test]
-    fn inject_post_compact_returns_original_when_no_files() {
+    #[tokio::test]
+    async fn inject_post_compact_returns_original_when_no_files() {
         let tokenizer = CharTokenizer;
         let config = PostCompactConfig::default();
-        let result = inject_post_compact("system", &[], &config, &tokenizer, Path::new("."));
+        let result = inject_post_compact("system", &[], &config, &tokenizer, Path::new(".")).await;
         assert_eq!(result, "system");
     }
 
-    #[test]
-    fn inject_post_compact_skips_unreadable_files() {
+    #[tokio::test]
+    async fn inject_post_compact_skips_unreadable_files() {
         let tokenizer = CharTokenizer;
         let config = PostCompactConfig::default();
         let result = inject_post_compact(
@@ -272,12 +276,13 @@ mod tests {
             &config,
             &tokenizer,
             Path::new("."),
-        );
+        )
+        .await;
         assert_eq!(result, "system");
     }
 
-    #[test]
-    fn inject_post_compact_injects_readable_file() {
+    #[tokio::test]
+    async fn inject_post_compact_injects_readable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file_path = dir.path().join("test.rs");
         std::fs::write(&file_path, "fn main() {}").expect("write");
@@ -285,7 +290,7 @@ mod tests {
 
         let tokenizer = CharTokenizer;
         let config = PostCompactConfig::default();
-        let result = inject_post_compact("system", &[rel], &config, &tokenizer, dir.path());
+        let result = inject_post_compact("system", &[rel], &config, &tokenizer, dir.path()).await;
         assert!(result.contains("<post_compact_context>"));
         assert!(result.contains("fn main() {}"));
         assert!(result.contains("test.rs"));

@@ -25,8 +25,8 @@ use tokio::sync::Mutex;
 
 use crate::budget::TokenBudget;
 use crate::compress::{
-    CircuitBreaker, CompressResult, PostCompactConfig, PredictiveTracker, StateKeep,
-    compress_pipeline, extract_read_files, inject_post_compact, should_predict_compact,
+    CircuitBreaker, CircuitBreakerConfig, CompressResult, PostCompactConfig, PredictiveTracker,
+    StateKeep, compress_pipeline, extract_read_files, inject_post_compact, should_predict_compact,
 };
 
 /// 根据压缩结果计算压缩级别（0-4，用于 metrics 维度）。
@@ -149,6 +149,18 @@ impl ContextManagerImpl {
         )
     }
 
+    /// 注入压缩熔断器配置（CT-4，2026-08-25 审查）。
+    ///
+    /// 默认 [`CircuitBreakerConfig::default`]（fail=3 / `force_end=5` / thrash=2 /
+    /// cooldown=60s）。阈值配置化的终态是挂到 `core::ContextConfig` 字段由 CLI
+    /// 层透传（core 本轮只读不改），在该扩展落地前以链式 builder 提供注入点，
+    /// 不破坏既有构造签名（server/sdk 调用点零改动，行为默认不变）。
+    #[must_use]
+    pub fn with_circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = Mutex::new(CircuitBreaker::with_config(config));
+        self
+    }
+
     /// 链式注入 Prompt 管道与 context 模板（启用动态 system prompt 构建）。
     ///
     /// 注入后 `build_chat_request` 优先调 `pipeline.build(&ctx)` 生成 system prompt，
@@ -265,6 +277,12 @@ impl ContextManagerImpl {
         let provider_ref = self.provider.as_deref();
 
         // 持写锁运行压缩管道，释放后再获取熔断器锁（避免锁序倒置：messages → breaker）。
+        //
+        // CT-1（2026-08-25 审查）：写锁跨整个管道含 L2 的 LLM 摘要调用。曾评估
+        // "读快照→放锁→调用→回写"的收窄方案，不可行：放锁窗口内并发 append
+        // （尾插）/restore（整表换血）与回写竞态会丢失增量，正确合并需引入消息
+        // 版本号协议，超出缺陷修复范围。现以 fallback.rs 的 30s 超时兜底封顶
+        // 锁的最长持有时长（主/备 provider 各一次）。
         let (outcome, new_tokens, tokens_before) = {
             let mut guard = self.messages.write().await;
             let tokens_before = self.tokenizer.count_messages(&guard);
@@ -505,8 +523,16 @@ impl ContextManager for ContextManagerImpl {
                 if read_files.is_empty() {
                     base_system
                 } else {
-                    let workdir =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    // CT-5（2026-08-25 审查）：相对路径基于会话 workdir 解析而非进程
+                    // cwd——server/sdk 多会话下两者可能不同；模板未注入时（测试路径）
+                    // 退回进程 cwd 兜底。
+                    let workdir = self.prompt_ctx_template.as_ref().map_or_else(
+                        || {
+                            std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        },
+                        |t| t.workdir.as_std_path().to_path_buf(),
+                    );
                     inject_post_compact(
                         &base_system,
                         &read_files,
@@ -514,6 +540,7 @@ impl ContextManager for ContextManagerImpl {
                         self.tokenizer.as_ref(),
                         &workdir,
                     )
+                    .await
                 }
             } else {
                 base_system

@@ -26,6 +26,7 @@ pub mod predictive;
 pub mod rolling;
 pub mod state_keep;
 pub mod summarize;
+mod tool_group;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use clip::ClipConfig;

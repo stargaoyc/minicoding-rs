@@ -90,6 +90,12 @@ pub struct AutoMemory {
     cached_entries: Mutex<Option<Vec<AutoEntry>>>,
     /// 缓存的索引文件 mtime。
     cached_mtime: Mutex<Option<OffsetDateTime>>,
+    /// save 串行化锁（2026-08-25 审查 MM-5）：正文与索引分两次 rename，并发
+    /// save 交错可产生"正文 A + 索引 B"错配。与 `long_term.rs::save_lock` 同构
+    /// 采用 `tokio::sync::Mutex`——临界区为全程异步 IO（两次 write + rename），
+    /// 必然跨 `.await`，std Mutex 会阻塞 executor worker 且违反 AGENTS.md §2.4
+    /// 并发原语约定；进程内互斥消除该窗口，跨进程一致性由 load 端兜底。
+    save_lock: tokio::sync::Mutex<()>,
 }
 
 impl AutoMemory {
@@ -110,6 +116,7 @@ impl AutoMemory {
             index_path: dir.join(AUTO_INDEX_FILE),
             cached_entries: Mutex::new(None),
             cached_mtime: Mutex::new(None),
+            save_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -223,6 +230,8 @@ impl AutoMemory {
 
     /// 原子写入索引与渲染后的正文，刷新缓存。
     async fn save_entries(&self, entries: &[AutoEntry]) -> Result<(), MemoryError> {
+        // 串行化并发 save（2026-08-25 审查 MM-5，见字段注释）
+        let _save_guard = self.save_lock.lock().await;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -879,6 +888,45 @@ mod tests {
         let mut entries: Vec<AutoEntry> = Vec::new();
         evict_until_fit(&mut entries);
         assert!(entries.is_empty(), "expected empty: entries");
+    }
+
+    // === MM-5 回归（2026-08-25 审查）：并发 save 串行化，双文件不交错 ===
+
+    #[tokio::test]
+    async fn concurrent_saves_leave_consistent_file_pair() {
+        // 16 个并发 add_entry（各自独立 topic）：save 无串行锁时，两次 rename
+        // 交错可产生"正文 A + 索引 B"错配。串行化后任一时刻落盘均为同一次
+        // save 的完整双文件——最终磁盘上的 md 必须与索引渲染结果一致。
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = std::sync::Arc::new(make(tmp.path()));
+
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let mem = std::sync::Arc::clone(&mem);
+            handles.push(tokio::spawn(async move {
+                mem.add_entry(
+                    format!("topic-{i}"),
+                    "content".to_string(),
+                    AutoCategory::Pref,
+                    0.5,
+                )
+                .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().expect("add_entry 应成功");
+        }
+
+        // 直接读磁盘比对（绕过内存缓存），验证落盘的 md/index 是同一次 save 的产物
+        let index_bytes = std::fs::read(tmp.path().join(AUTO_INDEX_FILE)).unwrap();
+        let disk_entries: Vec<AutoEntry> = serde_json::from_slice(&index_bytes)
+            .expect("auto.index.json 应为合法 JSON（未被并发写撕裂）");
+        let disk_md = std::fs::read_to_string(tmp.path().join(AUTO_FILE)).unwrap();
+        assert_eq!(
+            disk_md.trim_end(),
+            render_entries(&disk_entries).trim_end(),
+            "正文必须与索引渲染一致（同一次 save 的原子产物）"
+        );
     }
 
     // === 指令性检测：英文全大写也命中 ===

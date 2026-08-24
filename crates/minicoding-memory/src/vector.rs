@@ -26,8 +26,25 @@ pub struct SearchResult {
     pub id: String,
     /// BM25 分数（越高越相关）。
     pub score: f64,
-    /// 匹配片段（前 200 字符）。
+    /// 匹配片段（前 ~200 字节，向下对齐 UTF-8 char 边界，见 [`truncate_snippet`]）。
     pub snippet: String,
+}
+
+/// 截取前 200 **字节**并向下对齐到 char 边界（MM-1，2026-08-25 审查）。
+///
+/// 此前 `doc.content[..200]` 直接按字节切片——CJK 等多字节 UTF-8 内容在 200
+/// 字节处恰落字符中间时会 panic（`byte index is not a char boundary`）。对齐
+/// 写法与 `project_doc/loader.rs` 的截断一致。
+fn truncate_snippet(content: &str) -> String {
+    const SNIPPET_MAX_BYTES: usize = 200;
+    if content.len() <= SNIPPET_MAX_BYTES {
+        return content.to_string();
+    }
+    let mut end = SNIPPET_MAX_BYTES.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_string()
 }
 
 /// BM25 检索索引（`@memory` 语义检索）。
@@ -144,11 +161,7 @@ impl MemoryIndex {
             .take(top_k)
             .map(|(i, score)| {
                 let doc = &self.docs[i];
-                let snippet = if doc.content.len() > 200 {
-                    doc.content[..200].to_string()
-                } else {
-                    doc.content.clone()
-                };
+                let snippet = truncate_snippet(&doc.content);
                 SearchResult {
                     id: doc.id.clone(),
                     score,
@@ -290,5 +303,47 @@ mod tests {
         }
         let results = idx.search("rust", 3);
         assert_eq!(results.len(), 3);
+    }
+
+    // === MM-1 回归（2026-08-25 审查）：CJK 内容截断不 panic、落在 char 边界 ===
+
+    #[test]
+    fn snippet_truncation_is_char_boundary_safe_for_cjk() {
+        // 纯 CJK：每字 3 字节，200 字节处必落字符中间——旧实现 `content[..200]`
+        // 在此直接 panic。
+        let content = "汉".repeat(150); // 450 字节
+        let mut idx = MemoryIndex::new();
+        idx.add_document("cjk", &content);
+        let results = idx.search("汉", 1);
+        assert_eq!(results.len(), 1);
+        let snippet = &results[0].snippet;
+        assert!(
+            snippet.len() <= 200,
+            "snippet 应 ≤ 200 字节: {}",
+            snippet.len()
+        );
+        assert!(
+            snippet.is_char_boundary(snippet.len()),
+            "snippet 必须以 char 边界结尾"
+        );
+        assert!(!snippet.is_empty());
+        assert!(snippet.chars().all(|c| c == '汉'));
+    }
+
+    #[test]
+    fn snippet_truncation_handles_mixed_ascii_cjk() {
+        // ASCII 与 CJK 混排：199 个 ASCII + CJK，切点恰在多字节字符内部，
+        // 向下对齐后应停在 ASCII 段末尾。
+        let content = format!("{}{}", "a".repeat(199), "汉字测试");
+        assert!(content.len() > 200);
+        let snippet = truncate_snippet(&content);
+        assert_eq!(snippet, "a".repeat(199), "应回退到 ASCII/CJK 边界处");
+    }
+
+    #[test]
+    fn snippet_short_content_passes_through_unchanged() {
+        let short = "短内容";
+        assert_eq!(truncate_snippet(short), short);
+        assert_eq!(truncate_snippet(""), "");
     }
 }
