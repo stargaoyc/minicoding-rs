@@ -156,4 +156,16 @@
   `nightly-2026-08-18` 编译项目代码（stable 频道 1.98 不满足 MSRV 1.99）、
   tauri-cli 用 runner 预装 stable 安装（外部工具不受项目 MSRV 约束）
 
+## [0.3.2] - 2026-08-24
+
+### Fixed
+
+- **desktop：修复全部 HTTP 请求 `Failed to fetch`**（用户反馈：新建会话
+  报"创建失败：Failed to fetch"）。根因：Tauri WebView 的页面 origin
+  （Windows `http://tauri.localhost`、macOS/Linux `tauri://localhost`）不在
+  server 默认本机 CORS 白名单（S2 精确匹配 `localhost`/`127.0.0.1`/`[::1]`）
+  内，preflight 被拒——桌面端所有 HTTP/SSE 请求均受影响，v0.3.1 的"新建会话
+  无反应"同为此根因。修复：sidecar 启动参数显式加白两个 WebView origin，
+  serve 子命令默认策略不变（外部站点伪造 origin 仍因无 token 而 401）
+
 [Unreleased]: 后续变更见各 commit（Conventional Commits）。
