@@ -1706,6 +1706,11 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> anyhow::Result<()>;
 - `GET /sessions/{id}` 触发懒恢复（`get_or_load`），重启前的会话按需从磁盘重建 Runtime，响应体含 `messages` 与 `tasks: Vec<Task>`——由 `ServerSession::task_state` 返回
   （常驻订阅 `Event::TaskUpdated` 的镜像快照，任务权威源是 `TaskStore`）。前端据此渲染任务面板；
 - `POST /sessions` 的 `plan_mode: true` 使会话初始 `PermissionMode::Plan`（C-25：先写 `plan.md` 拆分子任务，`plan.exit` 批准后执行）；
+- `POST /sessions` 的 `workdir` 字段**预校验**（2026-08-24）：目录不存在/不可访问时立即返回
+  `400 {"error":"工作目录不存在或不可访问：…"}`
+  ，而非照常建会话、首个 turn 才在沙箱路径层报错；空白串视为未提供（走 server 默认目录）；
+  高危预设（`full-access`/`external-sandbox`）缺 `confirm_danger: true` 返回 400（S3/C-22）；
+  Runtime 构建失败（典型：API key 未配置/keyring 不可用）返回 500，错误信息含修复指引——前端须展示该错误（NewSessionDialog 红色提示），不得静默吞掉；
 - `POST /sessions` 的 `timeout_sec` / `max_retries` / `small_model` / `turn_timeout_sec` / `compress`
   五个可选字段覆盖 server 默认值（W-19 设置面板：Web 模式前端设置存储经此注入，
   Tauri 模式写 `config.toml` 后由 `serve` 读取为默认值，两类来源都无需新建端点）；

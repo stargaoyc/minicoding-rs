@@ -49,12 +49,15 @@ const MODE_OPTIONS: {
 export function NewSessionDialog({
   open,
   creating,
+  error,
   onConfirm,
   onClose,
 }: {
   open: boolean;
   /** 创建请求进行中（禁用确定按钮，防重复提交）。 */
   creating: boolean;
+  /** 创建失败的错误信息（非 null 时红色显示，对话框保持打开供重试）。 */
+  error: string | null;
   onConfirm: (workdir: string | undefined, mode: SessionModeKey) => void;
   onClose: () => void;
 }) {
@@ -138,6 +141,12 @@ export function NewSessionDialog({
               : "留空时使用服务端启动目录。工作区内的文件操作受权限与沙箱约束（C-01/C-03）。"}
           </p>
           {pickError && <p className="text-[10px] text-[var(--color-risk-high)]">{pickError}</p>}
+          {/* 创建失败（如 API key 未配置 / 服务端 5xx）：红色可见，不再静默吞掉 */}
+          {error && (
+            <p className="rounded-md border border-[var(--color-risk-high)]/40 bg-[var(--color-risk-high)]/10 px-2 py-1.5 text-[11px] leading-snug text-[var(--color-risk-high)]">
+              创建失败：{error}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-col gap-1">
