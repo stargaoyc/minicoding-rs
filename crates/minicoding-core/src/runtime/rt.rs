@@ -180,6 +180,9 @@ pub struct Runtime {
     /// `assistant(tool_calls)` 与 `tool_result` 之间，破坏配对）——先缓冲，
     /// 下一请求构建时包裹 `<hook_context>` 边界并入 system 段头部。
     pub(crate) pending_hook_contexts: std::sync::Mutex<Vec<String>>,
+    /// AllowAlways/DenyAlways 持久化存储（遗留#3；`None` 时 Always 决策折叠
+    /// 但不落盘）。sdk 默认注入 `~/.minicoding/policy.toml`。
+    pub(crate) policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
     /// 单 turn 门闩（2026-08-23 审查 §4-P2）：`run_turn` 入口 `try_lock`，
     /// 并发第二个 turn 返回 `RuntimeError::TurnInProgress`。tokio Mutex（无锁
     /// 争用时零开销）；guard 持有至 turn 结束（含取消/超时路径，随 future drop 释放）。

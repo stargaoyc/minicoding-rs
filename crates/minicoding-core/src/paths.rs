@@ -50,6 +50,14 @@ pub fn last_known_good_path() -> Result<Utf8PathBuf, std::io::Error> {
     Ok(minicoding_home()?.join(".last-known-good.toml"))
 }
 
+/// 用户级权限决策持久化路径（遗留#3：`~/.minicoding/policy.toml`）。
+///
+/// # Errors
+/// 当 home 目录无法确定时返回错误。
+pub fn policy_path() -> Result<Utf8PathBuf, std::io::Error> {
+    Ok(minicoding_home()?.join("policy.toml"))
+}
+
 /// 审计日志路径。
 ///
 /// # Errors

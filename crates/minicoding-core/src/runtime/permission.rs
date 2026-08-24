@@ -205,8 +205,8 @@ impl Runtime {
 
         // Metrics: 记录权限决策
         let verdict_str = match &decision {
-            Decision::Allow => "allow",
-            Decision::Deny(_) => "deny",
+            Decision::Allow | Decision::AllowAlways => "allow",
+            Decision::Deny(_) | Decision::DenyAlways(_) => "deny",
         };
         metrics::record_permission(verdict_str);
 
@@ -221,7 +221,12 @@ impl Runtime {
             SideEffect::Network => "network",
         };
         let tool_timer = metrics::start_timer();
+        // AllowAlways/DenyAlways 已在 resolve_decision 持久化并折叠为
+        // Allow/Deny——此处仅防御性兜底。
         let result = match decision {
+            Decision::AllowAlways | Decision::DenyAlways(_) => {
+                unreachable!("AllowAlways/DenyAlways must be collapsed in resolve_decision")
+            }
             Decision::Deny(msg) => {
                 // 拒绝路径同样发 ToolCallStarted/Finished（2026-08-23 审查 §4-P2）：
                 // SSE 消费者视角此前"凭空出现一条错误结果"，无卡片/终态事件。
@@ -404,6 +409,28 @@ impl Runtime {
                         Ok((Decision::Deny(reason), None))
                     }
                     _ => {
+                        // 遗留#3：持久化规则查表（仅当本 prompt 提供 Always 选项——
+                        // C-23 受保护文件的 restricted ask 不查，防绕过）
+                        if prompt
+                            .options
+                            .contains(&crate::policy::PromptOption::AllowAlways)
+                            && let Some(store) = &self.policy_persist
+                            && let Some(allow) = store.decision_for(&call.name)
+                        {
+                            tracing::info!(
+                                tool = %call.name,
+                                allow,
+                                "persisted policy hit, skipping prompt"
+                            );
+                            return Ok((
+                                if allow {
+                                    Decision::Allow
+                                } else {
+                                    Decision::Deny(format!("persisted deny for {}", call.name))
+                                },
+                                None,
+                            ));
+                        }
                         // Hook 未决策 → 走 prompter 交互
                         let prompt_id = prompt.id.clone();
                         self.events.emit(Event::PermissionRequested {
@@ -412,7 +439,33 @@ impl Runtime {
                             summary: prompt.summary.clone(),
                             risk: prompt.risk,
                         });
-                        let d = self.prompter.prompt(prompt.clone()).await;
+                        let mut d = self.prompter.prompt(prompt.clone()).await;
+                        // 遗留#3：Always 决策持久化后折叠为一次性语义执行
+                        if let Some(store) = &self.policy_persist {
+                            match &d {
+                                Decision::AllowAlways => {
+                                    if let Err(e) = store.set_allow(&call.name) {
+                                        tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
+                                    }
+                                    d = Decision::Allow;
+                                }
+                                Decision::DenyAlways(reason) => {
+                                    let reason = reason.clone();
+                                    if let Err(e) = store.set_deny(&call.name, &reason) {
+                                        tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
+                                    }
+                                    d = Decision::Deny(reason);
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            // 无持久化注入：Always 折叠但不落盘（与旧行为一致）
+                            d = match d {
+                                Decision::AllowAlways => Decision::Allow,
+                                Decision::DenyAlways(r) => Decision::Deny(r),
+                                other => other,
+                            };
+                        }
                         let event = Event::PermissionResolved {
                             id: prompt_id.clone(),
                             decision: d.clone(),
@@ -611,6 +664,12 @@ impl Runtime {
         let (decision_str, detail) = match (decision, prompt_id.is_some()) {
             (Decision::Allow, true) => ("allow", format!("user allowed {tool}")),
             (Decision::Allow, false) => ("allow", format!("policy allowed {tool}")),
+            (Decision::AllowAlways, _) => {
+                ("allow", format!("user allowed {tool} always (persisted)"))
+            }
+            (Decision::DenyAlways(reason), _) => {
+                ("deny", format!("user denied {tool} always: {reason}"))
+            }
             (Decision::Deny(reason), true) => ("deny", format!("user denied {tool}: {reason}")),
             (Decision::Deny(reason), false) => ("deny", format!("policy denied {tool}: {reason}")),
         };

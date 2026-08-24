@@ -85,14 +85,57 @@ impl Default for InteractivePrompter {
 impl PermissionPrompter for InteractivePrompter {
     fn prompt(&self, req: PermissionPrompt) -> BoxFuture<'_, Decision> {
         Box::pin(async move {
-            eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
-            eprintln!("[permission] allow? [y/N] ");
-            match tokio::task::spawn_blocking(read_yes_no).await {
-                Ok(true) => Decision::Allow,
-                Ok(false) => Decision::Deny("denied by user".to_string()),
-                Err(_) => Decision::Deny("prompter task failed".to_string()),
+            // 遗留#3：prompt 提供 Always 选项时开放 `a` 键（始终允许/拒绝）
+            let has_always = req.options.iter().any(|o| {
+                matches!(
+                    o,
+                    minicoding_core::policy::PromptOption::AllowAlways
+                        | minicoding_core::policy::PromptOption::DenyAlways
+                )
+            });
+            let deny_always_offered = req
+                .options
+                .contains(&minicoding_core::policy::PromptOption::DenyAlways);
+            if has_always {
+                eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
+                if deny_always_offered {
+                    eprintln!("[permission] [y]允许 / [a]始终允许 / [n]拒绝 / [N]始终拒绝");
+                } else {
+                    eprintln!("[permission] [y]允许 / [a]始终允许 / [n/N]拒绝");
+                }
+                match tokio::task::spawn_blocking(read_ynad).await {
+                    Ok(Some(Decision::Allow)) => Decision::Allow,
+                    Ok(Some(d @ (Decision::AllowAlways | Decision::DenyAlways(_)))) => d,
+                    _ => Decision::Deny("denied by user".to_string()),
+                }
+            } else {
+                eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
+                eprintln!("[permission] allow? [y/N] ");
+                match tokio::task::spawn_blocking(read_yes_no).await {
+                    Ok(true) => Decision::Allow,
+                    Ok(false) => Decision::Deny("denied by user".to_string()),
+                    Err(_) => Decision::Deny("prompter task failed".to_string()),
+                }
             }
         })
+    }
+}
+
+/// 读取一行并解析 y/a/n（遗留#3）：`Some(Allow)`=y、`Some(AllowAlways)`=a，
+/// 其余（n/N/空/无法解析）=一次性 [`Decision::Deny`]。`DenyAlways` 不经键盘
+/// 映射——CLI 提示层仅在选项集含 `DenyAlways` 时提示 `N`，当前 v1 统一折叠
+/// 为一次性 Deny（持久化拒绝规则由 Web/TUI 的显式按钮路径写入）。
+fn read_ynad() -> Option<Decision> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let stdin = std::io::stdin();
+    if stdin.lock().read_line(&mut line).is_err() {
+        return None;
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(Decision::Allow),
+        "a" => Some(Decision::AllowAlways),
+        _ => Some(Decision::Deny("denied by user".to_string())),
     }
 }
 

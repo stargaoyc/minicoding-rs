@@ -565,16 +565,19 @@ impl App {
         }
         let pending = self.pending_permission.take();
         let Some(p) = pending else { return };
-        let decision = match key.code {
-            KeyCode::Char('y' | 'Y' | 'a' | 'A') => Decision::Allow,
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => Decision::Deny("用户拒绝".to_string()),
+        // 遗留#3：`a` 仅在 prompt 提供 AllowAlways 选项时映射 Always
+        // （C-23：受保护文件的 restricted ask 不含该选项，`a` 退化为一次性 Allow）
+        let always_offered = p.prompt.options.contains(&PromptOption::AllowAlways);
+        let decision = match (key.code, always_offered) {
+            (KeyCode::Char('a'), true) => Decision::AllowAlways,
+            (KeyCode::Char('y' | 'Y'), _) | (KeyCode::Char('a' | 'A'), false) => Decision::Allow,
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, _) => Decision::Deny("用户拒绝".to_string()),
             _ => {
                 // 未识别按键，放回 pending 等待下次按键
                 self.pending_permission = Some(p);
                 return;
             }
         };
-        // AllowAlways/DenyAlways 暂不区分（T-M7-3 骨架：仅 Once 语义）
         let _ = p.reply.send(decision);
     }
 

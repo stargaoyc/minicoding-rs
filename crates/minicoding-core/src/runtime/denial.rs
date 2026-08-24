@@ -87,12 +87,12 @@ impl Runtime {
         )
         .await;
         match decision {
-            Decision::Allow => {
+            Decision::Allow | Decision::AllowAlways => {
                 let mut fallback = ctx.clone();
                 fallback.sandbox_policy = Some(SandboxPolicy::DangerFullAccess);
                 Some(fallback)
             }
-            Decision::Deny(_) => None,
+            Decision::Deny(_) | Decision::DenyAlways(_) => None,
         }
     }
 

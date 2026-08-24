@@ -94,6 +94,7 @@ pub struct RuntimeBuilder {
     /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
     /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -134,6 +135,7 @@ impl RuntimeBuilder {
             config_path: None,
             event_store: None,
             snapshot_store: None,
+            policy_persist: None,
         }
     }
 
@@ -368,6 +370,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 注入 AllowAlways/DenyAlways 持久化存储（2026-08-23 审查遗留#3；
+    /// sdk 默认注入 `~/.minicoding/policy.toml`）。
+    #[must_use]
+    pub fn with_policy_persist(
+        mut self,
+        persist: Option<Arc<crate::policy::PolicyPersist>>,
+    ) -> Self {
+        self.policy_persist = persist;
+        self
+    }
+
     /// 设置事件存储（Event Sourcing，默认 `NoopEventStore`）。
     ///
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
@@ -436,6 +449,7 @@ impl RuntimeBuilder {
             config_path: self.config_path,
             last_non_whitelist_sig: std::sync::Mutex::new(None),
             hot_reload_baseline,
+            policy_persist: self.policy_persist,
             pending_hook_contexts: std::sync::Mutex::new(Vec::new()),
             session,
             events: self.events,

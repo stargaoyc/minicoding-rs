@@ -241,8 +241,9 @@ pub async fn check_project_scope_approval(
                 };
                 let decision = prompter.prompt(prompt).await;
                 let state = match decision {
-                    Decision::Allow => ApprovalState::Approved,
-                    Decision::Deny(_) => ApprovalState::Rejected,
+                    // 该 prompt 仅提供 Once 选项（无 Always 变体可达，防御性归并）
+                    Decision::Allow | Decision::AllowAlways => ApprovalState::Approved,
+                    Decision::Deny(_) | Decision::DenyAlways(_) => ApprovalState::Rejected,
                 };
                 let now = time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)

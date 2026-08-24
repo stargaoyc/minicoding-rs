@@ -34,6 +34,12 @@ pub enum Verdict {
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
+    /// 用户选择"始终允许"：Runtime 持久化工具级 allow 规则后按 `Allow` 执行
+    /// （2026-08-23 审查遗留#3）。下游（执行/审计/事件）收到的是折叠后的
+    /// `Allow`/`Deny`——本变体仅存在于 prompter 返回到持久化之间。
+    AllowAlways,
+    /// 同 [`Decision::AllowAlways`]，语义为拒绝。
+    DenyAlways(String),
     Deny(String),
 }
 

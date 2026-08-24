@@ -415,13 +415,14 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
    过滤原语，如实标注不限网络）（ec5fe43）；
 2. ✅ 成本工程：Anthropic cache_control 断点、thinking_budget_tokens 配置端、
    calibrate() Usage 校准（74b2267）；
-3. ⬜ **AllowAlways/DenyAlways 持久化层**——唯一未落地项。设计稿：Decision
-   枚举增 `allow_always`/`deny_always` 变体（serde snake_case，旧数据反序列化
-   兼容）；merge_verdicts 取严秩同 Allow；runtime resolve_decision 弹窗后写
-   `~/.minicoding/policy.toml` `[allow]/[deny]` 工具名单（原子写 0600），Ask
-   前先查表命中即免弹窗（audit detail 标 source=persisted）；四端 UI 恢复
-   四按钮/`a` 键。波及 protocol DTO + ts 再生成 + 前端三处映射，建议独立
-   批次实施；
+3. ✅ AllowAlways/DenyAlways 持久化层四端贯通：Decision 枚举增
+   `allow_always`/`deny_always`（serde snake_case，旧数据兼容）；core 新增
+   `PolicyPersist`（`~/.minicoding/policy.toml`，原子写 unix 0600，工具名
+   粒度 allow/deny 双表互斥覆盖）；resolve_decision 在 prompt 提供 Always
+   选项时查表命中即免弹窗、弹窗返回 Always 后落盘并折叠执行（C-23 受保护
+   文件 restricted ask 不查不落，防绕过）；CLI 提示层支持 y/a/n、TUI `a`
+   键按选项集映射、Web 恢复四按钮并回传新 Decision；ts DTO 再生成。
+   完整 JSON Schema 维度校验仍待 jsonschema crate（同 MCP 项）。
 4. ✅ TUI scrollback+可见区渲染；Web EventDto 手写运行时守卫（Zod 依赖待
    评审，等价实现）；Desktop CSP script-src 收紧（e8b4ca4）;
 5. ✅ MCP：required 入参预检、restart 一次性断线重试、list_tools annotations

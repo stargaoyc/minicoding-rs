@@ -124,9 +124,10 @@ impl Tool for UiAsk {
                     decision: decision.clone(),
                 },
             );
-            let answer = match decision {
-                Decision::Allow => "yes".to_string(),
-                Decision::Deny(reason) if reason.is_empty() => "no".to_string(),
+            let answer = match &decision {
+                Decision::Allow | Decision::AllowAlways => "yes".to_string(),
+                Decision::Deny(r) if r.is_empty() => "no".to_string(),
+                Decision::DenyAlways(_) => "no".to_string(),
                 Decision::Deny(reason) => format!("no ({reason})"),
             };
             Ok(ToolResult::ok_text(format!("用户回答: {answer}")))

@@ -478,6 +478,12 @@ pub fn build_runtime(
         .events(event_bus)
         .with_config_watcher(config_watcher)
         .with_config_path(config_path)
+        // 遗留#3：AllowAlways/DenyAlways 持久化（~/.minicoding/policy.toml）
+        .with_policy_persist(
+            minicoding_core::paths::policy_path()
+                .ok()
+                .map(|p| std::sync::Arc::new(minicoding_core::policy::PolicyPersist::new(p))),
+        )
         .event_store(Arc::new(event_store))
         .snapshot_store(Arc::new(snapshot_store));
 

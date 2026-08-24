@@ -32,12 +32,15 @@ export function usePermissions() {
   const resolve = useCallback(
     async (choice: PermissionChoice) => {
       if (!pending) return;
-      // 映射为后端 Decision（Allow / Deny(reason)）。UI 已收敛为两值：
-      // 后端 Always 持久化层未实现，保留 union 成员仅为协议前向兼容
+      // 遗留#3：Always 决策原样回传（服务端持久化到 policy.toml 后折叠执行）
       const decision =
-        choice === "allow" || choice === "allow_always"
+        choice === "allow"
           ? "allow"
-          : { deny: `user denied via ${choice}` };
+          : choice === "allow_always"
+            ? "allow_always"
+            : choice === "deny_always"
+              ? { deny_always: "user denied via dialog" }
+              : { deny: `user denied via ${choice}` };
       try {
         await resolvePermission(pending.sessionId, pending.id, decision as never);
       } finally {
