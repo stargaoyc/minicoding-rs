@@ -400,6 +400,7 @@ impl ContextManager for TestContext {
                     max_output_tokens: None,
                     stop: Vec::new(),
                     seed: None,
+                    thinking_budget_tokens: None,
                 },
             })
         })

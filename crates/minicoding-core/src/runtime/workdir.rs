@@ -90,7 +90,7 @@ impl Runtime {
             .await;
 
         match decision {
-            Decision::Allow => {
+            Decision::Allow | Decision::AllowAlways => {
                 *self.workdir.write().await = canonical.clone();
                 tracing::info!(
                     session = %self.session.id,
@@ -99,7 +99,7 @@ impl Runtime {
                 );
                 Ok(true)
             }
-            Decision::Deny(reason) => {
+            Decision::Deny(reason) | Decision::DenyAlways(reason) => {
                 tracing::info!(
                     session = %self.session.id,
                     reason = %reason,

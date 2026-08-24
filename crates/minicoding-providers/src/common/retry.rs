@@ -276,6 +276,7 @@ mod tests {
                 max_output_tokens: None,
                 stop: vec![],
                 seed: None,
+                thinking_budget_tokens: None,
             },
         }
     }

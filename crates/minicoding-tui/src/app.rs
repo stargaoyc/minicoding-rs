@@ -214,6 +214,8 @@ pub struct App {
     /// 此前仅设状态文案不调 cancel，长 turn 唯一手段是杀进程）。turn 间隙为
     /// `None`（`cancel()` 对非运行 turn 本就不生效）。
     cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// 回看偏移（0=吸底；PgUp 增/PgDn 减，scrollback）
+    scroll_offset: usize,
     // 主题配色（未来 Ctrl+Shift+T 切换深/浅色）
     theme: Theme,
 }
@@ -251,6 +253,7 @@ impl App {
             tasks: Vec::new(),
             task_panel_state: ratatui::widgets::ListState::default(),
             cancel_token: None,
+            scroll_offset: 0,
             theme: Theme::default(),
         }
     }
@@ -329,6 +332,7 @@ impl App {
                     Role::User => {
                         let text = msg.text();
                         if !text.is_empty() {
+                            self.scroll_offset = 0;
                             self.lines.push(ChatLine::User(text));
                         }
                     }
@@ -443,6 +447,19 @@ impl App {
                 }
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => self.should_exit = true,
+            // scrollback：PgUp 上翻 / PgDn 下翻（减到 0 即吸底）
+            (KeyCode::PageUp, _) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+                self.status_msg = format!("↑ 回看 {} 行", self.scroll_offset);
+            }
+            (KeyCode::PageDown, _) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.status_msg = if self.scroll_offset == 0 {
+                    "↓ 已回到底部".to_string()
+                } else {
+                    format!("↑ 回看 {} 行", self.scroll_offset)
+                };
+            }
             // F2 切换侧栏显示
             (KeyCode::F(2), _) => {
                 self.sidebar_visible = true;
@@ -548,16 +565,19 @@ impl App {
         }
         let pending = self.pending_permission.take();
         let Some(p) = pending else { return };
-        let decision = match key.code {
-            KeyCode::Char('y' | 'Y' | 'a' | 'A') => Decision::Allow,
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => Decision::Deny("用户拒绝".to_string()),
+        // `a` 仅在 prompt 提供 AllowAlways 选项时映射 Always
+        // （C-23：受保护文件的 restricted ask 不含该选项，`a` 退化为一次性 Allow）
+        let always_offered = p.prompt.options.contains(&PromptOption::AllowAlways);
+        let decision = match (key.code, always_offered) {
+            (KeyCode::Char('a'), true) => Decision::AllowAlways,
+            (KeyCode::Char('y' | 'Y'), _) | (KeyCode::Char('a' | 'A'), false) => Decision::Allow,
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, _) => Decision::Deny("用户拒绝".to_string()),
             _ => {
                 // 未识别按键，放回 pending 等待下次按键
                 self.pending_permission = Some(p);
                 return;
             }
         };
-        // AllowAlways/DenyAlways 暂不区分（骨架：仅 Once 语义）
         let _ = p.reply.send(decision);
     }
 
@@ -568,6 +588,7 @@ impl App {
         }
         if let Some(text) = self.input.submit() {
             // 立即在 UI 显示用户消息（不等待 MessageAppended 事件，提升响应感）
+            self.scroll_offset = 0;
             self.lines.push(ChatLine::User(text.clone()));
             let _ = self.ui_tx.try_send(UiCommand::Submit(text));
             self.is_turning = true;
@@ -623,7 +644,13 @@ impl App {
     fn render_chat_with_panel(&mut self, frame: &mut Frame, area: Rect) {
         match self.panel_mode {
             PanelMode::Off => {
-                crate::view::chat::render_chat(frame, area, &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    area,
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
             }
             PanelMode::Tool => {
                 let chunks = Layout::vertical([
@@ -631,7 +658,13 @@ impl App {
                     Constraint::Length(8), // 工具面板
                 ])
                 .split(area);
-                crate::view::chat::render_chat(frame, chunks[0], &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    chunks[0],
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
                 crate::view::tool_panel::render_tool_panel(frame, chunks[1], &self.lines);
             }
             PanelMode::Task => {
@@ -640,7 +673,13 @@ impl App {
                     Constraint::Length(8), // 任务面板
                 ])
                 .split(area);
-                crate::view::chat::render_chat(frame, chunks[0], &self.lines, &self.streaming);
+                crate::view::chat::render_chat(
+                    frame,
+                    chunks[0],
+                    &self.lines,
+                    &self.streaming,
+                    self.scroll_offset,
+                );
                 crate::view::task_panel::render_task_panel(
                     frame,
                     chunks[1],

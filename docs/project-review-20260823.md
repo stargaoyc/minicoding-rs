@@ -406,12 +406,30 @@ minicoding-rs 是一个**少见的"声明即约束"型项目**：架构守卫把
 | §11 前端一致性 | ✅ 高优先级项 | TUI Ctrl-C 取消；TUI 恢复历史渲染；Web 假 Always 收敛为两值；CI gen-types 门禁；AGENTS Router 标注。TUI 渲染 O(n)/帧、scrollback、Zod、Desktop CSP 遗留（7219a67） |
 | §12 工程化/文档 | ✅ 本批 | repository URL 统一 stargaoyc；security.md §8 网络矩阵诚实注记；本附录 |
 
-### 明确遗留（后续里程碑候选）
+### 明确遗留（2026-08-23 第二修复批次后更新）
 
-1. OS 级网络隔离（landlock ABI≥4 AccessNet / Seatbelt deny network* / WFP）——安全文档核心支柱；
-2. prompt caching 发送端 + extended thinking 配置端 + count_tokens 校准；
-3. AllowAlways/DenyAlways 决策持久化层（policy.toml）四端贯通；
-4. TUI 渲染增量重建 + scrollback；Web Zod 运行时校验；Desktop CSP unsafe-inline；
-5. MCP schema JSON Schema 校验、断线重启 supervisor、server annotations；
-6. asyncRewake / inject_context Runtime 接线；
-7. 斜杠命令框架 + token/cost 计量展示（UX 地基）。
+第一批七类遗留已落地六类半（各含独立提交，fmt/clippy/test 全绿维持）：
+
+1. ✅ OS 网络隔离：Linux landlock AccessNet + macOS Seatbelt deny network*
+   （ReadOnly/WorkspaceWrite 子进程默认禁 TCP/UDP；Windows Job Object 无
+   过滤原语，如实标注不限网络）（ec5fe43）；
+2. ✅ 成本工程：Anthropic cache_control 断点、thinking_budget_tokens 配置端、
+   calibrate() Usage 校准（74b2267）；
+3. ✅ AllowAlways/DenyAlways 持久化层四端贯通：Decision 枚举增
+   `allow_always`/`deny_always`（serde snake_case，旧数据兼容）；core 新增
+   `PolicyPersist`（`~/.minicoding/policy.toml`，原子写 unix 0600，工具名
+   粒度 allow/deny 双表互斥覆盖）；resolve_decision 在 prompt 提供 Always
+   选项时查表命中即免弹窗、弹窗返回 Always 后落盘并折叠执行（C-23 受保护
+   文件 restricted ask 不查不落，防绕过）；CLI 提示层支持 y/a/n、TUI `a`
+   键按选项集映射、Web 恢复四按钮并回传新 Decision；ts DTO 再生成。
+   完整 JSON Schema 维度校验仍待 jsonschema crate（同 MCP 项）。
+4. ✅ TUI scrollback+可见区渲染；Web EventDto 手写运行时守卫（Zod 依赖待
+   评审，等价实现）；Desktop CSP script-src 收紧（e8b4ca4）;
+5. ✅ MCP：required 入参预检、restart 一次性断线重试、list_tools annotations
+   （cfa0d34）。完整 JSON Schema 校验待引入 jsonschema crate；
+6. ◐ Hook 接线：PreToolUse inject_context 已接线（缓冲→下轮 system 头部，
+   包裹 `<hook_context>`）；SessionStart/UserPromptSubmit 注入与 asyncRewake
+   后台执行仍待 executor 集成设计（cfa0d34 + hooks.md 标注）；
+7. ✅ UX 地基：斜杠命令 /status //tokens //clear；token 计量贯通
+   （Usage.output_tokens → MessageMeta.tokens → REPL 展示与会话累计）
+   （b4c37df）。

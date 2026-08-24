@@ -175,6 +175,14 @@ pub struct Runtime {
     ///
     /// `Arc<TokioMutex>` 因 `--replay`/SSE handler 需读取此值判断 `durable_seq`。
     pub(crate) durable_seq: Arc<TokioMutex<u64>>,
+    /// Hook 注入上下文缓冲：PreToolUse Hook 的
+    /// `inject_context` 在工具调用间隙**不能**直接 append（会插入
+    /// `assistant(tool_calls)` 与 `tool_result` 之间，破坏配对）——先缓冲，
+    /// 下一请求构建时包裹 `<hook_context>` 边界并入 system 段头部。
+    pub(crate) pending_hook_contexts: std::sync::Mutex<Vec<String>>,
+    /// AllowAlways/DenyAlways 持久化存储（`None` 时 Always 决策折叠
+    /// 但不落盘）。sdk 默认注入 `~/.minicoding/policy.toml`。
+    pub(crate) policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
     /// 单 turn 门闩：`run_turn` 入口 `try_lock`，
     /// 并发第二个 turn 返回 `RuntimeError::TurnInProgress`。tokio Mutex（无锁
     /// 争用时零开销）；guard 持有至 turn 结束（含取消/超时路径，随 future drop 释放）。
@@ -491,11 +499,30 @@ impl Runtime {
                     };
 
                     // 3. 流式调用 LLM
+                    // Hook 注入上下文消费：包裹 `<hook_context>` 边界
+                    // （声明非指令，C-05 精神）并入 system 头部；不落盘不进历史。
+                    {
+                        let drained: Vec<String> = self
+                            .pending_hook_contexts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .drain(..)
+                            .collect();
+                        for c in drained.iter().rev() {
+                            req.system.insert_str(
+                                0,
+                                &format!("<hook_context>\n{c}\n</hook_context>\n"),
+                            );
+                        }
+                    }
+
                     // 配对完整性最后防线：压缩管道丢弃边界可能切断
                     // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
                     // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。
                     req.messages = super::repair::repair_request_messages(req.messages);
-                    let (assistant_msg, llm_stop_reason) = match self.stream_llm(req).await {
+                    let (assistant_msg, llm_stop_reason, llm_usage) =
+                        match self.stream_llm(req).await
+                        {
                         Ok(msg) => msg,
                         Err(e) => {
                             metrics::record_error("llm");
@@ -509,6 +536,10 @@ impl Runtime {
                         return Err(RuntimeError::Storage(e));
                     }
                     self.ctx.append(assistant_msg.clone()).await;
+                    // count_tokens 校准：真实 input_tokens 回灌本地估算
+                    if let Some(u) = llm_usage {
+                        self.ctx.calibrate(u.input_tokens);
+                    }
                     let event = Event::MessageAppended(assistant_msg.clone());
                     self.persist_event(&event).await;
                     self.events.emit(event);
@@ -796,7 +827,8 @@ impl Runtime {
     async fn stream_llm(
         &self,
         req: ChatRequest,
-    ) -> Result<(Message, Option<StopReason>), crate::model::LlmError> {
+    ) -> Result<(Message, Option<StopReason>, Option<crate::provider::Usage>), crate::model::LlmError>
+    {
         let timer = metrics::start_timer();
         let model_name = req.params.model.clone();
         let provider_id = self.provider.id();
@@ -841,7 +873,8 @@ impl Runtime {
                             salvaged_chars = text_chars,
                             "llm stream error mid-turn; salvaging partial text output (stop_reason=Stopped)"
                         );
-                        return Ok((acc.finalize(), Some(StopReason::Stopped)));
+                        let usage = acc.usage().cloned();
+                        return Ok((acc.finalize(), Some(StopReason::Stopped), usage));
                     }
                     return Err(e);
                 }
@@ -894,7 +927,8 @@ impl Runtime {
         // Metrics: 记录 LLM 调用延迟
         metrics::record_elapsed("llm_call_duration_ms", "model", &model_name, timer);
         let stop_reason = acc.stop_reason().cloned();
-        Ok((acc.finalize(), stop_reason))
+        let usage = acc.usage().cloned();
+        Ok((acc.finalize(), stop_reason, usage))
     }
 
     /// 执行工具调用（无副作用并行、有副作用串行 + 权限检查）。

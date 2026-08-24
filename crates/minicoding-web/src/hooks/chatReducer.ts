@@ -149,11 +149,17 @@ export function applyChatEvent(
     case "permission_resolved": {
       const w = next.waitingPermission;
       if (w && w.id === event.id) {
-        // Decision = "allow" | { deny: string }
+        // Decision = "allow" | "allow_always" | { deny: string } | { deny_always: string }
+        const reason =
+          typeof event.decision === "object"
+            ? ("deny" in event.decision
+              ? event.decision.deny
+              : event.decision.deny_always)
+            : null;
         set({
           waitingPermission: null,
-          ...(typeof event.decision === "object"
-            ? { permissionDeniedMsg: `权限请求已被拒绝：${w.tool}（${event.decision.deny}）` }
+          ...(reason !== null
+            ? { permissionDeniedMsg: `权限请求已被拒绝：${w.tool}（${reason}）` }
             : {}),
         });
       }

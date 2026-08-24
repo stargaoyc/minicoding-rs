@@ -14,6 +14,7 @@
  * 注入 `http://127.0.0.1:{port}`（design.md §26.5）。
  */
 
+import { isEventDto } from "./event-guard";
 import type {
   EventDto,
   Message,
@@ -304,7 +305,12 @@ export function subscribeEvents(
 
   source.onmessage = (ev) => {
     try {
-      const dto = JSON.parse(ev.data) as EventDto;
+      const parsed: unknown = JSON.parse(ev.data);
+      if (!isEventDto(parsed)) {
+        console.warn("[sse] 未知事件类型，已丢弃:", ev.data.slice(0, 120));
+        return;
+      }
+      const dto = parsed as EventDto;
       if (dto.type === "token" || dto.type === "reasoning_delta") {
         highFreqCount += 1;
         if (highFreqCount % 100 === 0) {

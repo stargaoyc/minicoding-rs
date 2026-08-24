@@ -94,6 +94,11 @@ impl DeltaAccumulator {
 
         let mut msg = Message::assistant_text(self.text);
         msg.tool_calls = tool_calls;
+        // token 计量：provider Usage.output_tokens
+        // 落盘到消息元数据，供 CLI/TUI/Web 计量展示与 /tokens 会话累计。
+        if let Some(u) = &self.usage {
+            msg.metadata.tokens = Some(u.output_tokens);
+        }
         msg
     }
 

@@ -101,6 +101,7 @@ async fn call_llm_summary(
             max_output_tokens: Some(config.max_summary_tokens),
             stop: Vec::new(),
             seed: None,
+            thinking_budget_tokens: None,
         },
     };
 

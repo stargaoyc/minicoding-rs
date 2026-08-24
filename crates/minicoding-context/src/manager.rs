@@ -407,6 +407,20 @@ impl ContextManager for ContextManagerImpl {
         *self.session_id.lock().expect("session_id poisoned") = Some(id.to_string());
     }
 
+    /// 校准：`actual` 反映刚发送请求的真实 prompt 规模，直接覆盖缓存
+    /// （比增量估算可信）；指数平滑系数 0.5 抑制单次异常。
+    fn calibrate(&self, actual_input_tokens: usize) {
+        let current = self.token_cache.load(Ordering::SeqCst);
+        let blended = usize::midpoint(current, actual_input_tokens);
+        self.token_cache.store(blended, Ordering::SeqCst);
+        tracing::debug!(
+            current,
+            actual = actual_input_tokens,
+            blended,
+            "token cache calibrated"
+        );
+    }
+
     fn append(&self, msg: Message) -> BoxFuture<'_, ()> {
         // 增量计算新消息 token（含消息框架开销），append 后加到缓存。
         let delta = self.tokenizer.count_messages(std::slice::from_ref(&msg));
@@ -520,6 +534,7 @@ impl ContextManager for ContextManagerImpl {
                 max_output_tokens: None,
                 stop: Vec::new(),
                 seed: None,
+                thinking_budget_tokens: None,
             };
             Ok(ChatRequest {
                 system,
