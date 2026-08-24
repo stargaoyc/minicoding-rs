@@ -1,27 +1,31 @@
-//! 用户级权限决策持久化（2026-08-23 审查遗留#3）。
+//! 用户级权限决策持久化（2026-08-23 审查遗留#3，含路径粒度升级）。
 //!
 //! `AllowAlways`/`DenyAlways` 落盘到 `~/.minicoding/policy.toml`：
 //!
 //! ```toml
 //! [allow]
 //! "fs.write" = true
+//! "fs.write@src/generated" = true
 //!
 //! [deny]
 //! "shell.run" = "user declined network commands"
+//! "fs.write@src/generated/internal" = "no internal writes"
 //! ```
 //!
 //! 语义与边界：
-//! - **工具名粒度**（v1）：按 tool 名记忆，不含参数维度；
-//! - **C-23 安全**：项目约束文件（AGENTS.md 等）的询问本就不提供 Always 选项，
+//! - **两级粒度**：键为 `"tool"`（工具级）或 `"tool@相对路径前缀"`（路径级，
+//!   specificity 更高）。查询取**最长命中前缀**；同长度跨表冲突时 **deny 胜**
+//!   （fail-closed）；无路径命中时回退工具级，仍 deny 优先。
+//! - **C-23 安全**：项目约束文件（AGENTS.md 等）的询问不提供 Always 选项，
 //!   且消费方仅在 prompt 选项含 Always 时查表——受保护文件不会被持久化规则
-//!   静默放行；
+//!   静默放行。
 //! - **0600**：unix 下落盘后收紧权限（与 `mcp_choices.toml` 同标准，C-04）。
 
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// 持久化策略存储（tool → 决策）。
+/// 持久化策略存储（tool / `tool@path-prefix` → 决策）。
 #[derive(Debug, Clone)]
 pub struct PolicyPersist {
     path: Utf8PathBuf,
@@ -43,23 +47,55 @@ impl PolicyPersist {
         Self { path }
     }
 
-    /// 查询工具的持久化决策：`Some(true)`=allow，`Some(false)`=deny，
-    /// `None`=无记录。文件不存在/解析失败一律视为无记录（fail-open 回正常
-    /// 询问链，持久化层故障不阻塞会话）。
+    /// 工具级查询：`Some(true)`=allow，`Some(false)`=deny，`None`=无记录。
+    ///
+    /// 文件不存在/解析失败一律视为无记录（fail-open 回正常询问链，持久化层
+    /// 故障不阻塞会话）。
     #[must_use]
     pub fn decision_for(&self, tool: &str) -> Option<bool> {
+        self.decision_for_path(tool, None)
+    }
+
+    /// 路径感知查询（遗留#3 升级）：`path` 为工作目录内相对路径。
+    ///
+    /// specificity 从高到低：
+    /// 1. `deny[tool@prefix]` / `allow[tool@prefix]` 中**最长命中前缀**者；
+    ///    同长度跨表冲突时 deny 胜；
+    /// 2. 无路径命中时回退工具级：`deny[tool]` 优先于 `allow[tool]`
+    ///    （fail-closed）；均无则 `None`。
+    #[must_use]
+    pub fn decision_for_path(&self, tool: &str, path: Option<&str>) -> Option<bool> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let file: PolicyFile = toml::from_str(&text).ok()?;
-        if file.allow.get(tool).copied().unwrap_or(false) {
-            return Some(true);
+        if let Some(p) = path {
+            // 路径级：分别取 deny/allow 最长命中前缀长度（键以 `tool@` 引导）
+            fn longest<'a, V>(
+                keys: std::collections::btree_map::Keys<'a, String, V>,
+                tool: &str,
+                p: &'a str,
+            ) -> Option<usize> {
+                keys.filter_map(|k| k.strip_prefix(&format!("{tool}@")))
+                    .filter(|prefix| p.starts_with(*prefix))
+                    .map(str::len)
+                    .max()
+            }
+            let deny_hit = longest(file.deny.keys(), tool, p);
+            let allow_hit = longest(file.allow.keys(), tool, p);
+            match (deny_hit, allow_hit) {
+                (Some(d), Some(a)) => return Some(d < a),
+                (Some(_), None) => return Some(false),
+                (None, Some(_)) => return Some(true),
+                (None, None) => {}
+            }
         }
+        // 工具级：deny 优先（fail-closed）
         if file.deny.contains_key(tool) {
             return Some(false);
         }
-        None
+        file.allow.get(tool).copied()
     }
 
-    /// 记录 allow 规则并原子落盘（unix 0600）。
+    /// 记录工具级 allow 规则并原子落盘（unix 0600）。
     ///
     /// # Errors
     /// 读/序列化/写入失败时返回错误字符串。
@@ -70,7 +106,7 @@ impl PolicyPersist {
         })
     }
 
-    /// 记录 deny 规则（含原因）并原子落盘。
+    /// 记录工具级 deny 规则（含原因）并原子落盘。
     ///
     /// # Errors
     /// 同 [`Self::set_allow`]。
@@ -79,6 +115,27 @@ impl PolicyPersist {
         self.mutate(move |f| {
             f.deny.insert(tool.to_string(), reason);
             f.allow.remove(tool);
+        })
+    }
+
+    /// 记录**路径级** allow 规则（`tool@前缀`），原子落盘。
+    ///
+    /// # Errors
+    /// 同 [`Self::set_allow`]。
+    pub fn set_allow_path(&self, tool: &str, prefix: &str) -> Result<(), String> {
+        self.mutate(|f| {
+            f.allow.insert(format!("{tool}@{prefix}"), true);
+        })
+    }
+
+    /// 记录**路径级** deny 规则，原子落盘。
+    ///
+    /// # Errors
+    /// 同 [`Self::set_allow`]。
+    pub fn set_deny_path(&self, tool: &str, prefix: &str, reason: &str) -> Result<(), String> {
+        let reason = reason.to_string();
+        self.mutate(move |f| {
+            f.deny.insert(format!("{tool}@{prefix}"), reason);
         })
     }
 
@@ -125,22 +182,15 @@ mod tests {
     fn allow_deny_roundtrip_and_overwrite() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = Utf8PathBuf::from_path_buf(tmp.path().join("policy.toml")).expect("utf8");
-        let store = PolicyPersist::new(path.clone());
+        let store = PolicyPersist::new(path);
 
-        // 无记录
         assert_eq!(store.decision_for("fs.write"), None);
-
-        // set_allow → Some(true)
         store.set_allow("fs.write").expect("set_allow");
         assert_eq!(store.decision_for("fs.write"), Some(true));
-
-        // set_deny 覆盖 allow → Some(false)
         store
             .set_deny("fs.write", "user declined")
             .expect("set_deny");
         assert_eq!(store.decision_for("fs.write"), Some(false));
-
-        // 再次 allow 覆盖回 true
         store.set_allow("shell.run").expect("allow shell");
         assert_eq!(store.decision_for("shell.run"), Some(true));
         assert_eq!(store.decision_for("fs.write"), Some(false));
@@ -152,5 +202,42 @@ mod tests {
         let path = Utf8PathBuf::from_path_buf(tmp.path().join("none.toml")).expect("utf8");
         let store = PolicyPersist::new(path);
         assert_eq!(store.decision_for("any.tool"), None);
+    }
+
+    #[test]
+    fn path_specificity_and_deny_priority() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(tmp.path().join("p.toml")).expect("utf8");
+        let store = PolicyPersist::new(path);
+        store.set_allow("fs.write").expect("allow tool");
+        store
+            .set_allow_path("fs.write", "src/generated")
+            .expect("allow path");
+        store
+            .set_deny_path("fs.write", "src/generated/internal", "no internal writes")
+            .expect("deny path");
+
+        // 工具级 allow 兜底
+        assert_eq!(store.decision_for_path("fs.write", None), Some(true));
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/main.rs")),
+            Some(true)
+        );
+        // 命中 allow 路径前缀
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/generated/a.rs")),
+            Some(true)
+        );
+        // 更长 deny 前缀胜过较短 allow 前缀
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/generated/internal/x.rs")),
+            Some(false)
+        );
+        // deny 路径独立于 allow 表存在时同样生效
+        assert_eq!(
+            store.decision_for_path("shell.run", None),
+            None,
+            "未配置的工具不受影响"
+        );
     }
 }

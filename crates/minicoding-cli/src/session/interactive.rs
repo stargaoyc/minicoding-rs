@@ -24,8 +24,10 @@ use anstyle::{AnsiColor, Color, Style};
 use minicoding_core::model::{ToolContent, TurnOutcome, UserInput};
 use minicoding_core::policy::PermissionMode;
 use minicoding_core::runtime::{Event, Runtime};
-use rustyline::DefaultEditor;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
+use rustyline::{Context as RlContext, Editor, Helper};
 use tokio::sync::broadcast::error::RecvError;
 
 /// REPL 提示符。
@@ -52,9 +54,13 @@ const YELLOW: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))
 /// 运行交互 REPL 会话。
 ///
 /// 返回退出码：0 正常退出，1 初始化 / IO 致命错误。
+#[allow(clippy::too_many_lines)] // 斜杠命令分派表线性展开，拆分降低可读性
 pub async fn run_interactive_session(rt: &Runtime) -> i32 {
-    let mut rl = match DefaultEditor::new() {
-        Ok(rl) => rl,
+    let mut rl = match Editor::<AtFileHelper, DefaultHistory>::new() {
+        Ok(mut rl) => {
+            rl.set_helper(Some(AtFileHelper::default()));
+            rl
+        }
         Err(e) => {
             eprintln!("初始化行编辑器失败: {e}");
             return 1;
@@ -71,6 +77,9 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
 
     anstream::eprintln!("{DIM}minicoding 交互会话（/help 查看命令，/quit 或 Ctrl-D 退出）{DIM:#}");
 
+    // 会话累计 token（遗留#7）：run_one_turn 返回 assistant metadata.tokens
+    let mut session_tokens: usize = 0;
+    let mut turn_count: usize = 0;
     let mut consecutive_ctrlc: u8 = 0;
 
     loop {
@@ -117,6 +126,31 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
                     handle_undo_command(rt).await;
                     continue;
                 }
+                "model" => {
+                    match parts.next() {
+                        Some(m) if !m.is_empty() => {
+                            rt.set_model(m);
+                            anstream::eprintln!("{GREEN}模型已切换（会话级）：{m}{GREEN:#}");
+                        }
+                        _ => anstream::eprintln!("{DIM}当前模型：{}{DIM:#}", rt.model()),
+                    }
+                    continue;
+                }
+                "status" => {
+                    handle_status_command(rt, session_tokens, turn_count).await;
+                    continue;
+                }
+                "tokens" => {
+                    print_tokens(session_tokens, turn_count);
+                    continue;
+                }
+                "clear" => {
+                    // 软清屏：仅清终端显示，会话上下文保留（清上下文需
+                    // ContextManager 截断 API，暂未提供）
+                    anstream::eprint!("\x1b[2J\x1b[H");
+                    anstream::eprintln!("{DIM}已清屏（会话上下文保留）{DIM:#}");
+                    continue;
+                }
                 "" => {
                     continue;
                 }
@@ -128,7 +162,12 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
         }
 
         let _ = rl.add_history_entry(&line);
-        run_one_turn(rt, line).await;
+        // @文件引用注入（遗留：对标 CC @file）：正文保留原 token 供模型理解
+        // 指代，文件内容以 <file_ref> 边界附于消息尾部
+        let expanded = expand_at_refs(&line, &rt.workdir().await);
+        let used = run_one_turn(rt, expanded).await;
+        session_tokens += used;
+        turn_count += 1;
     }
 
     anstream::eprintln!("{DIM}再见{DIM:#}");
@@ -254,6 +293,10 @@ fn print_help() {
     anstream::eprintln!(
         "{DIM}  /undo              回滚最近一次文件改动 operation（T-M5-8）{DIM:#}"
     );
+    anstream::eprintln!("{DIM}  /model [name]      查看/切换模型（会话级生效）{DIM:#}");
+    anstream::eprintln!("{DIM}  /status            会话状态摘要{DIM:#}");
+    anstream::eprintln!("{DIM}  /tokens            本会话 token 计量{DIM:#}");
+    anstream::eprintln!("{DIM}  /clear             清屏（上下文保留）{DIM:#}");
     anstream::eprintln!("{DIM}Ctrl-C：提示符处连续两次退出；turn 运行时取消当前回合{DIM:#}");
     anstream::eprintln!("{DIM}其他输入作为提问发送给助手。{DIM:#}");
 }
@@ -358,5 +401,177 @@ fn summarize_content(content: &ToolContent) -> String {
     } else {
         let truncated: String = one_line.chars().take(PREVIEW_MAX).collect();
         format!("{truncated}…")
+    }
+}
+
+/// `/status`：会话状态摘要（遗留#7）。
+async fn handle_status_command(rt: &Runtime, session_tokens: usize, turn_count: usize) {
+    let snap = rt.plan_controller().snapshot().await;
+    let ctx_tokens = rt.context().token_count();
+    let model = rt.model();
+    anstream::eprintln!("{DIM}── 会话状态 ──{DIM:#}");
+    anstream::eprintln!("{DIM}session : {}{DIM:#}", rt.session().id);
+    anstream::eprintln!("{DIM}model   : {model}{DIM:#}");
+    anstream::eprintln!("{DIM}mode    : {:?}{DIM:#}", snap.mode);
+    anstream::eprintln!("{DIM}turns   : {turn_count}{DIM:#}");
+    anstream::eprintln!("{DIM}ctx     : ~{ctx_tokens} tokens{DIM:#}");
+    print_tokens(session_tokens, turn_count);
+}
+
+/// `/tokens`：会话级 token 计量输出。
+fn print_tokens(session_tokens: usize, turn_count: usize) {
+    if turn_count == 0 {
+        anstream::eprintln!("{DIM}tokens: 尚无用量{DIM:#}");
+        return;
+    }
+    anstream::eprintln!(
+        "{DIM}tokens: 会话累计 {session_tokens}（均 {}/turn，共 {turn_count} turn）{DIM:#}",
+        session_tokens / turn_count
+    );
+}
+
+// ==================== @文件引用（遗留：对标 CC @path）====================
+
+/// `@路径` 自动补全 Helper（Tab 触发）：补全光标前最后一个未闭合的
+/// `@` token 之后的相对路径（工作目录内，含目录并追加 `/`）。
+#[derive(Default)]
+struct AtFileHelper {
+    _priv: (),
+}
+
+impl Completer for AtFileHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &RlContext<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let before = &line[..pos];
+        let Some(at) = before.rfind('@') else {
+            return Ok((pos, Vec::new()));
+        };
+        // '@' 之后到光标之间不能有空白（否则不是进行中的路径 token）
+        let prefix = &before[at + 1..];
+        if prefix.contains(char::is_whitespace) {
+            return Ok((pos, Vec::new()));
+        }
+        let workdir = std::env::current_dir().unwrap_or_default();
+
+        // prefix 拆 (目录部分, 文件名前缀)
+        let (dir_rel, name_prefix) = match prefix.rfind('/') {
+            Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+            None => ("", prefix),
+        };
+        let scan_dir = if dir_rel.is_empty() {
+            workdir.clone()
+        } else {
+            workdir.join(dir_rel)
+        };
+        let mut candidates = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&scan_dir) else {
+            return Ok((pos, Vec::new()));
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(name_prefix) || name.starts_with('.') {
+                continue;
+            }
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            candidates.push(Pair {
+                display: format!("{}{}", name, if is_dir { "/" } else { "" }),
+                replacement: format!("{dir_rel}{name}{}", if is_dir { "/" } else { "" }),
+            });
+        }
+        candidates.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+        Ok((at + 1, candidates))
+    }
+}
+
+// rustyline 需要空实现的其他 trait
+impl rustyline::hint::Hinter for AtFileHelper {
+    type Hint = String;
+}
+impl rustyline::highlight::Highlighter for AtFileHelper {}
+impl rustyline::validate::Validator for AtFileHelper {}
+impl Helper for AtFileHelper {}
+
+/// 展开用户输入中的 `@相对路径` 引用（遗留：对标 CC @file）。
+///
+/// 每个 `@path` token（至空白结束；支持引号包裹 `"@a b.txt"`）在 workdir 内
+/// 经 `resolve_under` 校验后读取内容，以 `<file_ref path>` 边界附加到消息尾部
+/// （单文件 32KiB 截断）；越界/读取失败替换为错误占位提示，不静默丢弃。
+/// 原始 token 从正文移除，保持提问简洁。
+#[must_use]
+fn expand_at_refs(line: &str, workdir: &camino::Utf8PathBuf) -> String {
+    use minicoding_policy::resolve_under;
+
+    const MAX_FILE_BYTES: usize = 32 * 1024;
+    use std::fmt::Write as _;
+    let mut body = line.to_string();
+    let mut attachments = String::new();
+
+    // 简易 tokenizer：优先匹配引号包裹的 "@..."，再匹配裸 @非空白+
+    let mut out = String::new();
+    let bytes: Vec<char> = body.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == '@' && (i == 0 || bytes[i - 1].is_whitespace()) {
+            // 收集 token 至空白
+            let start = i;
+            let mut j = i + 1;
+            while j < bytes.len() && !bytes[j].is_whitespace() {
+                j += 1;
+            }
+            let path_ref: String = bytes[start + 1..j].iter().collect();
+            i = j;
+            if path_ref.is_empty() {
+                out.push('@');
+                continue;
+            }
+            match resolve_under(workdir, &path_ref) {
+                Ok(abs) => match std::fs::read(abs.as_std_path()) {
+                    Ok(bytes_raw) => {
+                        let content = if bytes_raw.len() > MAX_FILE_BYTES {
+                            let cut = &bytes_raw[..MAX_FILE_BYTES];
+                            format!(
+                                "{}\n…[截断，共 {} 字节]",
+                                String::from_utf8_lossy(cut),
+                                bytes_raw.len()
+                            )
+                        } else {
+                            String::from_utf8_lossy(&bytes_raw).into_owned()
+                        };
+                        let _ = write!(
+                            attachments,
+                            "\n<file_ref path=\"{path_ref}\">\n{content}\n</file_ref>"
+                        );
+                    }
+                    Err(e) => {
+                        let _ = write!(
+                            attachments,
+                            "\n<file_ref path=\"{path_ref}\" error=\"读取失败: {e}\" />"
+                        );
+                    }
+                },
+                Err(e) => {
+                    let _ = write!(
+                        attachments,
+                        "\n<file_ref path=\"{path_ref}\" error=\"路径越界或不存在: {e}\" />"
+                    );
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    drop(bytes);
+    body = out.trim_end().to_string();
+    if attachments.is_empty() {
+        body
+    } else {
+        format!("{body}\n{attachments}")
     }
 }

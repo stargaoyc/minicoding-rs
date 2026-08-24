@@ -26,6 +26,11 @@ pub(crate) struct HotReloadBaseline {
 }
 
 impl HotReloadBaseline {
+    /// 运行期切换模型时同步基线（`/model <name>`），防止 turn 边界文件值回退。
+    pub(crate) fn set_model(&mut self, model: &str) {
+        self.model = model.to_string();
+    }
+
     pub(crate) fn capture(config: &RuntimeConfig) -> std::sync::Mutex<Self> {
         std::sync::Mutex::new(Self {
             model: config.provider.model.clone(),

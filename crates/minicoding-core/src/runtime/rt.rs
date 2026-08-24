@@ -196,6 +196,36 @@ impl Runtime {
         &self.session
     }
 
+    /// 当前模型名（`/model` 查看用）。
+    #[must_use]
+    pub fn model(&self) -> String {
+        self.config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .provider
+            .model
+            .clone()
+    }
+
+    /// 运行期切换模型（遗留：`/model <name>` 命令）。
+    ///
+    /// 写运行期配置锁，下一 `build_chat_request` 即生效（M-12 起 model 取自
+    /// `req.params.model`）。会话级生效，不回写 config.toml；同时刷新热更新
+    /// 基线，避免 turn 边界被文件值回退覆盖。
+    pub fn set_model(&self, model: &str) {
+        {
+            let mut cfg = self
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cfg.provider.model.clone_from(&model.to_string());
+        }
+        if let Ok(mut b) = self.hot_reload_baseline.lock() {
+            b.set_model(model);
+        }
+        tracing::info!(model, "runtime model switched");
+    }
+
     /// 返回审计 sink（W-11 只读浏览审计，`workspace.rs` 用）。
     #[must_use]
     pub fn audit(&self) -> Arc<dyn AuditSink> {

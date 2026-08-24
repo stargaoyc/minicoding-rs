@@ -411,11 +411,14 @@ impl Runtime {
                     _ => {
                         // 遗留#3：持久化规则查表（仅当本 prompt 提供 Always 选项——
                         // C-23 受保护文件的 restricted ask 不查，防绕过）
+                        // 路径感知查询（遗留#3 升级）：fs.* 类工具取 input.path
+                        // 相对路径，命中 `tool@前缀` 规则按最长前缀优先
+                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
                         if prompt
                             .options
                             .contains(&crate::policy::PromptOption::AllowAlways)
                             && let Some(store) = &self.policy_persist
-                            && let Some(allow) = store.decision_for(&call.name)
+                            && let Some(allow) = store.decision_for_path(&call.name, rule_path)
                         {
                             tracing::info!(
                                 tool = %call.name,
