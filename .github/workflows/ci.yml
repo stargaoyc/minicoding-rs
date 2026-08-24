@@ -194,6 +194,12 @@ jobs:
       - name: Install dependencies
         working-directory: crates/minicoding-web
         run: pnpm install --frozen-lockfile
+      # AGENTS.md §8.4：生成 DTO 与 Rust 源一致性门禁（2026-08-23 审查 §11-P1）
+      - name: Verify generated DTO types are up to date
+        working-directory: crates/minicoding-web
+        run: |
+          pnpm gen-types
+          git diff --exit-code src/api/generated ||             (echo "::error::generated DTO 与 Rust 源不一致：请运行 pnpm gen-types 并提交" && exit 1)
       - name: Lint
         working-directory: crates/minicoding-web
         run: pnpm lint

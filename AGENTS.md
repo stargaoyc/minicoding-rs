@@ -480,7 +480,7 @@ windows = { version = "...", features = ["..."] }
 | 框架 | React + React Compiler | 19.2 |
 | 语言 | TypeScript | 7.0 |
 | 构建 | Vite (Rolldown) | 8.1 |
-| 路由 | TanStack Router | 1.170 |
+| 路由 | TanStack Router | 1.170（**未采用**，单页状态切换；引入前需修订本表，2026-08-23 审查）|
 | 数据获取 | TanStack Query | 5.101 |
 | 客户端状态 | Zustand | 5.0 |
 | Schema 校验 | Zod | 4.4 |

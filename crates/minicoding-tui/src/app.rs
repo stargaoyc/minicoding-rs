@@ -210,6 +210,10 @@ pub struct App {
     // T-M7-4：任务列表（由 `Event::TaskUpdated` 维护）
     tasks: Vec<Task>,
     task_panel_state: ratatui::widgets::ListState,
+    /// 当前 Runtime 的取消 token（2026-08-23 审查 §11-P0：Ctrl-C 中断 turn——
+    /// 此前仅设状态文案不调 cancel，长 turn 唯一手段是杀进程）。turn 间隙为
+    /// `None`（`cancel()` 对非运行 turn 本就不生效）。
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
     // T-M7-4：主题配色（未来 Ctrl+Shift+T 切换深/浅色）
     theme: Theme,
 }
@@ -246,6 +250,7 @@ impl App {
             panel_mode: PanelMode::Off,
             tasks: Vec::new(),
             task_panel_state: ratatui::widgets::ListState::default(),
+            cancel_token: None,
             theme: Theme::default(),
         }
     }
@@ -407,6 +412,17 @@ impl App {
         }
     }
 
+    /// 注入当前 Runtime 的取消 token（build 后调用；切换会话重建 Runtime 后需重设）。
+    pub fn set_cancel_token(&mut self, token: tokio_util::sync::CancellationToken) {
+        self.cancel_token = Some(token);
+    }
+
+    /// 注入恢复会话的历史消息（§11-P1：此前 `restore_history` 只回填上下文，
+    /// UI 聊天区从空白开始，会话切换形同虚设）。
+    pub fn set_history(&mut self, history: Vec<ChatLine>) {
+        self.lines = history;
+    }
+
     /// 处理普通按键（输入模式）。
     fn handle_key(&mut self, key: &KeyEvent) {
         if key.kind != KeyEventKind::Press {
@@ -416,7 +432,11 @@ impl App {
             (KeyCode::Enter, _) => self.submit_input(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if self.is_turning {
-                    // 中断当前 turn（Runtime.cancel_token 触发 Interrupted）
+                    // 中断当前 turn（C-13 graceful：已落盘消息保留，
+                    // run_turn 返回 Interrupted）——2026-08-23 审查 §11-P0
+                    if let Some(token) = &self.cancel_token {
+                        token.cancel();
+                    }
                     self.status_msg = "正在中断…".to_string();
                 } else {
                     self.should_exit = true;

@@ -78,6 +78,8 @@ fn run_loop(
 /// 构建 Runtime + 启动桥接 + 创建 App。
 ///
 /// 返回 `(App, rt_rx)`——`App` 持有 `ui_tx`，`rt_rx` 由主循环消费。
+use minicoding_tui::app::ChatLine;
+
 fn build_and_start(
     workdir: &str,
     mode: &SessionLoadMode,
@@ -109,11 +111,45 @@ fn build_and_start(
     // `run_turn` 前会通过 `Runtime::restore_history` 回填——见 builder.rs 文档。
 
     // UI ↔ Runtime channel
+    let cancel_token = rt.cancel_token();
+    // 恢复会话历史 → UI 聊天区初始行（§11-P1：此前 restore_history 只回填
+    // 上下文，UI 从空白开始）。工具输出行不回放（噪音大），带 tool_calls 的
+    // assistant 显示为已完成的工具行。
+    let history: Vec<ChatLine> = rt
+        .session()
+        .messages
+        .iter()
+        .filter_map(|m| match m.role {
+            minicoding_core::model::Role::User => {
+                let t = m.text();
+                (!t.is_empty()).then_some(ChatLine::User(t))
+            }
+            minicoding_core::model::Role::Assistant => {
+                if m.tool_calls.is_empty() {
+                    let t = m.text();
+                    (!t.is_empty()).then_some(ChatLine::Assistant(t))
+                } else {
+                    Some(ChatLine::Tool {
+                        tool: m
+                            .tool_calls
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        done: true,
+                    })
+                }
+            }
+            _ => None,
+        })
+        .collect();
     let (ui_tx, ui_rx) = mpsc::channel::<UiCommand>(16);
     let (rt_tx, rt_rx) = mpsc::channel::<AppEvent>(256);
     spawn_runtime_bridge(rt, ui_rx, perm_rx, rt_tx);
 
-    let app = App::new(ui_tx, sessions, current_session_id);
+    let mut app = App::new(ui_tx, sessions, current_session_id);
+    app.set_cancel_token(cancel_token);
+    app.set_history(history);
     Ok((app, rt_rx))
 }
 

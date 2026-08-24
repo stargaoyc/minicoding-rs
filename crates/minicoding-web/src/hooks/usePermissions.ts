@@ -32,8 +32,8 @@ export function usePermissions() {
   const resolve = useCallback(
     async (choice: PermissionChoice) => {
       if (!pending) return;
-      // 映射为后端 Decision（Allow / Deny(reason)），AllowAlways/DenyAlways 暂以
-      // Allow/Deny 回传（后端 PermissionPolicy 按 id 记录 always 缓存）
+      // 映射为后端 Decision（Allow / Deny(reason)）。UI 已收敛为两值：
+      // 后端 Always 持久化层未实现，保留 union 成员仅为协议前向兼容
       const decision =
         choice === "allow" || choice === "allow_always"
           ? "allow"

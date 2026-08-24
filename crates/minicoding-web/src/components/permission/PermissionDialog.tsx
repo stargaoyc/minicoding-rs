@@ -35,15 +35,16 @@ const RISK_CONFIG: Record<
   },
 };
 
+// 仅两值（2026-08-23 审查 §11-P1）：后端 AllowAlways/DenyAlways 持久化层
+// 尚未实现（policy.toml 不存在，决策不落盘），显示"始终*"按钮却按一次性
+// 处理会欺骗用户。待策略层贯通后再恢复四按钮。
 const CHOICES: {
   value: PermissionChoice;
   label: string;
   variant: "default" | "secondary" | "danger";
 }[] = [
   { value: "allow", label: "允许", variant: "default" },
-  { value: "allow_always", label: "始终允许", variant: "secondary" },
   { value: "deny", label: "拒绝", variant: "danger" },
-  { value: "deny_always", label: "始终拒绝", variant: "danger" },
 ];
 
 interface PermissionDialogProps {
