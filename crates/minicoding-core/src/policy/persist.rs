@@ -68,14 +68,22 @@ impl PolicyPersist {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let file: PolicyFile = toml::from_str(&text).ok()?;
         if let Some(p) = path {
-            // 路径级：分别取 deny/allow 最长命中前缀长度（键以 `tool@` 引导）
+            // 路径级：分别取 deny/allow 最长命中前缀长度（键以 `tool@` 引导）。
+            // 前缀命中须落在 `/` 组件边界——裸 starts_with 会使 `src/generated`
+            // 误命中兄弟目录 `src/generated-evil/x`（S18 同类 bug 的 persist 层
+            // 补修，2026-08-25 审查 §6.2-S12）
             fn longest<'a, V>(
                 keys: std::collections::btree_map::Keys<'a, String, V>,
                 tool: &str,
                 p: &'a str,
             ) -> Option<usize> {
                 keys.filter_map(|k| k.strip_prefix(&format!("{tool}@")))
-                    .filter(|prefix| p.starts_with(*prefix))
+                    .filter(|prefix| {
+                        p.starts_with(*prefix)
+                            && (prefix.is_empty()
+                                || p.len() == prefix.len()
+                                || p[prefix.len()..].starts_with('/'))
+                    })
                     .map(str::len)
                     .max()
             }
@@ -140,7 +148,6 @@ impl PolicyPersist {
     }
 
     fn mutate(&self, f: impl FnOnce(&mut PolicyFile)) -> Result<(), String> {
-        use std::io::Write as _;
         let mut file = match std::fs::read_to_string(&self.path) {
             Ok(text) => toml::from_str::<PolicyFile>(&text)
                 .map_err(|e| format!("policy.toml 解析失败: {e}"))
@@ -154,21 +161,11 @@ impl PolicyPersist {
             std::fs::create_dir_all(parent.as_std_path())
                 .map_err(|e| format!("创建目录失败: {e}"))?;
         }
+        // 0600 创建收敛到 util::fs_private（S7 单一事实源；unix 下 OpenOptions
+        // 原子指定 mode，避免"先写后 chmod"竞态，且对已存在的宽权限文件兜底收紧）
         let tmp = Utf8PathBuf::from(format!("{}.tmp", self.path.as_str()));
-        let mut fh = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(tmp.as_std_path())
-            .map_err(|e| format!("写临时文件失败: {e}"))?;
-        fh.write_all(bytes.as_bytes()).map_err(|e| format!("{e}"))?;
-        // unix：临时文件即目标权限（rename 继承）；其他平台依赖 umask
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(tmp.as_std_path(), std::fs::Permissions::from_mode(0o600));
-        }
+        crate::util::fs_private::write_private(tmp.as_std_path(), bytes.as_bytes())
+            .map_err(|e| format!("{e}"))?;
         std::fs::rename(tmp.as_std_path(), self.path.as_std_path())
             .map_err(|e| format!("rename 失败: {e}"))
     }
@@ -238,6 +235,34 @@ mod tests {
             store.decision_for_path("shell.run", None),
             None,
             "未配置的工具不受影响"
+        );
+    }
+
+    #[test]
+    fn path_prefix_requires_component_boundary() {
+        // 2026-08-25 审查 S-12：裸 starts_with 会使 `src/generated` 命中
+        // 兄弟目录 `src/generated-evil/...`，前缀匹配须落在 `/` 组件边界
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(tmp.path().join("p.toml")).expect("utf8");
+        let store = PolicyPersist::new(path);
+        store
+            .set_allow_path("fs.write", "src/generated")
+            .expect("allow path");
+
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/generated-evil/x")),
+            None,
+            "兄弟目录前缀碰撞不得命中"
+        );
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/generated/x")),
+            Some(true),
+            "组件边界内的子路径正常命中"
+        );
+        assert_eq!(
+            store.decision_for_path("fs.write", Some("src/generated")),
+            Some(true),
+            "与前缀完全相等的路径命中"
         );
     }
 }

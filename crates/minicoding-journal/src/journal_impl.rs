@@ -127,11 +127,14 @@ impl Journal for FileChangeJournal {
                     .entries
                     .lock()
                     .map_err(|e| JournalError::Conflict(format!("journal lock poisoned: {e}")))?;
-                let mut merged = failed_entries;
-                let undone = report.undone_entries - merged.len();
+                // 失败 entry 回推**尾部**原位（2026-08-25 审查 §6.2-S7）：此前
+                // 拼到头部，下次 /undo 从尾弹出的是最老 entry 而非失败的新
+                // entry——撤销时序错乱。failed_entries 当前最新在前，反转恢复
+                // 账本时间序后 append 到尾部。
+                let mut restored: Vec<ChangeEntry> = failed_entries.into_iter().rev().collect();
+                let undone = report.undone_entries - restored.len();
                 report.undone_entries = undone;
-                merged.extend(guard.split_off(0));
-                *guard = merged;
+                guard.append(&mut restored);
             }
 
             Ok(report)
@@ -498,6 +501,67 @@ mod tests {
         let j = FileChangeJournal::new(None);
         let res = j.undo(1).await;
         assert!(matches!(res, Err(JournalError::NoEntries)));
+    }
+
+    #[tokio::test]
+    async fn failed_entry_retry_targets_newest_first() {
+        // 2026-08-25 审查 §6.2-S7：失败 entry 应回推尾部原位——批量撤销中
+        // 新 entry 冲突、旧 entry 成功后，再次 /undo 应首先重试**新** entry
+        let tmp = TempDir::new().unwrap();
+        let f_old = Utf8PathBuf::from_path_buf(tmp.path().join("old.txt")).unwrap();
+        let f_new = Utf8PathBuf::from_path_buf(tmp.path().join("new.txt")).unwrap();
+        fs::write(f_old.as_std_path(), b"v1").await.unwrap();
+        fs::write(f_new.as_std_path(), b"v1").await.unwrap();
+        let j = FileChangeJournal::new(None);
+        // 旧 entry（先入账本）
+        j.record(entry(
+            "op-old",
+            vec![FileChange::Written {
+                path: f_old.clone(),
+                before: Some(b"v1".to_vec()),
+                after: b"v2".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        fs::write(f_old.as_std_path(), b"v2").await.unwrap();
+        // 新 entry（后入账本，制造外部冲突）
+        j.record(entry(
+            "op-new",
+            vec![FileChange::Written {
+                path: f_new.clone(),
+                before: Some(b"v1".to_vec()),
+                after: b"v2".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        fs::write(f_new.as_std_path(), b"externally-changed")
+            .await
+            .unwrap();
+
+        // 批量撤销 2 条：新 entry 冲突保留，旧 entry 撤销成功
+        let report = j.undo(2).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert_eq!(report.failed_files.len(), 1);
+        assert_eq!(report.failed_files[0].0, f_new);
+        assert_eq!(
+            fs::read(f_old.as_std_path()).await.unwrap(),
+            b"v1",
+            "旧 entry 应已撤销"
+        );
+
+        // 重试 /undo(1)：必须命中回推到尾部的**新** entry（修复前会误取空/旧序）
+        fs::write(f_new.as_std_path(), b"v2").await.unwrap();
+        let retry = j.undo(1).await.unwrap();
+        assert_eq!(retry.undone_entries, 1);
+        assert_eq!(retry.failed_files.len(), 0, "expected empty");
+        assert_eq!(
+            fs::read(f_new.as_std_path()).await.unwrap(),
+            b"v1",
+            "重试应撤销新 entry"
+        );
+        assert!(j.is_empty());
     }
 
     #[tokio::test]

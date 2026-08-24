@@ -29,10 +29,13 @@ impl AuditSink for FileAuditSink {
             let line =
                 serde_json::to_string(&rec).map_err(|e| StorageError::Serialize(e.to_string()))?;
             // tokio::fs::OpenOptions 不支持 mode()，使用 spawn_blocking 调 std
-            // 以在 Unix 下原子设置 0600（仅在 create 时生效）
+            // 以在 Unix 下原子设置 0600（create 时生效；已存在的宽权限文件
+            // 兜底收紧——与 jsonl tighten_existing 同语义，2026-08-25 审查 L1）
             let inner = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                 use std::io::Write;
-                let mut file = open_for_append(&path)?;
+                let file = open_for_append(&path)?;
+                tighten_existing(&file);
+                let mut file = file;
                 writeln!(file, "{line}")?;
                 file.sync_all()?;
                 Ok(())
@@ -63,6 +66,19 @@ fn open_for_append(path: &Utf8Path) -> std::io::Result<std::fs::File> {
         .append(true)
         .create(true)
         .open(path.as_std_path())
+}
+
+/// 已存在文件的权限兜底收紧到 0600（历史宽权限文件，L1）。
+#[cfg(unix)]
+fn tighten_existing(file: &std::fs::File) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = file.metadata()
+        && meta.permissions().mode() & 0o777 != 0o600
+    {
+        let mut perm = meta.permissions();
+        perm.set_mode(0o600);
+        let _ = file.set_permissions(perm);
+    }
 }
 
 #[cfg(test)]

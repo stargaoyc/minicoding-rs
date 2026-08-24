@@ -216,10 +216,26 @@ impl JsonlStorage {
         let path = self.session_path(new_session_id);
         {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(path.as_std_path())?;
+            // S19/C-04：fork 转录含源会话敏感内容，0600 创建（2026-08-25 审查 L2）
+            let mut opts = std::fs::OpenOptions::new();
+            opts.append(true).create(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(path.as_std_path())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = file.metadata()
+                    && meta.permissions().mode() & 0o777 != 0o600
+                {
+                    let mut perm = meta.permissions();
+                    perm.set_mode(0o600);
+                    let _ = file.set_permissions(perm);
+                }
+            }
             if file.metadata()?.len() == 0 {
                 // 新文件写格式头（M-02），与 append 路径一致
                 let header = format!(
@@ -674,7 +690,7 @@ impl Storage for JsonlStorage {
 
 /// S19：已存在文件的权限兜底收紧到 0600（历史文件可能是宽权限创建）。
 #[cfg(unix)]
-async fn tighten_existing(file: &tokio::fs::File, path: &camino::Utf8PathBuf) {
+pub(crate) async fn tighten_existing(file: &tokio::fs::File, path: &camino::Utf8PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = file.metadata().await {
         let mode = meta.permissions().mode() & 0o777;

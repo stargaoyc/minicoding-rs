@@ -55,9 +55,12 @@ pub fn redact(input: &str) -> String {
 
 /// 脱敏单行：识别 `KEY=value`/`KEY: value` 模式后整体替换值。
 fn redact_line(line: &str) -> String {
-    // 1. 字段赋值模式：`KEY = value` 或 `KEY: value`
-    if let Some((sep_idx, _is_colon)) = find_secret_assignment(line) {
-        return redact_assignment(line, sep_idx);
+    // 1. 字段赋值模式：扫描行内**全部** `KEY=value` / `KEY: value` 赋值对
+    //    （2026-08-25 审查 §6.2-S9：此前每行只看第一个分隔符，
+    //    `PORT=8080 API_KEY=sk-x` 这类首个字段非敏感的多赋值行整行漏检）
+    let assignments = find_secret_assignments(line);
+    if !assignments.is_empty() {
+        return redact_assignments(line, &assignments);
     }
 
     // 2. Bearer token
@@ -77,27 +80,70 @@ fn redact_line(line: &str) -> String {
     line.to_string()
 }
 
-/// 在 `line` 中查找敏感字段的赋值分隔符位置（`=` 或 `:`）。
+/// 在 `line` 中查找**所有**敏感字段的赋值分隔符位置（`=` 或 `:`）。
 ///
-/// 返回 `Some((sep_idx, is_colon))`：分隔符索引及是否为冒号分隔。
-/// 字段名须包含 `SECRET_KEYWORDS` 中任一关键词（大小写不敏感）。
-fn find_secret_assignment(line: &str) -> Option<(usize, bool)> {
-    let lower = line.to_lowercase();
-    // 优先匹配 `=` 分隔（.env / shell 风格）
-    if let Some(eq_idx) = lower.find('=') {
-        let key_part = &lower[..eq_idx];
-        if is_secret_key(key_part) {
-            return Some((eq_idx, false));
+/// 按空白把行切段，每段内自段首向右扫描分隔符：字段名（段首到分隔符）含
+/// `SECRET_KEYWORDS` 任一关键词即命中（每段只取首个命中，避免值区重复处理）。
+/// 返回 `(sep_idx, is_colon)` 列表，按出现顺序排列。
+fn find_secret_assignments(line: &str) -> Vec<(usize, bool)> {
+    let mut out = Vec::new();
+    let mut seg_start: Option<usize> = None;
+    // 以哨兵空白结尾，统一刷新最后一段
+    for (i, c) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), ' ')))
+    {
+        if !c.is_whitespace() {
+            seg_start.get_or_insert(i);
+            continue;
+        }
+        if let Some(start) = seg_start.take() {
+            let seg = &line[start..i];
+            for (rel, sc) in seg.char_indices() {
+                if sc != '=' && sc != ':' {
+                    continue;
+                }
+                if is_secret_key(&seg[..rel]) {
+                    out.push((start + rel, sc == ':'));
+                    break;
+                }
+            }
         }
     }
-    // 再匹配 `:` 分隔（YAML / TOML inline 风格）
-    if let Some(colon_idx) = lower.find(':') {
-        let key_part = &lower[..colon_idx];
-        if is_secret_key(key_part) {
-            return Some((colon_idx, true));
-        }
+    out
+}
+
+/// 把各敏感赋值的 value 部分替换为 `***`，保留 KEY 与分隔符及前置空白。
+///
+/// 值的终止边界：下一个敏感赋值所在段的段首；末个赋值为行尾。中间夹带的
+/// 非敏感 token 会一并吞入值区——方向是过度脱敏而非泄漏（fail-closed）。
+fn redact_assignments(line: &str, assigns: &[(usize, bool)]) -> String {
+    let _ = assigns.iter().all(|&(_, _)| true); // 保持签名信息性
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (idx, &(sep_idx, _)) in assigns.iter().enumerate() {
+        // 下一个赋值所在段的段首（跳过其 key 与前置空白）；末个为行尾
+        let value_end = if idx + 1 < assigns.len() {
+            let next_sep = assigns[idx + 1].0;
+            line[..next_sep]
+                .rfind(char::is_whitespace)
+                .map_or(next_sep, |wi| {
+                    wi + (line[wi..].len() - line[wi..].trim_start().len())
+                })
+        } else {
+            line.len()
+        };
+        out.push_str(&line[cursor..sep_idx]);
+        let sep = &line[sep_idx..=sep_idx];
+        let rest = &line[sep_idx + 1..];
+        let ws_len = rest.len() - rest.trim_start().len();
+        out.push_str(sep);
+        out.push_str(&line[sep_idx + 1..sep_idx + 1 + ws_len]);
+        out.push_str("***");
+        cursor = value_end;
     }
-    None
+    out.push_str(&line[cursor.min(line.len())..]);
+    out
 }
 
 /// 字段名是否含敏感关键词。
@@ -117,20 +163,6 @@ fn is_secret_key(key: &str) -> bool {
         })
         .collect();
     SECRET_KEYWORDS.iter().any(|kw| normalized.contains(kw))
-}
-
-/// 把 `KEY=value` / `KEY: value` 的 value 部分替换为 `***`，保留 KEY 与分隔符。
-fn redact_assignment(line: &str, sep_idx: usize) -> String {
-    let key_part = &line[..sep_idx];
-    // 跳过 `=` / `:` 与可选空白
-    let rest = &line[sep_idx + 1..];
-    let value_start = match rest.char_indices().find(|(_, c)| !c.is_whitespace()) {
-        Some((i, _)) => sep_idx + 1 + i,
-        None => line.len(),
-    };
-    let sep = &line[sep_idx..=sep_idx];
-    let whitespace = &line[sep_idx + 1..value_start];
-    format!("{key_part}{sep}{whitespace}***")
 }
 
 #[cfg(test)]
@@ -213,5 +245,25 @@ mod tests {
         assert!(out.contains("PASSWORD="));
         assert!(out.contains("***"));
         assert!(!out.contains("hunter2"));
+    }
+
+    #[test]
+    fn redact_multiple_assignments_on_one_line() {
+        // 2026-08-25 审查 §6.2-S9：首个分隔符字段非敏感的多赋值行，
+        // 此前整行漏检
+        let input = "PORT=8080 API_KEY=sk-secret123\n";
+        let out = redact(input);
+        assert!(out.contains("PORT=8080"));
+        assert!(out.contains("API_KEY="));
+        assert!(!out.contains("sk-secret123"));
+    }
+
+    #[test]
+    fn redact_two_secrets_on_one_line() {
+        let input = "API_TOKEN=aaa SECRET_KEY=bbb\n";
+        let out = redact(input);
+        assert!(out.contains("API_TOKEN="));
+        assert!(out.contains("SECRET_KEY="));
+        assert!(!out.contains("aaa") && !out.contains("bbb"));
     }
 }

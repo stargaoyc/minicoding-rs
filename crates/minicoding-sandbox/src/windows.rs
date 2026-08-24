@@ -1,17 +1,16 @@
-//! Windows 受限令牌 + Job Object 沙箱驱动。
+//! Windows Job Object 进程遏制沙箱驱动。
 //!
-//! 基于 `windows` crate（MIT/Apache-2.0）实现 `SandboxDriver` trait。
-//! 两层隔离：
-//! 1. **Job Object**：限制子进程创建数量、CPU/内存上限、UI 访问（剪贴板等）；
-//! 2. **CREATE_SUSPENDED**：`apply` 设置挂起标志，`post_spawn` 分配 Job Object
-//!    后恢复线程，确保子进程首条指令执行前已受限。
+//! 基于 `windows-sys` crate（MIT/Apache-2.0）实现 `SandboxDriver` trait。
+//! **单层遏制**（诚实边界，2026-08-25 审查 §6.2-S5 措辞修正）：
+//! 1. **Job Object**：限制子进程创建数量、UI 访问（剪贴板等）、
+//!    `CREATE_SUSPENDED` 两阶段确保首条指令前生效；
 //!
-//! ## 限制
-//!
-//! Windows Job Object 不提供文件系统级隔离（不像 Linux Landlock / macOS Seatbelt）。
+//! Job Object **不提供**：文件系统隔离（不像 Linux Landlock / macOS Seatbelt）、
+//! 网络过滤（需 WFP）、CPU/内存资源上限（当前未设置 JOBOBJECT 限额字段）。
 //! 文件系统隔离需要 AppContainer 或 Mandatory Integrity Control，作为后续增强。
-//! 当前实现提供进程级遏制（限制子进程数、资源上限、UI 隔离），是 Windows 平台
-//! 最佳实践的子集，优于完全无沙箱（NoopDriver）。
+//! 当前实现提供进程级遏制（限制子进程数、UI 隔离），是 Windows 平台
+//! 最佳实践的子集，优于完全无沙箱（NoopDriver）——`is_hardened()` 如实
+//! 返回 false，doctor 不高估防护。
 //!
 //! ## apply + post_spawn 两阶段
 //!
@@ -45,6 +44,14 @@ pub struct WindowsJobDriver {
     /// Runtime 独立 `detect_driver()`——不存在跨 Runtime 共享 driver 的路径。
     /// 若未来引入并发 spawn 场景，需改为 pid→policy 映射或 apply 返回句柄。
     last_policy: std::sync::Mutex<Option<SandboxPolicy>>,
+    /// 活跃 Job Object 句柄（2026-08-25 审查 §6.2-S5）。
+    ///
+    /// 此前 `assign_process_to_job` 后 JobHandle 立即 drop——运行期失去 kill
+    /// 整个 Job 的能力，`KILL_ON_JOB_CLOSE` 的泄漏防护承诺落空（该标志绑定
+    /// "最后句柄关闭"事件）。句柄保存在驱动内：随驱动（即 Runtime）drop 时
+    /// 关闭并按 `KILL_ON_JOB_CLOSE` 终止残留沙箱子进程。串行 spawn 不变式下
+    /// 同一时刻至多一个活跃 Job。
+    active_job: std::sync::Mutex<Option<JobHandle>>,
 }
 
 impl WindowsJobDriver {
@@ -53,6 +60,7 @@ impl WindowsJobDriver {
     pub fn new() -> Self {
         Self {
             last_policy: std::sync::Mutex::new(None),
+            active_job: std::sync::Mutex::new(None),
         }
     }
 }
@@ -101,7 +109,15 @@ impl SandboxDriver for WindowsJobDriver {
 
         // 创建 Job Object，分配子进程，恢复线程
         let job = create_restricted_job(&policy)?;
-        assign_process_to_job(job, pid)?;
+        if let Err(e) = assign_process_to_job(&job, pid) {
+            // 分配失败也要恢复线程：挂起进程若不 resume 将永久泄漏（S5）
+            let _ = resume_thread(pid);
+            return Err(e);
+        }
+        *self
+            .active_job
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
         resume_thread(pid)?;
         Ok(())
     }
@@ -122,13 +138,12 @@ impl SandboxDriver for WindowsJobDriver {
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
-    JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS,
-    JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
-    JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_UI_RESTRICTIONS,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 
 /// Job Object 句柄包装：Drop 时自动 CloseHandle（触发 `KILL_ON_JOB_CLOSE`）。
@@ -148,11 +163,14 @@ impl Drop for JobHandle {
 /// 创建受限 Job Object。
 ///
 /// 限制：
-/// - `KILL_ON_JOB_CLOSE`：Job handle 关闭时终止所有子进程（防泄漏）；
-/// - `BREAKAWAY_OK`：允许子进程脱离（兼容某些运行时）；
+/// - `KILL_ON_JOB_CLOSE`：Job 最后句柄关闭时终止所有子进程（防泄漏）；
 /// - `DIE_ON_UNHANDLED_EXCEPTION`：未处理异常时终止子进程；
 /// - `LIMIT_ACTIVE_PROCESS`：限制子进程数（防 fork bomb）；
 /// - UI 限制：禁止剪贴板/系统参数/退出 Windows 等。
+///
+/// 不设 `BREAKAWAY_OK`（2026-08-25 审查 §6.2-S5 方向修正）：该标志允许 Job 内
+/// 进程以 `CREATE_BREAKAWAY_FROM_JOB` 创建**脱离 Job 的后代**——沙箱场景恰恰
+/// 不应放行脱离。
 fn create_restricted_job(_policy: &SandboxPolicy) -> Result<JobHandle, SandboxError> {
     // SAFETY: CreateJobObjectW(NULL, NULL) 创建匿名 Job Object，无内存安全风险。
     let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -163,7 +181,6 @@ fn create_restricted_job(_policy: &SandboxPolicy) -> Result<JobHandle, SandboxEr
     // 设置扩展限制
     let mut ext_limit: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     ext_limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        | JOB_OBJECT_LIMIT_BREAKAWAY_OK
         | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
         | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
     ext_limit.BasicLimitInformation.ActiveProcessLimit = 64; // 限制 64 个子进程
@@ -207,13 +224,15 @@ fn create_restricted_job(_policy: &SandboxPolicy) -> Result<JobHandle, SandboxEr
 }
 
 /// 分配子进程到 Job Object。
-fn assign_process_to_job(job: JobHandle, pid: u32) -> Result<(), SandboxError> {
+///
+/// 仅借用 `&JobHandle`——句柄所有权留在驱动（`active_job`），运行期保留
+/// kill 整个 Job 的能力（S5）。
+fn assign_process_to_job(job: &JobHandle, pid: u32) -> Result<(), SandboxError> {
     // 打开子进程句柄
     let process_handle = open_process_handle(pid)?;
 
     // SAFETY: job handle 与 process handle 均有效。
     let ret = unsafe { AssignProcessToJobObject(job.0, process_handle) };
-    let _ = job; // JobHandle 在此 drop（但 KILL_ON_JOB_CLOSE 不会触发，因为还有子进程引用）
 
     // 关闭进程句柄（已分配到 Job，不需要持有）
     // SAFETY: process_handle 来自 OpenProcess，有效时 CloseHandle 释放。

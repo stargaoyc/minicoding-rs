@@ -159,8 +159,13 @@ impl Runtime {
             Err(e) => {
                 let result = ToolResult::err_text(format!("permission error: {e}"));
                 self.emit_denied_lifecycle(&call.id, &call.name, &result);
-                self.record_permission_audit(&call.name, &Decision::Deny(e.to_string()), None)
-                    .await;
+                self.record_permission_audit(
+                    &call.name,
+                    &Decision::Deny(e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
                 tracing::warn!(tool = %call.name, error = %e, "policy check failed");
                 return Ok((call.id.clone(), result));
             }
@@ -195,8 +200,13 @@ impl Runtime {
                 Err(e) => {
                     let result = ToolResult::err_text(format!("permission error: {e}"));
                     self.emit_denied_lifecycle(&call.id, &call.name, &result);
-                    self.record_permission_audit(&call.name, &Decision::Deny(e.to_string()), None)
-                        .await;
+                    self.record_permission_audit(
+                        &call.name,
+                        &Decision::Deny(e.to_string()),
+                        None,
+                        None,
+                    )
+                    .await;
                     tracing::warn!(tool = %call.name, error = %e, "policy recheck on modified input failed");
                     return Ok((call.id.clone(), result));
                 }
@@ -223,8 +233,8 @@ impl Runtime {
 
         // 4. 解析为最终决策（PreToolUse 直出 / Verdict Allow|Deny / Ask→PermissionRequest Hook→prompter）。
         //    Ask 场景传 effective_call——弹窗展示的是实际将执行的（可能被 Hook 改写的）输入。
-        let (decision, prompt_id) = if let Some(d) = pre_decision {
-            (d, None)
+        let (decision, prompt_id, audit_note) = if let Some(d) = pre_decision {
+            (d, None, None)
         } else {
             self.resolve_decision(
                 &verdict,
@@ -242,7 +252,7 @@ impl Runtime {
 
         // 5. 落审计（所有副作用权限决策均落盘，AGENTS.md §5.5；
         //    C-04：detail 不含工具输入原文，避免凭证外泄）
-        self.record_permission_audit(&call.name, &decision, prompt_id)
+        self.record_permission_audit(&call.name, &decision, prompt_id, audit_note.as_deref())
             .await;
 
         // Metrics: 记录权限决策
@@ -441,7 +451,9 @@ impl Runtime {
     /// - `Allow` / `Deny` → 直出
     /// - `Ask` → 先跑 `PermissionRequest` Hook（可能短路）；未短路则走 `prompter`
     ///
-    /// 返回 `(Decision, Option<prompt_id>)`：`prompt_id` 为 `Some` 表示经用户交互。
+    /// 返回 `(Decision, Option<prompt_id>, Option<audit_note>)`：`prompt_id` 为
+    /// `Some` 表示经用户交互；`audit_note` 为 `Some` 时覆盖审计 detail（Always
+    /// 决策折叠后仍能区分"持久化@目录"/"会话级"来源，2026-08-25 审查 S-1）。
     async fn resolve_decision(
         &self,
         verdict: &Verdict,
@@ -449,11 +461,21 @@ impl Runtime {
         side_effect: SideEffect,
         dispatch_cfg: &DispatchConfig,
         is_builtin_deny: bool,
-    ) -> Result<(Decision, Option<String>), RuntimeError> {
+    ) -> Result<(Decision, Option<String>, Option<String>), RuntimeError> {
         match verdict {
-            Verdict::Allow => Ok((Decision::Allow, None)),
-            Verdict::Deny(msg) => Ok((Decision::Deny(msg.clone()), None)),
+            Verdict::Allow => Ok((Decision::Allow, None, None)),
+            Verdict::Deny(msg) => Ok((Decision::Deny(msg.clone()), None, None)),
             Verdict::Ask(prompt) => {
+                // 会话级 Allow 缓存（S-1）：无路径工具的 AllowAlways 落在此处，
+                // 本会话内同工具后续调用免弹窗（会话结束即失效，不跨项目）。
+                if self
+                    .session_allows
+                    .lock()
+                    .is_ok_and(|s| s.contains(&call.name))
+                {
+                    tracing::info!(tool = %call.name, "session-scoped allow hit, skipping prompt");
+                    return Ok((Decision::Allow, None, None));
+                }
                 // PermissionRequest Hook（Verdict::Ask 时、prompter 前）
                 let hook_input = self
                     .build_hook_input(
@@ -473,39 +495,26 @@ impl Runtime {
                 match result.decision {
                     HookDecision::Allow if !is_builtin_deny => {
                         // Hook 自动批准，跳过 prompter
-                        Ok((Decision::Allow, None))
+                        Ok((Decision::Allow, None, None))
                     }
                     HookDecision::Deny => {
                         let reason = result
                             .reason
                             .unwrap_or_else(|| "blocked by hook".to_string());
-                        Ok((Decision::Deny(reason), None))
+                        Ok((Decision::Deny(reason), None, None))
                     }
                     _ => {
+                        // fs.* 类工具取 input.path 相对路径（持久化查表与目录
+                        // 粒度 Always 持久化共用）
+                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
                         // 遗留#3：持久化规则查表（仅当本 prompt 提供 Always 选项——
                         // C-23 受保护文件的 restricted ask 不查，防绕过）
-                        // 路径感知查询（遗留#3 升级）：fs.* 类工具取 input.path
-                        // 相对路径，命中 `tool@前缀` 规则按最长前缀优先
-                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
                         if prompt
                             .options
                             .contains(&crate::policy::PromptOption::AllowAlways)
-                            && let Some(store) = &self.policy_persist
-                            && let Some(allow) = store.decision_for_path(&call.name, rule_path)
+                            && let Some(decision) = self.lookup_persisted_decision(call, rule_path)
                         {
-                            tracing::info!(
-                                tool = %call.name,
-                                allow,
-                                "persisted policy hit, skipping prompt"
-                            );
-                            return Ok((
-                                if allow {
-                                    Decision::Allow
-                                } else {
-                                    Decision::Deny(format!("persisted deny for {}", call.name))
-                                },
-                                None,
-                            ));
+                            return Ok((decision, None, None));
                         }
                         // Hook 未决策 → 走 prompter 交互
                         let prompt_id = prompt.id.clone();
@@ -516,25 +525,29 @@ impl Runtime {
                             risk: prompt.risk,
                         });
                         let mut d = self.prompter.prompt(prompt.clone()).await;
-                        // 遗留#3：Always 决策持久化后折叠为一次性语义执行
-                        if let Some(store) = &self.policy_persist {
-                            match &d {
-                                Decision::AllowAlways => {
-                                    if let Err(e) = store.set_allow(&call.name) {
-                                        tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
-                                    }
-                                    d = Decision::Allow;
-                                }
-                                Decision::DenyAlways(reason) => {
-                                    let reason = reason.clone();
-                                    if let Err(e) = store.set_deny(&call.name, &reason) {
-                                        tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
-                                    }
-                                    d = Decision::Deny(reason);
-                                }
-                                _ => {}
+                        // 遗留#3：Always 决策持久化后折叠为一次性语义执行。
+                        // S-1 粒度收敛（2026-08-25 审查）：带路径工具按**父目录**
+                        // 持久化（`tool@目录`，与 decision_for_path 查询对齐）；
+                        // 无路径工具只做会话级放行——杜绝"一次按键=跨会话/跨项目
+                        // 全局永久放行"。
+                        let rule_dir = rule_path.and_then(|p| {
+                            camino::Utf8Path::new(p)
+                                .parent()
+                                .filter(|dir| !dir.as_str().is_empty())
+                                .map(std::string::ToString::to_string)
+                        });
+                        let mut audit_note: Option<String> = None;
+                        match &d {
+                            Decision::AllowAlways | Decision::DenyAlways(_) => {
+                                audit_note = self.persist_and_collapse_always(
+                                    call,
+                                    &mut d,
+                                    rule_dir.as_deref(),
+                                );
                             }
-                        } else {
+                            _ => {}
+                        }
+                        if audit_note.is_none() {
                             // 无持久化注入：Always 折叠但不落盘（与旧行为一致）
                             d = match d {
                                 Decision::AllowAlways => Decision::Allow,
@@ -548,10 +561,89 @@ impl Runtime {
                         };
                         self.persist_event(&event).await;
                         self.events.emit(event);
-                        Ok((d, Some(prompt_id)))
+                        Ok((d, Some(prompt_id), audit_note))
                     }
                 }
             }
+        }
+    }
+
+    /// 遗留#3：持久化规则查表（`tool` / `tool@路径前缀`）。
+    ///
+    /// `rule_path` 为工具输入的相对路径；命中返回折叠后的 `Allow`/`Deny` 决策，
+    /// 未注入持久化或无记录返回 `None`。
+    fn lookup_persisted_decision(
+        &self,
+        call: &ToolCall,
+        rule_path: Option<&str>,
+    ) -> Option<Decision> {
+        let store = self.policy_persist.as_ref()?;
+        let allow = store.decision_for_path(&call.name, rule_path)?;
+        tracing::info!(tool = %call.name, allow, "persisted policy hit, skipping prompt");
+        Some(if allow {
+            Decision::Allow
+        } else {
+            Decision::Deny(format!("persisted deny for {}", call.name))
+        })
+    }
+
+    /// Always 决策持久化并折叠为一次性语义（S-1 粒度收敛，2026-08-25 审查）。
+    ///
+    /// - `AllowAlways` + 路径 → `tool@父目录` 规则落盘；无路径 → 会话级放行；
+    /// - `DenyAlways` + 路径 → `tool@父目录` deny；无路径 → 工具级全局 deny
+    ///   （拒绝方向 fail-closed，全局生效是安全的）。
+    ///
+    /// 返回审计 detail 注记（区分"持久化@目录/会话级/全局 deny"来源）；
+    /// `policy_persist` 未注入时返回 `None`（调用方退化为纯折叠）。
+    fn persist_and_collapse_always(
+        &self,
+        call: &ToolCall,
+        d: &mut Decision,
+        rule_dir: Option<&str>,
+    ) -> Option<String> {
+        let store = self.policy_persist.as_ref()?;
+        match d {
+            Decision::AllowAlways => {
+                if let Some(dir) = rule_dir {
+                    if let Err(e) = store.set_allow_path(&call.name, dir) {
+                        tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
+                    }
+                    *d = Decision::Allow;
+                    Some(format!(
+                        "user allowed {tool} always @ {dir} (persisted)",
+                        tool = call.name
+                    ))
+                } else {
+                    if let Ok(mut s) = self.session_allows.lock() {
+                        s.insert(call.name.clone());
+                    }
+                    *d = Decision::Allow;
+                    Some(format!(
+                        "user allowed {tool} always (session-scoped)",
+                        tool = call.name
+                    ))
+                }
+            }
+            Decision::DenyAlways(reason) => {
+                let reason = reason.clone();
+                let res = if let Some(dir) = rule_dir {
+                    store.set_deny_path(&call.name, dir, &reason)
+                } else {
+                    store.set_deny(&call.name, &reason)
+                };
+                if let Err(e) = res {
+                    tracing::warn!(error = %e, tool = %call.name, "policy.toml 写入失败");
+                }
+                *d = Decision::Deny(reason.clone());
+                Some(match rule_dir {
+                    Some(dir) => format!(
+                        "user denied {tool} always @ {dir}: {reason}",
+                        tool = call.name
+                    ),
+                    None => format!("user denied {tool} always: {reason}", tool = call.name),
+                })
+            }
+            _ => None,
         }
     }
 
@@ -729,13 +821,16 @@ impl Runtime {
     /// 记录权限决策审计（C-01 决策可追溯，AGENTS.md §5.5）。
     ///
     /// `prompt_id` 为 `Some` 表示经用户交互（Ask→prompter），`None` 表示策略直出
-    /// （Allow/Deny）。审计落盘失败仅记 `warn` 日志，不中断工具执行——审计失败不应
-    /// 阻断主流程，但会被运维发现并处理。
+    /// （Allow/Deny）。`audit_note` 为 `Some` 时覆盖默认 detail（用于 Always 决策
+    /// 折叠后保留"持久化@目录/会话级"来源，2026-08-25 审查 S-1）。审计落盘失败
+    /// 仅记 `warn` 日志，不中断工具执行——审计失败不应阻断主流程，但会被运维
+    /// 发现并处理。
     pub(crate) async fn record_permission_audit(
         &self,
         tool: &str,
         decision: &Decision,
         prompt_id: Option<String>,
+        audit_note: Option<&str>,
     ) {
         let (decision_str, detail) = match (decision, prompt_id.is_some()) {
             (Decision::Allow, true) => ("allow", format!("user allowed {tool}")),
@@ -749,6 +844,9 @@ impl Runtime {
             (Decision::Deny(reason), true) => ("deny", format!("user denied {tool}: {reason}")),
             (Decision::Deny(reason), false) => ("deny", format!("policy denied {tool}: {reason}")),
         };
+        // Always 决策在 resolve_decision 已折叠为 Allow/Deny，此处以 note 保留
+        // 真实来源（此前 "(persisted)" 分支不可达，审计无法区分一次性与永久授权）
+        let detail = audit_note.map_or(detail, ToOwned::to_owned);
         let rec = crate::storage::AuditRecord {
             ts: time::OffsetDateTime::now_utc(),
             session: self.session.id.clone(),

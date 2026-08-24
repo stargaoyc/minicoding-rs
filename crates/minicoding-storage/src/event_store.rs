@@ -103,17 +103,32 @@ impl EventStore for JsonlEventStore {
         record: EventRecord,
     ) -> BoxFuture<'_, Result<(), StorageError>> {
         let path = self.session_path(session);
+        // M-01 同款串行化（2026-08-25 审查 §6.2-S8）：同会话事件流此前无锁，
+        // 且行与换行分两次 write——跨进程并发 append 可交错出半行损坏。
+        // 复用消息流的 `{session}.lock` 排他锁（顺带与消息 append 互斥）。
+        let lock_path = self.base_dir.join(format!("{session}.lock"));
         Box::pin(async move {
             let line = serde_json::to_string(&record)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
+
+            let _lock = tokio::task::spawn_blocking(move || {
+                crate::lock::SessionLock::acquire_blocking(lock_path)
+            })
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
+
             // S19/C-04：事件流同样可能含敏感输出，0600 创建
             let mut opts = tokio::fs::OpenOptions::new();
             opts.append(true).create(true);
             #[cfg(unix)]
             opts.mode(0o600); // S19/C-04（tokio 自带该方法）
             let mut file = opts.open(&path).await?;
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
+            #[cfg(unix)]
+            crate::jsonl::tighten_existing(&file, &path).await;
+            // 单次 write_all（行 + 换行）：原子追加，消除两 syscall 间交错窗口
+            let mut buf = line.into_bytes();
+            buf.push(b'\n');
+            file.write_all(&buf).await?;
             file.flush().await?;
             file.sync_all().await?;
             Ok(())

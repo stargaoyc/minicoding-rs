@@ -134,8 +134,9 @@ fn matches_pre_approved(tool: &str, input: &Value, allowed: &[PreApprovedPrompt]
     let Some(command_text) = extract_command_text(input) else {
         return false;
     };
-    // 复合命令一律不继承预批准（S6）
-    if [";", "&&", "||", "`", "$(", "|"]
+    // 复合命令一律不继承预批准（S6）。换行同为命令分隔符——缺失会使
+    // `"cargo build\ngit push"` 借前缀命中直接放行第二条命令（S2 同根）
+    if [";", "&&", "||", "`", "$(", "|", "\n", "\r"]
         .iter()
         .any(|op| command_text.contains(op))
     {
@@ -237,9 +238,11 @@ fn shell_hits_blacklist(input: &Value) -> bool {
         return false;
     };
 
-    // 按命令分隔符切段逐段独立判定（`;`/`|`/反引号/`$()`——`&&`/`||` 含于 `&`/`|`
-    // 的字符级切分；粗粒度切分只会影响检测灵敏度，方向 fail-closed）。
-    cmd.split([';', '|', '&', '`'])
+    // 按命令分隔符切段逐段独立判定（`;`/`|`/反引号/`$()`/换行——`&&`/`||` 含于
+    // `&`/`|` 的字符级切分；粗粒度切分只会影响检测灵敏度，方向 fail-closed）。
+    // 换行必须参与切段：`sh -c` 中换行即命令分隔符，缺失会使
+    // `"true\nrm AGENTS.md"` 整段词法判定失效（2026-08-25 审查 §6.1-S2）。
+    cmd.split([';', '|', '&', '`', '\n', '\r'])
         .map(str::trim)
         .filter(|seg| !seg.is_empty() && *seg != "$(")
         .any(|segment| {
@@ -309,11 +312,13 @@ fn tokenize_command(cmd: &str) -> Vec<String> {
 /// S5：路径是否位于 VCS 元数据目录内（.git/.hg/.svn 任一组件）。
 ///
 /// 组件比较做大小写折叠（2026-08-23 审查 §9-P1：大小写不敏感 FS 上
-/// `.GIT/hooks/pre-commit` 此前可绕过）。
+/// `.GIT/hooks/pre-commit` 此前可绕过）；尾随 `.`/空格剥离同 S10
+/// （Windows 上 `.git.` 创建时即 `.git`）。
 fn in_vcs_metadata(path: &str) -> bool {
     Utf8Path::new(path).components().any(|c| {
         let lower = c.as_str().to_ascii_lowercase();
-        matches!(lower.as_str(), ".git" | ".hg" | ".svn")
+        let lower = lower.trim_end_matches(['.', ' ']);
+        matches!(lower, ".git" | ".hg" | ".svn")
     })
 }
 
@@ -371,8 +376,12 @@ fn targets_project_doc(path: &str) -> bool {
         // override 变体，.cursorrules/.claude 为 fallback）。文件名比较做大小写
         // 折叠——macOS APFS/Windows NTFS 大小写不敏感，`.GIT`/`agents.md` 变体
         // 此前可绕过黑名单在 AcceptEdits 下免弹窗写入。
+        //
+        // 尾随 `.`/空格剥离（2026-08-25 审查 §6.2-S10）：Win32 CreateFile 创建时
+        // 剥离尾随点/空格，`AGENTS.md.` 实际写入的就是 `AGENTS.md`——比较前
+        // 归一化以封堵该绕过。
         Some(name) => matches!(
-            name.to_ascii_lowercase().as_str(),
+            name.to_ascii_lowercase().trim_end_matches(['.', ' ']),
             "agents.md" | "agents.override.md" | "claude.md" | ".cursorrules" | ".clinerules"
         ),
         None => false,
@@ -1121,6 +1130,65 @@ mod tests {
             let input = serde_json::json!({ "command": cmd });
             assert!(!is_blacklisted("shell.run", &input), "{cmd} 读操作不应拦截");
         }
+    }
+
+    // ===== S2：换行即命令分隔符，须参与黑名单分段与预批准复合拦截 =====
+
+    #[test]
+    fn shell_newline_separated_write_denied() {
+        // 2026-08-25 审查 §6.1-S2：换行不在分段集合时，段首动词是 `true`，
+        // `rm AGENTS.md` 沉入句尾完全逃逸词法判定
+        for cmd in [
+            "true\nrm AGENTS.md",
+            "echo ok\nrm -rf .git",
+            "cat x\nmv CLAUDE.md /tmp/x",
+            "true\r\ntruncate -s 0 CLAUDE.md",
+            "echo a\necho b > AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+    }
+
+    #[test]
+    fn pre_approved_rejects_newline_compound() {
+        use super::{PreApprovedPrompt, matches_pre_approved};
+        let allowed = vec![PreApprovedPrompt {
+            tool: "shell.run".to_string(),
+            prompt: "cargo build".to_string(),
+        }];
+        // 换行拼接第二条命令不得继承预批准（S6 的换行变体）
+        assert!(!matches_pre_approved(
+            "shell.run",
+            &serde_json::json!({ "command": "cargo build\ngit push" }),
+            &allowed,
+        ));
+        // 单命令词边界前缀仍正常放行
+        assert!(matches_pre_approved(
+            "shell.run",
+            &serde_json::json!({ "command": "cargo build --release" }),
+            &allowed,
+        ));
+    }
+
+    // ===== S10：Windows 尾随点/空格归一化 =====
+
+    #[test]
+    fn trailing_dot_space_normalization() {
+        // Win32 CreateFile 剥离尾随点/空格：`AGENTS.md.` 实际写入 `AGENTS.md`
+        let write = serde_json::json!({ "path": "docs/AGENTS.md." });
+        assert!(
+            is_blacklisted("fs.delete", &write),
+            "尾随点的约束文件删除应命中保护"
+        );
+        let vcs_path = serde_json::json!({ "path": ".git. /hooks/pre-commit" });
+        assert!(
+            is_blacklisted("fs.write", &vcs_path),
+            "尾随点的 VCS 目录组件应命中保护"
+        );
+        // 普通带点文件不受影响
+        let normal = serde_json::json!({ "path": "src/foo.bar " });
+        assert!(!is_blacklisted("fs.write", &normal));
     }
 
     #[test]

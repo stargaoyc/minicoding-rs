@@ -183,6 +183,13 @@ pub struct Runtime {
     /// AllowAlways/DenyAlways 持久化存储（遗留#3；`None` 时 Always 决策折叠
     /// 但不落盘）。sdk 默认注入 `~/.minicoding/policy.toml`。
     pub(crate) policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
+    /// 会话级 Allow 缓存（2026-08-25 审查 S-1）。
+    ///
+    /// 无路径输入的工具（`shell.run`/`web.fetch` 等）用户选择 `AllowAlways` 时
+    /// **只做会话级放行**，不再落盘为跨会话/跨项目的工具级全局规则（一次按键
+    /// 即永久放行的放大效应，见审查报告 §6.1-S1）。带路径工具仍按目录粒度
+    /// 持久化。std Mutex：临界区仅集合读写、不跨 await。
+    pub(crate) session_allows: std::sync::Mutex<HashSet<String>>,
     /// asyncRewake 调度器（遗留#6 全量接线；默认 Noop 拒绝 spawn）。
     pub(crate) rewake: Arc<dyn crate::hooks::AsyncRewakeScheduler>,
     /// `SessionStart` Hook 是否已派发（每会话恰一次）。

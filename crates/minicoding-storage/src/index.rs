@@ -108,10 +108,29 @@ impl SessionIndex {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         let tmp: Utf8PathBuf = path.with_extension("json.tmp");
-        // 先写 .tmp 并 fsync，再 rename（同文件系统原子）
+        // 先写 .tmp 并 fsync，再 rename（同文件系统原子）。
+        // 0600 创建（2026-08-25 审查 L2）：索引含会话标题/摘要等敏感元数据
         {
             use std::io::Write;
-            let mut file = std::fs::File::create(tmp.as_std_path())?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts.open(tmp.as_std_path())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = file.metadata()
+                    && meta.permissions().mode() & 0o777 != 0o600
+                {
+                    let mut perm = meta.permissions();
+                    perm.set_mode(0o600);
+                    let _ = file.set_permissions(perm);
+                }
+            }
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
         }

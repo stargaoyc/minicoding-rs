@@ -84,6 +84,7 @@ impl Runtime {
             &format!("{} sandbox-fallback", call.name),
             &decision,
             Some(prompt_id),
+            None,
         )
         .await;
         match decision {
