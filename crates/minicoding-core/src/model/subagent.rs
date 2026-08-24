@@ -13,6 +13,8 @@
 //! 父 Agent 只接收 `summary`，不接收子 Agent 中间消息（C-05：上下文是数据非指令）。
 
 use crate::tool::ToolGroup;
+
+use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -176,6 +178,13 @@ pub struct SubagentSpec {
     pub skip_memory: bool,
     /// 是否允许再生子 Agent（默认 `false`，防无限嵌套）。
     pub can_spawn_subagent: bool,
+    /// 子 Agent 工作目录（2026-08-25 审查 T-1）。
+    ///
+    /// `None` = 继承父会话 workdir。`WorktreeSubagentRunner` 在创建隔离
+    /// worktree 后**必须**把 worktree 绝对路径写入此字段再委托内层 runner——
+    /// 此前 spec 无该字段，子 Agent 在父进程 CWD 工作，worktree 隔离空转。
+    #[serde(default)]
+    pub workdir: Option<Utf8PathBuf>,
     /// 单次子 Agent 执行超时。
     pub timeout: Duration,
     /// 隔离模式（默认 `Shared`，`design.md` §7.5）。
@@ -208,6 +217,7 @@ impl SubagentSpec {
             thoroughness: Thoroughness::Medium,
             skip_memory: ty.default_skip_memory(),
             can_spawn_subagent: ty.default_can_spawn(),
+            workdir: None,
             timeout,
             ty,
             isolation: Isolation::default(),

@@ -214,7 +214,7 @@ impl Runtime {
         } else {
             verdict
         };
-        // 合并后 verdict 可能升级为 Deny：重建 dispatch_cfg/is_builtin_deny，
+        // 合并后 verdict 可能升级为 Deny：重建 dispatch_cfg/is_hard_deny（硬拒绝语义，A-2），
         // 保证 C-21（builtin Deny 不被 Hook Allow 覆盖）对改写后输入同样成立
         let dispatch_cfg = if input_modified {
             self.build_dispatch_config(&verdict)
@@ -371,7 +371,12 @@ impl Runtime {
         dispatch_cfg: &DispatchConfig,
         effective_call: &mut ToolCall,
     ) -> Result<Option<Decision>, RuntimeError> {
-        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+        // 命名澄清（A-2，2026-08-25 审查）：当前 BuiltinPolicy 的 `Verdict::Deny`
+        // 恰好只产 L0 黑名单拒绝，故"策略 Deny ⇒ 硬拒绝、Hook Allow 不可翻案"
+        // 成立。但这是对策略行为的**约定**而非类型保证——Plan 门/路径越界 Deny
+        // 也会被并入此通道（方向更严，无害）。若未来引入可被 Hook 覆盖的软
+        // Deny，需先给 `Verdict` 增加显式变体区分硬/软，再改此判定。
+        let is_hard_deny = matches!(verdict, Verdict::Deny(_));
         let hook_input = self
             .build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict))
             .await;
@@ -390,7 +395,7 @@ impl Runtime {
                     .unwrap_or_else(|| "blocked by hook".to_string());
                 Some(Decision::Deny(reason))
             }
-            HookDecision::Allow if !is_builtin_deny => {
+            HookDecision::Allow if !is_hard_deny => {
                 // Hook 升级 Ask→Allow（不降级已有 Allow）
                 Some(Decision::Allow)
             }

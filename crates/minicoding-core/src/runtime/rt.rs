@@ -675,6 +675,9 @@ impl Runtime {
                     call_signatures.push(sig);
                     if repeat_guard::is_repeating(&call_signatures, hard_stop_count) {
                         tracing::warn!("turn terminated: repeated tool calls detected");
+                        // 终态消息先落盘再广播（A-P2，见 append_terminal_notice）
+                        self.append_terminal_notice("[检测到重复工具调用，已终止以避免死循环]")
+                            .await;
                         let event = Event::TurnEnd {
                             stop_reason: StopReason::Stopped,
                         };
@@ -730,6 +733,7 @@ impl Runtime {
 
                 // 达到 max_iters 上限
                 tracing::warn!(max_iters, "turn exceeded max tool iterations");
+                self.append_terminal_notice("[达到最大工具调用轮次上限]").await;
                 let event = Event::TurnEnd {
                     stop_reason: StopReason::Stopped,
                 };
@@ -757,6 +761,9 @@ impl Runtime {
                     // M-03（D-05）：取消可能发生在工具执行中途，回填悬空 tool_calls
                     // 的合成错误结果，保证 resume 后历史对严格 provider 合法。
                     self.backfill_missing_tool_results().await;
+                    // 终态消息先落盘再广播（A-P2）：UI 已展示的 [已取消] 需入
+                    // transcript，否则 resume 后 UI 与历史永久分歧
+                    self.append_terminal_notice("[已取消]").await;
                     let event = Event::TurnEnd {
                         stop_reason: StopReason::Interrupted,
                     };
@@ -773,6 +780,7 @@ impl Runtime {
                     );
                     // M-03（D-05）：超时同样可能留下悬空 tool_calls，回填合成结果。
                     self.backfill_missing_tool_results().await;
+                    self.append_terminal_notice("[turn 超时终止]").await;
                     let event = Event::TurnEnd {
                         stop_reason: StopReason::Stopped,
                     };
@@ -884,6 +892,22 @@ impl Runtime {
         }
     }
 
+    /// 终态合成消息落盘（A-P2，2026-08-25 审查）：取消/超时/上限/重复终止的
+    /// `[...]` 提示此前只返回给前端、不入 transcript——违反"先落盘再广播"
+    /// 自定不变量（design.md §2.1），resume 后 UI 所见与会话历史永久分歧。
+    /// 落盘失败仅告警不阻断（中断路径不应因存储故障而失败）。
+    async fn append_terminal_notice(&self, text: &str) {
+        let msg = Message::assistant_text(text.to_string());
+        if let Err(e) = self.storage.append(&self.session.id, &msg).await {
+            metrics::record_error("storage");
+            tracing::warn!(error = %e, "terminal notice persist failed");
+        }
+        self.ctx.append(msg.clone()).await;
+        let event = Event::MessageAppended(msg);
+        self.persist_event(&event).await;
+        self.events.emit(event);
+    }
+
     /// 流式调用 LLM 并聚合为 assistant 消息。
     ///
     /// 返回 `(Message, Option<StopReason>)`：`stop_reason` 为 provider 报告的停止
@@ -908,7 +932,6 @@ impl Runtime {
             message_count = req.messages.len(),
             otel.name = span_name::LLM_CHAT_STREAM,
         );
-        let _enter = span.enter();
 
         // 详细日志（排查用）：请求元信息 + 响应统计。字段不含 input 原文与凭证（C-04）。
         tracing::info!(
@@ -919,6 +942,11 @@ impl Runtime {
             "llm_call started"
         );
 
+        // `.instrument(span)` 替代 `span.enter()` guard（2026-08-25 审查 A-P3）：
+        // entered guard 跨 `.await` 持有依赖线程局部语义，与 `run_turn` 的
+        // instrument 风格自相矛盾且 future 搬移时 span 归属错误。整个流式消费
+        // 体作为 inner future 被 instrument，span 跟随执行位置。
+        async move {
         let mut stream = self.provider.chat_stream(req).await?;
         let mut acc = DeltaAccumulator::new();
         self.events.emit(Event::TurnStreamingStarted);
@@ -997,6 +1025,9 @@ impl Runtime {
         let stop_reason = acc.stop_reason().cloned();
         let usage = acc.usage().cloned();
         Ok((acc.finalize(), stop_reason, usage))
+        }
+        .instrument(span)
+        .await
     }
 
     /// 执行工具调用（无副作用并行、有副作用串行 + 权限检查）。
@@ -1023,23 +1054,107 @@ impl Runtime {
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
         // S14：查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch
         // 报 NotFound，避免懒注册语义变化演变为免检绕过
+        let readonly_of = |c: &ToolCall| {
+            self.tools
+                .get(&c.name)
+                .is_some_and(|t| t.side_effect() == SideEffect::None)
+        };
         let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
-            calls.iter().partition(|c| {
-                self.tools
-                    .get(&c.name)
-                    .is_some_and(|t| t.side_effect() == SideEffect::None)
-            });
+            calls.iter().partition(|c| readonly_of(c));
+
+        // 顺序感知调度（2026-08-25 审查 A-P1）：仅当原始顺序中**所有只读调用
+        // 都位于副作用调用之前**时，"先并行读、再串行写"才与 LLM 意图一致。
+        // 一旦存在 写→读 相邻依赖（如 `shell.run` 生成文件后 `fs.read` 读取），
+        // 分桶会让 read 先于 write 执行读到旧数据——退化为全串行保序执行，
+        // 结果正确性优先于并行收益。结果仍按原始顺序回填，两种路径一致。
+        let reads_all_before_effects = {
+            let mut seen_effect = false;
+            let mut ok = true;
+            for c in calls {
+                if !readonly_of(c) {
+                    seen_effect = true;
+                } else if seen_effect {
+                    ok = false;
+                    break;
+                }
+            }
+            ok
+        };
 
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
+        if reads_all_before_effects {
+            results.extend(self.run_readonly_bucket(&readonly, &ctx).await?);
+            // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
+            for call in &side_effect {
+                let call_side_effect = self.tool_side_effect(&call.name);
+                // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
+                let span = tracing::debug_span!(
+                    "tool_call",
+                    session.id = %ctx.session_id,
+                    tool.name = %call.name,
+                    tool.side_effect = ?call_side_effect,
+                    tool.parallel = false,
+                    call_id = %call.id,
+                    otel.name = span_name::TOOL_CALL,
+                );
+                let _enter = span.enter();
+                results.push(self.execute_side_effect_call(call, &ctx).await?);
+            }
+        } else {
+            tracing::debug!(
+                total = calls.len(),
+                "read-after-write ordering detected in batch; executing strictly sequentially"
+            );
+            for call in calls {
+                if readonly_of(call) {
+                    // 单元素只读桶：复用并行路径（保序回退下逐个执行）
+                    let one: [&ToolCall; 1] = [call];
+                    results.extend(self.run_readonly_bucket(&one, &ctx).await?);
+                } else {
+                    let call_side_effect = self.tool_side_effect(&call.name);
+                    let span = tracing::debug_span!(
+                        "tool_call",
+                        session.id = %ctx.session_id,
+                        tool.name = %call.name,
+                        tool.side_effect = ?call_side_effect,
+                        tool.parallel = false,
+                        call_id = %call.id,
+                        otel.name = span_name::TOOL_CALL,
+                    );
+                    let _enter = span.enter();
+                    results.push(self.execute_side_effect_call(call, &ctx).await?);
+                }
+            }
+        }
 
-        // 无副作用：按 `tools.parallel_reads` 并发执行（0 = 串行，见 tech-stack.md §13）。
-        // 克隆 `events`/`tools` 到闭包外，让 async 块只捕获 owned 数据，
-        // 避免捕获 `&self` 导致 future 非 `'static`（无法被 SDK `tokio::spawn`）。
-        //
-        // **HRTB 修复**：`readonly.iter().map(|call| async move { ... })` 中 `call`
-        // 是 `&&ToolCall`，闭包签名 `fn(&'a &'b ToolCall) -> impl Future + 'a` 不满足
-        // `buffer_unordered` 要求的 HRTB（future 类型对任意 `'a` 必须相同）。把每个
-        // future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
+        // 按 LLM 原始顺序回填，保证 tool_result 与 tool_calls 一一对应
+        results.sort_by_key(|(id, _)| calls.iter().position(|c| c.id == *id).unwrap_or(usize::MAX));
+
+        Ok(results)
+    }
+
+    /// 工具副作用分级查询（查不到返回 `SideEffect::None`，span 属性用）。
+    fn tool_side_effect(&self, name: &str) -> SideEffect {
+        self.tools
+            .get(name)
+            .map_or(SideEffect::None, |t| t.side_effect())
+    }
+
+    /// 执行只读桶：按 `tools.parallel_reads` 并发（0 = 串行）。
+    ///
+    /// 从 `execute_tool_calls` 提取（2026-08-25 审查 A-P1 保序回退需要按单调用
+    /// 复用该路径）。克隆 `events`/`tools` 到闭包外，让 async 块只捕获 owned
+    /// 数据，避免捕获 `&self` 导致 future 非 `'static`（无法被 SDK `tokio::spawn`）。
+    ///
+    /// **HRTB 修复**：`readonly.iter().map(|call| async move { ... })` 中 `call`
+    /// 是 `&&ToolCall`，闭包签名 `fn(&'a &'b ToolCall) -> impl Future + 'a` 不满足
+    /// `buffer_unordered` 要求的 HRTB（future 类型对任意 `'a` 必须相同）。把每个
+    /// future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
+    async fn run_readonly_bucket(
+        &self,
+        readonly: &[&ToolCall],
+        ctx: &crate::tool::ToolContext,
+    ) -> Result<Vec<(ToolCallId, ToolResult)>, RuntimeError> {
         let events = self.events.clone();
         let tools = self.tools.clone();
         let denial_detector = self.denial_detector.clone();
@@ -1125,6 +1240,7 @@ impl Runtime {
                 fut
             })
             .collect();
+        let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(readonly.len());
         let parallel_reads = {
             let cfg = self
                 .config
@@ -1133,7 +1249,7 @@ impl Runtime {
             cfg.tools.parallel_reads
         };
         // M-12：`parallel_reads = 0` 时串行执行（顺序与 LLM 原始顺序一致，便于定位）。
-        // 并行分支用 `buffer_unordered`，结果随后按原始顺序回填（见下方 sort）。
+        // 并行分支用 `buffer_unordered`；结果由调用方按原始顺序统一回填（sort）。
         if parallel_reads == 0 {
             for fut in ro_futs {
                 results.push(fut.await?);
@@ -1145,31 +1261,6 @@ impl Runtime {
                 results.push(r?);
             }
         }
-
-        // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
-        for call in &side_effect {
-            // 查找工具的 side_effect 类型用于 span 属性
-            let call_side_effect = self
-                .tools
-                .get(&call.name)
-                .map_or(SideEffect::None, |t| t.side_effect());
-            // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
-            let span = tracing::debug_span!(
-                "tool_call",
-                session.id = %ctx.session_id,
-                tool.name = %call.name,
-                tool.side_effect = ?call_side_effect,
-                tool.parallel = false,
-                call_id = %call.id,
-                otel.name = span_name::TOOL_CALL,
-            );
-            let _enter = span.enter();
-            results.push(self.execute_side_effect_call(call, &ctx).await?);
-        }
-
-        // 按 LLM 原始顺序回填，保证 tool_result 与 tool_calls 一一对应
-        results.sort_by_key(|(id, _)| calls.iter().position(|c| c.id == *id).unwrap_or(usize::MAX));
-
         Ok(results)
     }
 
