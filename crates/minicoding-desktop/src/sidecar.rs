@@ -148,7 +148,9 @@ impl Default for SidecarProcess {
 /// 终止 sidecar 进程（应用退出/重启时调用）。
 ///
 /// `CommandChild::kill` 消费自身（从 state 中 `take` 后调用），幂等：未启动过
-/// sidecar 或已 kill 过时无操作。
+/// sidecar 或已 kill 过时无操作。kill 之后追加按 PID 的 OS 级兜底强杀——插件
+/// `kill` 在个别平台（Windows 句柄失效等）可能失败，孤儿进程残留即用户可感知
+/// 的 bug；对已退出 PID 的重复强杀是无害 no-op（错误码忽略）。
 #[cfg(feature = "desktop")]
 pub fn kill_sidecar(app: &tauri::AppHandle) {
     let state = app.state::<SidecarProcess>();
@@ -160,9 +162,30 @@ pub fn kill_sidecar(app: &tauri::AppHandle) {
     else {
         return;
     };
+    let pid = child.pid();
     match child.kill() {
         Ok(()) => log::info!("sidecar 已终止（应用退出清理）"),
         Err(e) => log::warn!("sidecar 终止失败: {e}"),
+    }
+    force_kill_by_pid(pid);
+}
+
+/// 按 PID OS 级强杀（best-effort，错误静默——仅作 `CommandChild::kill` 的兜底）。
+#[cfg(feature = "desktop")]
+fn force_kill_by_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW：本函数在 GUI 子系统进程内执行，避免闪烁控制台窗口
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
     }
 }
 

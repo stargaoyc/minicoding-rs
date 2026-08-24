@@ -246,7 +246,7 @@
 | W-04 | 多会话面板 | 左侧会话列表 + 右侧对话流，TanStack Query 缓存管理 | M9 | 已实现（可折叠侧栏 + 会话元数据展示） |
 | W-05 | 暗色/亮色主题 | Tailwind v4 + shadcn/ui theme provider | M9 | 已实现（双主题 CSS 变量 + Zustand 持久化 + 系统偏好跟随 + FOUC 预防） |
 | W-06 | Tauri 桌面壳 | Tauri 2.x + Rust sidecar（`minicoding-server`），三平台打包 `.dmg`/`.msi`/`.AppImage` | M9 | 已实现（`crates/minicoding-desktop`，feature gate `desktop`） |
-| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 已实现（系统托盘 + `Ctrl+Alt+M` 全局快捷键 + 关闭隐藏到托盘 + Tauri updater） |
+| W-07 | 桌面端 OS 集成 | 系统托盘 + 全局快捷键 + 自动更新（Tauri updater 签名校验） | M9 | 已实现（系统托盘 + `Ctrl+Alt+M` 全局快捷键 + Tauri updater；2026-08-24 起**关闭窗口即退出应用**，不再隐藏到托盘） |
 | W-08 | 静态资源托管 | `minicoding serve --web ./dist` 单二进制部署 + CORS 配置 | M9 | 已实现（`tower-http::ServeDir` + SPA fallback + `--cors-origin`） |
 | W-09 | 前端安全 | CSP 严格、防 XSS、权限弹窗后端校验 `prompt_id` 不可伪造、凭证不出现在前端 | M9 | 已实现（禁用 `dangerouslySetInnerHTML`、Markdown 经 React 转义、权限后端强制 C-01） |
 | W-10 | 全 Rust 工具链构建 | oxlint + oxfmt + Vite (Rolldown) + Tailwind v4 (Oxide) | M9 | 已实现（package.json 内置 `lint`/`format` 脚本） |
@@ -257,7 +257,7 @@
 | W-15 | 平台感知命令执行 | `shell.background` 按平台选 shell（Unix `sh -c` / Windows `cmd /C`，与 `shell.run` 一致）；环境 prompt 段显式声明平台命令语义（Windows 提示勿用 `ls`/`mkdir -p`/`cat` 等 Unix 命令） | M9 | 已实现（`background.rs` cfg!(windows) 分支 + `EnvironmentContributor` 平台命令提示） |
 | W-16 | 取消后会话可继续 | 手动终止（cancel）后下一轮对话正常执行：`CancellationToken` 每轮 turn 结束重建（取消一次不再砖化会话）；`cancel()` 仅对运行中 turn 生效（turn 间隙点击不毒化下一轮）；前端 `turn_end` 清空被终止 turn 的流式文本/工具卡片残留渲染 | M9 | 已实现（`Runtime.cancel_token` 重建 + `turn_active` 标记；`useChat` `turn_end` 清理；回归测试 `cancel_then_next_turn_still_works`/`cancel_between_turns_is_ignored`） |
 | W-17 | 发送消息强制滚动到底部 | 用户发送消息后（乐观 user 消息出现）无视"接近底部"保护，必定滚动到最新对话位置；AI 回复期间仍保持"接近底部才跟随" | M9 | 已实现（`MessageList` `scrollToBottom(force)`，末条 user 消息触发） |
-| W-18 | 退出时终止 sidecar | desktop 应用退出/重启（托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar`，窗口关闭隐藏到托盘不杀 sidecar） |
+| W-18 | 退出时终止 sidecar | desktop 应用退出/重启（关窗、托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill；另加按 PID OS 级兜底强杀） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar` + PID 兜底；2026-08-24 起关闭窗口即退出并触发清理） |
 | W-19 | 设置面板扩展 | 设置弹窗除模型信息外新增三组配置（Tauri 写 `config.toml` `[provider]`+`[context]` 段并重启 sidecar；Web 存 localStorage 经 `POST /sessions` 覆盖注入，参数缺失时 `GET /config` 兜底）：模型参数（LLM 请求超时 C-07 / 最大重试 C-13 / 小 LLM 模型 design.md §3.8）+ 上下文（turn 超时 / 压缩开关 C-18） | M9 | 已实现（`ServerConfig`/`ServerRuntimeParams`/`CreateSessionBody` 扩 5 字段；`GET /config` 只读响应不含 API key C-04；desktop `get/save_context_config` invoke；SetupDialog 分组表单） |
 | W-20 | 前端回放/单测基建（M-14） | Vitest + MSW（REST 拦截 + mock EventSource 重放 SSE fixture，不连真实后端）；SSE 事件流 record/replay 快照三态（`SNAPSHOT_MODE`=replay/record/off，对齐 dsh `DSH_SNAPSHOT`）覆盖"发消息→流式渲染→权限确认→沙箱拒绝卡片"；chatReducer 纯函数抽取（`useSSEStream` 行为不变重构）；MessageBubble/ToolCallCard 沙箱拒绝卡片（M-09 前端补齐）；CI `web` job（oxlint+tsc+vitest+build）（见 AGENTS.md §8.8） | M9 | 已实现 |
 
