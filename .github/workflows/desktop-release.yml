@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -146,7 +146,7 @@ jobs:
           find "target/${{ matrix.target }}/release/bundle" -type f 2>/dev/null | sort || echo "(bundle 目录不存在)"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.os }}
           path: |
@@ -166,12 +166,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -193,5 +193,13 @@ jobs:
           fi
           echo "找到 ${#files[@]} 个文件："
           printf '  %s\n' "${files[@]}"
-          # release 已由 cargo-dist 的 release.yml 创建，直接上传 assets
+          # Release 正常由 cargo-dist 的 release.yml 创建；若其未运行或失败（发布竞态），
+          # 这里兜底创建，避免 gh release upload 因 Release 不存在而整体失败（E-1）。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "⚠️ Release $TAG 不存在，兜底创建"
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes "Desktop installers for $TAG (fallback: created by Desktop Release workflow because release.yml did not create it)."
+          fi
           gh release upload "$TAG" "${files[@]}" --clobber

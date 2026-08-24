@@ -117,10 +117,8 @@ notify = "8"
 # 测试（dev-dependencies，见 tech-stack.md §10）
 wiremock = "0.6"
 tempfile = "3.13"
-insta = "1.41"
 proptest = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
-assert_cmd = "2.0"
 
 # 跨进程锁
 fs2 = "0.4"

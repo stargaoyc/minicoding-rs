@@ -33,7 +33,7 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -45,7 +45,7 @@ jobs:
     name: cargo clippy -D warnings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -60,7 +60,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -76,7 +76,7 @@ jobs:
     name: cargo llvm-cov (≥80%)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -109,7 +109,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -128,7 +128,7 @@ jobs:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -144,7 +144,7 @@ jobs:
     name: typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install typos
         uses: taiki-e/install-action@v2
         with:
@@ -165,7 +165,7 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-08-18
@@ -182,13 +182,16 @@ jobs:
     name: web (oxlint + tsc + vitest + build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          # 与 desktop-release.yml 一致：钉精确版（pnpm-lock.yaml 由 11.13.0 生成，
+          # 浮动大版本可能因 lockfile/行为差异导致 --frozen-lockfile 失败）
+          version: 11.13.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          # 与 desktop-release.yml 一致：node 22 主线（≥22.13 内置 node:sqlite，pnpm 11 依赖）
+          node-version: '22'
           cache: pnpm
           cache-dependency-path: crates/minicoding-web/pnpm-lock.yaml
       - name: Install dependencies
@@ -219,7 +222,7 @@ jobs:
     name: cargo build desktop feature
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # 钉住已验证的 nightly：2026-08-22 后的 nightly（c656540d）在 tokio opaque
       # type 上触发 rustc ICE（layout_of rigid alias），全 workspace clippy/test 均命中。
       # 上游修复后可解除钉住恢复 @nightly。

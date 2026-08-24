@@ -4,56 +4,39 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
-## [0.2.33] - 2026-08-22
+## [0.3.2] - 2026-08-24
 
-### Breaking
+### Fixed
 
-- **server 默认强制 API 鉴权**：启动生成 token（stdout `SERVER_TOKEN=`）或
-  `--auth-token` 显式指定；脚本需带 `Authorization: Bearer` 或显式 `--no-auth`
-  （S1）
-- **CORS 默认收敛**为 localhost/127.0.0.1/[::1]；跨域来源需 `--cors-origin`，
-  `*` 通配不再支持（S2）
-- **last-known-good.toml 不再包含明文 api_key**（保留 `env:` 引用原文；
-  S7/C-04）
+- **desktop：修复全部 HTTP 请求 `Failed to fetch`**（用户反馈：新建会话
+  报"创建失败：Failed to fetch"）。根因：Tauri WebView 的页面 origin
+  （Windows `http://tauri.localhost`、macOS/Linux `tauri://localhost`）不在
+  server 默认本机 CORS 白名单（S2 精确匹配 `localhost`/`127.0.0.1`/`[::1]`）
+  内，preflight 被拒——桌面端所有 HTTP/SSE 请求均受影响，v0.3.1 的"新建会话
+  无反应"同为此根因。修复：sidecar 启动参数显式加白两个 WebView origin，
+  serve 子命令默认策略不变（外部站点伪造 origin 仍因无 token 而 401）
 
-### Added
+## [0.3.1] - 2026-08-24
 
-- 高危沙箱预设二次确认字段 `confirm_danger`（S3/C-22）
-- `GET /metrics` Prometheus 端点 + 进程内指标聚合（P9）
-- 存储契约测试框架：内存/JSONL 双后端共享断言，更高格式版本显式拒绝
-  （M-13/S-28）
-- 前端 Vitest + MSW 单测与 SSE record/replay 快照基建（M-14/W-20）
-- 工具输出 render intent 与 `plan.list` 只读工具（M-11/T-15b/T-19）
-- 配置热更新白名单（model/turn_timeout_sec/parallel_reads；M-12）与
-  `parallel_reads` 并发旋钮
-- 会话 step 边界事件持久化与压缩引用链可追溯（M-06/M-07）
-- 循环打断软升级：单工具指纹逐级提醒阈值可配（M-08）
+### Fixed
 
-### Security
-
-- PreToolUse Hook `modify_input` 后对修改后输入重跑策略检查并取严合并
-  （S4/C-01/C-21）
-- 内置黑名单扩展至 shell 写约束文件与 `.git/hooks`；预批准缓存词法比对防
-  拼接绕过（S5/S6/C-02/C-23）
-- shell.run 超时 clamp 至会话上限 + unix 进程组整树终止 + 输出流式字节截断
-  （S8-S10/C-07）
-- MCP `readOnlyHint` 默认不信任（S13）；`<tool_output>` 边界转义（S21/C-05）
-- web.fetch 重定向逐跳 SSRF 复检（S22）；会话/事件/snapshot 落盘 0600
-  （S19）；journal 恢复路径组件级包容校验、绝对越界不再绕过（S18 升级）
-- `/undo` 落审计 FileUndone（S28/C-28）；Windows 驱动移除 BREAKAWAY_OK、
-  is_hardened 如实报告（S24/S25）；Seatbelt profile tempfile 随机名（S26）
+- **desktop：关闭应用即终止 sidecar**（用户反馈：`minicoding-server-sidecar`
+  不随应用退出）。根因：窗口 X 关闭被拦截为"隐藏到托盘"应用未真正退出；
+  `restart_app` 走 exec 替换进程镜像不触发 `RunEvent::Exit`。修复：关闭窗口
+  即退出应用并 kill sidecar；重启前显式 kill；`kill_sidecar` 增加 PID OS 级
+  兜底强杀（Windows `taskkill /T /F` / unix `kill -9`）。运行期托盘与
+  `Ctrl+Alt+M` 隐藏/恢复保留
+- **desktop/web：新建会话失败可见化**（用户反馈：填路径点确认后前端无反应）。
+  根因：创建接口失败（典型为 API key 未配置/keyring 不可用返回 500）被前端
+  静默吞掉。修复：对话框红色展示服务端错误原文、成功才切换会话
+- **server：`POST /sessions` 对 `workdir` 预校验**：目录不存在立即返回 400
+  可读报错，不再照常建会话、首个 turn 才在沙箱路径层报错；空白串视为未提供
 
 ### Changed
 
-- 架构治理：builder 组装下沉 sdk（tui 解除对 cli 依赖，A11）；hooks 分发算法
-  下沉 minicoding-hooks（A1）；memory→storage 解耦改经 Storage trait（A7）；
-  plan_handle/repeat_guard 自 rt.rs 抽取（A6/A4）；全 workspace 依赖方向守卫
-  测试矩阵（A8）；路径校验单一实现委托 path_sandbox（S15）；工具分桶
-  fail-closed（S14）；fs.write 建目录前包容校验（S16）
-- 协议：HTTP DTO 进 ts-rs 导出链 + 自动 barrel 脚本（P1/P2）；JsonValue 绑定
-  收敛 generated/bindings（P4）；config_hash wire 类型修正（P5）
-- 文档：data-model/design/api/features 等按实现全面对齐（D1-D9）；四份历史
-  审查报告标注 superseded（D7）
+- desktop 发布工具链：Desktop Release workflow 统一钉住
+  `nightly-2026-08-18` 编译项目代码（stable 频道 1.98 不满足 MSRV 1.99）、
+  tauri-cli 用 runner 预装 stable 安装（外部工具不受项目 MSRV 约束）
 
 ## [0.3.0] - 2026-08-24
 
@@ -134,38 +117,55 @@
 - 文档：security.md 网络矩阵按实现对齐；hooks.md 接线状态诚实化；审查报告
   附录全程跟踪修复状态
 
-## [0.3.1] - 2026-08-24
+## [0.2.33] - 2026-08-22
 
-### Fixed
+### Breaking
 
-- **desktop：关闭应用即终止 sidecar**（用户反馈：`minicoding-server-sidecar`
-  不随应用退出）。根因：窗口 X 关闭被拦截为"隐藏到托盘"应用未真正退出；
-  `restart_app` 走 exec 替换进程镜像不触发 `RunEvent::Exit`。修复：关闭窗口
-  即退出应用并 kill sidecar；重启前显式 kill；`kill_sidecar` 增加 PID OS 级
-  兜底强杀（Windows `taskkill /T /F` / unix `kill -9`）。运行期托盘与
-  `Ctrl+Alt+M` 隐藏/恢复保留
-- **desktop/web：新建会话失败可见化**（用户反馈：填路径点确认后前端无反应）。
-  根因：创建接口失败（典型为 API key 未配置/keyring 不可用返回 500）被前端
-  静默吞掉。修复：对话框红色展示服务端错误原文、成功才切换会话
-- **server：`POST /sessions` 对 `workdir` 预校验**：目录不存在立即返回 400
-  可读报错，不再照常建会话、首个 turn 才在沙箱路径层报错；空白串视为未提供
+- **server 默认强制 API 鉴权**：启动生成 token（stdout `SERVER_TOKEN=`）或
+  `--auth-token` 显式指定；脚本需带 `Authorization: Bearer` 或显式 `--no-auth`
+  （S1）
+- **CORS 默认收敛**为 localhost/127.0.0.1/[::1]；跨域来源需 `--cors-origin`，
+  `*` 通配不再支持（S2）
+- **last-known-good.toml 不再包含明文 api_key**（保留 `env:` 引用原文；
+  S7/C-04）
+
+### Added
+
+- 高危沙箱预设二次确认字段 `confirm_danger`（S3/C-22）
+- `GET /metrics` Prometheus 端点 + 进程内指标聚合（P9）
+- 存储契约测试框架：内存/JSONL 双后端共享断言，更高格式版本显式拒绝
+  （M-13/S-28）
+- 前端 Vitest + MSW 单测与 SSE record/replay 快照基建（M-14/W-20）
+- 工具输出 render intent 与 `plan.list` 只读工具（M-11/T-15b/T-19）
+- 配置热更新白名单（model/turn_timeout_sec/parallel_reads；M-12）与
+  `parallel_reads` 并发旋钮
+- 会话 step 边界事件持久化与压缩引用链可追溯（M-06/M-07）
+- 循环打断软升级：单工具指纹逐级提醒阈值可配（M-08）
+
+### Security
+
+- PreToolUse Hook `modify_input` 后对修改后输入重跑策略检查并取严合并
+  （S4/C-01/C-21）
+- 内置黑名单扩展至 shell 写约束文件与 `.git/hooks`；预批准缓存词法比对防
+  拼接绕过（S5/S6/C-02/C-23）
+- shell.run 超时 clamp 至会话上限 + unix 进程组整树终止 + 输出流式字节截断
+  （S8-S10/C-07）
+- MCP `readOnlyHint` 默认不信任（S13）；`<tool_output>` 边界转义（S21/C-05）
+- web.fetch 重定向逐跳 SSRF 复检（S22）；会话/事件/snapshot 落盘 0600
+  （S19）；journal 恢复路径组件级包容校验、绝对越界不再绕过（S18 升级）
+- `/undo` 落审计 FileUndone（S28/C-28）；Windows 驱动移除 BREAKAWAY_OK、
+  is_hardened 如实报告（S24/S25）；Seatbelt profile tempfile 随机名（S26）
 
 ### Changed
 
-- desktop 发布工具链：Desktop Release workflow 统一钉住
-  `nightly-2026-08-18` 编译项目代码（stable 频道 1.98 不满足 MSRV 1.99）、
-  tauri-cli 用 runner 预装 stable 安装（外部工具不受项目 MSRV 约束）
-
-## [0.3.2] - 2026-08-24
-
-### Fixed
-
-- **desktop：修复全部 HTTP 请求 `Failed to fetch`**（用户反馈：新建会话
-  报"创建失败：Failed to fetch"）。根因：Tauri WebView 的页面 origin
-  （Windows `http://tauri.localhost`、macOS/Linux `tauri://localhost`）不在
-  server 默认本机 CORS 白名单（S2 精确匹配 `localhost`/`127.0.0.1`/`[::1]`）
-  内，preflight 被拒——桌面端所有 HTTP/SSE 请求均受影响，v0.3.1 的"新建会话
-  无反应"同为此根因。修复：sidecar 启动参数显式加白两个 WebView origin，
-  serve 子命令默认策略不变（外部站点伪造 origin 仍因无 token 而 401）
+- 架构治理：builder 组装下沉 sdk（tui 解除对 cli 依赖，A11）；hooks 分发算法
+  下沉 minicoding-hooks（A1）；memory→storage 解耦改经 Storage trait（A7）；
+  plan_handle/repeat_guard 自 rt.rs 抽取（A6/A4）；全 workspace 依赖方向守卫
+  测试矩阵（A8）；路径校验单一实现委托 path_sandbox（S15）；工具分桶
+  fail-closed（S14）；fs.write 建目录前包容校验（S16）
+- 协议：HTTP DTO 进 ts-rs 导出链 + 自动 barrel 脚本（P1/P2）；JsonValue 绑定
+  收敛 generated/bindings（P4）；config_hash wire 类型修正（P5）
+- 文档：data-model/design/api/features 等按实现全面对齐（D1-D9）；四份历史
+  审查报告标注 superseded（D7）
 
 [Unreleased]: 后续变更见各 commit（Conventional Commits）。
