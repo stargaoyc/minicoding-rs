@@ -3,4 +3,4 @@
 /**
  * `SendUserMessage` 响应。
  */
-export type SendMessageResponse = { stop_reason: string, final_text: string, };
+export type SendMessageResponse = { stop_reason: string; final_text: string };

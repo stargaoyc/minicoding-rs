@@ -4,12 +4,15 @@ import type { SandboxDenyInfo } from "./SandboxDenyInfo";
 /**
  * 工具执行结果元数据。
  */
-export type ToolResultMeta = { 
-/**
- * serde 序列化为 `{ secs, nanos }`（`std::time::Duration` 默认 impl）。
- */
-elapsed: { secs: number; nanos: number }, bytes: number, truncated: boolean, 
-/**
- * 沙箱拒绝结构化信息（M-09；非拒绝结果为 `None`，wire 省略）。
- */
-sandbox_denied: SandboxDenyInfo | null, };
+export type ToolResultMeta = {
+  /**
+   * serde 序列化为 `{ secs, nanos }`（`std::time::Duration` 默认 impl）。
+   */
+  elapsed: { secs: number; nanos: number };
+  bytes: number;
+  truncated: boolean;
+  /**
+   * 沙箱拒绝结构化信息（M-09；非拒绝结果为 `None`，wire 省略）。
+   */
+  sandbox_denied: SandboxDenyInfo | null;
+};
