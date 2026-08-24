@@ -15,7 +15,7 @@
 
 | 维度 | 目标 |
 |------|------|
-| 性能 | 冷启动 < 50ms，单轮工具调用 < 10ms 调度开销，流式首 token 延迟与上游一致 |
+| 性能 | 目标值（暂无公开基准报告）：冷启动 < 50ms，单轮工具调用 < 10ms 调度开销，流式首 token 延迟与上游一致 |
 | 可扩展 | 工具、LLM Provider、上下文压缩策略、权限策略均可通过 trait + 注册表扩展 |
 | 安全 | 所有副作用操作（写文件、执行命令、网络）必须经过权限策略审核并留痕 |
 | 可嵌入 | 核心运行时以 library crate 形式提供，CLI/TUI/Web/桌面都是 frontend |
@@ -33,7 +33,7 @@
 - **Hooks 系统（参考 Claude Code）**：10 类生命周期事件（PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/PermissionRequest/...），外部脚本 + JSON over stdio 协议，可拦截/改写/注入；含 asyncRewake 异步唤醒；L0 硬约束不可被 Hook 覆盖。
 - **MCP 集成**：作为 MCP client 连接外部 server（GitHub/Slack/数据库），`mcp__<server>__<tool>` 命名，project 作用域首次批准防恶意仓库植入；亦可作为 MCP server 被其他 Agent 调用。
 - **Plan 模式**：双重只读强制（硬门 + 软引导），`plan.exit` 提交计划并预批准，参考 Claude Code。
-- **文件改动回滚**：`/undo` 会话内 operation 级撤销（`FileChangeJournal`，特性门控）。
+- **文件改动回滚**：`/undo` 会话内 operation 级撤销（`FileChangeJournal`，特性门控；默认关闭、纯内存——不落盘，仅会话内有效）。
 - **Event Sourcing**：会话状态建模为不可变事件流，支持快照回放、SSE 游标恢复、跨会话 fork。
 - **流式输出**：SSE / chunked 流式解析，支持工具调用增量解析。
 - **会话持久化**：JSONL 格式的会话日志 + Event Store，支持恢复与回放（默认禁副作用）。
@@ -99,7 +99,7 @@ minicoding-rs/
 │   ├── tech-stack.md            # 技术选型
 │   ├── roadmap.md               # 开发路线图
 │   ├── dev-plan.md              # 详细开发计划
-│   ├── features.md              # 功能清单（203 项）
+│   ├── features.md              # 功能清单（204 项）
 │   ├── rules.md                 # 运行时大模型约束（C-01..C-35）
 │   ├── m9-design.md             # M9 Web/桌面设计
 │   └── getting-started.md       # 上手指南
@@ -147,7 +147,7 @@ minicoding-rs/
 |------|------|
 | [开发路线图](docs/roadmap.md) | 里程碑与交付计划（M0–M10） |
 | [开发计划](docs/dev-plan.md) | 任务级开发计划（含验收标准与依赖） |
-| [功能清单](docs/features.md) | 全功能总账（按领域分组，203 项） |
+| [功能清单](docs/features.md) | 全功能总账（按领域分组，204 项） |
 | [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束（C-01..C-35） |
 | [开发过程文档](docs/development-process.md) | 项目开发全过程记录、关键设计决策、里程碑演进 |
 | [AI 编码约束](AGENTS.md) | AI 助手开发本项目时的编码/架构/文档/安全/前端规范 |

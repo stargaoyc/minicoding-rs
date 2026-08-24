@@ -342,10 +342,6 @@ deny_domains = ["*.internal.corp"]
 - 追加写，不可篡改历史（无 update/delete API）。
 - 可选：每条记录带 HMAC 签名（密钥派生自机器标识），防篡改（后续）。
 
-### 7.4 压缩审计（M-07，R-02）
-
-上下文压缩成功后追加一条 `kind: compress` 审计（detail 为 JSON：压缩级别、各分支计数、丢弃消息的序号区间 `{from_seq, to_seq}`、掉 token 量、压缩前后 token 数），使"这轮压缩掉了什么"可追溯。`AuditKind::Compress` 与权限决策审计同一 `audit.log`（0600，追加写），`CompressedRange` 语义见 `data-model.md` §1。
-
 ### 7.3 查询
 
 ```bash
@@ -353,6 +349,10 @@ minicoding audit list --session <id>
 minicoding audit list --since 2026-07-01 --tool shell.run
 minicoding audit stats          # 工具调用频次、拒绝率
 ```
+
+### 7.4 压缩审计（M-07，R-02）
+
+上下文压缩成功后追加一条 `kind: compress` 审计（detail 为 JSON：压缩级别、各分支计数、丢弃消息的序号区间 `{from_seq, to_seq}`、掉 token 量、压缩前后 token 数），使"这轮压缩掉了什么"可追溯。`AuditKind::Compress` 与权限决策审计同一 `audit.log`（0600，追加写），`CompressedRange` 语义见 `data-model.md` §1。
 
 ---
 
@@ -392,8 +392,8 @@ pub enum SandboxPolicy {
 
 | 平台 | 技术 | 实现 | crate |
 |------|------|------|-------|
-| macOS 12+ | `sandbox-run`（封装原生 sandbox 框架 / Seatbelt） | 由 `sandbox-run` 生成 profile 并 `apply_sandbox`：`ProtectSystem=strict` / `ReadWritePaths=<workdir>` / `PrivateNetwork=true`；VCS 目录设 `ReadOnlyPaths`；不手写 profile 字符串 | `minicoding-sandbox`（基于 `sandbox-run`） |
-| Linux 5.13+ | `sandbox-run`（Landlock）+ `libseccomp` | `sandbox-run` 底层调 `landlock` crate 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`）；`libseccomp` 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load`）；不手写 ruleset 胶水 | `sandbox-run` + `landlock` + `libseccomp` |
+| macOS 12+ | `sandbox_init`(3) FFI（Seatbelt，自研胶水） | 父进程生成 Seatbelt profile 写临时文件（0600），`Command::pre_exec` 在子进程 fork 后 exec 前调 `sandbox_init` 加载（原 ~~`sandbox-run`~~ 方案因 EUPL-1.2 弃用）；VCS 目录默认只读；不依赖外部 crate | `minicoding-sandbox`（FFI 直连） |
+| Linux 5.13+ | `landlock` 直连（自研 pre_exec 胶水）；`libseccomp` 待接入 | 自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前调 landlock `restrict_self()` 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`），不手写 BPF；seccomp syscall 白名单为后续增强 | `landlock` + `libc` |
 | Windows | AppContainer / Job Object（评估） | 受限 token + Job 限制写路径；初期降级为应用层 + 用户提示 | `windows` crate |
 | 全平台兜底 | 容器 / VM | CI/不可信任务推荐在容器内运行 `minicoding` | 外部 |
 
@@ -807,12 +807,12 @@ minicoding doctor --security
 
 ---
 
-## 15. server 暴露面（S1/S2/S3，2026-08 Sprint 0）
+## 18. server 暴露面（S1/S2/S3，2026-08 Sprint 0）
 
 `minicoding serve` / `minicoding-server` 的 HTTP/SSE 端点是本机攻击面最高的一层
 （能读会话、代答权限、触发命令执行）。Sprint 0 落地三层防御：
 
-### 15.1 API 鉴权（S1）
+### 18.1 API 鉴权（S1）
 
 - 启动时强制启用：`--auth-token <t>` 显式指定；省略则自动生成并以 `SERVER_TOKEN=<t>`
   打印到 stdout（desktop sidecar 由宿主生成并经 CLI 参数内存传递，C-04）；
@@ -821,36 +821,36 @@ minicoding doctor --security
 - token 比较为常量时间实现（防时序侧信道）；
 - `--no-auth` 显式关闭（stderr 三行红字警告），仅限本机隔离环境。
 
-### 15.2 CORS 默认收敛本机来源（S2）
+### 18.2 CORS 默认收敛本机来源（S2）
 
 - `cors_origins` 为空时默认仅允许 `localhost`/`127.0.0.1`/`[::1]`（任意端口）——
   解析 URI host 精确匹配，`http://localhost.evil.com` 类伪装不通过；
 - `--cors-origin` 显式追加精确来源；`*` 通配不再支持。
   此前默认 `Allow Any` 与浏览器组合可构成 drive-by full-access RCE 链，已消除。
 
-### 15.3 高危预设二次确认（S3/C-22）
+### 18.3 高危预设二次确认（S3/C-22）
 
 - `POST /sessions` 携带 `preset=full-access|external-sandbox` 时必须同时携带
   `"confirm_danger": true`（UI 先弹红色警告确认框），否则 400；
 - 确认后仍记 tracing warn；会话内每次工具调用的权限决策照常落 audit.log。
 
-### 15.4 Hook 改写输入的策略复查（S4/C-01/C-21）
+### 18.4 Hook 改写输入的策略复查（S4/C-01/C-21）
 
 - PreToolUse Hook `modify_input` 改写工具入参后，Runtime 对**修改后**输入重跑
   `PermissionPolicy::check`，与原判定**取严合并**（Deny > Ask > Allow）；
 - 合并后为 Deny 时重建 builtin_deny 标记——Hook 的 Allow 不能越过复查结果（C-21）；
 - Ask 弹窗展示改写后的实际输入；审计记录最终生效决策。
 
-### 15.5 LKG 配置不再复制凭证明文（S7/C-04）
+### 18.5 LKG 配置不再复制凭证明文（S7/C-04）
 
 - `last-known-good.toml` 以**解析前**快照写入：保留 `env:VAR` 引用原文（回退时重新
   解析，凭证不断供），剥离字面明文 key；文件 0600（`util::write_private` 统一收口）。
 
 ---
 
-## 16. 权限与资源加固（S5–S13/S21/S22/S28，2026-08 Sprint 1）
+## 19. 权限与资源加固（S5–S13/S21/S22/S28，2026-08 Sprint 1）
 
-### 16.1 黑名单扩展（S5/C-02/C-23）
+### 19.1 黑名单扩展（S5/C-02/C-23）
 
 - `shell.run` 词法近似判定写受保护目标：破坏性动词（`rm`/`mv`/`truncate`/`dd`/`unlink`/
   `sed -i`）或重定向（`>`/`>>`/tee）命中 `AGENTS.md`/`CLAUDE.md` → 硬 Deny（堵 shell
@@ -859,32 +859,32 @@ minicoding doctor --security
   shell 命令写 `.git/hooks` 等 → Deny（Linux landlock 并集语义下的应用层补偿）；
 - 诚实边界：词法近似无法识别 base64|sh 类变形，该残余风险由沙箱与用户审批兜底。
 
-### 16.2 预批准缓存词法比对（S6）
+### 19.2 预批准缓存词法比对（S6）
 
 plan.exit 缓存命中改为：命令与预批准 prompt **词法完全相等** 或 **词边界前缀**；
 含复合操作符（`;`/`&&`/`|`/反引号/`$(`）的命令永不继承预批准——堵拼接绕过。
 
-### 16.3 shell.run 资源三连加固（S8–S10/C-07）
+### 19.3 shell.run 资源三连加固（S8–S10/C-07）
 
 - **超时 clamp**：工具入参 `timeout_ms` 只能缩短不能超过 ToolContext 上限；
 - **进程组整树终止**（unix）：pre_exec `setpgid(0,0)`，超时 `killpg(SIGKILL)` 清理后台孤儿；
 - **流式字节上限**：stdout/stderr 按 `max_output_bytes` 流式读取截断，不再全量缓冲。
 
-### 16.4 MCP 只读声明显式信任（S13/C-25）
+### 19.4 MCP 只读声明显式信任（S13/C-25）
 
 `McpServerConfig.trust_read_only_hint`（默认 `false`）：不受信时 server 自报只读的
 工具也按 `Command` 处理（串行 + Ask，走完整权限链）；仅在首次批准时显式勾选信任才免检。
 
-### 16.5 工具输出边界转义（S21/C-05）
+### 19.5 工具输出边界转义（S21/C-05）
 
 `wrap_tool_output` 对内容中的字面闭合标签插入零宽空格——防恶意网页内容提前闭合
 `<tool_output>` 边界实施 prompt injection。
 
-### 16.6 web.fetch 重定向逐跳 SSRF 复检（S22）
+### 19.6 web.fetch 重定向逐跳 SSRF 复检（S22）
 
 自动重定向禁用，手动逐跳跟随（上限 5），每跳重过 `validate_url`（含 DNS 解析后 IP
 复检）——堵"公网入口 302 → 内网/元数据地址"绕过。
 
-### 16.7 /undo 落审计（S28/C-28）
+### 19.7 /undo 落审计（S28/C-28）
 
 回滚成功（含恢复/冲突计数）与失败均记 `AuditKind::FileUndone` 审计条目。

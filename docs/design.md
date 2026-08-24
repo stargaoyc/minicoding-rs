@@ -220,7 +220,8 @@ impl Runtime {
 | `stop_reason == MaxTokens` | 截断警告，提示用户继续 |
 | 连续工具调用次数 ≥ `max_tool_iters`（默认 50） | 强制终止并报错 |
 | 单轮总耗时 ≥ `turn_timeout` | 取消并保留现场 |
-| 相同工具调用连续重复 ≥ 3 次（防死循环） | 注入提示并降级 |
+| 单工具指纹连续命中软提醒阈值（默认 `[3,5,8]`，M-08） | 注入 system 级提醒（不替换工具输出、不终止） |
+| 整轮工具调用集合签名连续重复 ≥ 硬停止阈值（默认 3 轮） | 强制停止（C-13 早期止损） |
 
 ---
 
@@ -1953,7 +1954,7 @@ pub struct Task {
     pub updated_at: time::OffsetDateTime,
 }
 
-pub enum TaskStatus { Pending, InProgress, Completed, Deleted }
+pub enum TaskStatus { Pending, InProgress, Completed, Cancelled }
 pub enum Priority { High, Medium, Low }
 ```
 
@@ -1986,18 +1987,18 @@ B.blocked_by = ["A"]
 - **压缩免疫**：任务列表存 `SessionMeta`（§3.7），不进 `messages`，不受压缩管道影响；
 - **resume 恢复**：`--resume <session>` 时从磁盘重建任务列表，继续未完成任务；
 - **跨会话共享**（后续）：`MINICODING_TASK_LIST_ID` 环境变量让多会话共享同一任务列表（参考 CC 的 `CLAUDE_CODE_TASK_LIST_ID`），适合多 Agent 协作大任务；
-- **清理**：所有任务 `Completed`/`Deleted` 后列表自动归档到 `tasks/archive/{session_id}.jsonl`；
+- **清理**：所有任务 `Completed`/`Cancelled` 后列表自动归档到 `tasks/archive/{session_id}.jsonl`；
 - **HTTP 查询路径**（§24）：`TaskStore`（内存态）是任务权威源，`ServerSession::task_state`
   常驻订阅 `Event::TaskUpdated` 镜像其变更，`GET /sessions`/`GET /sessions/{id}` 返回该快照
   （此前 `SessionMeta.tasks` 恒空导致前端任务面板无数据）；CLI/TUI 侧走 `TaskStore` 直读。
 
 ### 18.6 校验规则（参考 CC 硬约束）
 
-- 最多 20 个 active 任务（`Pending`/`InProgress`，不含 `Completed`/`Deleted`，防列表爆炸）；
+- 最多 20 个 active 任务（`Pending`/`InProgress`，不含 `Completed`/`Cancelled`，防列表爆炸）；
 - `subject` 必填非空；
 - **同一时间最多 1 个 `InProgress`**（强制专注单任务，防模型并行多步导致混乱）；
 - `Completed` 必须填 `summary`（参考 CC v2.1.142+ 要求"完成需有证据"）；
-- 状态迁移合法性：`Completed` 不能回到 `Pending`；`Deleted` 是终态；
+- 状态迁移合法性：`Pending → InProgress → Completed`/`Cancelled` 单向流转（C-31），不可跳跃不可回退；`Completed` 不能回到 `Pending`；`Cancelled` 是终态；
 - `add_blocks`/`add_blocked_by` 的 task_id 必须存在；不可自引用（`add_blocks=["self"]` 拒绝）；
 - 依赖图不可成环（DFS 检测）。
 
@@ -2200,6 +2201,8 @@ async fn call_tool(&self, server: &str, tool: &str, input: Value) -> ToolResult 
 重连采用指数退避（1s → 2s → 4s → 上限 60s），避免 server 短暂故障时频繁重连打满 CPU。Disconnected 状态下用户调用该 server 工具直接返回错误"server disconnected, retrying connection"，而非 hang。
 
 **启动事件 channel**：预热完成/失败通过 `tokio::sync::mpsc` 通知 Runtime，Runtime 转发为 `Event::McpServerReady`/`Event::McpServerFailed` 广播，前端据此更新 MCP server 状态指示器（如 TUI 状态栏显示 `github: ✓` / `slack: ⏳` / `db: ✗`）。
+
+> 注：`Event::McpServerReady`/`Event::McpServerFailed`/`Event::McpServerDisconnected` 为**规划中**事件，尚未加入 core `Event` 枚举（权威清单见 §11）。
 
 ```rust
 pub enum McpPoolEvent {
@@ -2713,7 +2716,7 @@ GET    /sessions/{id}/events              → SSE 事件流（带 Last-Event-ID 
 POST   /sessions/{id}/permissions/{pid}   → ResolvePermission
 ```
 
-SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼容（浏览器 `EventSource` 自动重连时携带）。HTTP server 实现在 `minicoding-server` crate（新增），依赖 `minicoding-tools` + `tokio` + `axum`（或 `hyper`，选型见 `tech-stack.md`）。
+SSE 用 `Last-Event-ID` HTTP header 传递 `seq`，与标准 SSE 重连机制兼容（浏览器 `EventSource` 自动重连时携带）。HTTP server 实现在 `minicoding-server` crate（新增），依赖 `minicoding-tools` + `tokio` + `axum` 0.8（已选型，见 `tech-stack.md`）。
 
 **HRTB 兼容设计（`run_turn_owned` + `send_message_boxed`）**：axum 的 `Handler` trait 要求 future 为 `'static` 且满足 HRTB（higher-ranked trait bound，`for<'a> Fn(&'a mut Request) -> Future<Output = Response> + 'a`）。但 `Runtime::run_turn(&self) -> impl Future + '_` 的 future 借用 `&self`，生命周期参数 `'_` 泄漏到外层 future 类型——当 handler `.await` 该 future 时，编译器报 "implementation of `FnOnce` is not general enough"（future 类型对每个具体的 `'a` 不同，不满足 HRTB "对任意 `'a` 类型相同"的要求）。
 

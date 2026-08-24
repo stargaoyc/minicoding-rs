@@ -1,5 +1,7 @@
 # M9 设计文档 — Web 与桌面应用
 
+> **注记**：本文为 M9 设计快照，架构/技术栈以 `docs/design.md` §26 与 `docs/tech-stack.md` 为准，冲突时以后者为准。
+>
 > **里程碑**：M9（可选，低优先级）
 > **预估**：12 人日 / 8 task
 > **依赖**：M8（`minicoding-server` HTTP/SSE JSON-RPC 稳定）

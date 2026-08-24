@@ -2,6 +2,8 @@
 
 本文是 `minicoding-rs` 的功能总账，按领域分组列出全部功能项、交付里程碑与状态。状态约定：`规划中` / `已实现` / `部分实现`（附说明）。里程碑引用 `roadmap.md`。
 
+> **编号体系说明**：本文件的 `A-xx`/`T-xx`/`C-xx`/`M-xx`/`H-xx`/`E-xx`/`P-xx`/`X-xx`/`W-xx` 等均为**功能项编号**（前缀对应所属领域章节），与 `rules.md` 的运行时约束编号 `C-01..C-35` 属**不同命名空间**——两处的 `C-xx` 编号互不关联，引用时请注意区分（约束↔设计位置映射见 `rules.md` §6）。
+
 > **更新说明**：参考 Claude Code 与 Codex CLI 设计，新增 Hooks、MCP client、Plan 模式、文件回滚、AGENTS.md、审批模式/预设等能力；沙箱从"后续可选"升级为一等公民并前置到 M4。功能项数与统计已同步更新。
 
 ---
@@ -143,12 +145,12 @@
 | H-05 | PreToolUse 拦截/改写 | deny/allow(Ask→Allow)/modify_input | M5 | 已实现 |
 | H-06 | PostToolUse 后处理 | 跑 formatter/linter、改写 result | M5 | 已实现 |
 | H-07 | PermissionRequest 短路 | 自动批准/阻断，跳过 Prompter | M5 | 已实现 |
-| H-08 | 上下文注入 | SessionStart/UserPromptSubmit/PreCompact 注入 | M5 | 已实现 |
+| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact 未派发 | M5 | 部分实现（生命周期派发与 `inject_context` 缓冲已接线，PreCompact 事件未接线） |
 | H-09 | L0 不可覆盖 | Hook 的 allow 对内置黑名单 Deny 无效 | M5 | 已实现 |
 | H-10 | on_hook_error 策略 | continue/deny/fail，超时 kill | M5 | 已实现 |
 | H-11 | 6 个内置示例 Hook | fmt-on-write/auto-approve-tests/block-secrets/git-status-inject/backup-before-compact/test-on-stop | M5 | 已实现 |
 | H-12 | Hook 审计 | allow/deny/modify_input 落 audit.log（source=hook） | M5 | 已实现 |
-| H-13 | asyncRewake 异步唤醒 | PostToolUse/Stop 后台任务完成后唤醒，3 并发上限，超时 kill | M5 | 已实现 |
+| H-13 | asyncRewake 异步唤醒 | PostToolUse/Stop 后台任务完成后唤醒，3 并发上限，超时 kill | M5 | 部分实现（协议就绪，后台 executor 未接线） |
 
 ## 8. MCP 集成（Model Context Protocol，参考 Codex/CC）
 

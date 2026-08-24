@@ -214,21 +214,21 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | 凭证存储 | OS keychain（`keyring`） / 文件 0600 | 全平台 | 不把密钥写进配置明文 |
 | 应用层路径沙箱 | `std::path::canonicalize` + `camino` | 全平台 | 防目录穿越（第一道防线，`security.md` §3） |
 | 跨平台沙箱统一 API | ~~`sandbox-run`~~（**已弃用**） | Linux+macOS | systemd 风格 API（`ProtectSystem`/`ReadWritePaths`/`PrivateNetwork`），原生支持 `apply_sandbox` 在子进程 fork 后 exec 前调用，与 `tokio::process` 兼容；内部封装 Landlock ruleset 与 macOS sandbox profile 生成。**弃用原因**：EUPL-1.2 许可证不合规（AGENTS.md §2.7），已由自研轻量驱动替代（Linux landlock `pre_exec` / macOS `sandbox_init` / Windows Job Object，见 `minicoding-sandbox/src/lib.rs` 顶部注释） |
-| Linux 文件系统沙箱 | `landlock` | Linux 5.13+ | 官方 rust-landlock，内核 LSM 限制可写范围；纯 Rust 绑定无 C 依赖，由 `sandbox-run` 底层调用 |
-| Linux 系统调用过滤 | `libseccomp` | Linux | seccomp-bpf 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load`），与 `sandbox-run` 叠加 |
-| macOS 沙箱 | `sandbox-run`（封装原生 sandbox 框架） | macOS 12+ | Seatbelt 框架，由 `sandbox-run` 生成 profile 并应用，无需手写 profile 字符串 |
+| Linux 文件系统沙箱 | `landlock` | Linux 5.13+ | 官方 rust-landlock，内核 LSM 限制可写范围；纯 Rust 绑定无 C 依赖，由自研 pre_exec 胶水直连 |
+| Linux 系统调用过滤 | `libseccomp`（待接入） | Linux | seccomp-bpf 白名单系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load`）；需系统 C 库，尚未接线（见 §13 决策记录） |
+| macOS 沙箱 | `sandbox_init`(3) FFI（自研胶水） | macOS 12+ | Seatbelt 框架：父进程生成 profile 临时文件，子进程 fork 后 exec 前经 FFI 加载；原 ~~`sandbox-run`~~ 方案已随之弃用，无需手写 profile 解析 |
 | Windows 受限令牌 | `windows` crate | Windows 10+ | 受限 token + Job Object + DACL 限制写路径；成熟度低于 macOS/Linux，初期可降级为应用层 + 用户提示 |
 | 进程硬化 | `libc`（`PR_SET_DUMPABLE`/`RLIMIT_CORE`） | Linux/Unix | pre-main 禁 ptrace/core dump，清 `LD_*`/`DYLD_*` |
 | 跨进程文件锁 | `fs2` | 全平台 | 会话文件互斥（`data-model.md` §10） |
 | 文件权限收紧 | `std::fs` + `cfg!(unix)` `chmod 0600/0700` | Unix | `~/.minicoding/` 与会话文件权限收紧 |
 
-> **平台检测策略**：`minicoding-sandbox::detect_driver()` 编译期按 `cfg!(target_os)` 选实现，运行期 `sandbox_run::landlock_available()` 探测内核支持。无可用硬隔离时（如 Windows 早期版本、不支持 Landlock 的旧内核）返回 `NoopDriver`（来自 core）并打 `warn`，依赖容器自身隔离（对应 `ExternalSandbox` 策略）。`landlock` 与 `libseccomp` 通过 cargo `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 平台不编译。`sandbox-run` 本身跨 Linux+macOS，统一了 `apply_sandbox` 调用入口。
+> **平台检测策略**：`minicoding-sandbox::detect_driver()` 编译期按 `cfg!(target_os)` 选实现，运行期 `landlock_available()` 探测内核支持（Linux）。无可用硬隔离时（如 Windows 早期版本、不支持 Landlock 的旧内核）返回 `NoopDriver`（来自 core）并打 `warn`，依赖容器自身隔离（对应 `ExternalSandbox` 策略）。`landlock` 通过 cargo `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 平台不编译；macOS 经 FFI 直连 libsystem 无外部 crate。统一调用入口由自研 `detect_driver()` 工厂 + `SandboxDriver::apply(cmd)`（pre_exec 胶水）承担。
 
 > **平台优先级（Linux 先行）**：沙箱与核心 Runtime 的多平台支持分阶段交付：
-> - **M0-M4（Linux 先行）**：沙箱仅实现 Linux（`sandbox-run` + `landlock` + `libseccomp`），CI matrix 只跑 Linux。macOS/Windows 在此阶段编译可用但沙箱降级为 `NoopDriver` + 应用层权限 + 用户提示（不阻塞 MVP）。
-> - **M5+（macOS 补齐）**：补齐 macOS `sandbox-run`（Seatbelt）实现与 CI matrix。
+> - **M0-M4（Linux 先行）**：沙箱仅实现 Linux（`landlock` 直连 + 自研 pre_exec 胶水），CI matrix 只跑 Linux。macOS/Windows 在此阶段编译可用但沙箱降级为 `NoopDriver` + 应用层权限 + 用户提示（不阻塞 MVP）。
+> - **M5+（macOS 补齐）**：补齐 macOS `sandbox_init`(3) FFI（Seatbelt）实现与 CI matrix。
 > - **M6+（Windows 补齐）**：补齐 Windows 受限令牌 + Job Object 实现。
-> - **理由**：Linux 是 AI Coding 的主战场（CI/容器/服务器），Landlock 最成熟；macOS/Windows 沙箱成熟度低且非核心场景，推迟到最后避免阻塞 MVP。`sandbox-run` 跨平台 API 已统一，后续补齐只是平台实现填充，不涉及架构变更。
+> - **理由**：Linux 是 AI Coding 的主战场（CI/容器/服务器），Landlock 最成熟；macOS/Windows 沙箱成熟度低且非核心场景，推迟到最后避免阻塞 MVP。`detect_driver()` 工厂已按平台抽象统一入口，后续补齐只是平台实现填充，不涉及架构变更。
 
 ### 11.1 Hooks 与 MCP 相关
 
@@ -274,9 +274,9 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | 配置 | `toml` | `yaml`/`json` | Rust 生态亲和度 |
 | 错误 | `thiserror`+`anyhow` | `snafu` | 主流、低学习成本 |
 | Token 计数 | `tiktoken-rs` | 在线 API | 离线、低延迟 |
-| 跨平台沙箱统一 API | `sandbox-run` | 自研 seatbelt profile + landlock ruleset 胶水 | `sandbox-run` 封装跨平台细节（Landlock ruleset 构建、macOS profile 生成），systemd 风格 API 易用；自研胶水维护成本高、易出错 |
-| Linux 沙箱底层 | `landlock`+`libseccomp`（由 sandbox-run 调用） | `bubblewrap`（bwrap） | `landlock` 纯 Rust、内核原生无需外部二进制；bwrap 需 SUID 安装、跨发行版不可靠 |
-| macOS 沙箱 | `sandbox-run`（封装 Seatbelt） | 自实现 sandbox kit / 裸 `sandbox-exec` | `sandbox-run` 统一 API 跨平台；裸 `sandbox-exec` 需手写 profile 字符串易错 |
+| 跨平台沙箱统一 API | ~~`sandbox-run`~~（初选，因 EUPL-1.2 弃用）→ 自研轻量 pre_exec 胶水 | 自研 seatbelt profile + landlock ruleset 胶水 | 初评 `sandbox-run` 封装跨平台细节（Landlock ruleset 构建、macOS profile 生成）易用；后因 EUPL-1.2 许可证不合规弃用，改为自研薄胶水（仅封装子进程启动路径，ruleset 构建仍复用官方 crate），维护面可控 |
+| Linux 沙箱底层 | `landlock` 直连（`libseccomp` 待接入） | `bubblewrap`（bwrap） | `landlock` 纯 Rust、内核原生无需外部二进制；bwrap 需 SUID 安装、跨发行版不可靠 |
+| macOS 沙箱 | `sandbox_init`(3) FFI（自研胶水） | 自实现 sandbox kit / 裸 `sandbox-exec` | Seatbelt 内置框架经 FFI 加载 profile，无外部依赖；裸 `sandbox-exec` 需手写 profile 字符串易错 |
 | Windows 沙箱 | `windows` 受限令牌 + Job Object | AppContainer | Job Object + DACL 更成熟可控；AppContainer 权限模型复杂 |
 | MCP 客户端 | `rmcp` 2.2（官方，M4 一步到位） | 自实现 http/stdio | 官方 SDK 协议跟进快、对齐 2025-11-25 spec、含 `#[tool]` 宏与 schemars；自实现易落后、维护成本高 |
 | LSP server | `tower-lsp`（M8） | 自研 JSON-RPC stdio 薄封装 | LSP 协议方法集庞大（`textDocument/*`/`workspace/*`/`window/*`），`tower-lsp` 提供类型安全派发与生命周期管理；自研易出错且落后 LSP spec；与 ACP 共享 `minicoding-protocol` wire types，仅语义映射层不同 |

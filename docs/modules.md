@@ -2,7 +2,7 @@
 
 本文描述每个 crate / 模块的职责边界、内部结构、公共 API 与对外依赖。所有 crate 组成 Cargo workspace。
 
-> **重构说明（v2）**：原 `minicoding-core` 承载 14+ 职责（Agent 循环、上下文、权限、沙箱 trait、Hook trait、项目记忆、Journal、MCP trait、存储、审计、事件总线、配置、OTel、记忆），违反单一职责。本次重构将 core 精简为"抽象层 + Runtime 编排"，把各领域**实现**拆到独立 crate。trait 定义仍集中在 core（保证 Runtime 可持有 `Arc<dyn Trait>`），实现分散到领域 crate。沙箱改用 `sandbox-run` + `landlock` 主流库，MCP 改用官方 `rmcp` 2.x，均不自研。
+> **重构说明（v2）**：原 `minicoding-core` 承载 14+ 职责（Agent 循环、上下文、权限、沙箱 trait、Hook trait、项目记忆、Journal、MCP trait、存储、审计、事件总线、配置、OTel、记忆），违反单一职责。本次重构将 core 精简为"抽象层 + Runtime 编排"，把各领域**实现**拆到独立 crate。trait 定义仍集中在 core（保证 Runtime 可持有 `Arc<dyn Trait>`），实现分散到领域 crate。沙箱为自研轻量驱动（~~`sandbox-run`~~ 因 EUPL-1.2 弃用；Linux `landlock` 直连 + 自研 pre_exec 胶水，见 `tech-stack.md` §13），MCP 改用官方 `rmcp` 2.x 不自研。
 
 ---
 
@@ -21,7 +21,7 @@ minicoding-rs (workspace)
 │   ├── minicoding-memory        # 记忆实现：长期/Auto/会话记忆 + AGENTS.md loader
 │   ├── minicoding-hooks         # Hooks 实现：Registry + ScriptHook + asyncRewake + 内置 Hook
 │   ├── minicoding-journal       # FileChangeJournal 实现 + /undo
-│   ├── minicoding-sandbox       # OS 沙箱驱动（基于 sandbox-run + landlock + libseccomp）
+│   ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock 直连，seccomp 待接入）
 │   ├── minicoding-mcp           # MCP client/server（基于 rmcp 2.x）+ 进程池 + 后台预热 + inflight merge
 │   ├── minicoding-storage       # JSONL 存储 + audit.log 审计
 │   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）+ 小 LLM 配置
@@ -422,7 +422,7 @@ minicoding-journal/src/
 
 ### 7.1 职责
 
-实现 `SandboxDriver` trait（定义在 core）：基于 `sandbox-run` + `landlock` + `libseccomp` 主流库提供跨平台内核级隔离，**不自研**沙箱胶水代码。另实现 `SandboxDenialDetector`/`SandboxDenialTracker` trait（定义在 core，M-05 下沉）：平台 denial 签名库 + 单 turn 熔断（C-30）。
+实现 `SandboxDriver` trait（定义在 core）：自研轻量驱动提供跨平台内核级隔离——Linux `landlock` 直连（`Command::pre_exec` 在子进程 fork 后 exec 前应用）、macOS `sandbox_init`(3) FFI、Windows Job Object；`libseccomp`（syscall 过滤）待接入。原 ~~`sandbox-run`~~ 选型因 EUPL-1.2 许可证不合规弃用（见 `tech-stack.md` §13）。另实现 `SandboxDenialDetector`/`SandboxDenialTracker` trait（定义在 core，M-05 下沉）：平台 denial 签名库 + 单 turn 熔断（C-30）。
 
 ### 7.2 模块树
 
@@ -431,32 +431,32 @@ minicoding-sandbox/src/
 ├── lib.rs                 # detect_driver() 工厂：按 cfg!(target_os) 选实现
 ├── driver.rs              # SandboxDriverImpl 实现 trait
 ├── denial.rs              # DenialDetector + PLATFORM_SIGNATURES + SandboxCircuitBreaker（C-30，M-05 从 core 下沉）
-├── linux.rs               # Linux: sandbox-run (Landlock) + libseccomp（syscall 过滤）
-├── macos.rs               # macOS: sandbox-run（原生 sandbox 框架，Seatbelt）
+├── linux.rs               # Linux: landlock 直连（pre_exec 应用；seccomp 待接入）
+├── macos.rs               # macOS: sandbox_init(3) FFI（Seatbelt，profile 临时文件 + pre_exec）
 ├── windows.rs             # Windows: windows crate（受限令牌 + Job Object）
 └── hardening.rs           # pre-main 进程硬化（PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_*）
 ```
 
-### 7.3 库选型（不自研）
+### 7.3 库选型
 
 | 平台 | crate | 版本 | 理由 |
 |------|-------|------|------|
-| 跨平台统一 API | `sandbox-run` | 0.43 | systemd 风格 API（ProtectSystem/ReadWritePaths/PrivateNetwork），原生支持 `apply_sandbox` 在子进程 fork 后 exec 前调用，与 `tokio::process` 兼容；跨 Linux+macOS |
+| 跨平台统一 API | 自研轻量驱动（~~`sandbox-run`~~ 已弃用） | - | 原 `sandbox-run`（systemd 风格 API）因 EUPL-1.2 许可证不合规弃用；现为自研 pre_exec 胶水：Linux landlock 直连、macOS `sandbox_init`(3) FFI、Windows Job Object（见 `tech-stack.md` §11/§13） |
 | Linux 文件系统沙箱 | `landlock` | 0.4.5 | 官方 rust-landlock，Landlock LSM 安全抽象，纯 Rust 无 C 依赖，1260 万下载 |
-| Linux syscall 过滤 | `libseccomp` | 0.x | seccomp-bpf 白名单系统调用（禁 ptrace/mount/reboot/kexec_load） |
-| Windows | `windows` | - | 受限 token + Job Object + DACL |
+| Linux syscall 过滤 | `libseccomp`（待接入） | - | seccomp-bpf 白名单系统调用（禁 ptrace/mount/reboot/kexec_load）；需系统 libseccomp C 库，尚未接线 |
+| Windows | `windows-sys` | 0.59 | Job Object + 受限令牌 |
 | 进程硬化 | `libc` | - | PR_SET_DUMPABLE/RLIMIT_CORE |
 
-> **不再自研**：原方案的"自生成 seatbelt profile + 手写 landlock ruleset 胶水"全部废弃，改用 `sandbox-run` 统一 API。`sandbox-run` 内部已封装 Landlock ruleset 构建与 macOS sandbox profile 生成，我们只配置 `ProtectSystem`/`ReadWritePaths`/`PrivateNetwork` 等高级选项。
+> **选型变更**：原方案曾以"不自研胶水"为由选用 `sandbox-run` 统一 API，后因 EUPL-1.2 许可证不合规弃用，改为自研轻量 pre_exec 胶水——仅封装子进程启动路径（fork 后 exec 前应用约束），Landlock ruleset 构建仍由 `landlock` crate 提供。权衡记录见 `tech-stack.md` §13。
 
 ### 7.4 关键设计点
 
-- **平台检测**：`detect_driver()` 编译期按 `cfg!(target_os)` 选实现；运行期 `sandbox_run::landlock_available()` 探测内核支持，不支持则返回 `NoopDriver`（来自 core）并 warn。
-- **VCS 目录保护**：通过 `sandbox-run` 的 `ReadOnlyPaths` 把 `.git`/`.hg`/`.svn` 设为只读（P-20）。
-- **pre-exec apply**：`sandbox_run::apply_sandbox()` 在子进程 fork 后 exec 前调用，子进程启动即受限，无窗口期（参考 Codex，见 security.md §8.3）。
-- **依赖隔离**：`landlock`/`libseccomp` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译。
+- **平台检测**：`detect_driver()` 编译期按 `cfg!(target_os)` 选实现；运行期 `landlock_available()` 探测内核支持（Linux，`HardRequirement` + `create()` 探测不约束当前进程），不支持则返回 `NoopDriver`（来自 core）并 warn。
+- **VCS 目录保护**：`.git`/`.hg`/`.svn` 纳入只读规则（P-20）；landlock"白名单并集"语义下 workdir 可写会使子目录继承可写，故实际硬保护由应用层 builtin 黑名单补偿（S5）。
+- **pre-exec apply**：自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前应用约束（Linux `restrict_self()` / macOS `sandbox_init`），子进程启动即受限，无窗口期（参考 Codex，见 security.md §8.3）。
+- **依赖隔离**：`landlock` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译；macOS 无外部 crate 依赖（FFI 直连 libsystem）；`libseccomp` 待接入。
 - **denial 领域实现（M-05）**：`DenialDetector`（子串匹配 `PLATFORM_SIGNATURES`，覆盖 EPERM/EACCES/Landlock/seccomp/Seatbelt/Windows）与 `SandboxCircuitBreaker`（计数熔断，阈值 3/5）实现 core 的 trait 抽象；未启用本 crate 时 core 兜底 `NoopDenialDetector`/`NoopDenialTracker`（不识别沙箱拒绝，与 NoopDriver 语义一致）。CLI（`sandbox` feature）/server 在注入 `SandboxDriver` 的同时注入 denial 实现。
-- **依赖**：`minicoding-core` + `sandbox-run` + `landlock`（Linux）+ `libseccomp`（Linux）+ `windows`（Windows）+ `libc`。
+- **依赖**：`minicoding-core` + `landlock`（Linux）+ `libc`（Linux）+ `windows-sys`（Windows）；macOS FFI 直连无外部 crate。`libseccomp` 待接入。
 
 ---
 
@@ -1002,7 +1002,7 @@ Tauri 2.x 支持 iOS/Android，但 M9 仅验收桌面三平台。Mobile 留待 M
 | providers (openai/anthropic) | ✅ | ollama | router | 多模态 | - |
 | tools (fs/shell/task/plan) | ✅ | multiedit | mcp 包装 | ✅ web/git/shell.background | - |
 | storage (jsonl/audit) | ✅ | index/lock | export | 稳定 | - |
-| sandbox (应用层路径) | ✅ | - | ✅ OS 级（sandbox-run） | Windows 强化 | - |
+| sandbox (应用层路径) | ✅ | - | ✅ OS 级（landlock 直连 + 自研 pre_exec 胶水） | Windows 强化 | - |
 | memory | 基础 | ✅ 双文件+AGENTS.md+Auto | 增强 | ✅ 向量检索（BM25） | - |
 | hooks | - | - | ✅ 10 事件+asyncRewake | 稳定 | - |
 | journal | - | - | ✅ /undo | 稳定 | - |

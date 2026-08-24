@@ -73,7 +73,7 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 - **Context Manager**：维护消息历史、token 预算、自动压缩与摘要。
 - **Plan 模式**：通过 `PermissionMode::Plan` + `plan.exit` 工具实现双重只读强制（见 `design.md` §16），**不是独立编排组件**——Plan 是权限模式与工具的组合，实现在 `minicoding-tools` 与 `minicoding-policy`，编排逻辑复用 Agent Loop。
 - **Task 管理**：`task.create`/`update`/`list` 工具 + `TaskRegistry`（core trait），增量模型与依赖图，实现在 `minicoding-tools`。
-- **Event Bus**：广播生命周期事件（`MessageAppended` / `ToolCallStart` / `ToolCallEnd` / `TokenStreamed`），供 frontend 订阅渲染。
+- **Event Bus**：广播生命周期事件（`MessageAppended` / `ToolCallStarted` / `ToolCallFinished` / `Token`），供 frontend 订阅渲染。
 
 ### 3.3 Capability Layer（能力层）
 
@@ -85,7 +85,7 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 | `Tool` / `ToolRegistry` | `minicoding-tools`（内置）/ `minicoding-mcp`（远程包装） | 文件、Shell、Web、Git、Task、Plan、MCP |
 | `ContextManager` | `minicoding-context` | token 预算、4 级压缩管道、熔断、降级链 |
 | `PermissionPolicy` / `PermissionPrompter` | `minicoding-policy` | 决策引擎、builtin 黑名单、Prompter、ApprovalMode/Preset |
-| `SandboxDriver` | `minicoding-sandbox`（core 提供 `NoopDriver` 兜底） | OS 级隔离（sandbox-run + landlock + libseccomp） |
+| `SandboxDriver` | `minicoding-sandbox`（core 提供 `NoopDriver` 兜底） | OS 级隔离（自研 pre_exec 胶水：landlock 直连 / Seatbelt FFI / Job Object；seccomp 待接入） |
 | `Storage` / `AuditSink` | `minicoding-storage` | JSONL 持久化、audit.log 审计 |
 | `Hook` / `HookRegistry` | `minicoding-hooks` | 10 类事件、ScriptHook、asyncRewake |
 | `Journal` | `minicoding-journal` | FileChangeJournal、/undo 回滚 |

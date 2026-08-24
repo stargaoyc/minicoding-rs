@@ -143,7 +143,7 @@
 > **范围调整说明**：参考 CC/Codex 后将原 M5 的 MCP client 与 Journal/`/undo` 前置到 M4，与 OS 沙箱同步交付——MCP 远程工具与文件回滚都依赖沙箱作为安全底线，同里程碑交付避免 M5 出现"有 Hook 无沙箱兜底"的窗口期。dev-plan M4 含 11 个 task，M5 聚焦 Hooks/子 Agent/Plan。
 
 **范围**
-- `sandbox`：`SandboxDriver` trait 实现落地——Linux Landlock + seccomp（`landlock` + `libseccomp`，M4 主交付）；macOS Seatbelt 与 Windows 受限令牌在 M5+/M6+ 补齐（见平台优先级）。
+- `sandbox`：`SandboxDriver` trait 实现落地——Linux Landlock 直连（自研 pre_exec 胶水，`landlock` crate；`libseccomp` 待接入，M4 主交付）；macOS Seatbelt 与 Windows 受限令牌在 M5+/M6+ 补齐（见平台优先级）。
 - `sandbox`：pre-main 进程硬化（`PR_SET_DUMPABLE=0`/`RLIMIT_CORE=0`/清 `LD_*`）。
 - `sandbox`：`ExternalSandbox` 策略（CI/容器场景，依赖外层隔离，`NoopDriver` + info 日志）。
 - `sandbox`：`.git`/`.hg`/`.svn` 默认只读保护（防破坏版本库）。
@@ -173,7 +173,7 @@
 - `/undo` 能回滚最近一次 operation 的文件改动；失败文件在 `UndoReport` 中列出。
 - MCP/Hook 子进程不继承凭证环境变量。
 
-**任务追溯**：dev-plan T-M4-1..T-M4-11（11 个 task，预估 8 人日）。可度量门槛：Landlock EPERM 拦截越界写可验证、沙箱拒绝熔断 3/5 次阈值生效、`--preset full-access` red 警告 + 二次确认生效、MCP project 作用域首次批准流测试通过、`/undo` 冲突检测（mtime/hash 比对）测试通过。**平台优先级**：M4 仅交付 Linux（Landlock+libseccomp），macOS/Windows 降级 NoopDriver（见 `tech-stack.md` §11 平台优先级策略，M5+ 补 macOS，M6+ 补 Windows）。
+**任务追溯**：dev-plan T-M4-1..T-M4-11（11 个 task，预估 8 人日）。可度量门槛：Landlock EPERM 拦截越界写可验证、沙箱拒绝熔断 3/5 次阈值生效、`--preset full-access` red 警告 + 二次确认生效、MCP project 作用域首次批准流测试通过、`/undo` 冲突检测（mtime/hash 比对）测试通过。**平台优先级**：M4 仅交付 Linux（Landlock 直连，自研 pre_exec 胶水），macOS/Windows 降级 NoopDriver（见 `tech-stack.md` §11 平台优先级策略，M5+ 补 macOS，M6+ 补 Windows）。
 
 **风险**
 - Landlock 旧内核不支持 → 编译期检测 + 运行时降级 `NoopDriver` + warn。
@@ -193,7 +193,7 @@
 - `core`：6 个内置示例 Hook（fmt-on-write / auto-approve-tests / block-secrets / git-status-inject / backup-before-compact / test-on-stop）。
 - `core`：Plan 模式（`PermissionMode::Plan` + `plan.exit` 工具 + 双重只读强制 + 预批准缓存，见 `design.md` §16）。
 - `core`：类型化子 Agent（Explore/Plan/General/Custom，`task.spawn` 工具，见 `design.md` §7）。
-- `sandbox`：补齐 macOS Seatbelt 实现（`sandbox-run` 封装原生 sandbox 框架，平台优先级 M5+）。
+- `sandbox`：补齐 macOS Seatbelt 实现（`sandbox_init`(3) FFI + pre_exec 胶水，平台优先级 M5+）。
 - `cli`：`--hook`/配置加载 Hook；`/plan` 切换 Plan 模式。
 - `core`：OTel `hook.run` span。
 - `sdk`/`core`：Extension SDK（`Extension` trait + `Registrar` + `ExtensionManifest`，见 `design.md` §23、`modules.md` §17）+ Prompt 管道（9 个 `PromptContributor` 按固定顺序拼接，稳定段在前利于 prompt cache，见 `design.md` §22）。扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过）。
@@ -301,10 +301,10 @@
 - 前端核心能力：
   - 多会话面板（左侧会话列表 + 右侧对话流），复用 TanStack Router 类型安全路由；
   - 流式 token 渲染（SSE 订阅 `Event::Token`，TanStack Query 增量更新）；
-  - 工具调用展开/折叠面板（`Event::ToolCall`/`Event::ToolResult`）；
-  - 权限确认弹窗（`Event::PermissionRequest` → shadcn/ui Dialog → JSON-RPC `permission.resolve`）；
+  - 工具调用展开/折叠面板（`Event::ToolCallStarted`/`Event::ToolCallFinished`）；
+  - 权限确认弹窗（`Event::PermissionRequested` → shadcn/ui Dialog → JSON-RPC `permission.resolve`）；
   - 任务面板（`Event::TaskUpdated` 同步显示任务进度）；
-  - 上下文压缩/熔断可视化（`Event::Compress`/`Event::CompressCircuitBreak`）；
+  - 上下文压缩/熔断可视化（对应 `Event` 变体尚未提供，规划中；权威事件清单见 `design.md` §11）；
   - Hook 执行日志面板（`Event::HookRun`）；
   - 暗色/亮色主题切换（Tailwind v4 + shadcn/ui theme provider）；
   - 响应式布局（移动端友好，Tauri 2.x mobile 复用同一前端）。
@@ -406,3 +406,25 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 | MCP 协议演进 | 低 | 标 experimental；M5 仅 stdio |
 | Hook 链路延迟 | 低 | 默认超时 + `on_hook_error` 兜底 |
 | 沙箱拒绝误判为普通错误 | 中 | denial 签名库（stderr + errno） |
+
+---
+
+## 2026-08-25 审查遗留（延期立项项）
+
+以下事项经 2026-08-25 文档/代码一致性审查确认存在缺口，因非阻塞 MVP 或依赖前置条件而延期立项（此处仅登记，不含排期承诺）：
+
+| 事项 | 一句话理由 |
+|------|-----------|
+| seccomp 接入 | syscall 白名单是纵深防御的最后一块（当前仅 Landlock 文件面），需系统 `libseccomp` C 库与跨发行版验证，独立立项 |
+| DNS 解析-连接 IP pinning | web.fetch 的 SSRF 复检在"解析后、连接前"存在 TOCTOU 窗口，需 socket 层 pinning，改动面涉及 reqwest 连接器定制 |
+| HOME 白名单细粒度化 | 路径沙箱对 `$HOME` 下敏感目录（`.ssh`/`.aws` 等）的排除粒度不足，需逐目录 deny 规则与迁移兼容评估 |
+| EventBus 双通道拆分 | 高频 token 事件与控制事件共用 broadcast 有界通道，慢消费者丢控制事件风险需优先级双通道方案 |
+| Tauri 自动更新 | 桌面壳分发后的更新通道（签名 + updater 插件）未接，属 M9 发布运维项 |
+| TUI 斜杠命令体系 | TUI 侧 `/undo`/`/plan` 等命令注册与补全框架未成体系，先在 CLI REPL 验证语义后统一 |
+| evals 框架（含压缩质量量化评估） | 压缩摘要质量目前无量化基准，需任务集 + 评分器基建才能回归调参 |
+| 多 provider 故障切换 | provider router 故障转移需重试预算与幂等约束设计，避免双计费与重复副作用 |
+| 成本核算与支出上限 | token 用量统计与 per-session 支出熔断缺失，长循环失控成本不可见 |
+| task.spawn 扇出上限 | 子 Agent 并发无全局上限配置，防资源耗尽（C-07 同源）需补 fan-out cap |
+| auto memory 注入接线 | `inject_auto_memory` 生产链路零调用（仅单测覆盖），Auto memory 写入后不回流上下文 |
+| BM25 @memory 语义检索接线 | memory 检索索引已建但 `@memory` 引用语法未接查询链路 |
+| loader 全局层/@import 扩展 | AGENTS.md loader 仅项目层，全局层发现与 `@import` 组合语义待扩展 |
