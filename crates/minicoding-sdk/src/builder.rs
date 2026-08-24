@@ -479,6 +479,18 @@ pub fn build_runtime(
         .with_config_watcher(config_watcher)
         .with_config_path(config_path)
         // 遗留#3：AllowAlways/DenyAlways 持久化（~/.minicoding/policy.toml）
+        .with_async_rewake_scheduler({
+            #[cfg(feature = "hooks")]
+            {
+                std::sync::Arc::new(minicoding_hooks::ManagedRewakeScheduler::new())
+                    as std::sync::Arc<dyn minicoding_core::hooks::AsyncRewakeScheduler>
+            }
+            #[cfg(not(feature = "hooks"))]
+            {
+                std::sync::Arc::new(minicoding_core::hooks::NoopAsyncRewakeScheduler)
+                    as std::sync::Arc<dyn minicoding_core::hooks::AsyncRewakeScheduler>
+            }
+        })
         .with_policy_persist(
             minicoding_core::paths::policy_path()
                 .ok()

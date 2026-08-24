@@ -3,13 +3,12 @@
 /**
  * 工作区根目录信息。
  */
-export type WorkspaceRoot = {
-  /**
-   * 绝对路径。
-   */
-  path: string;
-  /**
-   * 目录名（展示用）。
-   */
-  name: string;
-};
+export type WorkspaceRoot = { 
+/**
+ * 绝对路径。
+ */
+path: string, 
+/**
+ * 目录名（展示用）。
+ */
+name: string, };

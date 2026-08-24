@@ -95,6 +95,7 @@ pub struct RuntimeBuilder {
     /// 落盘 snapshot，加速 `replay_session_state`（见 `design.md` §25.3）。
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     policy_persist: Option<Arc<crate::policy::PolicyPersist>>,
+    rewake: Option<Arc<dyn crate::hooks::AsyncRewakeScheduler>>,
 }
 
 impl Default for RuntimeBuilder {
@@ -136,6 +137,7 @@ impl RuntimeBuilder {
             event_store: None,
             snapshot_store: None,
             policy_persist: None,
+            rewake: None,
         }
     }
 
@@ -381,6 +383,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 注入 asyncRewake 后台调度器（遗留#6；默认 Noop——不产生后台任务）。
+    #[must_use]
+    pub fn with_async_rewake_scheduler(
+        mut self,
+        scheduler: Arc<dyn crate::hooks::AsyncRewakeScheduler>,
+    ) -> Self {
+        self.rewake = Some(scheduler);
+        self
+    }
+
     /// 设置事件存储（Event Sourcing，默认 `NoopEventStore`）。
     ///
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
@@ -450,7 +462,11 @@ impl RuntimeBuilder {
             last_non_whitelist_sig: std::sync::Mutex::new(None),
             hot_reload_baseline,
             policy_persist: self.policy_persist,
+            rewake: self
+                .rewake
+                .unwrap_or_else(|| Arc::new(crate::hooks::NoopAsyncRewakeScheduler)),
             pending_hook_contexts: std::sync::Mutex::new(Vec::new()),
+            session_start_done: std::sync::atomic::AtomicBool::new(false),
             session,
             events: self.events,
             workdir: tokio::sync::RwLock::new(workdir),

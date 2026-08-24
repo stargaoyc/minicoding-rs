@@ -28,7 +28,9 @@ mod protocol;
 mod registry;
 mod script;
 
-pub use async_rewake::{AsyncRewakeManager, DEFAULT_MAX_CONCURRENT, RewakeResult, RewakeStatus};
+pub use async_rewake::{
+    AsyncRewakeManager, DEFAULT_MAX_CONCURRENT, ManagedRewakeScheduler, RewakeResult, RewakeStatus,
+};
 pub use builtin::{
     AutoApproveTests, BackupBeforeCompact, BlockSecrets, FmtOnWrite, GitStatusInject, TestOnStop,
     builtin_hooks,

@@ -93,6 +93,12 @@ pub struct ServeCommand {
     #[arg(long, default_value_t = 300)]
     permission_timeout_sec: u64,
 
+    /// MCP server 模式（--as-mcp-server）下额外暴露**写类工具**
+    /// （fs.write/edit/delete、shell.run 等）。默认只暴露只读工具
+    /// （遗留#5：stdio 对端无交互审批通道，写操作默认 fail-closed）。
+    #[arg(long)]
+    expose_write_tools: bool,
+
     /// 静态资源目录（M9 `--web`，托管前端 SPA，见 `design.md` §26.7）。
     ///
     /// 设为前端构建产物目录（如 `crates/minicoding-web/dist`）时，HTTP server
@@ -349,6 +355,10 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
     //    server 模式下没有 Runtime 事件总线消费者）。
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
+    // 遗留#5：MCP server 模式默认只读暴露（对端无审批通道，写 fail-closed）
+    if cmd.expose_write_tools {
+        register_write_tools(&mut tools);
+    }
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
     // T-M8-5：git + web 工具组

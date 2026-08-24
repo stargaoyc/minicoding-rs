@@ -1018,3 +1018,53 @@ mod tests {
         assert!(!m.matches(HookEvent::PostToolUse, Some("fs.write")));
     }
 }
+
+// ==================== asyncRewake 调度抽象（遗留#6 全量接线）====================
+
+/// 后台 rewake 任务的完成结果（注入下一轮 prompt）。
+#[derive(Debug, Clone)]
+pub struct RewakeOutcome {
+    /// 关联 Hook 名。
+    pub hook_name: String,
+    /// 注入上下文（Success 为 hook 输出；Timeout/Error 为提示）。
+    pub context: String,
+}
+
+/// asyncRewake 后台调度器（`dyn` 兼容，遗留#6）。
+///
+/// Runtime 在 Hook 返回 `async_rewake = Some(spec)` 时调用 [`Self::try_spawn`]，
+/// 并在 turn 边界 [`Self::poll_completed`] 收取完成结果。默认 `NoopAsyncRewakeScheduler`
+/// 拒绝 spawn（fail-safe：不产生任何后台任务）。
+pub trait AsyncRewakeScheduler: Send + Sync {
+    /// 提交后台任务。返回 `false` 表示拒绝（并发上限/未启用）。
+    fn try_spawn(
+        &self,
+        hook_name: &str,
+        estimated_duration_sec: u32,
+        description: String,
+        fut: crate::provider::BoxFuture<'static, Result<String, String>>,
+    ) -> bool;
+
+    /// 取走全部已完成任务的结果。
+    fn poll_completed(&self) -> BoxFuture<'_, Vec<RewakeOutcome>>;
+}
+
+/// 空实现（默认注入）：`try_spawn` 恒 false。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopAsyncRewakeScheduler;
+
+impl AsyncRewakeScheduler for NoopAsyncRewakeScheduler {
+    fn try_spawn(
+        &self,
+        _hook_name: &str,
+        _estimated_duration_sec: u32,
+        _description: String,
+        _fut: crate::provider::BoxFuture<'static, Result<String, String>>,
+    ) -> bool {
+        false
+    }
+
+    fn poll_completed(&self) -> BoxFuture<'_, Vec<RewakeOutcome>> {
+        Box::pin(async { Vec::new() })
+    }
+}

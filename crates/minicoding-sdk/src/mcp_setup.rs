@@ -76,6 +76,24 @@ pub async fn attach_mcp_tools(
         return Ok(());
     }
 
+    // 健康监督（遗留#5）：周期 health_check，死亡连接经 restart 全量重建
+    //（一次性语义，避免风暴）。detach 后台 task 随 runtime 存活。
+    {
+        let supervisor_client = Arc::clone(&client);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                if !matches!(supervisor_client.health_check().await, Ok(true)) {
+                    warn!("mcp supervisor: 检测到不健康连接，尝试 restart");
+                    if let Err(e) = supervisor_client.restart().await {
+                        warn!(error = %e, "mcp supervisor restart 失败");
+                    }
+                }
+            }
+        });
+    }
+
     let hints = client.tool_hints().await;
     let mut registered = 0usize;
     for schema in client.list_tools().await {

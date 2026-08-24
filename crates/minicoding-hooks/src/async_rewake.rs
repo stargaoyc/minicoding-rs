@@ -449,3 +449,59 @@ mod tests {
         assert!(id2 > id1);
     }
 }
+
+// ==================== core 调度器 trait 适配（遗留#6 全量接线）====================
+
+/// [`AsyncRewakeManager`] 的 core-trait 适配器：供 sdk 注入 Runtime。
+#[derive(Debug)]
+pub struct ManagedRewakeScheduler {
+    manager: AsyncRewakeManager,
+}
+
+impl ManagedRewakeScheduler {
+    /// 默认并发上限（C-32，3）。
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            manager: AsyncRewakeManager::default_concurrent(),
+        }
+    }
+}
+
+impl Default for ManagedRewakeScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl minicoding_core::hooks::AsyncRewakeScheduler for ManagedRewakeScheduler {
+    fn try_spawn(
+        &self,
+        hook_name: &str,
+        estimated_duration_sec: u32,
+        description: String,
+        fut: minicoding_core::provider::BoxFuture<'static, Result<String, String>>,
+    ) -> bool {
+        let spec = minicoding_core::hooks::AsyncRewakeSpec {
+            estimated_duration_sec,
+            description: description.clone(),
+        };
+        self.manager.spawn(hook_name, &spec, fut).is_some()
+    }
+
+    fn poll_completed(
+        &self,
+    ) -> minicoding_core::provider::BoxFuture<'_, Vec<minicoding_core::hooks::RewakeOutcome>> {
+        Box::pin(async move {
+            self.manager
+                .poll()
+                .await
+                .into_iter()
+                .map(|r| minicoding_core::hooks::RewakeOutcome {
+                    hook_name: r.hook_name,
+                    context: r.context,
+                })
+                .collect()
+        })
+    }
+}
