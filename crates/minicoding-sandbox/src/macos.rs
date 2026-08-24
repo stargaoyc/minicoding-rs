@@ -198,7 +198,11 @@ fn build_profile(policy: &SandboxPolicy) -> std::io::Result<String> {
     p.push_str("(allow ipc-posix-sem)\n");
     p.push_str("(allow ipc-posix-shm)\n");
     p.push_str("(allow mach-lookup)\n");
-    p.push_str("(allow network*)\n");
+    // 网络隔离（2026-08-23 审查遗留#1，security.md §8 核心支柱）：
+    // 不再 (allow network*)——Seatbelt 默认拒绝未 allow 的操作，子进程
+    // TCP/UDP 全部被拦。web.fetch 在主进程内执行不受影响；需要子进程
+    // 联网的场景用 external-sandbox（不套 profile）/ danger-full-access。
+    p.push_str("(deny network*)\n");
 
     // 写权限：默认拒绝
     p.push_str("(deny file-write*)\n");

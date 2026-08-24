@@ -157,11 +157,33 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     let ro_access = landlock::AccessFs::from_read(TARGET_ABI);
     let write_access = landlock::AccessFs::from_all(TARGET_ABI);
 
-    let mut ruleset = Ruleset::default()
-        .handle_access(handled)
-        .map_err(|e| SandboxError::Sandbox(e.to_string()))?
+    // 网络限制（2026-08-23 审查遗留#1，security.md §8 核心支柱）：
+    // ReadOnly/WorkspaceWrite 下拒绝子进程 TCP bind/connect（landlock ABI≥4，
+    // Linux 6.7+；旧内核 Compatible 模式自动忽略该 handle——best-effort）。
+    // 不为网络添加任何 allow 规则 = 全部拒绝。web.fetch 在主进程内执行不受
+    // 影响（沙箱只作用于 spawn 的子进程）；需要子进程联网用 external-sandbox/
+    // danger-full-access。
+    let restrict_net = matches!(
+        policy,
+        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
+    );
+    let base = if restrict_net {
+        Ruleset::default()
+            .handle_access(handled)
+            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
+            .handle_access(landlock::AccessNet::BindTcp | landlock::AccessNet::ConnectTcp)
+            .map_err(|e| SandboxError::Sandbox(format!("net access: {e}")))?
+    } else {
+        Ruleset::default()
+            .handle_access(handled)
+            .map_err(|e| SandboxError::Sandbox(e.to_string()))?
+    };
+    let mut ruleset = base
         .create()
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
+    if restrict_net {
+        tracing::info!("landlock network restriction enabled (deny all TCP for child processes)");
+    }
 
     // 系统只读路径放行（必须，否则子进程无法 exec / 读库）
     ruleset = ruleset

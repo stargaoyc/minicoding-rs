@@ -20,6 +20,10 @@
 //! - `apply`：设置 `CREATE_SUSPENDED` 标志（进程创建后挂起，不执行任何代码）；
 //! - `post_spawn`：创建 Job Object → 分配子进程 → 恢复线程。
 //! 这样子进程首条指令执行前 Job Object 已生效。
+//!
+//! **网络隔离（2026-08-23 审查遗留#1）**：Job Object 无网络过滤原语（WFP 才
+//! 能做），Windows 平台子进程**不限制网络**——`is_hardened()` 如实返回 false；
+//! 网络管控仅由应用层权限审批承担。文档矩阵中该平台网络列为"未实现"。
 
 use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
 use std::io;

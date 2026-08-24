@@ -358,7 +358,7 @@ minicoding audit stats          # 工具调用频次、拒绝率
 
 ## 8. 操作系统级沙箱（一等公民，参考 Codex）
 
-> **实现状态核对（2026-08-23 审查 §9）**：本节"默认禁网络"为**设计目标而非现状**——三平台 OS 层均未限制网络（landlock 未启用 AccessNet、Seatbelt `(allow network*)`、Job Object 无网络限制）；网络管控当前仅由应用层权限审批承担。下文相关矩阵按目标语义阅读，落地前不应据此对 exec/自动化场景做安全假设。
+> **实现状态核对（2026-08-23 遗留#1 落地后更新）**：Linux landlock ABI≥4 与 macOS Seatbelt 已实现 ReadOnly/WorkspaceWrite 下子进程**默认禁 TCP/UDP**（web.fetch 等主进程工具不受影响）；Windows Job Object 无网络过滤原语，该平台仍不限网络（`is_hardened()=false` 如实上报）。需子进程联网时使用 external-sandbox/danger-full-access。
 
 > **设计变更**：原先沙箱被列为"后续可选/非硬隔离"。参考 OpenAI Codex CLI（`codex-rs`）的实践——Rust 完全可以在主流平台实现**内核级硬隔离**——本项目将 OS 沙箱升级为一等公民，作为应用层权限（§2/§3）之外的**第二道防线**。两道防线独立：即使应用层策略被绕过或误配，沙箱仍能在内核级阻止越界写/网络外联/危险系统调用。
 >
