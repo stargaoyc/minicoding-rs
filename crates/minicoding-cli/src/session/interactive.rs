@@ -259,7 +259,8 @@ fn print_help() {
 }
 
 /// 运行单轮对话，附带事件渲染与 Ctrl-C 取消。
-async fn run_one_turn(rt: &Runtime, line: String) {
+async fn run_one_turn(rt: &Runtime, line: String) -> usize {
+    // 返回值：本 turn 消耗 token（assistant metadata.tokens）
     let mut rx = rt.events().subscribe();
 
     // 渲染任务：消费事件流直到 `TurnEnd` 或通道关闭。
@@ -315,22 +316,26 @@ async fn run_one_turn(rt: &Runtime, line: String) {
     let _ = tokio::time::timeout(RENDER_FLUSH_TIMEOUT, render_task).await;
 
     match result {
-        Ok(TurnOutcome::Finished(msg)) => {
+        Ok(TurnOutcome::Finished(msg) | TurnOutcome::Interrupted(msg)) => {
             if !msg.text().is_empty() {
                 println!();
             }
-        }
-        Ok(TurnOutcome::Interrupted(_)) => {
-            println!();
-            anstream::eprintln!("{DIM}[已取消]{DIM:#}");
+            // token 计量（遗留#7）：metadata.tokens 为 provider Usage.output_tokens
+            let used = msg.metadata.tokens.unwrap_or(0);
+            if used > 0 {
+                anstream::eprintln!("{DIM}tokens(+{used}){DIM:#}");
+            }
+            used
         }
         Ok(TurnOutcome::Failed(e)) => {
             println!();
             anstream::eprintln!("{RED}错误: {e}{RED:#}");
+            0
         }
         Err(e) => {
             println!();
             anstream::eprintln!("{RED}运行时错误: {e}{RED:#}");
+            0
         }
     }
 }
