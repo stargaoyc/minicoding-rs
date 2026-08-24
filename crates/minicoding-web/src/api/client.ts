@@ -185,11 +185,11 @@ export function getSession(sessionId: string): Promise<{
   }>(`/sessions/${sessionId}`);
 }
 
-// 遗留#4：POST /messages 改 202 Accepted——结果走 SSE 推送
+// 遗留#4：POST /messages 改 202 Accepted——结果走 SSE 推送。
+// 2026-08-25 审查 F-202residue：后端响应体已瘦身为 `{accepted: true}`
+// （删除无消费方的空 stop_reason/final_text），前端类型同步。
 export interface SendMessageResponse {
   accepted: boolean;
-  stop_reason: string;
-  final_text: string;
 }
 
 export function sendMessage(sessionId: string, text: string): Promise<SendMessageResponse> {

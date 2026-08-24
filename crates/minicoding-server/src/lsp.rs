@@ -137,12 +137,15 @@ impl MinicodingLspServer {
         Ok(session)
     }
 
-    /// 运行一轮 turn：订阅 `EventBus` → 后台 spawn turn → 转发事件到 LSP 客户端。
+    /// 运行一轮 turn：订阅已带 seq 的实时通道 → 后台 spawn turn → 转发事件到 LSP 客户端。
     ///
     /// 事件转发策略：
     /// - **所有事件** → `minicoding/event` 通知（携带 `seq`，供完整客户端消费）；
     /// - **`Token` / `ToolCall` / `TurnStart` / `TurnEnd`** → 额外 `$/progress` 通知
     ///   （供标准 LSP 客户端渲染进度，token 文本放 `WorkDoneProgressReport::message`）。
+    ///
+    /// seq 由会话常驻 sequencer task 单一分配（2026-08-25 审查 F-seq），此处
+    /// 只从 `subscribe_sequenced` 读取，不调用 `push_event`。
     ///
     /// # Errors
     /// turn 执行失败、session 不存在、task panic 时返回错误描述。
@@ -150,9 +153,8 @@ impl MinicodingLspServer {
         let session = self.get_or_create_session().await?;
         let session_id = session.session_id().clone();
 
-        // 订阅 EventBus（在 spawn turn task 之前订阅，避免错过早期事件）
-        let runtime = session.runtime.clone();
-        let mut rx = runtime.events().subscribe();
+        // 订阅已带 seq 的实时通道（在 spawn turn task 之前订阅，避免错过早期事件）
+        let mut rx = session.subscribe_sequenced();
 
         // 后台 task 执行 turn
         let mgr = self.mgr.clone();
@@ -164,16 +166,15 @@ impl MinicodingLspServer {
         let client = self.client.clone();
         let conv_id = session_id.clone();
         let progress_token = NumberOrString::String(format!("minicoding.turn.{conv_id}"));
-        let session_clone = session.clone();
 
         loop {
             tokio::select! {
                 biased;
                 turn_result = &mut turn_task => {
-                    // drain 剩余事件（turn 完成后 EventBus 可能还有未消费的事件）
-                    while let Ok(event) = rx.try_recv() {
-                        let seq = session_clone.push_event(&event).await;
-                        forward_event(&client, &conv_id, &progress_token, seq, &EventKind::from(&event)).await;
+                    // drain 剩余事件（turn 完成后实时通道可能还有未消费的事件）
+                    while let Ok(item) = rx.try_recv() {
+                        let (seq, kind) = item;
+                        forward_event(&client, &conv_id, &progress_token, seq, &kind).await;
                     }
                     return match turn_result {
                         Ok(Ok(TurnOutcome::Finished(_) | TurnOutcome::Interrupted(_))) => Ok(()),
@@ -184,16 +185,8 @@ impl MinicodingLspServer {
                 }
                 event_result = rx.recv() => {
                     match event_result {
-                        Ok(event) => {
-                            let seq = session_clone.push_event(&event).await;
-                            forward_event(
-                                &client,
-                                &conv_id,
-                                &progress_token,
-                                seq,
-                                &EventKind::from(&event),
-                            )
-                            .await;
+                        Ok((seq, kind)) => {
+                            forward_event(&client, &conv_id, &progress_token, seq, &kind).await;
                         }
                         // channel 关闭（所有 Runtime handle 释放）→ 退出转发 loop
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

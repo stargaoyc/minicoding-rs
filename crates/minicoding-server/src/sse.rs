@@ -25,7 +25,14 @@
 //!    瞬态事件如 `Token` 不可恢复，客户端应容忍缺失）；
 //! 4. **不可恢复**：`seq` > `durable_seq`（或 `EventStore` 为 `NoopEventStore`），
 //!    发 `RehydrateRequired` 后关闭流（E-14）；
-//! 5. 重放完毕后订阅 `EventBus` 推送新事件。
+//! 5. 重放完毕后从已带 seq 的实时通道推送新事件。
+//!
+//! **seq 单一写者**（2026-08-25 审查 F-seq）：本模块不再调用 `push_event`
+//! 分配 seq——此前每个 SSE 连接对同一事件重复分配 seq，导致 ring buffer 中
+//! 同一事件出现多份、多客户端 seq 漂移、断线重放重复。订阅端统一从
+//! `subscribe_sequenced()`（单一写者 = 会话常驻 sequencer task，见
+//! `session_mgr.rs`）/ `replay_after`（ring buffer → durable → Rehydrate）
+//! 读取已带 seq 的事件。
 
 use crate::session_mgr::ServerSession;
 use minicoding_protocol::event::EventKind;
@@ -33,8 +40,7 @@ use minicoding_protocol::rehydrate::RehydrateRequired;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 
 /// 解析 `Last-Event-ID` header 为 seq。
 #[must_use]
@@ -64,8 +70,8 @@ fn format_rehydrate(session_id: &str, last_known_seq: u64) -> String {
 ///
 /// 1. 从 `session.replay_after(last_seq)` 重放历史事件（若 `last_seq` 已 evict，
 ///    先发 `RehydrateRequired` 再关闭流）；
-/// 2. 订阅 `session.runtime.events()` 推送新事件；
-/// 3. `BroadcastStream` `Lagged` 时发 `RehydrateRequired`（事件已丢失，客户端应重拉 snapshot）。
+/// 2. 从已带 seq 的实时通道（`subscribe_sequenced`）推送新事件；
+/// 3. 实时通道 `Lagged` 时发 `RehydrateRequired`（事件已丢失，客户端应重拉 snapshot）。
 ///
 /// 返回 `ReceiverStream<String>`，每条 item 是完整的 SSE 事件块。
 ///
@@ -77,6 +83,10 @@ pub fn sse_stream(
     let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
 
     tokio::spawn(async move {
+        // 0. **先订阅实时通道再重放**：重放快照与订阅之间到达的事件不会丢失
+        //    （重复的由下方 seq 去重剔除）。
+        let live_rx = session.subscribe_sequenced();
+
         // 1. 重放历史事件
         let replay = session.replay_after(last_seq).await;
         match replay {
@@ -85,21 +95,21 @@ pub fn sse_stream(
                 let _ = tx
                     .send(Ok(format_rehydrate(session.session_id(), last_seq)))
                     .await;
-                return;
             }
             Some(events) => {
+                // 去重基准：已重放的最大 seq（无重放项时为断点本身）
+                let mut floor = last_seq;
                 for (seq, kind_json) in events {
+                    floor = floor.max(seq);
                     let sse = format_sse_event(seq, &kind_json);
                     if tx.send(Ok(sse)).await.is_err() {
                         // 客户端断连，停止推送
                         return;
                     }
                 }
+                forward_live_events(session, tx, live_rx, floor).await;
             }
         }
-
-        // 2. 订阅 EventBus 推送新事件
-        push_new_events(session, tx).await;
     });
 
     ReceiverStream::new(rx)
@@ -110,31 +120,39 @@ pub fn sse_stream(
 /// 背景：若按 `sse_stream` 从 seq 0 重放，连接建立前的历史事件（如已决的
 /// `permission_requested`/`permission_resolved`）会被重新推给前端，导致弹窗
 /// 覆盖错位（新请求的权限弹窗被历史 pid 顶掉，审批悬空直到 300s 超时）。
-/// 首次连接直接订阅 EventBus，只收连接建立之后的事件；断线重连由浏览器
-/// `Last-Event-ID` 走 `sse_stream` 的恢复路径（不丢事件）。
+/// 首次连接只收连接建立之后的事件；断线重连由浏览器 `Last-Event-ID` 走
+/// `sse_stream` 的恢复路径（不丢事件）。
 pub fn sse_live(session: Arc<ServerSession>) -> ReceiverStream<Result<String, Infallible>> {
     let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
 
     tokio::spawn(async move {
-        push_new_events(session, tx).await;
+        let live_rx = session.subscribe_sequenced();
+        forward_live_events(session, tx, live_rx, 0).await;
     });
 
     ReceiverStream::new(rx)
 }
 
-/// 订阅 `EventBus` 并把新事件转为 SSE 块，直到客户端断连（tx send 失败）。
-async fn push_new_events(
+/// 从**已带 seq** 的实时通道转发新事件到 SSE 流，直到客户端断连。
+///
+/// - `floor`：去重基准——`seq <= floor` 的事件已被重放路径发送过，跳过
+///   （订阅先于重放建立时的窗口重叠，2026-08-25 审查 F-seq）；
+/// - 不调用 `push_event`：seq 由会话常驻 sequencer task 单一分配；
+/// - Lagged 时发 `RehydrateRequired` 并继续（客户端自行决定是否重拉 snapshot）。
+async fn forward_live_events(
     session: Arc<ServerSession>,
     tx: mpsc::Sender<Result<String, Infallible>>,
+    mut rx: tokio::sync::broadcast::Receiver<(u64, EventKind)>,
+    floor: u64,
 ) {
-    let event_rx = session.runtime.events().subscribe();
-    let mut stream = BroadcastStream::new(event_rx);
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(event) => {
-                let seq = session.push_event(&event).await;
-                let kind = EventKind::from(&event);
+    let mut floor = floor;
+    loop {
+        match rx.recv().await {
+            Ok((seq, kind)) => {
+                if seq <= floor {
+                    continue; // 重放窗口重叠，幂等去重
+                }
+                floor = seq;
                 let kind_json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
                 let sse = format_sse_event(seq, &kind_json);
                 if tx.send(Ok(sse)).await.is_err() {
@@ -142,11 +160,11 @@ async fn push_new_events(
                     break;
                 }
             }
-            Err(_lagged) => {
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 // broadcast 溢出——发 RehydrateRequired
                 let _ = tx.send(Ok(format_rehydrate(session.session_id(), 0))).await;
-                // 继续推送（客户端收到 RehydrateRequired 后自行决定是否重拉 snapshot）
             }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
 }

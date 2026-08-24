@@ -69,10 +69,15 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
         std::env::var("MINICODING_SERVER_BIN").unwrap_or_else(|_| "minicoding-server".to_string());
 
     let web_dir = crate::resolve_web_dir();
-    // S1：desktop 生成 token 并经 CLI 参数传给 sidecar（内存传递，C-04 兼容）
+    // S1：desktop 生成 token，经环境变量 `MINICODING_AUTH_TOKEN` 传给 sidecar
+    // （2026-08-25 审查 F-token：不再放 argv——argv 可被本机任意进程经
+    // `/proc/<pid>/cmdline` 读取，与拒传 --api-key 的 C-04 理由一致；
+    // env 仅父进程与子进程可见）。server 端 clap 定义
+    // `env = "MINICODING_AUTH_TOKEN"` 接收。
     let token = minicoding_core::util::generate_auth_token();
     let mut cmd = Command::new(&bin);
-    cmd.args(["--bind", "127.0.0.1:0", "--auth-token", &token]);
+    cmd.args(["--bind", "127.0.0.1:0"]);
+    cmd.env("MINICODING_AUTH_TOKEN", &token);
     // 注入 provider 非敏感配置（从 config.toml 读取）
     cmd.args(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
@@ -225,14 +230,10 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         .map_err(|e| anyhow::anyhow!("sidecar 配置错误: {e}"))?;
 
     let web_dir = crate::resolve_web_dir();
-    // S1：同 standalone 路径——token 内存传递（desktop 生成，前端请求时携带）
+    // S1：同 standalone 路径——token 经环境变量传递（2026-08-25 审查 F-token：
+    // argv 会经 /proc cmdline 泄露给本机进程，与拒传 --api-key 的 C-04 理由一致）
     let token = minicoding_core::util::generate_auth_token();
-    let mut args: Vec<String> = vec![
-        "--bind".into(),
-        "127.0.0.1:0".into(),
-        "--auth-token".into(),
-        token.clone(),
-    ];
+    let mut args: Vec<String> = vec!["--bind".into(), "127.0.0.1:0".into()];
     // WebView origin 加白（见 [`TAURI_WEBVIEW_ORIGINS`] 文档）
     for origin in TAURI_WEBVIEW_ORIGINS {
         args.push("--cors-origin".into());
@@ -247,6 +248,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     let (mut rx, child) = sidecar
         .args(&args)
+        .env("MINICODING_AUTH_TOKEN", &token)
         .spawn()
         .map_err(|e| anyhow::anyhow!("sidecar 启动失败: {e}"))?;
     let pid = child.pid();

@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { resolvePermission } from "../api/client";
-import type { Risk } from "../api/generated";
+import type { Decision, Risk } from "../api/generated";
 
 /**
  * 权限请求管理 hook（见 AGENTS.md §8.6、design.md §9.1）。
@@ -32,8 +32,10 @@ export function usePermissions() {
   const resolve = useCallback(
     async (choice: PermissionChoice) => {
       if (!pending) return;
-      // 遗留#3：Always 决策原样回传（服务端持久化到 policy.toml 后折叠执行）
-      const decision =
+      // 遗留#3：Always 决策原样回传（服务端持久化到 policy.toml 后折叠执行）。
+      // 2026-08-25 审查：按生成类型 Decision 判别联合逐支构造（原 `as never`
+      // 绕过类型检查，决策形状漂移时编译期无法发现）
+      const decision: Decision =
         choice === "allow"
           ? "allow"
           : choice === "allow_always"
@@ -42,7 +44,7 @@ export function usePermissions() {
               ? { deny_always: "user denied via dialog" }
               : { deny: `user denied via ${choice}` };
       try {
-        await resolvePermission(pending.sessionId, pending.id, decision as never);
+        await resolvePermission(pending.sessionId, pending.id, decision);
       } finally {
         setPending(null);
       }

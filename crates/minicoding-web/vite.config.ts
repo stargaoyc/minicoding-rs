@@ -10,8 +10,11 @@ export default defineConfig({
   server: {
     port: 5173,
     // 开发模式代理 API/SSE 到 minicoding-server，避免 CORS
+    // （2026-08-25 审查：补 /config /metrics——设置面板与监控端点此前直连被 CORS 拦截）
     proxy: {
       "/sessions": { target: "http://localhost:8080", changeOrigin: true },
+      "/config": { target: "http://localhost:8080", changeOrigin: true },
+      "/metrics": { target: "http://localhost:8080", changeOrigin: true },
       "/health": { target: "http://localhost:8080", changeOrigin: true },
     },
   },

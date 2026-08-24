@@ -40,8 +40,10 @@ export function useMessages(sessionId: string | null) {
 export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
   return useMutation({
-    // 遗留#4：POST /messages 改 202 Accepted——结果走 SSE，不消费 final_text
-    mutationFn: (text: string) => sendMessage(sessionId!, text).then((r) => r as unknown as { stop_reason: string; final_text: string }),
+    // 遗留#4：POST /messages 改 202 Accepted——结果走 SSE，不消费响应体。
+    // 2026-08-25 审查 F-202residue：后端已删除残留的空 stop_reason/final_text，
+    // 前端同步移除 `as unknown as {...}` 双重断言
+    mutationFn: (text: string) => sendMessage(sessionId!, text),
     // 乐观更新：发送时立即在 UI 显示用户消息（不等 POST 完成）
     onMutate: async (text: string) => {
       if (!sessionId) return {};

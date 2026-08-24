@@ -74,7 +74,11 @@ struct Cli {
     preset: String,
 
     /// API 鉴权 token（S1）。省略时自动生成并以 `SERVER_TOKEN=<t>` 打印到 stdout。
-    #[arg(long)]
+    ///
+    /// 2026-08-25 审查 F-token：支持环境变量 `MINICODING_AUTH_TOKEN`——desktop
+    /// sidecar 由父进程注入 env 而非 argv（argv 经 `/proc/<pid>/cmdline` 对本机
+    /// 所有进程可读，与同文件拒传 `--api-key` 的 C-04 理由一致）。
+    #[arg(long, env = "MINICODING_AUTH_TOKEN")]
     auth_token: Option<String>,
 
     /// 关闭 API 鉴权（仅限本机隔离环境；任意进程可完全控制 Agent）

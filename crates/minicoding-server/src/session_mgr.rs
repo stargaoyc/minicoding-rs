@@ -7,8 +7,10 @@
 //! 单会话聚合根，C-31 上下文一致性）。`SendUserMessage` handler 在调用 `run_turn`
 //! 前获取 session 级 `Mutex`，并发请求排队等待（第二个请求在第一个 turn 完成后才开始）。
 //!
-//! **事件 seq 分配**：`EventCursor` 为每个事件分配单调递增 `seq`，SSE 流用 `seq`
-//! 做 cursor 恢复（见 `sse.rs`）。
+//! **事件 seq 分配**（2026-08-25 审查 F-seq 收敛）：`EventCursor` 为每个事件分配
+//! 单调递增 `seq`，**只在会话级常驻 sequencer task 一处分配**（见 `insert_session`）；
+//! SSE/ACP/LSP 订阅端经 `subscribe_sequenced`/`replay_after` 读取已带 seq 的事件，
+//! 不再自行 `push_event`。SSE 流用 `seq` 做 cursor 恢复（见 `sse.rs`）。
 
 use crate::prompter::{PendingPermissions, ServerPrompter};
 use crate::runtime_builder::{ServerRuntimeParams, build_runtime};
@@ -20,6 +22,7 @@ use minicoding_core::policy::Decision;
 use minicoding_core::runtime::{Event, Runtime};
 use minicoding_core::storage::Storage;
 use minicoding_protocol::cursor::EventCursor;
+use minicoding_protocol::event::EventKind;
 use minicoding_storage::{JsonlEventStore, JsonlSnapshotStore, JsonlStorage, replay_session_state};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -59,6 +62,11 @@ pub struct ServerSession {
     /// 事件 seq 分配器（SSE cursor 恢复用）。`TokioMutex` 因 `push_event`/`replay_after`
     /// 在 async 上下文中调用，且 lock 持续时间短。
     pub cursor: TokioMutex<EventCursor>,
+    /// 已分配 seq 的事件转发通道（SSE/ACP/LSP 订阅端从这里读取**已带 seq** 的
+    /// 事件，不再自行分配 seq——2026-08-25 审查 F-seq：seq 必须单一写者，
+    /// 否则同一事件被多个订阅端重复 push 进 ring buffer，多客户端 seq 漂移、
+    /// 断线重放重复）。
+    sequenced_tx: tokio::sync::broadcast::Sender<(u64, EventKind)>,
     /// pending 权限请求表（`ServerPrompter` 共享）。`TokioMutex` 因 `prompt` 在
     /// `timeout().await` 上下文中持有锁。
     pub pending_permissions: PendingPermissions,
@@ -74,9 +82,13 @@ pub struct ServerSession {
 impl ServerSession {
     /// 创建新会话状态。
     fn new(runtime: Arc<Runtime>, pending: PendingPermissions) -> Self {
+        // 容量与 ring buffer 对齐（1024）：订阅端消费慢时 Lagged → RehydrateRequired，
+        // 与 EventBus(256) 相比降低慢客户端误触发重同步的概率
+        let (sequenced_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             runtime,
             cursor: TokioMutex::new(EventCursor::new(1024)),
+            sequenced_tx,
             pending_permissions: pending,
             turn_lock: TokioMutex::new(()),
             task_state: StdMutex::new(Vec::new()),
@@ -92,12 +104,31 @@ impl ServerSession {
     /// 分配 seq 并把事件推入 cursor ring buffer，返回分配的 seq。
     ///
     /// `EventKind` 序列化为 JSON 后存入 `EventCursor`，SSE 流用 `replay_after_with_seq`
-    /// 重放，把 seq 填入 SSE `id:` 字段。
+    /// 重放，把 seq 填入 SSE `id:` 字段。同时把 `(seq, EventKind)` 广播到
+    /// `sequenced_tx`，供 SSE/ACP/LSP 订阅端实时消费。
+    ///
+    /// **seq 单一写者**（2026-08-25 审查 F-seq）：本方法只被会话级常驻 sequencer
+    /// task（见 [`SessionManager::insert_session`]）调用；订阅端从
+    /// `subscribe_sequenced`/`replay_after` 读取已带 seq 的事件，不得自行分配。
     pub async fn push_event(&self, event: &Event) -> u64 {
-        let kind = minicoding_protocol::event::EventKind::from(event);
+        let kind = EventKind::from(event);
         let json = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
-        let mut cursor = self.cursor.lock().await;
-        cursor.push(json)
+        let seq = {
+            let mut cursor = self.cursor.lock().await;
+            cursor.push(json)
+        };
+        // 先入 buffer 后广播：订阅端收到 (seq, kind) 时重放路径必已可见该 seq
+        let _ = self.sequenced_tx.send((seq, kind));
+        seq
+    }
+
+    /// 订阅已分配 seq 的事件流（实时推送用）。
+    ///
+    /// 返回 `(seq, EventKind)` 广播 receiver——事件已由单一写者（sequencer task）
+    /// 分配 seq 并写入 ring buffer，订阅端直接转发即可，不触碰 `cursor`。
+    #[must_use]
+    pub fn subscribe_sequenced(&self) -> tokio::sync::broadcast::Receiver<(u64, EventKind)> {
+        self.sequenced_tx.subscribe()
     }
 
     /// 从 `after_seq` 之后重放事件（SSE 恢复用），返回 `(seq, Value)` 列表。
@@ -329,6 +360,29 @@ impl SessionManager {
                     } else {
                         state.push(task);
                     }
+                }
+            }
+        });
+
+        // 常驻 sequencer：唯一调用 `push_event` 的地方（2026-08-25 审查 F-seq）。
+        // 此前 seq 分配分散在每个 turn 的消费 task + 各 SSE/ACP/LSP 连接——同一事件
+        // 被多次 push 进 ring buffer（seq 重复、多客户端漂移、断线重放重复）。
+        // 收敛到单写者后，订阅端经 `subscribe_sequenced` 拿到已带 seq 的事件。
+        // turn 外发出的事件（如 HTTP set_permission_mode 触发的 PermissionModeChanged）
+        // 也能获得 seq 并可重放。
+        let sequencer = session.clone();
+        tokio::spawn(async move {
+            let mut rx = sequencer.runtime.events().subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        sequencer.push_event(&event).await;
+                    }
+                    // Lagged 必须续跑：seq 分配停摆会导致所有订阅端永久失联
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "SessionManager sequencer lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -586,8 +640,10 @@ impl SessionManager {
     /// 返回的 future 无外部借用（`'static`），避免 `async fn(&self, ..)` 与 axum
     /// `Handler` trait HRTB 的冲突。
     ///
-    /// 内部获取 `turn_lock`（串行化），订阅 `EventBus` 收集事件分配 seq，
-    /// 调用 `Runtime::run_turn_owned`。
+    /// 内部获取 `turn_lock`（串行化），调用 `Runtime::run_turn_owned`。
+    /// 事件 seq 分配由会话级常驻 sequencer task 负责（见 `insert_session`），
+    /// 此处不再临时订阅 EventBus——2026-08-25 审查 F-seq：turn 内再开一个
+    /// 消费 task 会与订阅端各自 `push_event`，同一事件在 ring buffer 中出现多份。
     ///
     /// # Errors
     /// - 会话不存在：`NotFound`；
@@ -604,7 +660,6 @@ impl SessionManager {
 
         // Clone `Arc<Runtime>` 断开 `session.runtime` 的 Arc-deref 借用链。
         let runtime = session.runtime.clone();
-        let events = runtime.events().clone();
 
         // Event Sourcing：首次 turn 前初始化事件流（新会话持久化 SessionCreated，
         // 恢复会话加载 seq + snapshot，见 `design.md` §25.1）。
@@ -616,33 +671,10 @@ impl SessionManager {
             .await
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
 
-        // 订阅 `EventBus`（在 run_turn 之前订阅，避免错过早期事件）
-        let mut rx = events.subscribe();
-
-        // 后台 task：消费 `EventBus` 事件，分配 seq，推入 cursor ring buffer
-        let session_clone = session.clone();
-        let event_task = tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        session_clone.push_event(&event).await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // 消费慢导致丢事件——SSE 客户端会收到 RehydrateRequired
-                        tracing::warn!("SessionManager event consumer lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
         // 驱动 turn。`runtime` 是 owned `Arc<Runtime>`，`run_turn(&self)` 借用
         // `&*runtime`（局部借用，future 自包含）。
         let user_input = UserInput::from_text(text);
         let result = runtime.run_turn(user_input).await;
-
-        // turn 结束后停止事件消费 task
-        event_task.abort();
 
         match result {
             Ok(outcome) => Ok(outcome),
@@ -743,34 +775,10 @@ mod tests {
 
     // ── 磁盘会话列表合并 + 懒恢复 ────────────────────────────────────────────
 
-    /// 串行化所有依赖 `MINICODING_HOME` 的测试（与 core `paths.rs` 同模式，
-    /// 避免并行运行时环境变量竞争）。`tokio::sync::Mutex`：guard 跨 await
-    /// 持有（seed 磁盘会话是 async），std Mutex 会触发 clippy::await_holding_lock。
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // `ENV_LOCK`/`EnvGuard` 上移至 `crate::test_support`（2026-08-25 审查 F-routes）：
+    // http 端点测试同样需要 `MINICODING_HOME` 隔离，跨模块共用同一把锁防并行竞争。
 
-    /// 测试期间临时设置 `MINICODING_HOME`，`Drop` 时恢复原值。
-    struct EnvGuard {
-        original: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(value: &str) -> Self {
-            let original = std::env::var("MINICODING_HOME").ok();
-            // SAFETY: ENV_LOCK 串行化所有 MINICODING_HOME 访问，无并发 set/remove。
-            unsafe { std::env::set_var("MINICODING_HOME", value) };
-            Self { original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: 同 set()，ENV_LOCK 保证串行访问；Drop 在测试 scope 结束时同步调用。
-            match &self.original {
-                Some(v) => unsafe { std::env::set_var("MINICODING_HOME", v) },
-                None => unsafe { std::env::remove_var("MINICODING_HOME") },
-            }
-        }
-    }
+    use crate::test_support::{ENV_LOCK, EnvGuard};
 
     /// 预写一个磁盘会话（模拟重启前的历史会话：仅有消息日志，无事件流）。
     async fn seed_disk_session(dir: &Utf8PathBuf, id: &str, texts: &[&str]) {

@@ -5,8 +5,10 @@
 //!
 //! ```text
 //! POST   /sessions                          → CreateSession
-//! POST   /sessions/{id}/messages            → SendUserMessage（阻塞至 turn 完成）
+//! POST   /sessions/{id}/messages            → SendUserMessage（202，turn 异步执行）
 //! POST   /sessions/{id}/cancel              → Cancel
+//! POST   /sessions/{id}/undo                → Undo（journal 回滚最近 n 批文件改动）
+//! POST   /sessions/{id}/permission-mode     → SetPermissionMode（权限模式切换）
 //! GET    /sessions                          → ListSessions
 //! GET    /sessions/{id}                     → GetSession
 //! GET    /sessions/{id}/events              → SSE 事件流（Last-Event-ID 恢复）
@@ -22,7 +24,9 @@
 //! 路径经 `resolve_path` 校验（C-03）；切换工作区走 Ask 审批 + 审计（复用
 //! W-03 权限弹窗与 `Event::PermissionRequested`）。
 //!
-//! `Undo` 端点暂未实现（需 `Journal` feature gate，T-M8 后续补）。
+//! Undo/SetPermissionMode 于 2026-08-25 审查 F-routes 补齐（NDJSON 适配器此前
+//! 已实现同名命令，HTTP 路由表缺位）：Undo 入口与 CLI `/undo` 相同——`Runtime`
+//! 注入的 `Journal::undo`；`SetPermissionMode` 入口为 `PlanModeController::set_mode`。
 
 use crate::runtime_builder::ServerRuntimeParams;
 use crate::session_mgr::{SessionManager, SessionManagerError};
@@ -244,7 +248,9 @@ struct SendMessageBody {
 }
 
 // `SendMessageResponse` 已移除（遗留#4：POST /messages 改 202 Accepted，
-// 响应用 json! 宏内联 `{accepted,stop_reason,final_text}`，不再需要结构体）。
+// 响应用 json! 宏内联 `{accepted}`）。2026-08-25 审查 F-202residue：响应体中
+// 残留的空 `stop_reason:""`/`final_text":""` 已删除——前端（useChat.ts）从不
+// 读取这两个字段（结果经 SSE 推送），协议瘦身为 `{accepted: true}`。
 
 /// `ResolvePermission` 请求 body。
 #[derive(Debug, Deserialize)]
@@ -363,6 +369,9 @@ fn build_router(
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/messages", post(send_message))
         .route("/sessions/{id}/cancel", post(cancel_turn))
+        // 2026-08-25 审查 F-routes：补齐 Undo 与 SetPermissionMode（对齐 NDJSON 命令）
+        .route("/sessions/{id}/undo", post(undo_session))
+        .route("/sessions/{id}/permission-mode", post(set_permission_mode))
         .route("/sessions/{id}/events", get(sse_events))
         .route(
             "/sessions/{id}/permissions/pending",
@@ -685,10 +694,12 @@ async fn get_session(
 ) -> Result<Json<GetSessionResponse>, HttpError> {
     let messages = state.mgr.get_messages(&session_id).await?;
     let session = state.mgr.get_or_load(&session_id).await?;
+    // 2026-08-25 审查 F-expect：与同文件其他锁访问一致，poisoned 时取内部值续行
+    //（task_state 只是任务快照镜像，锁中毒不值得让 GET /sessions/{id} 整体 500）
     let tasks = session
         .task_state
         .lock()
-        .expect("task_state mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     Ok(Json(GetSessionResponse {
         session_id,
@@ -701,8 +712,8 @@ async fn get_session(
 ///
 /// 2026-08-23 审查遗留#4：此前阻塞至 turn 完成——长 turn 占死 HTTP 连接，
 /// 客户端超时风险高。改为立即返回 202 + `{ accepted: true }`；结果经 SSE
-/// `MessageAppended`/`TurnEnd` 事件推送（前端已订阅）。`SendMessageResponse`
-/// 仅保留协议兼容字段（客户端不再消费 `final_text`）。
+/// `MessageAppended`/`TurnEnd` 事件推送（前端已订阅）。2026-08-25 审查
+/// F-202residue：删除响应体残留的空 `stop_reason`/`final_text` 字段（无消费方）。
 #[allow(clippy::too_many_lines)]
 async fn send_message(
     State(state): State<AppState>,
@@ -731,11 +742,7 @@ async fn send_message(
     });
     Ok((
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "accepted": true,
-            "stop_reason": "",
-            "final_text": ""
-        })),
+        Json(serde_json::json!({ "accepted": true })),
     ))
 }
 
@@ -746,6 +753,122 @@ async fn cancel_turn(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     state.mgr.cancel(&session_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// `Undo` 请求 body。
+#[derive(Debug, Deserialize)]
+struct UndoBody {
+    /// 回滚最近 `steps` 批（turn 粒度）文件改动；缺省 1；0 视为 1
+    /// （与 `Journal::undo` / CLI `/undo` 语义一致）。
+    #[serde(default)]
+    steps: usize,
+}
+
+/// `SetPermissionMode` 请求 body。
+#[derive(Debug, Deserialize)]
+struct SetPermissionModeBody {
+    /// 目标权限模式（`default`/`accept_edits`/`plan`/`auto`/`bypass_permissions`）。
+    mode: PermissionMode,
+}
+
+/// `POST /sessions/{id}/undo` — 回滚最近 n 批文件改动（2026-08-25 审查 F-routes）。
+///
+/// 入口与 CLI `/undo` 一致：`Runtime` 注入的 `Journal::undo`
+/// （server 端由 `runtime_builder` 注入 `FileChangeJournal`，见其 §11b）。
+/// 冲突文件不强行覆盖，记入 `failed_files` 返回（C-28）；
+/// 反向恢复落审计（C-28/AGENTS.md §5.5）。
+///
+/// # Errors
+/// 会话不存在返回 404；journal 未启用返回 501；路径越界返回 403（C-03）；
+/// 无可撤销条目/冲突返回 409；IO 失败返回 500。
+async fn undo_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<UndoBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let session = state.mgr.get_or_load(&session_id).await?;
+    let journal = session.runtime.journal().ok_or_else(|| HttpError {
+        status: StatusCode::NOT_IMPLEMENTED,
+        message: "journal 未启用".to_string(),
+    })?;
+
+    // 回滚与进行中的 turn 互斥（工具写与回滚并发会互相覆盖，C-28/C-31）。
+    // 60s 上限对齐 workspace_switch：turn 卡住时快速失败而非无界排队。
+    let report = {
+        let _turn_guard = tokio::time::timeout(Duration::from_secs(60), session.turn_lock.lock())
+            .await
+            .map_err(|_| HttpError {
+                status: StatusCode::CONFLICT,
+                message: "会话忙：上一轮消息仍在处理中，请稍后再试".to_string(),
+            })?;
+        journal.undo(body.steps.max(1)).await.map_err(|e| {
+            use minicoding_core::model::JournalError;
+            // 错误映射：越界 403（C-03 语义暴露给前端）、无可撤销/冲突 409、IO 500
+            let status = match &e {
+                JournalError::PathEscaped(_) => StatusCode::FORBIDDEN,
+                JournalError::NoEntries | JournalError::Conflict(_) => StatusCode::CONFLICT,
+                JournalError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            HttpError {
+                status,
+                message: e.to_string(),
+            }
+        })?
+    };
+
+    // C-28：/undo 反向恢复也落审计（摘要级别，不记录文件内容）
+    let rec = minicoding_core::storage::AuditRecord {
+        ts: time::OffsetDateTime::now_utc(),
+        session: session.runtime.session().id.clone(),
+        kind: minicoding_core::storage::AuditKind::ToolCall,
+        tool: Some("undo".to_string()),
+        decision: None,
+        detail: format!(
+            "http undo: steps={} undone_entries={} restored={} conflicts={}",
+            body.steps.max(1),
+            report.undone_entries,
+            report.restored_files.len(),
+            report.failed_files.len(),
+        ),
+    };
+    if let Err(e) = session.runtime.audit().record(rec).await {
+        tracing::warn!(error = %e, "undo audit record failed");
+    }
+
+    Ok(Json(serde_json::json!({
+        "undone_entries": report.undone_entries,
+        "restored_files": report
+            .restored_files
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>(),
+        "failed_files": report
+            .failed_files
+            .iter()
+            .map(|(p, reason)| serde_json::json!({ "path": p.to_string(), "reason": reason }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// `POST /sessions/{id}/permission-mode` — 切换权限模式（2026-08-25 审查 F-routes）。
+///
+/// 入口与 NDJSON `SetPermissionMode` 命令一致：`PlanModeController::set_mode`
+/// （内部持久化 `PermissionModeChanged` 并广播事件——事件经会话 sequencer 获得
+/// seq 后推送 SSE 客户端）。`set_mode` 本身不返回错误；未知 `mode` 字符串由
+/// JSON 反序列化拒绝（axum Json rejection → 422）。
+///
+/// # Errors
+/// 会话不存在返回 404。
+async fn set_permission_mode(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SetPermissionModeBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let session = state.mgr.get_or_load(&session_id).await?;
+    let mode = body.mode;
+    session.runtime.plan_controller().set_mode(mode).await;
+    tracing::info!(session = %session_id, to = ?mode, "permission mode switched via HTTP");
+    Ok(Json(serde_json::json!({ "ok": true, "mode": mode })))
 }
 
 /// `GET /sessions/{id}/events` — SSE 事件流。
@@ -905,12 +1028,23 @@ mod tests {
 
     /// 构造带鉴权的测试 app（SessionManager 用假 provider 参数，不发起真实请求）。
     fn test_app(auth_token: Option<&str>) -> axum::Router {
+        test_router(auth_token, "")
+    }
+
+    /// 可离线创建会话的变体：api_key 非空避免触发 keyring fallback
+    /// （2026-08-25 审查 F-routes：Undo/permission-mode/202 响应体测试需真实建会话，
+    /// OpenAI provider 构造不发网络请求）。
+    fn offline_app() -> axum::Router {
+        test_router(None, "sk-test")
+    }
+
+    fn test_router(auth_token: Option<&str>, api_key: &str) -> axum::Router {
         let cfg = ServerConfig {
             bind: "127.0.0.1:0".parse().expect("bind"),
             provider_kind: "openai".into(),
             provider_name: None,
             api_base: "http://localhost:1".into(),
-            api_key: String::new(),
+            api_key: api_key.to_string(),
             model: "test-model".into(),
             workdir: camino::Utf8PathBuf::from("."),
             system: None,
@@ -929,7 +1063,7 @@ mod tests {
             provider_kind: cfg.provider_kind.clone(),
             provider_name: None,
             api_base: cfg.api_base.clone(),
-            api_key: String::new(),
+            api_key: api_key.to_string(),
             model: cfg.model.clone(),
             workdir: cfg.workdir.clone(),
             system: None,
@@ -1081,5 +1215,124 @@ mod tests {
         ] {
             assert!(!is_local_origin(&origin_header(o), &p), "{o} 应拒绝");
         }
+    }
+
+    // ── F-routes / F-202residue：Undo / SetPermissionMode / 202 响应体 ──
+    //（2026-08-25 审查：端点级 handler 测试，跟随本模块 oneshot 模式；
+    // 会话创建需磁盘隔离——MINICODING_HOME 指向临时目录，与 session_mgr
+    // 测试共用 crate::test_support 的锁防并行竞争）
+
+    use crate::test_support::{ENV_LOCK, EnvGuard};
+
+    /// 发送 JSON POST 请求。
+    async fn post_json(app: axum::Router, uri: &str, body: &str) -> axum::response::Response {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("req");
+        app.oneshot(req).await.expect("resp")
+    }
+
+    /// 读 JSON 响应体。
+    async fn resp_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// 隔离环境下建离线 app 并创建一个真实会话。
+    /// 返回 `(app, session_id, keep)`——`keep` 持有临时目录与 env guard，
+    /// 生命周期覆盖整个测试（SessionManager 构造时捕获路径，中途不可删目录）。
+    async fn setup_session() -> (axum::Router, String, (tempfile::TempDir, EnvGuard)) {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let guard = EnvGuard::set(&dir_str);
+        let app = offline_app();
+        let resp = post_json(app.clone(), "/sessions", "{}").await;
+        assert_eq!(resp.status(), StatusCode::OK, "create_session 应成功");
+        let id = resp_json(resp).await["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        (app, id, (dir, guard))
+    }
+
+    #[tokio::test]
+    async fn send_message_202_body_has_no_residual_fields() {
+        // F-202residue：202 响应体瘦身为 {accepted: true}，无 stop_reason/final_text
+        let _lock = ENV_LOCK.lock().await;
+        let (app, sid, _keep) = setup_session().await;
+        let resp = post_json(
+            app,
+            &format!("/sessions/{sid}/messages"),
+            r#"{"text":"hi"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = resp_json(resp).await;
+        assert_eq!(v, serde_json::json!({"accepted": true}), "响应体: {v}");
+    }
+
+    #[tokio::test]
+    async fn undo_nonexistent_session_returns_404() {
+        let _lock = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir.path().to_str().expect("utf8").to_string();
+        let _guard = EnvGuard::set(&dir_str);
+        let app = offline_app();
+        let resp = post_json(app, "/sessions/01NOPE/undo", r#"{"steps":1}"#).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn undo_on_fresh_session_conflicts_with_no_entries() {
+        // 空 journal → JournalError::NoEntries → 409（无可撤销条目）
+        let _lock = ENV_LOCK.lock().await;
+        let (app, sid, _keep) = setup_session().await;
+        let resp = post_json(app, &format!("/sessions/{sid}/undo"), r#"{"steps":1}"#).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = resp_json(resp).await;
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no entries"),
+            "错误信息应含 no entries: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_roundtrip_and_invalid_mode_rejected() {
+        let _lock = ENV_LOCK.lock().await;
+        let (app, sid, _keep) = setup_session().await;
+
+        // 合法模式：200 + ok + 回显 mode
+        let resp = post_json(
+            app.clone(),
+            &format!("/sessions/{sid}/permission-mode"),
+            r#"{"mode":"plan"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = resp_json(resp).await;
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert_eq!(v["mode"], serde_json::json!("plan"));
+
+        // 非法模式字符串：JSON 反序列化拒绝 → 422（axum Json rejection 对
+        // "语法合法但取值非法" 的默认状态码，仍属 4xx 客户端错误）
+        let resp = post_json(
+            app,
+            &format!("/sessions/{sid}/permission-mode"),
+            r#"{"mode":"nonsense"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

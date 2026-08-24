@@ -527,9 +527,9 @@ async fn handle_prompt(
         return Ok(());
     };
 
-    // 先订阅 EventBus，避免 spawn turn task 后错过早期事件
-    let runtime = session.runtime.clone();
-    let mut rx = runtime.events().subscribe();
+    // 先订阅已带 seq 的实时通道，避免 spawn turn task 后错过早期事件
+    // （2026-08-25 审查 F-seq：订阅端只读 seq，不再自行 push_event 分配）
+    let mut rx = session.subscribe_sequenced();
 
     // 后台 task 执行 send_message_boxed
     let mgr_clone = mgr.clone();
@@ -546,9 +546,9 @@ async fn handle_prompt(
             biased;
             turn_result = &mut turn_task => {
                 // drain 剩余事件
-                while let Ok(event) = rx.try_recv() {
-                    let seq = session.push_event(&event).await;
-                    forward_event_as_update(stdout, &conv_id, seq, &EventKind::from(&event)).await?;
+                while let Ok(item) = rx.try_recv() {
+                    let (seq, kind) = item;
+                    forward_event_as_update(stdout, &conv_id, seq, &kind).await?;
                 }
                 // 写最终响应
                 match turn_result {
@@ -572,9 +572,8 @@ async fn handle_prompt(
             }
             event_result = rx.recv() => {
                 match event_result {
-                    Ok(event) => {
-                        let seq = session.push_event(&event).await;
-                        forward_event_as_update(stdout, &conv_id, seq, &EventKind::from(&event)).await?;
+                    Ok((seq, kind)) => {
+                        forward_event_as_update(stdout, &conv_id, seq, &kind).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         tracing::warn!(conversation_id = %conv_id, "ACP event consumer lagged");

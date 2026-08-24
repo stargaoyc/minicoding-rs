@@ -172,9 +172,11 @@ export function applyChatEvent(
       effects.push("invalidate-sessions");
       break;
     case "permission_mode_changed": {
-      // Plan 模式可视化（遗留）：跟踪 mode 切换
-      const ev = event as { to?: string };
-      if (ev.to === "plan") {
+      // Plan 模式可视化（遗留）：跟踪 mode 切换。
+      // 2026-08-25 审查：EventDto 是 `{seq} & (…|…)` 的判别联合，switch 已把
+      // event 窄化为 permission_mode_changed 变体——直接读 `to` 字段
+      //（原 `as { to?: string }` 把强类型 PermissionMode 弱化成 string）
+      if (event.to === "plan") {
         set({ planActive: true });
       } else {
         set({ planActive: false });
