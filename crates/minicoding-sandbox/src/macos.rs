@@ -238,7 +238,7 @@ fn build_profile(policy: &SandboxPolicy) -> std::io::Result<String> {
         }
     }
 
-    p
+    Ok(p)
 }
 
 #[cfg(test)]
