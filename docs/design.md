@@ -3103,13 +3103,13 @@ async fn start_session(app: tauri::AppHandle) -> Result<SessionInfo, String> {
 | 凭证泄露到前端 | 凭证仅存 Rust 后端内存 + OS keyring，前端只看到脱敏后的 `***`（§13.3） |
 | SSE 跨会话串流 | SSE 端点校验 `session_id` 归属当前认证用户 |
 | Tauri WebView 远程内容 | Tauri 默认禁用远程内容，仅加载本地 `dist/`；CSP 严格 |
-| CORS 误配 | `--cors-origin` 默认仅 `http://localhost:*`，生产部署需显式配置 |
+| CORS 误配 | `--cors-origin` 默认仅 `http://localhost:*`，生产部署需显式配置；桌面模式 sidecar 启动时经 `--cors-origin` 显式加白 Tauri WebView origin（Windows `http://tauri.localhost`、macOS/Linux `tauri://localhost`，2026-08-24 用户反馈"创建失败：Failed to fetch"根因——WebView origin 不在默认本机白名单），serve 子命令默认策略不变；外部站点伪造 tauri origin 仍因无 token 而 401 |
 
 ### 26.7 与 §24 协议的关系
 
 M9 前端复用 §24 定义的全部 JSON-RPC 方法与 SSE 事件格式，**不引入新协议**。新增的只是：
 - `minicoding serve --web ./dist`：静态资源托管（HTTP `GET /` 返回 `index.html`）；
-- `--cors-origin`：CORS 配置（仅 Web 模式需要，桌面模式同源无需）；
+- `--cors-origin`：CORS 配置（Web 直连模式需要；桌面模式由 sidecar 启动参数自动加白 Tauri WebView origin，见 §26.6）；
 - Tauri sidecar 管理：桌面模式专属，不影响协议层。
 
 这保证 M9 的前端可以无缝切换"连本地 sidecar"或"连远程 server"，且 LSP/ACP 适配器（E-15..E-18）与 Web 前端共享同一后端，无重复实现。

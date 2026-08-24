@@ -189,6 +189,21 @@ fn force_kill_by_pid(pid: u32) {
     }
 }
 
+/// `Tauri` `WebView` 页面的 origin 常量（按平台区分）。
+///
+/// 桌面前端运行在系统 `WebView` 中，对 sidecar 的 HTTP 调用受浏览器 CORS 模型
+/// 约束：Windows 下 origin 为 `http://tauri.localhost`，macOS/Linux 下为
+/// `tauri://localhost`。两者均不在 server 默认本机白名单（`localhost` /
+/// `127.0.0.1` / `[::1]`，S2 精确 host 匹配）内，preflight 被拒后前端表现为
+/// `Failed to fetch`（2026-08-24 用户反馈"创建失败"根因）。sidecar 启动时经
+/// `--cors-origin` 显式加白这两个来源（非空列表走精确匹配路径），不改动
+/// serve 子命令的默认收敛策略。
+///
+/// 安全性：origin 白名单只影响带凭证读取响应；桌面 token 仅本机 `WebView`
+/// 持有，外部站点伪造 tauri origin 仍因无 token 而 401。
+#[cfg(feature = "desktop")]
+const TAURI_WEBVIEW_ORIGINS: &[&str] = &["http://tauri.localhost", "tauri://localhost"];
+
 /// 启动 sidecar（Tauri 版本，通过 `tauri-plugin-shell` sidecar API）。
 ///
 /// 仅 `desktop` feature 启用时可用。生产模式下 sidecar 二进制通过
@@ -218,6 +233,11 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         "--auth-token".into(),
         token.clone(),
     ];
+    // WebView origin 加白（见 [`TAURI_WEBVIEW_ORIGINS`] 文档）
+    for origin in TAURI_WEBVIEW_ORIGINS {
+        args.push("--cors-origin".into());
+        args.push((*origin).into());
+    }
     // 注入 provider 非敏感配置（从 config.toml 读取，API key 由 sidecar 读 keyring）
     args.extend(build_provider_args_from_config());
     if let Some(dir) = &web_dir {
