@@ -57,11 +57,13 @@ jobs:
           persist-credentials: false
 
       # 工具链与 ci.yml 对齐：钉住 nightly-2026-08-18。项目 MSRV 1.99 而当前
-      # stable 频道为 1.98（runner 镜像亦然），stable 永远无法满足 rust-version；
-      # v0.2.33 能过纯属裸 cargo 恰好解析到 nightly（dtolnay action 上游行为
-      # 变更后失效，v0.3.0 连续三次发布失败根因）。所有编译步骤显式
-      # `rustup run <toolchain>`，不依赖任何隐式解析；交叉目标 std 由 targets
-      # 参数直接装入该工具链。
+      # stable 频道为 1.98（runner 镜像亦然），stable 无法编译项目代码；v0.2.33
+      # 能过纯属裸 cargo 恰好解析到 nightly（dtolnay action 上游行为变更后失效，
+      # v0.3.0 连续发布失败的根因）。分工如下：
+      #   - 项目代码（server sidecar / desktop app）：nightly-2026-08-18，
+      #     所有编译步骤显式 `rustup run`，不依赖隐式解析；
+      #   - tauri-cli 外部工具：runner 预装 stable 即可（不涉及项目 MSRV）。
+      # 交叉目标 std 由 targets 参数直接装入 nightly 工具链。
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -92,7 +94,7 @@ jobs:
           node-version: '22'
 
       - name: Install cargo-tauri
-        run: rustup run nightly-2026-08-18 cargo install tauri-cli --version "^2" --locked
+        run: rustup run stable cargo install tauri-cli --version "^2" --locked
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
