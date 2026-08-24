@@ -5,4 +5,10 @@ import type { Risk } from "./Risk";
 /**
  * 权限请求提示（点对点交互）。
  */
-export type PermissionPrompt = { id: string, tool: string, summary: string, risk: Risk, options: Array<PromptOption>, };
+export type PermissionPrompt = {
+  id: string;
+  tool: string;
+  summary: string;
+  risk: Risk;
+  options: Array<PromptOption>;
+};
