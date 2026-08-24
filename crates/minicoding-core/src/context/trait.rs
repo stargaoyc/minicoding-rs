@@ -33,4 +33,10 @@ pub trait ContextManager: Send + Sync {
     ///
     /// 默认 no-op——不要求所有实现支持（如测试用 `ContextManager` 无需记录）。
     fn set_session_hint(&self, _id: &str) {}
+
+    /// 用 provider 返回的真实 `Usage.input_tokens` 校准本地 token 估算
+    /// （2026-08-23 审查遗留#2）：本地 BPE/近似分词与 provider 实际计费口径
+    /// 存在漂移，长会话累积显著。默认 no-op；实现方以指数平滑吸收校准值，
+    /// 避免单次异常值抖动。
+    fn calibrate(&self, _actual_input_tokens: usize) {}
 }

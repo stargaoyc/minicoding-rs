@@ -118,16 +118,28 @@ impl AnthropicProvider {
             "model": req.params.model,
             "messages": messages,
             "stream": true,
-            "max_tokens": req.params.max_output_tokens.unwrap_or(4_096),
+            // thinking 启用时输出预算须 > budget_tokens（Anthropic 约束）
+            "max_tokens": req.params.max_output_tokens.map_or(4_096, |m| {
+                m.max(req.params.thinking_budget_tokens.unwrap_or(0) as usize + 1)
+            }),
         });
 
-        // system prompt 顶层分离（Anthropic 不接受 messages 里的 system role）
+        // system prompt 顶层分离（Anthropic 不接受 messages 里的 system role）。
+        // prompt caching（2026-08-23 审查遗留#2）：system 尾块打 `cache_control`
+        // 断点——长会话 system（含 AGENTS.md/project doc）跨 turn 稳定，缓存命中
+        // 可省 ~90% 输入费用；此前解析了 cache_read 字段却从不发送断点，永远
+        // 打不进缓存。
         if !req.system.is_empty() {
-            body["system"] = json!(req.system);
+            body["system"] = json!([
+                { "type": "text", "text": req.system,
+                  "cache_control": { "type": "ephemeral" } }
+            ]);
         }
 
         if !req.tools.is_empty() {
-            let tools: Vec<Value> = req
+            // 工具 schema 同样跨 turn 稳定：末位工具打第二个断点
+            // （Anthropic 最多 4 个断点；system + tools 尾部两处覆盖最大稳定前缀）
+            let mut tools: Vec<Value> = req
                 .tools
                 .iter()
                 .map(|t| {
@@ -138,10 +150,24 @@ impl AnthropicProvider {
                     })
                 })
                 .collect();
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
             body["tools"] = Value::Array(tools);
         }
 
-        if let Some(t) = req.params.temperature {
+        // Extended thinking（2026-08-23 审查遗留#2）：budget_tokens 显式启用；
+        // Anthropic 要求 thinking 启用时不得携带 temperature——跳过之。
+        if let Some(budget) = req.params.thinking_budget_tokens {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+        }
+
+        if req.params.thinking_budget_tokens.is_none()
+            && let Some(t) = req.params.temperature
+        {
             body["temperature"] = json!(t);
         }
         if let Some(t) = req.params.top_p {
@@ -561,6 +587,7 @@ mod tests {
                 max_output_tokens: None,
                 stop: vec![],
                 seed: None,
+                thinking_budget_tokens: None,
             },
         }
     }
@@ -728,6 +755,80 @@ mod tests {
     }
 
     #[test]
+    fn build_request_body_prompt_caching_breakpoints() {
+        // 2026-08-23 审查遗留#2：system 尾块与末位工具打 cache_control 断点
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let req = ChatRequest {
+            system: "rules".into(),
+            messages: vec![],
+            tools: vec![
+                ToolSchema {
+                    name: "a".into(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+                ToolSchema {
+                    name: "b".into(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+            ],
+            params: minicoding_core::provider::GenerationParams {
+                model: "claude-3-5-sonnet".into(),
+                temperature: None,
+                top_p: None,
+                max_output_tokens: Some(1_024),
+                stop: vec![],
+                seed: None,
+                thinking_budget_tokens: None,
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(
+            body["system"][0]["cache_control"]["type"],
+            json!("ephemeral"),
+            "system 尾块应打缓存断点"
+        );
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"]["type"],
+            json!("ephemeral")
+        );
+    }
+
+    #[test]
+    fn build_request_body_thinking_disables_temperature() {
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let req = ChatRequest {
+            system: String::new(),
+            messages: vec![],
+            tools: vec![],
+            params: minicoding_core::provider::GenerationParams {
+                model: "claude-3-5-sonnet".into(),
+                temperature: Some(0.7),
+                top_p: None,
+                max_output_tokens: Some(2_000),
+                stop: vec![],
+                seed: None,
+                thinking_budget_tokens: Some(1_500),
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["thinking"]["type"], json!("enabled"));
+        assert_eq!(body["thinking"]["budget_tokens"], 1_500);
+        assert!(
+            body.get("temperature").is_none(),
+            "thinking 启用时应省略 temperature"
+        );
+        // 输出预算 > budget
+        assert_eq!(body["max_tokens"], 2_000);
+    }
+
+    #[test]
     fn build_request_body_separates_system() {
         let provider =
             AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
@@ -743,11 +844,13 @@ mod tests {
                 max_output_tokens: Some(1_024),
                 stop: vec![],
                 seed: None,
+                thinking_budget_tokens: None,
             },
         };
         let body = provider.build_request_body(&req);
         // system 顶层分离，不在 messages 里
-        assert_eq!(body["system"], "You are helpful.");
+        // 缓存断点后 system 为单元素数组（text + cache_control）
+        assert_eq!(body["system"][0]["text"], "You are helpful.");
         assert_eq!(body["messages"][0]["role"], "user");
         assert!(body["messages"][0].get("system").is_none());
         assert_eq!(body["max_tokens"], 1_024);
@@ -1086,13 +1189,14 @@ mod tests {
                 max_output_tokens: Some(512),
                 stop: vec!["END".to_string()],
                 seed: None,
+                thinking_budget_tokens: None,
             },
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["model"], "claude-3-5-sonnet");
         assert_eq!(body["stream"], true);
         assert_eq!(body["max_tokens"], 512);
-        assert_eq!(body["system"], "rules");
+        assert_eq!(body["system"][0]["text"], "rules");
         assert_eq!(body["tools"][0]["name"], "fs.read");
         assert_eq!(body["tools"][0]["description"], "read a file");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");

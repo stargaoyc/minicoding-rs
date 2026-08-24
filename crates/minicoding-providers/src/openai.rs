@@ -489,6 +489,7 @@ mod tests {
                 max_output_tokens: None,
                 stop: vec![],
                 seed: None,
+                thinking_budget_tokens: None,
             },
         }
     }
@@ -777,6 +778,7 @@ mod tests {
                 max_output_tokens: Some(1024),
                 stop: vec!["END".to_string()],
                 seed: Some(42),
+                thinking_budget_tokens: None,
             },
         };
         let body = provider.build_request_body(&req);

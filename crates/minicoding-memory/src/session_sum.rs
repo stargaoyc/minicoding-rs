@@ -169,6 +169,7 @@ async fn call_llm_summary(provider: &dyn LlmProvider, input: &str) -> Result<Str
             max_output_tokens: Some(MAX_SUMMARY_TOKENS),
             stop: Vec::new(),
             seed: None,
+            thinking_budget_tokens: None,
         },
     };
 

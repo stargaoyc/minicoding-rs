@@ -41,6 +41,13 @@ pub struct GenerationParams {
     pub max_output_tokens: Option<usize>,
     pub stop: Vec<String>,
     pub seed: Option<u64>,
+    /// Extended thinking 预算（token，2026-08-23 审查遗留#2）。
+    ///
+    /// `Some(n)` 且 provider 支持时启用思考模式（Anthropic `thinking.budget_tokens`，
+    /// `OpenAI` 映射为 `reasoning_effort` 由各实现自行决策）；`None` 保持默认。
+    /// 注意：budget 应显著小于 `max_output_tokens`（Anthropic 要求 thinking
+    /// 计入输出预算）。
+    pub thinking_budget_tokens: Option<u32>,
 }
 
 /// 一次对话请求。

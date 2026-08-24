@@ -495,7 +495,9 @@ impl Runtime {
                     // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
                     // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。
                     req.messages = super::repair::repair_request_messages(req.messages);
-                    let (assistant_msg, llm_stop_reason) = match self.stream_llm(req).await {
+                    let (assistant_msg, llm_stop_reason, llm_usage) =
+                        match self.stream_llm(req).await
+                        {
                         Ok(msg) => msg,
                         Err(e) => {
                             metrics::record_error("llm");
@@ -509,6 +511,10 @@ impl Runtime {
                         return Err(RuntimeError::Storage(e));
                     }
                     self.ctx.append(assistant_msg.clone()).await;
+                    // count_tokens 校准（遗留#2）：真实 input_tokens 回灌本地估算
+                    if let Some(u) = llm_usage {
+                        self.ctx.calibrate(u.input_tokens);
+                    }
                     let event = Event::MessageAppended(assistant_msg.clone());
                     self.persist_event(&event).await;
                     self.events.emit(event);
@@ -796,7 +802,8 @@ impl Runtime {
     async fn stream_llm(
         &self,
         req: ChatRequest,
-    ) -> Result<(Message, Option<StopReason>), crate::model::LlmError> {
+    ) -> Result<(Message, Option<StopReason>, Option<crate::provider::Usage>), crate::model::LlmError>
+    {
         let timer = metrics::start_timer();
         let model_name = req.params.model.clone();
         let provider_id = self.provider.id();
@@ -841,7 +848,8 @@ impl Runtime {
                             salvaged_chars = text_chars,
                             "llm stream error mid-turn; salvaging partial text output (stop_reason=Stopped)"
                         );
-                        return Ok((acc.finalize(), Some(StopReason::Stopped)));
+                        let usage = acc.usage().cloned();
+                        return Ok((acc.finalize(), Some(StopReason::Stopped), usage));
                     }
                     return Err(e);
                 }
@@ -894,7 +902,8 @@ impl Runtime {
         // Metrics: 记录 LLM 调用延迟
         metrics::record_elapsed("llm_call_duration_ms", "model", &model_name, timer);
         let stop_reason = acc.stop_reason().cloned();
-        Ok((acc.finalize(), stop_reason))
+        let usage = acc.usage().cloned();
+        Ok((acc.finalize(), stop_reason, usage))
     }
 
     /// 执行工具调用（无副作用并行、有副作用串行 + 权限检查）。
