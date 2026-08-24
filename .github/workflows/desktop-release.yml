@@ -64,6 +64,14 @@ jobs:
       - name: Install stable Rust for cargo-tauri
         uses: dtolnay/rust-toolchain@stable
 
+      # 交叉编译目标（如 macos-x86_64 在 arm runner 上）的 std 必须在"实际执行
+      # cargo 的工具链"上存在：后续步骤的裸 cargo 解析到 nightly 还是 stable 取决
+      # 于 dtolnay action 的安装顺序（上游行为曾变化，v0.3.0 曾因此 E0463 失败），
+      # 因此对 stable 也显式补齐 ${{ matrix.target }}（host 目标时为幂等空操作）；
+      # nightly 已由上方 targets 参数覆盖。
+      - name: Ensure target std on stable toolchain
+        run: rustup target add --toolchain stable ${{ matrix.target }}
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
