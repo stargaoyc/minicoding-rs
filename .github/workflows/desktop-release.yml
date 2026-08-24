@@ -56,20 +56,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # 工具链与 ci.yml 对齐：钉住 nightly-2026-08-18。项目 MSRV 1.99 而当前
+      # stable 频道为 1.98（runner 镜像亦然），stable 永远无法满足 rust-version；
+      # v0.2.33 能过纯属裸 cargo 恰好解析到 nightly（dtolnay action 上游行为
+      # 变更后失效，v0.3.0 连续三次发布失败根因）。所有编译步骤显式
+      # `rustup run <toolchain>`，不依赖任何隐式解析；交叉目标 std 由 targets
+      # 参数直接装入该工具链。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-18
           targets: ${{ matrix.target }}
-
-      - name: Install stable Rust for cargo-tauri
-        uses: dtolnay/rust-toolchain@stable
-
-      # 编译统一走字面名 stable 工具链（所有步骤显式 `rustup run stable`，不依赖
-      # dtolnay 安装后的隐式解析）。runner 镜像预装 stable 可能落后于项目
-      # rust-version（v0.3.0 曾因镜像停留在 1.98 而 MSRV 拒绝），故此步强制刷新到
-      # 最新 stable 并同时补齐 ${{ matrix.target }} 的 std（host 目标时为幂等操作）。
-      - name: Refresh stable toolchain with build target
-        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -95,7 +92,7 @@ jobs:
           node-version: '22'
 
       - name: Install cargo-tauri
-        run: rustup run stable cargo install tauri-cli --version "^2" --locked
+        run: rustup run nightly-2026-08-18 cargo install tauri-cli --version "^2" --locked
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -117,7 +114,7 @@ jobs:
           pnpm run build
 
       - name: Build minicoding-server binary
-        run: rustup run stable cargo build --release -p minicoding-server --target ${{ matrix.target }}
+        run: rustup run nightly-2026-08-18 cargo build --release -p minicoding-server --target ${{ matrix.target }}
 
       - name: Place sidecar binary (Unix)
         if: runner.os != 'Windows'
@@ -137,7 +134,7 @@ jobs:
 
       - name: Tauri build
         working-directory: crates/minicoding-desktop
-        run: rustup run stable cargo tauri build --target ${{ matrix.target }} --features desktop
+        run: rustup run nightly-2026-08-18 cargo tauri build --target ${{ matrix.target }} --features desktop
 
       - name: List bundle output
         # 调试：显示 Tauri 产出的 bundle 文件（cargo tauri build 使用 workspace target/）
