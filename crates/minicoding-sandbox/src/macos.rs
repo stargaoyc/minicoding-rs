@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn build_profile_readonly_denies_writes() {
-        let p = build_profile(&SandboxPolicy::ReadOnly);
+        let p = build_profile(&SandboxPolicy::ReadOnly).expect("profile");
         assert!(p.contains("(deny file-write*)"));
         assert!(p.contains("(allow file-read*)"));
         // ReadOnly 不应放行任何写路径
@@ -281,7 +281,8 @@ mod tests {
         let p = build_profile(&SandboxPolicy::WorkspaceWrite {
             workdir: Utf8PathBuf::from("/tmp/test-workdir"),
             writable: vec![Utf8PathBuf::from("/tmp/test-extra")],
-        });
+        })
+        .expect("profile");
         assert!(p.contains("(deny file-write*)"));
         assert!(p.contains("(allow file-write* (subpath \"/tmp/test-workdir\"))"));
         assert!(p.contains("(allow file-write* (subpath \"/tmp/test-extra\"))"));
