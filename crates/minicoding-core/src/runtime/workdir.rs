@@ -86,7 +86,7 @@ impl Runtime {
         };
         self.persist_event(&event).await;
         self.events.emit(event);
-        self.record_permission_audit("workspace.switch", &decision, Some(prompt_id))
+        self.record_permission_audit("workspace.switch", &decision, Some(prompt_id), None)
             .await;
 
         match decision {

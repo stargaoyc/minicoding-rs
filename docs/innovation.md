@@ -112,7 +112,7 @@ minicoding-rs (workspace)
     ├── minicoding-memory        # 长期/Auto/会话记忆 + AGENTS.md loader
     ├── minicoding-hooks         # HookRegistry + ScriptHook + asyncRewake
     ├── minicoding-journal       # FileChangeJournal + /undo
-    ├── minicoding-sandbox       # OS 沙箱驱动（sandbox-run + landlock + libseccomp）
+    ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock 直连，seccomp 待接入）
     ├── minicoding-mcp           # MCP client/server（rmcp 2.2）+ 进程池
     ├── minicoding-storage       # JSONL 存储 + audit.log + EventStore
     ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）+ 小 LLM
@@ -316,7 +316,7 @@ OS 沙箱是 **opt-out 而非 opt-in**（参考 Codex）：`WorkspaceWrite` 是�
 
 `minicoding-rs` 在 Codex 思路基础上做了三层创新：
 
-1. **不自研胶水**：用 `sandbox-run` 统一跨平台 API，底层调 `landlock`/`libseccomp`/Seatbelt，避免手写 ruleset/profile 易错（见 `tech-stack.md` §11、§13）；
+1. **轻量自研胶水**：原选 ~~`sandbox-run`~~ 因 EUPL-1.2 许可证不合规弃用，改为自研 pre_exec 胶水（Linux `landlock` 直连 / macOS `sandbox_init` FFI / Windows Job Object），ruleset 构建仍复用官方 crate，避免手写 BPF（见 `tech-stack.md` §11、§13）；
 2. **沙箱拒绝熔断器**（C-30）：单 turn 内累计沙箱拒绝 ≥3 次触发熔断，防 Agent 反复撞墙烧 token（`security.md` §8.8）；
 3. **沙箱拒绝检测与升级流**（`security.md` §8.7）：denial 签名库把沙箱拒绝从普通错误中识别，升级为权限请求而非裸失败，用户可批准放宽重试。
 
@@ -1286,7 +1286,7 @@ AI 助手在写代码时容易「自信地编造 API」或「为通过测试而�
 |------|-----------|---------------|--------|
 | 语言 | Rust | Rust 2024 | 同语言，edition 2024 + MSRV 1.99 |
 | 架构 | 单一 CLI 偏向 | 多 crate workspace + 可嵌入 SDK | 可嵌入、多形态 |
-| 沙箱 | Landlock/Seatbelt/Windows 受限令牌 | 同（参考 Codex）+ sandbox-run 统一 API | 不自研胶水、跨平台统一 |
+| 沙箱 | Landlock/Seatbelt/Windows 受限令牌 | 同（参考 Codex）+ 自研 pre_exec 胶水 | landlock 直连原生隔离、无 EUPL 依赖 |
 | 审批模式 | Untrusted/OnFailure/OnRequest/Never | 同（参考 Codex）+ 预设 | 预设一键选定 |
 | `/undo` | `/rewind` 未实现冲突检测 | FileChangeJournal + 冲突检测（C-28） | 安全回滚，不覆盖外部编辑 |
 | AGENTS.md | 不可被 Agent 编辑 | 同（C-23 L0 硬约束） | 强化为 L0，启动自检 |
@@ -1450,4 +1450,4 @@ AI 助手在写代码时容易「自信地编造 API」或「为通过测试而�
 | `docs/architecture.md` | 分层架构、组件协作、横切关注点 |
 | `docs/hooks.md` | 10 类 Hook 事件、asyncRewake、安全约束 |
 | `docs/m9-design.md` | Web 前端、Tauri 桌面、全 Rust 工具链 |
-| `docs/features.md` | 功能清单（182 项）、优先级映射、依赖链 |
+| `docs/features.md` | 功能清单（204 项）、优先级映射、依赖链 |

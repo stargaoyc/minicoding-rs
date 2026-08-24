@@ -2,7 +2,7 @@
 # 桌面应用构建脚本（本地开发 + CI 共用）。
 #
 # 流程：
-#   1. 构建 Web 前端（npm ci + npm run build → crates/minicoding-web/dist/）
+#   1. 构建 Web 前端（pnpm install --frozen-lockfile + pnpm run build → crates/minicoding-web/dist/）
 #   2. 构建 minicoding-server 二进制（cargo build --release -p minicoding-server）
 #   3. 将 server 二进制复制到 crates/minicoding-desktop/binaries/minicoding-server-<triple>
 #      （Tauri 2.x externalBin 约定：自动追加 host target triple 后缀）
@@ -13,7 +13,7 @@
 #   ./scripts/build-desktop.sh aarch64-apple-darwin  # 交叉编译指定 target
 #
 # 依赖：
-#   - Node.js + npm
+#   - Node.js + pnpm（CI 经 pnpm/action-setup 安装，本地需自备）
 #   - Rust toolchain
 #   - cargo-tauri（`cargo install tauri-cli --version "^2"`）
 #   - 平台 GUI 系统库（Linux: webkit2gtk-4.1/glib/dbus；macOS/Windows 自带）
@@ -33,17 +33,17 @@ if ! command -v cargo-tauri >/dev/null 2>&1; then
   exit 1
 fi
 
-# 探测 npm
-if ! command -v npm >/dev/null 2>&1; then
-  echo "❌ npm 未安装" >&2
+# 探测 pnpm（与 CI 一致：pnpm/action-setup 安装后 PATH 可用）
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "❌ pnpm 未安装" >&2
   exit 1
 fi
 
 echo "==> [1/4] 构建 Web 前端（crates/minicoding-web）"
 (
   cd crates/minicoding-web
-  npm ci
-  npm run build
+  pnpm install --frozen-lockfile
+  pnpm run build
 )
 echo "✓ 前端构建完成：crates/minicoding-web/dist/"
 

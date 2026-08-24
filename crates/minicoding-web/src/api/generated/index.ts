@@ -32,7 +32,6 @@ export type { Role } from "./Role";
 export type { SandboxDenyInfo } from "./SandboxDenyInfo";
 export type { SandboxDenyKind } from "./SandboxDenyKind";
 export type { SendMessageBody } from "./SendMessageBody";
-export type { SendMessageResponse } from "./SendMessageResponse";
 export type { ServerConfigResponse } from "./ServerConfigResponse";
 export type { Session } from "./Session";
 export type { SessionConfig } from "./SessionConfig";

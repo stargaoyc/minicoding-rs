@@ -31,9 +31,9 @@ dist-ssr
 *.local
 
 # Tauri 桌面应用构建产物（sidecar 二进制 + bundle）
+# gen/schemas/ 为 tauri 生成但有意跟踪的 schema 文件，不在此忽略
 crates/minicoding-desktop/binaries/
 crates/minicoding-desktop/target/
-crates/minicoding-desktop/gen/schemas/
 
 # Editor directories and files
 .vscode/*

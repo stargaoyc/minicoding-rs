@@ -462,6 +462,7 @@ impl RuntimeBuilder {
             last_non_whitelist_sig: std::sync::Mutex::new(None),
             hot_reload_baseline,
             policy_persist: self.policy_persist,
+            session_allows: std::sync::Mutex::new(std::collections::HashSet::new()),
             rewake: self
                 .rewake
                 .unwrap_or_else(|| Arc::new(crate::hooks::NoopAsyncRewakeScheduler)),

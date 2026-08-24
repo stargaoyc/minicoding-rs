@@ -255,7 +255,7 @@ windows = { version = "...", features = ["..."] }
 - 统一 `RuntimeConfig`（core 定义）
 - 加载优先级：CLI 参数 > 环境变量 > `MINICODING_HOME/config.toml` > 内置默认；project 级分层加载未实现（规划项，见 `docs/roadmap.md`）
 - 路径约定：`~/.minicoding/`（见 `docs/modules.md` §1.2 `paths.rs`）
-- profiles 支持切换（如 `default`/`strict`/`danger`）
+- profiles 支持切换（如 `default`/`strict`/`danger`）（profiles 未实现，规划项）
 
 ### 3.9 事件总线与权限交互
 
@@ -299,7 +299,7 @@ windows = { version = "...", features = ["..."] }
 
 ### 4.5 功能 ID 与约束 ID 同步
 
-`docs/features.md` 的功能项与 `docs/rules.md` 的约束必须一一对应（新增功能同步新增约束）。
+`docs/features.md` 的功能项编号（A/T/C/M/H/E/P/X/W-xx 等）与 `docs/rules.md` 的约束编号（C-01..C-35）属不同命名空间，不可混引。约束↔设计位置的映射见 `docs/rules.md` §6；功能↔约束的对照表暂未建立，属待建项——涉及约束的功能改动须在 `docs/rules.md` 中核对对应 C-xx 约束并同步更新其实现层要求。
 
 ### 4.6 统计表准确
 
@@ -513,7 +513,7 @@ minicoding-web/src/
 
 ### 8.4 类型契约（DTO 自动生成）
 
-- `minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 自动生成 TypeScript 类型 + Zod schema，**不手写双份**；
+- `minicoding-protocol` 的 Rust DTO 通过 `ts-rs`（已选型）自动生成 TypeScript 类型 + Zod schema，**不手写双份**；
 - 生成产物放 `minicoding-web/src/api/generated/`，**不手动编辑**（文件头标注 `// AUTO-GENERATED, DO NOT EDIT`）；
 - 后端 DTO 变更后，前端 `npm run gen-types` 重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）；
 - 运行时校验：JSON-RPC 响应必须经 Zod parse 后才进入业务层，防止后端 schema 漂移导致运行时错误。

@@ -147,14 +147,14 @@ tool_result 回灌 LLM + 审计落盘
 
 ```rust
 /// 内建/SDK 用的进程内 Hook；外部脚本走 ScriptHook 适配器实现本 trait。
-#[trait_variant::make(Hook: Send)]
-pub trait Hook {
+pub trait Hook: Send + Sync {
     /// 唯一名
     fn name(&self) -> &str;
     /// 命中哪些事件与工具（matcher）
     fn matcher(&self) -> &HookMatcher;
-    /// 处理
-    async fn run(&self, input: HookInput) -> Result<HookOutput, HookError>;
+    /// 处理（返回 `BoxFuture` 保证 `dyn` 兼容——`async fn in trait` 的 dyn 兼容需 boxed future，
+    /// 与 core `hooks::Hook` 定义一致；不引入 trait-variant/async-trait）
+    fn run(&self, input: HookInput) -> BoxFuture<'_, Result<HookOutput, HookError>>;
 }
 
 pub struct HookMatcher {
