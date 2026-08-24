@@ -11,13 +11,26 @@
 //! 同时初始化系统托盘 + 全局快捷键（W-07）。
 //! 需要系统 webview 运行时（`webkit2gtk` Linux / `WebKit` macOS / `WebView2` Windows）。
 
+// Windows 下以 GUI 子系统编译（2026-08-23 用户反馈）：否则启动时除应用窗外
+// 还会弹出一个承载 stdout/stderr 日志的控制台窗口。日志统一改写
+// `<安装目录>/logs/`（见下方 log dir 与 plugin targets），开发调试读文件即可。
+#![windows_subsystem = "windows"]
 #![deny(clippy::all, clippy::pedantic)]
 
 use minicoding_core::config::ProviderConfig;
 use minicoding_desktop::{config, sidecar, tray};
 use tauri::Manager;
 
-/// panic 日志文件名（写入 temp 目录，Windows 下 `%TEMP%\\minicoding-panic.log`）。
+/// 日志目录：`<安装目录>/logs/`（exe 同级，2026-08-23 用户反馈——日志不再
+/// 弹控制台窗口/散落 temp）。取 exe 所在目录；获取失败回退系统 temp。
+fn resolve_log_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// panic 日志文件名（位于 [`resolve_log_dir`] 目录）。
 const PANIC_LOG_FILE: &str = "minicoding-panic.log";
 
 /// 将 panic 信息直接写入临时文件（不依赖 log crate，确保 logger 未初始化时也能记录）。
@@ -29,7 +42,9 @@ fn write_panic_to_file(location: &str, payload: &str) {
     let timestamp = chrono_like_timestamp();
 
     // 获取系统临时目录
-    let log_path = std::env::temp_dir().join(PANIC_LOG_FILE);
+    let mut log_path = resolve_log_dir();
+    let _ = std::fs::create_dir_all(&log_path);
+    log_path.push(PANIC_LOG_FILE);
 
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -88,9 +103,12 @@ fn main() {
                 // 内部调试日志）；业务日志从 INFO 起
                 .level(log::LevelFilter::Info)
                 .targets([
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    // Webview 目标仅转发到前端 devtools（不产生窗口），保留
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    // 日志写安装目录 logs/（2026-08-23 用户反馈：不再弹控制台/
+                    // 不散落系统 LogDir；GUI 子系统下 Stdout 无处输出，移除）
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                        path: resolve_log_dir(),
                         file_name: Some("minicoding".to_string()),
                     }),
                 ])
