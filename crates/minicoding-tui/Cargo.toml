@@ -20,8 +20,11 @@ path = "src/main.rs"
 [dependencies]
 minicoding-core = { workspace = true }
 minicoding-policy = { workspace = true }
-# TUI 不需要 keyring（凭证由 CLI/serve 管理）——去掉 cred-keyring
-minicoding-sdk = { workspace = true, default-features = false, features = [
+# TUI 不需要 keyring（凭证由 CLI/serve 管理）——去掉 cred-keyring。
+# 不走 workspace 继承：新版 cargo（≥1.92）禁止成员对继承依赖覆写
+# default-features（"`default-features = false` cannot override workspace's
+# `default-features`"），直接声明 path 依赖以兼容新旧两代 cargo。
+minicoding-sdk = { path = "../minicoding-sdk", default-features = false, features = [
     "sandbox", "hooks", "file-undo", "web", "extensions",
 ] }
 minicoding-storage = { workspace = true }
