@@ -6,9 +6,19 @@
 //! ## 流程
 //!
 //! 1. `git worktree add -b {branch} {worktree_path}` 创建隔离工作目录
-//! 2. 委托内部 runner 执行子 Agent（worktree 路径通过 spec 传入）
+//! 2. 委托内部 runner 执行子 Agent（worktree 路径经 `spec.workdir` 传入，
+//!    见下方"内层 runner 契约"）
 //! 3. 按 `merge_back` 策略合并改动回主 worktree
 //! 4. `auto_cleanup` 时删除 worktree + 分支
+//!
+//! ## 内层 runner 契约（2026-08-25 审查 T-1）
+//!
+//! 本装饰器创建 worktree 成功后，**必须**把 worktree 绝对路径写入
+//! `spec.workdir` 再委托内层 runner；内层 runner 构造子 Runtime 时以该字段为
+//! 工作目录（`ToolContext::workdir`）。当前 sdk/cli 尚无真实内层 runner 实现
+//! （默认注入 `NoopSubagentRunner`），未来实现时若忽略 `spec.workdir`，
+//! 子 Agent 将在父进程 CWD 工作，worktree 隔离空转——接线点见
+//! `SubagentSpec.workdir` 字段文档。
 //!
 //! ## 降级
 //!
@@ -192,6 +202,11 @@ impl SubagentRunner for WorktreeSubagentRunner {
                                     worktree = %worktree_path,
                                     "worktree 已创建"
                                 );
+                                // T-1（2026-08-25 审查）：把 worktree 绝对路径写入
+                                // spec.workdir 再委托内层 runner——内层 runner 构造
+                                // 子 Runtime 时以该字段为工作目录。此前未传递，
+                                // 子 Agent 在父进程 CWD 工作，worktree 隔离空转。
+                                spec.workdir = Some(worktree_path.clone());
                                 Some((worktree_path, branch, wt_spec))
                             }
                             Err(e) => {
@@ -209,12 +224,22 @@ impl SubagentRunner for WorktreeSubagentRunner {
             };
 
             // 委托内部 runner 执行
-            let result = self.inner.spawn(spec, input).await;
+            let mut result = self.inner.spawn(spec, input).await;
 
             // 处理 worktree 合并与清理
             if let Some((worktree_path, branch, wt_spec)) = worktree_info {
                 if let Err(e) = self.merge_back(&branch, wt_spec.merge_back).await {
                     tracing::warn!(error = %e, branch = %branch, "合并 worktree 改动失败");
+                    // T-2（2026-08-25 审查）：合并失败不能只记 warn——父 Agent 仅能
+                    // 看到 `SubagentResult`，若 summary 不注明，父 Agent 会误以为
+                    // 改动已落回主分支。侵入最小的方案：summary 前缀标注失败事实。
+                    if let Ok(r) = result.as_mut() {
+                        r.summary = format!(
+                            "[警告] worktree 分支 {branch} 的改动合并回主分支失败（{e}），\
+                             以下结论基于 worktree 内的执行状态。\n{}",
+                            r.summary
+                        );
+                    }
                 }
 
                 if wt_spec.auto_cleanup {
@@ -370,8 +395,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
         setup_git_repo(&workdir).await;
-        // 内部 runner 在 worktree 中创建一个文件并提交（通过 spec.workdir 传入）
-        let inner: Arc<dyn SubagentRunner> = Arc::new(CommittingRunner);
+        // 内部 runner 在 spec.workdir（worktree 路径）中创建一个文件并提交
+        let inner: Arc<dyn SubagentRunner> = Arc::new(CommittingRunner {
+            captured: Arc::new(Mutex::new(None)),
+        });
         let runner = WorktreeSubagentRunner::new(inner, workdir.clone());
 
         let mut spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
@@ -389,7 +416,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
         setup_git_repo(&workdir).await;
-        let inner: Arc<dyn SubagentRunner> = Arc::new(CommittingRunner);
+        let inner: Arc<dyn SubagentRunner> = Arc::new(CommittingRunner {
+            captured: Arc::new(Mutex::new(None)),
+        });
         let runner = WorktreeSubagentRunner::new(inner, workdir.clone());
 
         let mut spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
@@ -636,9 +665,14 @@ mod tests {
         }
     }
 
-    /// 提交 runner：在 `spec` 的 workdir（如果有）中创建一个文件并提交。
-    /// 用于测试 cherry-pick/merge 合并路径（需要 worktree 分支有新 commit）。
-    struct CommittingRunner;
+    /// 提交 runner：在 `spec.workdir`（worktree 路径）中创建一个文件并提交。
+    /// 用于测试 cherry-pick/merge 合并路径（需要 worktree 分支有新 commit），
+    /// 同时捕获收到的 `spec.workdir` 供 T-1 断言（2026-08-25 审查：原实现
+    /// 在测试进程 CWD 写文件并提交——自欺式验证，从未真正进入 worktree）。
+    struct CommittingRunner {
+        /// 捕获内层 runner 实际收到的 `spec.workdir`。
+        captured: Arc<Mutex<Option<camino::Utf8PathBuf>>>,
+    }
 
     impl SubagentRunner for CommittingRunner {
         fn spawn(
@@ -646,27 +680,98 @@ mod tests {
             spec: SubagentSpec,
             _input: String,
         ) -> BoxFuture<'_, Result<SubagentResult, RuntimeError>> {
+            let captured = self.captured.clone();
             Box::pin(async move {
-                // spec.system_prompt 在 WorktreeSubagentRunner 中未被修改，
-                // 但 worktree 路径通过 spec 间接传递——实际实现中 runner 会
-                // 通过 spec.isolation 获取 worktree 路径。此处我们简单地在
-                // 当前工作目录创建文件并提交（测试环境已 cd 到 worktree）。
-                // 由于我们无法直接获取 worktree 路径，这里通过 isolation 提取。
-                if let Isolation::Worktree(_) = spec.isolation {
-                    // 在当前工作目录创建文件并提交
-                    let file = "subagent_artifact.txt";
-                    std::fs::write(file, "subagent content\n").map_err(RuntimeError::Io)?;
-                    let _ = tokio::process::Command::new("git")
-                        .args(["add", file])
-                        .output()
-                        .await;
-                    let _ = tokio::process::Command::new("git")
-                        .args(["commit", "-m", "subagent work"])
-                        .output()
-                        .await;
-                }
+                // T-1 契约：WorktreeSubagentRunner 必须传入 spec.workdir；
+                // 缺失说明装饰器未接线，直接失败暴露问题而非静默在 CWD 提交。
+                let Some(workdir) = spec.workdir.clone() else {
+                    return Err(RuntimeError::Config(
+                        "CommittingRunner: spec.workdir 未设置（T-1：worktree 路径必须经 spec 传入）"
+                            .to_string(),
+                    ));
+                };
+                *captured.lock().unwrap() = Some(workdir.clone());
+
+                let file = "subagent_artifact.txt";
+                std::fs::write(workdir.join(file).as_std_path(), "subagent content\n")
+                    .map_err(RuntimeError::Io)?;
+                let _ = tokio::process::Command::new("git")
+                    .args(["add", file])
+                    .current_dir(workdir.as_std_path())
+                    .output()
+                    .await;
+                let _ = tokio::process::Command::new("git")
+                    .args(["commit", "-m", "subagent work"])
+                    .current_dir(workdir.as_std_path())
+                    .output()
+                    .await;
                 Ok(SubagentResult::completed("committed".to_string(), 10))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_with_worktree_passes_worktree_path_as_spec_workdir() {
+        // T-1 回归（2026-08-25 审查）：委托给 inner 的 spec.workdir 必须 == 创建的
+        // worktree 路径，且子 Agent 的产物确实落在该目录内。
+        let tmp = tempfile::tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
+        setup_git_repo(&workdir).await;
+
+        let captured: Arc<Mutex<Option<camino::Utf8PathBuf>>> = Arc::new(Mutex::new(None));
+        let inner: Arc<dyn SubagentRunner> = Arc::new(CommittingRunner {
+            captured: Arc::clone(&captured),
+        });
+        let runner = WorktreeSubagentRunner::new(inner, workdir.clone());
+
+        let mut spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
+        let mut wt_spec = WorktreeSpec::new();
+        wt_spec.auto_cleanup = false; // 保留 worktree 供事后断言
+        wt_spec.merge_back = MergeStrategy::None;
+        spec.isolation = Isolation::Worktree(wt_spec);
+
+        let result = runner.spawn(spec, "test".to_string()).await;
+        assert!(result.is_ok(), "spawn 应成功: {result:?}");
+
+        let got = captured.lock().unwrap().clone().expect("inner 应收到 spec");
+        // worktree 路径形如 {workdir}/.minicoding/worktrees/subagent/<ulid>
+        assert!(
+            got.starts_with(workdir.join(".minicoding").join("worktrees")),
+            "spec.workdir 应指向 worktrees 目录之下: {got}"
+        );
+        // 子 Agent 产物应真实落在 worktree 内（而非父进程 CWD）
+        assert!(
+            got.join("subagent_artifact.txt").exists(),
+            "子 Agent 产物应存在于 worktree 内: {got}"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_failure_is_surfaced_in_summary() {
+        // T-2 回归（2026-08-25 审查）：merge_back 失败时 summary 必须前缀注明，
+        // 保证父 Agent 可感知（不能只记 warn 且结果照常 completed）。
+        let tmp = tempfile::tempdir().unwrap();
+        let workdir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
+        setup_git_repo(&workdir).await;
+        // OkRunner 不产生任何 commit → cherry-pick 空分支必然失败
+        let inner: Arc<dyn SubagentRunner> = Arc::new(OkRunner::default());
+        let runner = WorktreeSubagentRunner::new(inner, workdir.clone());
+
+        let mut spec = SubagentSpec::default_for(SubagentType::GeneralPurpose);
+        let mut wt_spec = WorktreeSpec::new();
+        wt_spec.merge_back = MergeStrategy::CherryPick;
+        spec.isolation = Isolation::Worktree(wt_spec);
+
+        let result = runner
+            .spawn(spec, "test".to_string())
+            .await
+            .expect("merge 失败不应使 spawn 返回 Err");
+        assert!(
+            result.summary.contains("合并回主分支失败"),
+            "summary 应注明合并失败: {}",
+            result.summary
+        );
+        // 原 inner 结论仍保留在后半段
+        assert!(result.summary.contains("ok"), "原 summary 不应被丢弃");
     }
 }

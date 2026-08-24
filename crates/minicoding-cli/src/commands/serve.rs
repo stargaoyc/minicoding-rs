@@ -355,11 +355,12 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
     //    server 模式下没有 Runtime 事件总线消费者）。
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
-    // 遗留#5：MCP server 模式默认只读暴露（对端无审批通道，写 fail-closed）
+    // 遗留#5：MCP server 模式默认只读暴露（对端无审批通道，写 fail-closed）。
+    // 仅在显式传入 `--expose-write-tools` 时注册写类工具——此前旗标之后紧跟一条
+    // 无条件注册调用，导致 fail-closed 完全失效（2026-08-25 审查修复）。
     if cmd.expose_write_tools {
         register_write_tools(&mut tools);
     }
-    register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
     // T-M8-5：git + web 工具组
     minicoding_tools::register_git_tools(&mut tools);

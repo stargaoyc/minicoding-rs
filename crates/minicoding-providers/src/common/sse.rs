@@ -17,6 +17,12 @@ use minicoding_core::model::LlmError;
 /// 底层字节流类型（`reqwest::Response::bytes_stream` 转换后）。
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>;
 
+/// SSE 缓冲字节上限（16 MiB，2026-08-25 审查 PR-6）。
+///
+/// 缓冲无上限时，恶意/异常服务端可持续发送不含事件边界（空行）的字节流，
+/// 内存无限增长直至 OOM。超限即 fail-closed：返回解析错误并终止流。
+const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
 /// SSE 解析流：yield 事件的 `data` payload 字符串。
 pub struct SseStream {
     inner: ByteStream,
@@ -24,6 +30,9 @@ pub struct SseStream {
     /// 仅在事件边界（空行）进行 UTF-8 解码，保证跨 chunk 的多字节字符正确拼接。
     buffer: Vec<u8>,
     done: bool,
+    /// 缓冲超限熔断标记（fail-closed：置位后后续 poll 一律终止流，
+    /// 防止消费端继续 poll 时缓冲继续增长，2026-08-25 审查 PR-6）。
+    overflowed: bool,
 }
 
 impl SseStream {
@@ -34,6 +43,7 @@ impl SseStream {
             inner,
             buffer: Vec::new(),
             done: false,
+            overflowed: false,
         }
     }
 
@@ -87,6 +97,10 @@ impl Stream for SseStream {
     type Item = Result<String, LlmError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // 熔断态：缓冲曾超限，直接终止流（fail-closed，不再消费底层字节）
+        if self.overflowed {
+            return Poll::Ready(None);
+        }
         loop {
             // 1) 优先消费已缓冲的完整事件
             if let Some(event) = self.take_event() {
@@ -110,6 +124,13 @@ impl Stream for SseStream {
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     self.buffer.extend_from_slice(&bytes);
+                    if self.buffer.len() > MAX_BUFFER_BYTES {
+                        // fail-closed：超限即报错终止（PR-6），不尝试继续解析
+                        self.overflowed = true;
+                        return Poll::Ready(Some(Err(LlmError::Parse(format!(
+                            "SSE 事件缓冲超过 {MAX_BUFFER_BYTES} 字节仍无事件边界，判定为异常流并终止"
+                        )))));
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(LlmError::Network(e.to_string()))));
@@ -297,5 +318,23 @@ mod tests {
     fn extract_data_joins_multi_line() {
         let event = "data: a\ndata: b\ndata: c\n\n";
         assert_eq!(SseStream::extract_data(event), Some("a\nb\nc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn oversized_buffer_without_boundary_fails_closed() {
+        // PR-6（2026-08-25 审查）：无事件边界的超限字节流 → Parse 错误且流终止
+        // （fail-closed），后续 poll 不再产出任何项。
+        let chunk = vec![b'a'; 1024 * 1024]; // 1 MiB × 17 > 16 MiB 上限
+        let items: Vec<Result<Vec<u8>, reqwest::Error>> =
+            (0..17).map(|_| Ok(chunk.clone())).collect();
+        let mut sse = SseStream::new(stream::iter(items).boxed());
+
+        // 首个产出即应为 Parse 错误（超限前不会有任何事件被解析）
+        match sse.next().await {
+            Some(Err(LlmError::Parse(_))) => {}
+            other => panic!("期望首个产出为 Parse 错误，得到 {other:?}"),
+        }
+        // 熔断标记置位后流应终止（不继续消费底层字节）
+        assert!(sse.next().await.is_none(), "熔断后流应终止");
     }
 }

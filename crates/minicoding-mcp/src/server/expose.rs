@@ -265,41 +265,11 @@ fn convert_content_to_blocks(content: ToolContent) -> Vec<rmcp::model::ContentBl
     }
 }
 
-/// base64 编码（与 `client/rmcp.rs` 的 `base64_decode` 对称，手写避免引入依赖）。
+/// base64 编码（MCP wire format：RFC 4648 标准 alphabet + padding；2026-08-25
+/// 审查 MC-3 以 `base64` crate 替换手写实现，与 client 侧解码对称）。
 fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    // 用 `as_chunks::<3>()` 替代 `chunks_exact(3)`：前者返回 `(&[[u8; 3]], &[u8])`，
-    // 在编译期已知块大小时更高效（clippy::chunks_exact_to_as_chunks）。
-    let (full_chunks, rem) = data.as_chunks::<3>();
-    for chunk in full_chunks {
-        let b0 = u32::from(chunk[0]);
-        let b1 = u32::from(chunk[1]);
-        let b2 = u32::from(chunk[2]);
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
-        out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
-        out.push(char::from(TABLE[((n >> 6) & 0x3F) as usize]));
-        out.push(char::from(TABLE[(n & 0x3F) as usize]));
-    }
-    match rem.len() {
-        1 => {
-            let n = u32::from(rem[0]) << 16;
-            out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
-            out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let n = (u32::from(rem[0]) << 16) | (u32::from(rem[1]) << 8);
-            out.push(char::from(TABLE[((n >> 18) & 0x3F) as usize]));
-            out.push(char::from(TABLE[((n >> 12) & 0x3F) as usize]));
-            out.push(char::from(TABLE[((n >> 6) & 0x3F) as usize]));
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────

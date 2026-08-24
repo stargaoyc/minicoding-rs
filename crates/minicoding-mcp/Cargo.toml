@@ -21,6 +21,8 @@ camino = { workspace = true }
 futures = { workspace = true }
 time = { workspace = true }
 ulid = { workspace = true }
+# MCP wire format 的 image/audio data 编解码（MC-3，2026-08-25 审查：替换手写实现）
+base64 = { workspace = true }
 
 # rmcp 2.x 官方 SDK（M4 起引入，见 modules.md §8.3、tech-stack.md §11.1）
 # M4 用 stdio 传输；M6（T-M6-4）补齐 streamable HTTP + bearer token 鉴权。

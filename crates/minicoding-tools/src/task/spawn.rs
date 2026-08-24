@@ -12,7 +12,10 @@
 //! - 持有 `Arc<dyn PlanModeController>` 实现 Plan 模式守卫：`SubagentType::Plan`
 //!   仅在 `PermissionMode::Plan` 下可派发，其它模式下退化为 `Explore`（design.md §7.3）；
 //! - 不嵌套约束：`spec.can_spawn_subagent == false` 时由 runner 在子 Agent 工具集中
-//!   移除 `task.spawn`（design.md §7.3），工具层不重复实现。
+//!   移除 `task.spawn`（design.md §7.3）；工具层另有深度防御（T-4，2026-08-25 审查）：
+//!   子 Agent Runtime 组装时经 [`TaskSpawn::with_can_spawn_subagent`] 传入
+//!   `spec.can_spawn_subagent`，为 `false` 时工具直接拒绝派发——不依赖 runner
+//!   移除工具这一单一防线。
 
 use minicoding_core::agent::SubagentRunner;
 use minicoding_core::model::{
@@ -33,6 +36,9 @@ pub struct TaskSpawn {
     output_schema: ToolOutputSchema,
     runner: Arc<dyn SubagentRunner>,
     plan_controller: Arc<dyn PlanModeController>,
+    /// 本 Runtime 是否允许派发子 Agent（镜像所属 spec 的 `can_spawn_subagent`，
+    /// T-4 深度防御；顶层 Runtime 注册点恒为 `true`）。
+    can_spawn: bool,
 }
 
 impl TaskSpawn {
@@ -105,7 +111,19 @@ impl TaskSpawn {
             output_schema,
             runner,
             plan_controller,
+            can_spawn: true,
         }
+    }
+
+    /// 设置本工具实例是否允许派发（T-4 深度防御，2026-08-25 审查）。
+    ///
+    /// 子 Agent Runtime 组装时应传 `spec.can_spawn_subagent`：为 `false` 时
+    /// `execute` 直接返回错误结果，不调用 runner——即便 runner 未从子 Agent
+    /// 工具集中移除本工具，嵌套派发也不可绕过。
+    #[must_use]
+    pub fn with_can_spawn_subagent(mut self, allowed: bool) -> Self {
+        self.can_spawn = allowed;
+        self
     }
 }
 
@@ -199,6 +217,14 @@ impl Tool for TaskSpawn {
         let runner = self.runner.clone();
         let plan_controller = self.plan_controller.clone();
         Box::pin(async move {
+            // T-4 深度防御（2026-08-25 审查）：所属 spec 禁止再生子 Agent 时，
+            // 工具层直接拒绝（is_error=true 的错误结果），不依赖 runner 移除工具。
+            if !self.can_spawn {
+                return Ok(ToolResult::err_text(
+                    "task.spawn 在当前上下文中被禁用（can_spawn_subagent=false，不允许嵌套派发子 Agent）",
+                ));
+            }
+
             let args: SpawnInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
@@ -493,6 +519,27 @@ mod tests {
         let input = json!({"type": "explore", "prompt": "x"});
         let err = tool.execute(input, &make_ctx()).await.unwrap_err();
         assert!(matches!(err, ToolError::Exec(_)));
+    }
+
+    #[tokio::test]
+    async fn spawn_denied_when_can_spawn_false_deep_defense() {
+        // T-4（2026-08-25 审查）：can_spawn_subagent=false 时工具层直接返回
+        // 错误结果，runner 不被调用（不依赖 runner 移除工具）。
+        let runner = MockRunner::with_ok("should not run");
+        let controller = MockController::new(PermissionMode::Default);
+        let tool = TaskSpawn::new(runner.clone(), controller).with_can_spawn_subagent(false);
+        let result = tool
+            .execute(json!({"type": "explore", "prompt": "x"}), &make_ctx())
+            .await
+            .expect("应返回错误结果而非 Err");
+        assert!(result.is_error, "拒绝派发应标记 is_error=true");
+        match result.content {
+            minicoding_core::model::ToolContent::Text(t) => {
+                assert!(t.contains("can_spawn_subagent"), "错误文本应说明原因: {t}");
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+        assert!(runner.captured.read().await.is_none(), "runner 不应被调用");
     }
 
     #[tokio::test]

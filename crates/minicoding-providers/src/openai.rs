@@ -143,14 +143,22 @@ impl OpenAiProvider {
             body["tools"] = Value::Array(tools);
         }
 
-        if let Some(t) = req.params.temperature {
+        // 推理系模型（o1/o3/o4/gpt-5）拒绝自定义 temperature（发送即 400），
+        // 直接省略该参数；其余模型维持原行为（2026-08-25 审查 PR-2）
+        if !uses_max_completion_tokens(&req.params.model)
+            && let Some(t) = req.params.temperature
+        {
             body["temperature"] = json!(t);
         }
         if let Some(t) = req.params.top_p {
             body["top_p"] = json!(t);
         }
         if let Some(m) = req.params.max_output_tokens {
-            body["max_tokens"] = json!(m);
+            if uses_max_completion_tokens(&req.params.model) {
+                body["max_completion_tokens"] = json!(m);
+            } else {
+                body["max_tokens"] = json!(m);
+            }
         }
         if !req.params.stop.is_empty() {
             body["stop"] = json!(req.params.stop);
@@ -416,11 +424,25 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
         }
     }
 
-    if let Some(usage) = chunk.get("usage") {
+    if let Some(usage) = chunk.get("usage")
+        && !usage.is_null()
+    {
         deltas.push(Delta::Usage(parse_usage(usage)));
     }
 
     deltas
+}
+
+/// 判断模型是否为 `OpenAI` 推理系（`o1`/`o3`/`o4`/`gpt-5` 前缀，大小写不敏感）。
+///
+/// 推理系模型已废弃 `max_tokens` 参数（改用 `max_completion_tokens`），且拒绝
+/// 自定义 `temperature`（发送即 400）。DeepSeek 等兼容网关仍只认旧参数，故按
+/// 模型名启发式分派而非全局切换（2026-08-25 审查 PR-2）。
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    ["o1", "o3", "o4", "gpt-5"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 /// 解析 `OpenAI` `usage` 对象为 [`Usage`]。
@@ -604,6 +626,15 @@ mod tests {
     #[test]
     fn parse_chunk_empty_choices_no_usage_yields_nothing() {
         let chunk = json!({"choices": []});
+        assert!(parse_chunk(&chunk).is_empty());
+    }
+
+    #[test]
+    fn parse_chunk_null_usage_yields_nothing() {
+        // PR-1（2026-08-25 审查）：流式 chunk 每个都带 `"usage": null`；
+        // `get()` 对存在的 null 键返回 Some(Value::Null)，不判空会每 chunk
+        // 产出全零 Usage delta，污染上游 token 统计。
+        let chunk = json!({"choices": [], "usage": null});
         assert!(parse_chunk(&chunk).is_empty());
     }
 
@@ -818,6 +849,85 @@ mod tests {
         // 无可选 params 时不出现对应字段
         assert!(body.get("temperature").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    // --- uses_max_completion_tokens / PR-2 参数分派 ---
+
+    #[test]
+    fn reasoning_model_detection_prefixes_case_insensitive() {
+        for m in [
+            "o1",
+            "o1-mini",
+            "o3",
+            "O4-mini",
+            "o4",
+            "gpt-5",
+            "GPT-5-Turbo",
+        ] {
+            assert!(uses_max_completion_tokens(m), "{m} 应识别为推理系模型");
+        }
+        for m in ["gpt-4", "gpt-4o", "gpt-3.5-turbo", "deepseek-chat", "o2-x"] {
+            assert!(!uses_max_completion_tokens(m), "{m} 不应识别为推理系模型");
+        }
+    }
+
+    #[test]
+    fn build_request_body_reasoning_model_uses_completion_tokens_and_drops_temperature() {
+        // PR-2：o3 → max_completion_tokens + 不发 temperature
+        let provider = OpenAiProvider::new("https://api.openai.com/v1", "sk-test", "o3")
+            .expect("构造 provider");
+        let req = ChatRequest {
+            system: String::new(),
+            messages: vec![Message::user_text("hi")],
+            tools: Vec::<ToolSchema>::new(),
+            params: GenerationParams {
+                model: "o3".to_string(),
+                temperature: Some(0.5),
+                top_p: Some(0.9),
+                max_output_tokens: Some(1024),
+                stop: vec![],
+                seed: None,
+                thinking_budget_tokens: None,
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "推理系不应发送 max_tokens"
+        );
+        assert!(
+            body.get("temperature").is_none(),
+            "o 系拒绝自定义 temperature，应省略"
+        );
+        // top_p 未在禁发列表，维持原行为
+        assert_eq!(body["top_p"], json!(0.9_f32));
+    }
+
+    #[test]
+    fn build_request_body_gpt5_case_insensitive_dispatch() {
+        let provider = OpenAiProvider::new("https://api.openai.com/v1", "sk-test", "gpt-5")
+            .expect("构造 provider");
+        let mut req = basic_req();
+        req.params.model = "GPT-5-Mini".to_string();
+        req.params.max_output_tokens = Some(2048);
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["max_completion_tokens"], 2048);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn build_request_body_legacy_model_keeps_max_tokens() {
+        let provider = OpenAiProvider::new("https://api.openai.com/v1", "sk-test", "gpt-4")
+            .expect("构造 provider");
+        let mut req = basic_req();
+        req.params.temperature = Some(0.3);
+        req.params.max_output_tokens = Some(512);
+        let body = provider.build_request_body(&req);
+        // 非推理系维持 max_tokens + temperature 现状
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["temperature"], json!(0.3_f32));
     }
 
     // --- auth_headers ---

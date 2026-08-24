@@ -126,87 +126,99 @@ impl Tool for FsGrep {
             };
             ensure_dir(&base).await?;
 
-            let mut out = String::new();
             let ctx_lines = args.context;
             let head_limit = args.head_limit;
-            let mut matches_emitted = 0usize;
-            let walker = ignore::WalkBuilder::new(&base).build();
-            for entry in walker {
-                let entry =
-                    entry.map_err(|e| ToolError::Io(std::io::Error::other(e.to_string())))?;
-                let Some(ft) = entry.file_type() else {
-                    continue;
-                };
-                if !ft.is_file() {
-                    continue;
-                }
-                let rel = match entry.path().strip_prefix(base.as_std_path()) {
-                    Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => entry.path().to_string_lossy().to_string(),
-                };
-                if let Some(m) = &include_matcher {
-                    let basename = match entry.path().file_name() {
-                        Some(n) => n.to_string_lossy().to_string(),
-                        None => String::new(),
+            // 遍历 + 匹配整体移入阻塞线程池（T-5，2026-08-25 审查）：`ignore` 的
+            // WalkBuilder 是同步遍历，大仓库下会长时间占用 executor 线程饿死其他
+            // task；阻塞线程内文件读取退化为 `std::fs`（线程池阻塞无碍）。
+            // 收集完输出后回传 async 侧统一截断。
+            let out = tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
+                let mut out = String::new();
+                let mut matches_emitted = 0usize;
+                let walker = ignore::WalkBuilder::new(&base).build();
+                for entry in walker {
+                    let entry =
+                        entry.map_err(|e| ToolError::Io(std::io::Error::other(e.to_string())))?;
+                    let Some(ft) = entry.file_type() else {
+                        continue;
                     };
-                    if !m.is_match(&basename) {
+                    if !ft.is_file() {
                         continue;
                     }
-                }
-                let Ok(content) = tokio::fs::read_to_string(entry.path()).await else {
-                    continue;
-                };
+                    let rel = match entry.path().strip_prefix(base.as_std_path()) {
+                        Ok(p) => p.to_string_lossy().to_string(),
+                        Err(_) => entry.path().to_string_lossy().to_string(),
+                    };
+                    if let Some(m) = &include_matcher {
+                        let basename = match entry.path().file_name() {
+                            Some(n) => n.to_string_lossy().to_string(),
+                            None => String::new(),
+                        };
+                        if !m.is_match(&basename) {
+                            continue;
+                        }
+                    }
+                    let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                        continue;
+                    };
 
-                if ctx_lines == 0 {
-                    for (i, line) in content.lines().enumerate() {
-                        if re.is_match(line) {
-                            match head_limit {
-                                Some(limit) if matches_emitted >= limit => {
-                                    return Ok(finish(out, max_output_bytes));
+                    if ctx_lines == 0 {
+                        for (i, line) in content.lines().enumerate() {
+                            if re.is_match(line) {
+                                match head_limit {
+                                    Some(limit) if matches_emitted >= limit => {
+                                        return Ok(out);
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
-                            }
-                            let _ = writeln!(out, "{rel}:{}:{}", i + 1, line);
-                            matches_emitted += 1;
-                        }
-                    }
-                } else {
-                    // 带上下文行（grep -C 语义）：收集命中行号 → 合并区间 → 输出
-                    // 命中行 + 前后各 ctx 行，区间间以 `--` 分隔（同文件内）。
-                    let lines: Vec<&str> = content.lines().collect();
-                    let mut ranges: Vec<(usize, usize)> = Vec::new();
-                    for (i, line) in lines.iter().enumerate() {
-                        if re.is_match(line) {
-                            let start = i.saturating_sub(ctx_lines);
-                            let end = (i + ctx_lines).min(lines.len().saturating_sub(1));
-                            if let Some(last) = ranges.last_mut()
-                                && start <= last.1.saturating_add(1)
-                            {
-                                last.1 = last.1.max(end);
-                            } else {
-                                ranges.push((start, end));
-                            }
-                        }
-                    }
-                    'outer: for (start, end) in ranges {
-                        for (i, line) in lines.iter().enumerate().skip(start).take(end - start + 1)
-                        {
-                            match head_limit {
-                                Some(limit) if matches_emitted >= limit => break 'outer,
-                                _ => {}
-                            }
-                            let marker = if re.is_match(line) { ':' } else { '-' };
-                            let _ = writeln!(out, "{rel}:{}{marker}{}", i + 1, line);
-                            if marker == ':' {
+                                let _ = writeln!(out, "{rel}:{}:{}", i + 1, line);
                                 matches_emitted += 1;
                             }
                         }
-                        if end < lines.len().saturating_sub(1) {
-                            let _ = writeln!(out, "--");
+                    } else {
+                        // 带上下文行（grep -C 语义）：收集命中行号 → 合并区间 → 输出
+                        // 命中行 + 前后各 ctx 行，区间间以 `--` 分隔（同文件内）。
+                        let lines: Vec<&str> = content.lines().collect();
+                        let mut ranges: Vec<(usize, usize)> = Vec::new();
+                        for (i, line) in lines.iter().enumerate() {
+                            if re.is_match(line) {
+                                let start = i.saturating_sub(ctx_lines);
+                                let end = (i + ctx_lines).min(lines.len().saturating_sub(1));
+                                if let Some(last) = ranges.last_mut()
+                                    && start <= last.1.saturating_add(1)
+                                {
+                                    last.1 = last.1.max(end);
+                                } else {
+                                    ranges.push((start, end));
+                                }
+                            }
+                        }
+                        'outer: for (start, end) in ranges {
+                            for (i, line) in
+                                lines.iter().enumerate().skip(start).take(end - start + 1)
+                            {
+                                match head_limit {
+                                    Some(limit) if matches_emitted >= limit => break 'outer,
+                                    _ => {}
+                                }
+                                let marker = if re.is_match(line) { ':' } else { '-' };
+                                let _ = writeln!(out, "{rel}:{}{marker}{}", i + 1, line);
+                                if marker == ':' {
+                                    matches_emitted += 1;
+                                }
+                            }
+                            if end < lines.len().saturating_sub(1) {
+                                let _ = writeln!(out, "--");
+                            }
                         }
                     }
                 }
-            }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| {
+                ToolError::Io(std::io::Error::other(format!("fs.grep 后台遍历失败: {e}")))
+            })??;
 
             Ok(finish(out, max_output_bytes))
         })

@@ -304,44 +304,9 @@ impl RmcpClient {
                 reason: format!("list_tools failed: {e}"),
             })?;
 
-        // 转换 schema + 命名 + enabled_tools 过滤
-        let tools_with_hints: Vec<(ToolSchema, minicoding_core::mcp::ToolHint)> = rmcp_tools
-            .into_iter()
-            .filter(|t| {
-                cfg.enabled_tools
-                    .as_ref()
-                    .is_none_or(|list| list.iter().any(|n| n == &t.name))
-            })
-            .map(|t| {
-                let name = crate::naming::mcp_tool_name(&cfg.name, &t.name)
-                    .map_err(|e| McpError::Config(format!("tool name `{}` invalid: {e}", t.name)));
-                // S13/C-25：annotations 是远端自我声明，仅采集供 wrapper 按
-                // trust_read_only_hint 决定是否采信（默认不信任 → Unknown/Command）
-                let annotations = t.annotations.clone().unwrap_or_default();
-                let hint = match (annotations.read_only_hint, annotations.destructive_hint) {
-                    (Some(true), _) => minicoding_core::mcp::ToolHint::ReadOnly,
-                    (_, Some(true)) => minicoding_core::mcp::ToolHint::Destructive,
-                    _ => minicoding_core::mcp::ToolHint::Unknown,
-                };
-                name.map(|full_name| {
-                    (
-                        ToolSchema {
-                            name: full_name,
-                            description: t.description.as_deref().unwrap_or("").to_string(),
-                            input_schema: serde_json::Value::Object(
-                                t.input_schema.as_ref().clone(),
-                            ),
-                        },
-                        hint,
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let hints: HashMap<String, minicoding_core::mcp::ToolHint> = tools_with_hints
-            .iter()
-            .map(|(sc, h)| (sc.name.clone(), *h))
-            .collect();
-        let tools: Vec<ToolSchema> = tools_with_hints.into_iter().map(|(s, _)| s).collect();
+        // 转换 schema + 命名 + enabled_tools 过滤（抽为自由函数，MC-2 修复时
+        // start_one 超 too_many_lines 阈值，顺带拆分职责）
+        let (tools, hints) = convert_rmcp_tools(cfg, rmcp_tools)?;
 
         // 缓存连接 + 工具
         let conn = ServerConnection {
@@ -351,9 +316,19 @@ impl RmcpClient {
             tool_timeout,
         };
         let mut connections = self.connections.write().await;
+        // MC-2（2026-08-25 审查）：同名 server 直接 insert 会静默覆盖旧连接——
+        // 旧 stdio 子进程/HTTP 连接就此泄漏（子进程永不退出）。覆盖前取出旧条目，
+        // 待写锁释放后优雅关闭（`close_with_timeout` 自带上限，到时返回不挂起；
+        // DropGuard 兜底取消）。
+        let stale = connections.remove(&cfg.name);
         connections.insert(cfg.name.clone(), conn);
         // Metrics：MCP 连接数 gauge
         metrics::set_mcp_connections(&cfg.name, 1);
+        drop(connections);
+        if let Some(mut old) = stale {
+            tracing::info!(server = %cfg.name, "检测到同名 mcp server 旧连接，先关闭后替换");
+            let _ = old.service.close_with_timeout(Duration::from_secs(5)).await;
+        }
 
         tracing::info!(
             server = %cfg.name,
@@ -371,6 +346,58 @@ impl RmcpClient {
             McpTransport::Http { .. } => "http",
         }
     }
+}
+
+/// 将 rmcp 工具列表转换为 minicoding `(schemas, hints)`（含 `mcp_tool_name` 命名
+/// 与 `enabled_tools` 过滤；S13/C-25：annotations 是远端自我声明，仅采集供
+/// wrapper 按 `trust_read_only_hint` 决定是否采信——默认不信任 → Unknown/Command）。
+///
+/// 从 `start_one` 抽出：MC-2 修复时该函数超 `clippy::too_many_lines` 阈值，
+/// 顺带拆分"握手"与"schema 转换"职责。
+fn convert_rmcp_tools(
+    cfg: &McpServerConfig,
+    rmcp_tools: Vec<rmcp::model::Tool>,
+) -> Result<
+    (
+        Vec<ToolSchema>,
+        HashMap<String, minicoding_core::mcp::ToolHint>,
+    ),
+    McpError,
+> {
+    let tools_with_hints: Vec<(ToolSchema, minicoding_core::mcp::ToolHint)> = rmcp_tools
+        .into_iter()
+        .filter(|t| {
+            cfg.enabled_tools
+                .as_ref()
+                .is_none_or(|list| list.iter().any(|n| n == &t.name))
+        })
+        .map(|t| {
+            let name = crate::naming::mcp_tool_name(&cfg.name, &t.name)
+                .map_err(|e| McpError::Config(format!("tool name `{}` invalid: {e}", t.name)));
+            let annotations = t.annotations.clone().unwrap_or_default();
+            let hint = match (annotations.read_only_hint, annotations.destructive_hint) {
+                (Some(true), _) => minicoding_core::mcp::ToolHint::ReadOnly,
+                (_, Some(true)) => minicoding_core::mcp::ToolHint::Destructive,
+                _ => minicoding_core::mcp::ToolHint::Unknown,
+            };
+            name.map(|full_name| {
+                (
+                    ToolSchema {
+                        name: full_name,
+                        description: t.description.as_deref().unwrap_or("").to_string(),
+                        input_schema: serde_json::Value::Object(t.input_schema.as_ref().clone()),
+                    },
+                    hint,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let hints: HashMap<String, minicoding_core::mcp::ToolHint> = tools_with_hints
+        .iter()
+        .map(|(sc, h)| (sc.name.clone(), *h))
+        .collect();
+    let tools: Vec<ToolSchema> = tools_with_hints.into_iter().map(|(s, _)| s).collect();
+    Ok((tools, hints))
 }
 
 impl Default for RmcpClient {
@@ -682,14 +709,14 @@ fn convert_one(block: &ContentBlock) -> ToolContent {
         ContentBlock::Text(t) => ToolContent::Text(t.text.clone()),
         ContentBlock::Image(img) => {
             // base64 解码（best effort，失败则原样保留 base64 字符串）
-            let data = base64_decode(&img.data).unwrap_or_else(|_| img.data.as_bytes().to_vec());
+            let data = base64_decode(&img.data).unwrap_or_else(|| img.data.as_bytes().to_vec());
             ToolContent::Image {
                 mime: img.mime_type.clone(),
                 data,
             }
         }
         ContentBlock::Audio(a) => {
-            let data = base64_decode(&a.data).unwrap_or_else(|_| a.data.as_bytes().to_vec());
+            let data = base64_decode(&a.data).unwrap_or_else(|| a.data.as_bytes().to_vec());
             ToolContent::Image {
                 mime: a.mime_type.clone(),
                 data,
@@ -705,28 +732,22 @@ fn convert_one(block: &ContentBlock) -> ToolContent {
     }
 }
 
-/// base64 解码（不引入额外依赖，用 `base64` crate 会增加依赖体积，此处手写）。
-fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
-    let mut decoded = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for c in s.chars().filter(|c| !c.is_whitespace() && *c != '=') {
-        let v = match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            _ => return Err("invalid base64 char"),
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            decoded.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-    Ok(decoded)
+/// MCP wire format 的 base64 解码（2026-08-25 审查 MC-3：以 `base64` crate 替换
+/// 手写实现，见 tech-stack.md 依赖治理）。
+///
+/// MCP 规范要求 RFC 4648 标准 base64；对端实现偶有 URL-safe alphabet 或缺省
+/// padding 的变体，故按 `STANDARD` → `URL_SAFE` → `NO_PAD` 变体依次回退，保持与
+/// 原手写实现（同时接受两种 alphabet、忽略 padding）相当的宽容度。
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    [
+        &base64::engine::general_purpose::STANDARD,
+        &base64::engine::general_purpose::URL_SAFE,
+        &base64::engine::general_purpose::STANDARD_NO_PAD,
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+    ]
+    .into_iter()
+    .find_map(|engine| engine.decode(s).ok())
 }
 
 #[cfg(test)]
@@ -780,17 +801,33 @@ mod tests {
     }
 
     #[test]
-    fn base64_decode_basic() {
-        // "Hello" in base64
-        let decoded = base64_decode("SGVsbG8=").unwrap();
-        assert_eq!(decoded, b"Hello");
+    fn base64_decode_rfc_vectors() {
+        // RFC 4648 标准向量（STANDARD 引擎，带 padding）
+        assert_eq!(base64_decode("Zg=="), Some(b"f".to_vec()));
+        assert_eq!(base64_decode("Zm8="), Some(b"fo".to_vec()));
+        assert_eq!(base64_decode("Zm9v"), Some(b"foo".to_vec()));
+        assert_eq!(base64_decode("Zm9vYmFy"), Some(b"foobar".to_vec()));
+        assert_eq!(base64_decode(""), Some(Vec::new()));
     }
 
     #[test]
-    fn base64_decode_url_safe() {
-        // URL-safe variant uses - and _ instead of + and /
-        let decoded = base64_decode("SGVsbG8=").unwrap();
-        assert_eq!(decoded, b"Hello");
+    fn base64_decode_accepts_url_safe_and_unpadded_variants() {
+        use base64::Engine as _;
+        // URL-safe alphabet（-/_）：STANDARD 失败后由 URL_SAFE 引擎回退解码
+        let url_safe = base64::engine::general_purpose::URL_SAFE.encode([0xfb, 0xff]);
+        assert_eq!(url_safe, "-_8=");
+        assert_eq!(base64_decode(&url_safe), Some(vec![0xfb, 0xff]));
+        // 缺省 padding：由 NO_PAD 变体回退解码（对端实现常见变体）
+        assert_eq!(
+            base64_decode("Zm9vYmE"),
+            Some(b"fooba".to_vec()),
+            "无 padding 的标准 base64 应可解码"
+        );
+    }
+
+    #[test]
+    fn base64_decode_invalid_input_returns_none() {
+        assert_eq!(base64_decode("not*valid!"), None);
     }
 
     /// 构造一个最小可用的 HTTP server 配置（用于 `build_http_config` 测试）。

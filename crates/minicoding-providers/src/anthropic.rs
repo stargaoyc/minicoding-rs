@@ -118,10 +118,11 @@ impl AnthropicProvider {
             "model": req.params.model,
             "messages": messages,
             "stream": true,
-            // thinking 启用时输出预算须 > budget_tokens（Anthropic 约束）
-            "max_tokens": req.params.max_output_tokens.map_or(4_096, |m| {
-                m.max(req.params.thinking_budget_tokens.unwrap_or(0) as usize + 1)
-            }),
+            // max_tokens 计算见 compute_max_tokens（2026-08-25 审查 PR-4）
+            "max_tokens": compute_max_tokens(
+                req.params.max_output_tokens,
+                req.params.thinking_budget_tokens,
+            ),
         });
 
         // system prompt 顶层分离（Anthropic 不接受 messages 里的 system role）。
@@ -170,7 +171,12 @@ impl AnthropicProvider {
         {
             body["temperature"] = json!(t);
         }
-        if let Some(t) = req.params.top_p {
+        // thinking 启用时 top_p 同样不可携带（Anthropic 与 temperature 同一约束：
+        // thinking 模式下采样参数被拒绝），镜像 temperature 的 gate 逻辑
+        // （2026-08-25 审查 PR-3）
+        if req.params.thinking_budget_tokens.is_none()
+            && let Some(t) = req.params.top_p
+        {
             body["top_p"] = json!(t);
         }
         if !req.params.stop.is_empty() {
@@ -500,6 +506,35 @@ fn usize_from_option_opt(v: Option<&Value>) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
+/// Anthropic 能力声明的输出上限（与 [`AnthropicProvider::capabilities`]
+/// 的 `max_output` 一致；超出会被 API 以 400 拒绝）。
+const MAX_OUTPUT_LIMIT: usize = 8_192;
+
+/// 计算 Anthropic `max_tokens` 请求值（2026-08-25 审查 PR-4）。
+///
+/// - 未启用 thinking：用户配置值，缺省 4096（维持原行为）；
+/// - 启用 thinking：输出预算必须**大于** `budget_tokens`（API 约束），取
+///   `budget + max(用户配置或缺省值, 1024)`——此前仅 `budget + 1`，正文输出
+///   余量趋近于零，thinking 回复几乎必然被截断；最终 clamp 到能力上限防 400。
+#[must_use]
+fn compute_max_tokens(max_output_tokens: Option<usize>, thinking_budget: Option<u32>) -> usize {
+    const DEFAULT_MAX_TOKENS: usize = 4_096;
+    const THINKING_MIN_HEADROOM: usize = 1_024;
+    match thinking_budget {
+        None => max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        Some(budget) => {
+            let headroom = max_output_tokens
+                .unwrap_or(DEFAULT_MAX_TOKENS)
+                .max(THINKING_MIN_HEADROOM);
+            // u32 在 64 位平台必能装入 usize；转换失败（16 位平台）按 0 兜底
+            usize::try_from(budget)
+                .unwrap_or_default()
+                .saturating_add(headroom)
+                .min(MAX_OUTPUT_LIMIT)
+        }
+    }
+}
+
 /// Anthropic `stop_reason` → [`StopReason`]。
 fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
@@ -824,8 +859,55 @@ mod tests {
             body.get("temperature").is_none(),
             "thinking 启用时应省略 temperature"
         );
-        // 输出预算 > budget
-        assert_eq!(body["max_tokens"], 2_000);
+        // PR-4：thinking 时 max_tokens = budget + max(用户配置, 1024) = 1500 + 2000
+        assert_eq!(body["max_tokens"], 3_500);
+    }
+
+    #[test]
+    fn build_request_body_thinking_gates_top_p() {
+        // PR-3（2026-08-25 审查）：thinking 启用时 top_p 必须省略（镜像 temperature）
+        let provider =
+            AnthropicProvider::new("https://api.anthropic.com", "sk-test", "claude-3-5-sonnet")
+                .expect("构造");
+        let req = ChatRequest {
+            system: String::new(),
+            messages: vec![],
+            tools: vec![],
+            params: minicoding_core::provider::GenerationParams {
+                model: "claude-3-5-sonnet".into(),
+                temperature: None,
+                top_p: Some(0.9),
+                max_output_tokens: Some(2_000),
+                stop: vec![],
+                seed: None,
+                thinking_budget_tokens: Some(1_000),
+            },
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(body["thinking"]["type"], json!("enabled"));
+        assert!(body.get("top_p").is_none(), "thinking 启用时应省略 top_p");
+        // 非 thinking 路径不受影响：同请求去掉 budget 后 top_p 应保留
+        let mut req2 = req.clone();
+        req2.params.thinking_budget_tokens = None;
+        let body2 = provider.build_request_body(&req2);
+        assert_eq!(body2["top_p"], json!(0.9_f32));
+    }
+
+    #[test]
+    fn compute_max_tokens_matrix() {
+        // 未启用 thinking：用户值 / 缺省 4096，不 clamp 旧路径行为
+        assert_eq!(compute_max_tokens(None, None), 4_096);
+        assert_eq!(compute_max_tokens(Some(512), None), 512);
+        // thinking：budget + max(用户配置, 1024)
+        assert_eq!(compute_max_tokens(None, Some(1_000)), 5_096);
+        // 小配置走最小余量 1024
+        assert_eq!(compute_max_tokens(Some(100), Some(500)), 1_524);
+        // clamp 到能力输出上限（防 API 400）
+        assert_eq!(
+            compute_max_tokens(Some(8_192), Some(8_000)),
+            MAX_OUTPUT_LIMIT
+        );
+        assert_eq!(compute_max_tokens(None, Some(9_000)), MAX_OUTPUT_LIMIT);
     }
 
     #[test]

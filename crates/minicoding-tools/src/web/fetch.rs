@@ -57,6 +57,7 @@ impl Tool for WebFetch {
         ctx: &minicoding_core::tool::ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let max_bytes = ctx.max_output_bytes;
+        let timeout = ctx.timeout;
         Box::pin(async move {
             let url: String = params
                 .get("url")
@@ -68,7 +69,14 @@ impl Tool for WebFetch {
             validate_url(&url).await?;
 
             // 2. HTTP GET + 转换 + 截断
-            fetch_and_convert(&url, max_bytes).await
+            // T-3（2026-08-25 审查）：整个抓取链路（重定向循环 + 读体 + 转换）
+            // 纳入 ctx.timeout 窗口——慢速/挂起的服务端此前可无限占用 turn。
+            match tokio::time::timeout(timeout, fetch_and_convert(&url, max_bytes)).await {
+                Ok(result) => result,
+                Err(elapsed) => Ok(ToolResult::err_text(format!(
+                    "web.fetch 执行超时（超过 {elapsed:?}）"
+                ))),
+            }
         })
     }
 
@@ -76,6 +84,38 @@ impl Tool for WebFetch {
     fn render_output(&self, result: &ToolResult) -> RenderIntent {
         RenderIntent::default_for(result)
     }
+}
+
+/// 响应体读取上限（T-6，2026-08-25 审查）：超过即停止读取并标注截断。
+/// 此前 `resp.text()` 无界缓冲，异常/恶意大响应可直接 OOM。
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// 流式读取响应体并限制最大字节数（T-6，2026-08-25 审查）。
+///
+/// 用 `bytes_stream` 逐 chunk 累积，达到 [`MAX_BODY_BYTES`] 即停止消费
+/// （丢弃剩余连接），返回 `(body, 是否被截断)`；截断标记与下游
+/// `truncate_output`（`ctx.max_output_bytes`）的输出级截断衔接。
+async fn read_body_capped(resp: reqwest::Response) -> Result<(String, bool), ToolError> {
+    use futures::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut body: Vec<u8> = Vec::new();
+    let mut capped = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ToolError::Exec(format!("读取响应体失败: {e}")))?;
+        let remain = MAX_BODY_BYTES.saturating_sub(body.len());
+        if remain == 0 {
+            capped = true;
+            break;
+        }
+        // 只追加到上限为止（半截 chunk 也截断），随后停止读取
+        let take = remain.min(chunk.len());
+        body.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            capped = true;
+            break;
+        }
+    }
+    Ok((String::from_utf8_lossy(&body).into_owned(), capped))
 }
 
 /// 执行 HTTP GET 并按 content-type 转换/截断（SSRF 校验后的核心逻辑）。
@@ -141,10 +181,7 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
         .unwrap_or("")
         .to_string();
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| ToolError::Exec(format!("读取响应体失败: {e}")))?;
+    let (body, body_capped) = read_body_capped(resp).await?;
 
     // HTML → Markdown（仅 HTML 内容；其他类型直接返回文本）
     let markdown = if content_type.contains("text/html") {
@@ -162,9 +199,12 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
     // 截断：经 `truncate_output` 在 UTF-8 字符边界上截断——直接字节切片
     // `&markdown[..max_bytes]` 会在多字节字符中间 panic（远程内容可控，
     // 中文长页面必现；2026-08-23 审查 §5-P0/§6-P0）
-    let (truncated, _was_truncated) = crate::util::truncate_output(markdown, max_bytes);
+    let (truncated, was_truncated) = crate::util::truncate_output(markdown, max_bytes);
 
-    Ok(ToolResult::ok_text(truncated))
+    let mut result = ToolResult::ok_text(truncated);
+    // T-6：响应体级截断与输出级截断统一标注 metadata.truncated
+    result.metadata.truncated = was_truncated || body_capped;
+    Ok(result)
 }
 
 /// S22：解析相对 Location 为绝对 URL（同 scheme/host，路径合并）。
@@ -448,6 +488,56 @@ mod tests {
         );
         assert!(text.starts_with('A'));
         assert!(text.ends_with("\n...[output truncated]"));
+    }
+
+    #[tokio::test]
+    async fn oversized_body_capped_at_limit_with_metadata() {
+        // T-6（2026-08-25 审查）：响应体超过 10MiB 硬上限 → 停止读取、
+        // metadata.truncated 标注、内容不超过上限（输出上限给足以隔离变量）。
+        let server = MockServer::start().await;
+        let body = "B".repeat(MAX_BODY_BYTES + 1024);
+        Mock::given(method("GET"))
+            .and(path("/huge"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_owned(), "text/plain"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/huge", server.uri());
+        // 输出上限放大到 64 MiB：确保触发的是响应体级截断而非输出级截断
+        let result = fetch_and_convert(&url, 64 * 1024 * 1024)
+            .await
+            .expect("fetch should succeed");
+        assert!(result.metadata.truncated, "超限应标注 truncated");
+        match &result.content {
+            ToolContent::Text(t) => {
+                assert!(
+                    t.len() <= MAX_BODY_BYTES,
+                    "响应体应被限制在 {} 字节内: {}",
+                    MAX_BODY_BYTES,
+                    t.len()
+                );
+                assert!(t.starts_with('B'));
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn small_body_not_marked_truncated() {
+        // T-6 回归补充：未触上限的正常响应不误标 truncated。
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/small"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(b"tiny".to_vec(), "text/plain"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/small", server.uri());
+        let result = fetch_and_convert(&url, 1024 * 1024)
+            .await
+            .expect("fetch should succeed");
+        assert!(!result.metadata.truncated);
     }
 
     #[tokio::test]

@@ -97,6 +97,9 @@ impl Stream for DeltaStream<'_> {
         match self.inner.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(event))) => match event {
                 Event::Token(text) => Poll::Ready(Some(Ok(Delta::Text(text)))),
+                // ReasoningDelta 同样透传（2026-08-25 审查）：此前落入 `_` 忽略
+                // 分支，SDK 消费方永远收不到思考过程增量。
+                Event::ReasoningDelta(text) => Poll::Ready(Some(Ok(Delta::Reasoning(text)))),
                 Event::TurnEnd { .. } => {
                     // TurnEnd 事件：根据 final_result 决定终止或返回错误。
                     if self.emitted_final {

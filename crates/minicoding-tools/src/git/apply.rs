@@ -106,6 +106,7 @@ impl Tool for GitApply {
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
         let env = ctx.env.clone();
+        let timeout = ctx.timeout;
         Box::pin(async move {
             let patch: String = params
                 .get("patch")
@@ -121,34 +122,46 @@ impl Tool for GitApply {
             cmd.stdin(std::process::Stdio::piped());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
+            // T-3（2026-08-25 审查）：git apply 此前无超时——仓库钩子挂起会永久
+            // 占用 turn。kill_on_drop 保证超时取消 future 时内部 Child 被终止
+            // （C-07 不留孤儿进程）。
+            cmd.kill_on_drop(true);
 
             let mut child = cmd
                 .spawn()
                 .map_err(|e| ToolError::Exec(format!("git apply spawn 失败: {e}")))?;
 
-            // 写 patch 到 stdin
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                stdin
-                    .write_all(patch.as_bytes())
+            // stdin 写入 + 等待退出统一纳入超时窗口（大 patch 写满管道同样可能卡住）
+            let run = async {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    stdin
+                        .write_all(patch.as_bytes())
+                        .await
+                        .map_err(|e| ToolError::Exec(format!("stdin 写入失败: {e}")))?;
+                }
+                child
+                    .wait_with_output()
                     .await
-                    .map_err(|e| ToolError::Exec(format!("stdin 写入失败: {e}")))?;
-                // drop stdin 触发 EOF
-            }
+                    .map_err(|e| ToolError::Exec(format!("git apply 等待失败: {e}")))
+            };
 
-            let output = child
-                .wait_with_output()
-                .await
-                .map_err(|e| ToolError::Exec(format!("git apply 等待失败: {e}")))?;
-
-            if !output.status.success() {
-                return Err(ToolError::Exec(format!(
-                    "git apply 失败 (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&output.stderr)
-                )));
+            match tokio::time::timeout(timeout, run).await {
+                Err(elapsed) => Ok(ToolResult::err_text(format!(
+                    "git apply 执行超时（超过 {elapsed:?}），子进程已终止"
+                ))),
+                Ok(Err(e)) => Err(e),
+                Ok(Ok(output)) => {
+                    if !output.status.success() {
+                        return Err(ToolError::Exec(format!(
+                            "git apply 失败 (exit {}): {}",
+                            output.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&output.stderr)
+                        )));
+                    }
+                    Ok(ToolResult::ok_text("patch 已应用"))
+                }
             }
-            Ok(ToolResult::ok_text("patch 已应用"))
         })
     }
 
@@ -272,6 +285,52 @@ mod tests {
         let content = std::fs::read_to_string(&file_path).expect("read");
         let normalized = content.replace("\r\n", "\n");
         assert_eq!(normalized, "hello world\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_timeout_returns_error_result() {
+        // T-3（2026-08-25 审查）：ctx.timeout 耗尽 → is_error=true 的工具错误文本
+        // （而非 Err 或无限挂起）。用 PATH shim 注入一个"永远挂起"的假 git，
+        // 保证确定性（真实 git 在小窗口内可能先完成，存在竞态）。
+        use std::collections::HashMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = tempfile::tempdir().expect("repo tmpdir");
+        init_git_repo(repo.path());
+        let shim = tempfile::tempdir().expect("shim tmpdir");
+        let fake_git = shim.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\nwhile true; do :; done\n").expect("write shim");
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod shim");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            shim.path().to_string_lossy().to_string(),
+        );
+        let mut ctx = minicoding_core::tool::ToolContext::new(
+            repo.path().to_str().unwrap().into(),
+            "t".into(),
+        );
+        ctx.timeout = std::time::Duration::from_millis(300);
+        ctx.env = env;
+
+        let tool = GitApply::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"patch": "--- /dev/null\n+++ b/x.txt\n@@ -0,0 +1 @@\n+a\n"}),
+                &ctx,
+            )
+            .await
+            .expect("超时应返回错误结果而非 Err");
+        assert!(result.is_error, "超时结果应标记 is_error=true");
+        match result.content {
+            minicoding_core::model::ToolContent::Text(t) => {
+                assert!(t.contains("超时"), "错误文本应说明超时: {t}");
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
     }
 
     #[test]

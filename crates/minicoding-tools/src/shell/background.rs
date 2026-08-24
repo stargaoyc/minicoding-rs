@@ -8,6 +8,15 @@
 //! [`BackgroundShellStore`] 抽象后台 shell 生命周期（与 `TaskStore` 同构）。
 //! 默认实现 [`InMemoryBackgroundShellStore`] 持有 `tokio::sync::Mutex<HashMap>`；
 //! Runtime 可注入自定义实现（如跨会话持久化）。
+//!
+//! ## 条目回收（T-8，2026-08-25 审查）
+//!
+//! store 此前只增不减：长会话中每次 `shell.background` 都累积一条
+//! `ShellEntry`（含输出缓冲 Arc），永不回收导致内存缓慢泄漏。现设
+//! [`MAX_TRACKED_SHELLS`] 硬上限（128 条）：注册新条目前若已达上限，淘汰
+//! **最旧的已完成**条目；若无已完成条目则淘汰全局最旧——保证上限硬约束成立。
+//! 被淘汰条目的 `shell_id` 随即失效（`shell.output`/`kill` 返回 `NotFound`）；
+//! 运行中进程经 `kill_on_drop` 终止，不会残留孤儿进程。
 
 use minicoding_core::metrics;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
@@ -16,8 +25,12 @@ use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{RenderIntent, Tool};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
+
+/// 后台 shell 存储条目上限（T-8，2026-08-25 审查）：超出后淘汰最旧条目。
+const MAX_TRACKED_SHELLS: usize = 128;
 
 /// 后台 shell 的当前状态快照（非阻塞读取）。
 #[derive(Debug, Clone)]
@@ -68,21 +81,26 @@ struct ShellEntry {
     stderr: Arc<Mutex<String>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     child: Arc<Mutex<Option<tokio::process::Child>>>,
+    /// 插入序号（单调递增，淘汰"最旧"条目的依据，T-8）。
+    seq: u64,
 }
 
 /// 内存后台 shell 存储（默认实现，非持久化）。
 ///
 /// 使用 `tokio::sync::Mutex`（见 AGENTS.md §2.4）；`output`/`kill` 临界区内无
 /// `await`（仅 clone/kill）。后台读取 task 持有 `Arc<Mutex<String>>` 缓冲区，
-/// 与 store 无锁竞争。
+/// 与 store 无锁竞争。条目数受 [`MAX_TRACKED_SHELLS`] 约束（T-8，见模块文档）。
 pub struct InMemoryBackgroundShellStore {
     shells: Mutex<HashMap<String, ShellEntry>>,
+    /// 插入序号发生器（与 `shells` 锁解耦，仅 fetch_add，T-8）。
+    next_seq: AtomicU64,
 }
 
 impl Default for InMemoryBackgroundShellStore {
     fn default() -> Self {
         Self {
             shells: Mutex::new(HashMap::new()),
+            next_seq: AtomicU64::new(0),
         }
     }
 }
@@ -233,14 +251,17 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                 }
             });
 
-            // 8. 注册到 store
+            // 8. 注册到 store：已达上限先淘汰最旧条目（T-8，2026-08-25 审查，
+            //    策略见 `evict_oldest` 与模块文档）
             let entry = ShellEntry {
                 stdout: stdout_buf,
                 stderr: stderr_buf,
                 exit_code,
                 child: child_handle,
+                seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
             };
             let mut shells = self.shells.lock().await;
+            evict_oldest(&mut shells);
             shells.insert(shell_id.clone(), entry);
             // Metrics：后台 shell 数 gauge
             metrics::set_background_shells(shells.len() as u64);
@@ -297,6 +318,28 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             }
             Ok(())
         })
+    }
+}
+
+/// 淘汰最旧条目使 store 不超过 [`MAX_TRACKED_SHELLS`]（T-8，2026-08-25 审查）。
+///
+/// 优先淘汰最旧的**已完成**条目（`exit_code` 已记录、缓冲不再增长）；若无已完成
+/// 条目则退化为淘汰全局最旧——保证硬上限成立。被淘汰的运行中进程经
+/// `kill_on_drop` 终止；`try_lock` 失败（正被 kill 等临界区持有）按未完成处理。
+fn evict_oldest(shells: &mut HashMap<String, ShellEntry>) {
+    if shells.len() < MAX_TRACKED_SHELLS {
+        return;
+    }
+    let victim = shells
+        .iter()
+        .min_by_key(|(_, e)| {
+            let completed = e.exit_code.try_lock().is_ok_and(|g| g.is_some());
+            (u8::from(!completed), e.seq)
+        })
+        .map(|(id, _)| id.clone());
+    if let Some(id) = victim {
+        shells.remove(&id);
+        tracing::debug!(shell_id = %id, "后台 shell 条目已达上限，淘汰最旧条目");
     }
 }
 
@@ -599,6 +642,62 @@ mod tests {
             panic!("expected text content");
         };
         assert!(text.contains("shell_id"), "should contain shell_id: {text}");
+    }
+
+    #[tokio::test]
+    async fn store_evicts_oldest_beyond_cap() {
+        // T-8（2026-08-25 审查）：超过 MAX_TRACKED_SHELLS 后最旧条目被淘汰
+        //（output 返回 NotFound），新条目仍可用。
+        let store = InMemoryBackgroundShellStore::new();
+        let mut env = HashMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_string(), path);
+        }
+
+        let first_id = store
+            .spawn(
+                "true".to_string(),
+                "/tmp".to_string(),
+                env.clone(),
+                None,
+                1024 * 1024,
+            )
+            .await
+            .expect("first spawn");
+
+        // 连续 spawn 超过上限：第 129 次插入必然触发淘汰（无论首个条目是否已
+        // 记录退出码，min_by_key 的兜底分支都会选中全局最旧的 first_id）
+        let mut last_id = String::new();
+        for _ in 0..(MAX_TRACKED_SHELLS + 2) {
+            last_id = store
+                .spawn(
+                    "true".to_string(),
+                    "/tmp".to_string(),
+                    env.clone(),
+                    None,
+                    1024 * 1024,
+                )
+                .await
+                .expect("spawn");
+        }
+
+        assert!(
+            store.output(first_id.clone()).await.is_err(),
+            "最旧条目应被淘汰"
+        );
+        // 最新条目保留且正常完成（退出码由 wait task 100ms 轮询记录，需等待）
+        for _ in 0..30 {
+            if store
+                .output(last_id.clone())
+                .await
+                .expect("最新条目应保留")
+                .exited
+            {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        panic!("最新条目在 3s 内未完成");
     }
 
     #[test]

@@ -63,6 +63,7 @@ impl Tool for GitDiff {
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
         let env = ctx.env.clone();
+        let timeout = ctx.timeout;
         let git_ref = params
             .get("ref")
             .and_then(|v| v.as_str())
@@ -83,18 +84,26 @@ impl Tool for GitDiff {
             }
             cmd.env_clear();
             cmd.envs(&env);
-            let output = cmd
-                .output()
-                .await
-                .map_err(|e| ToolError::Exec(format!("git diff 执行失败: {e}")))?;
-            if !output.status.success() {
-                return Err(ToolError::Exec(format!(
-                    "git diff 失败 (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&output.stderr)
-                )));
+            // T-3（2026-08-25 审查）：diff 在大仓库/慢盘上可能长时间运行，
+            // 此前无超时会永久占用 turn。kill_on_drop 保证超时取消 future 时
+            // 子进程被终止（C-07）。
+            cmd.kill_on_drop(true);
+            match tokio::time::timeout(timeout, cmd.output()).await {
+                Err(elapsed) => Ok(ToolResult::err_text(format!(
+                    "git diff 执行超时（超过 {elapsed:?}），子进程已终止"
+                ))),
+                Ok(Err(e)) => Err(ToolError::Exec(format!("git diff 执行失败: {e}"))),
+                Ok(Ok(output)) => {
+                    if !output.status.success() {
+                        return Err(ToolError::Exec(format!(
+                            "git diff 失败 (exit {}): {}",
+                            output.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&output.stderr)
+                        )));
+                    }
+                    Ok(ToolResult::ok_text(String::from_utf8_lossy(&output.stdout)))
+                }
             }
-            Ok(ToolResult::ok_text(String::from_utf8_lossy(&output.stdout)))
         })
     }
 
@@ -232,6 +241,44 @@ mod tests {
             .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
             .await;
         assert!(result.is_err(), "path escape should be rejected");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diff_timeout_returns_error_result() {
+        // T-3（2026-08-25 审查）：ctx.timeout 耗尽 → is_error=true 的工具错误文本。
+        // 用 PATH shim 注入一个"永远挂起"的假 git，保证确定性（真实 git 在小
+        // 窗口内可能先完成，存在竞态；空仓库则 HEAD 128 直接失败）。
+        use std::collections::HashMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = tempfile::tempdir().expect("repo tmpdir");
+        let shim = tempfile::tempdir().expect("shim tmpdir");
+        let fake_git = shim.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\nwhile true; do :; done\n").expect("write shim");
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod shim");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            shim.path().to_string_lossy().to_string(),
+        );
+        let mut ctx = minicoding_core::tool::ToolContext::new(
+            repo.path().to_str().unwrap().into(),
+            "t".into(),
+        );
+        ctx.timeout = std::time::Duration::from_millis(300);
+        ctx.env = env;
+
+        let tool = GitDiff::new();
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+        let r = result.expect("超时应返回错误结果而非 Err");
+        assert!(r.is_error, "超时结果应标记 is_error=true");
+        match r.content {
+            ToolContent::Text(t) => assert!(t.contains("超时"), "应说明超时: {t}"),
+            other => panic!("expected text content, got {other:?}"),
+        }
     }
 
     #[test]
