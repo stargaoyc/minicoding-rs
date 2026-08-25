@@ -167,7 +167,9 @@ mod tests {
     use tempfile::TempDir;
 
     /// 环境变量进程级全局——所有改 env 的测试共享此锁（函数内 static 各自
-    /// 为锁不互斥，并行测试会交叉污染，集成期修复）
+    /// 为锁不互斥，并行测试会交叉污染，集成期修复）。仅 linux 测试使用
+    /// （home_read_allow_paths 为 linux cfg），非 linux target 下不编译。
+    #[cfg(target_os = "linux")]
     static ENV_SERIAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]

@@ -58,6 +58,8 @@ jobs:
           toolchain: nightly-2026-08-18
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install libseccomp-dev (A1 seccomp feature 经 --all-features 激活)
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - name: cargo clippy
         # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库（webkit2gtk/glib），
         # 在 desktop job 中单独编译
@@ -73,6 +75,8 @@ jobs:
         with:
           toolchain: nightly-2026-08-18
       - uses: Swatinem/rust-cache@v2
+      - name: Install libseccomp-dev (A1 seccomp feature 经 --all-features 激活)
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - name: cargo test
         # 排除 minicoding-desktop：desktop feature 需 Tauri 系统库
         run: cargo test --workspace --exclude minicoding-desktop --all-features
@@ -91,6 +95,8 @@ jobs:
           toolchain: nightly-2026-08-18
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - name: Install libseccomp-dev (A1 seccomp feature 经 --all-features 激活)
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
@@ -208,8 +214,10 @@ jobs:
       - name: Add Windows MSVC target
         run: rustup target add x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check --target x86_64-pc-windows-msvc
-        run: cargo check --target x86_64-pc-windows-msvc -p minicoding-core -p minicoding-sandbox -p minicoding-tools -p minicoding-journal -p minicoding-policy -p minicoding-storage
+      - name: cargo check --target x86_64-pc-windows-msvc (--all-targets 含测试)
+        # --all-targets 必须含：cfg(test) 下的平台分支错误（如 ENV_SERIAL_LOCK
+        # 未门控）只有编译测试目标才暴露（v0.3.4 第三次发布失败教训）
+        run: cargo check --all-targets --target x86_64-pc-windows-msvc -p minicoding-core -p minicoding-sandbox -p minicoding-tools -p minicoding-journal -p minicoding-policy -p minicoding-storage
 
   # M-14/R-10：前端单测基建（Vitest + MSW，AGENTS.md §8.8）。
   # oxlint/oxfmt/tsc/vitest/vite build 与 Rust 侧 fmt/clippy/test 门禁对齐；
@@ -272,7 +280,7 @@ jobs:
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libdbus-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libglib2.0-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libdbus-1-dev libseccomp-dev
       - name: Create placeholder frontend dist
         run: |
           mkdir -p crates/minicoding-web/dist
