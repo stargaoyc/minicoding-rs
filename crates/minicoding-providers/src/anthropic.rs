@@ -926,8 +926,8 @@ mod tests {
         );
         // budget 本身超过上限时，"严格大于 budget"的 API 约束优先于 clamp——
         // 违反前者必 400；后者由上游对 budget 的合法性校验兜底
-        let over_budget: u32 = u32::try_from(THINKING_MAX_OUTPUT_LIMIT + 1_000)
-            .expect("fits in u32 on 64-bit");
+        let over_budget: u32 =
+            u32::try_from(THINKING_MAX_OUTPUT_LIMIT + 1_000).expect("fits in u32 on 64-bit");
         assert_eq!(
             compute_max_tokens(None, Some(over_budget)),
             THINKING_MAX_OUTPUT_LIMIT + 1_001

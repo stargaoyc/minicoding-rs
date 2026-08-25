@@ -585,7 +585,12 @@ async fn handle_prompt(
                 if let Some(m) = next_msg {
                     handle_turn_message(mgr.clone(), stdout, m).await?;
                 } else {
-                    // stdin EOF：客户端断连，取消当前 turn 并结束
+                    // stdin EOF：客户端断连，取消当前 turn 并结束。
+                    // FE-11（2026-08-25 R2 审查）核实：EOF 后挂起权限不会永久
+                    // 悬挂——cancel 触发 turn Interrupted（其 id 经 turn_done
+                    // 分支应答），未决 prompt 由 ServerPrompter 超时保护兜底
+                    // （超时 Deny，见 prompter.rs）。此注释记录该闭环供后续
+                    // 维护者核对。
                     tracing::info!(conversation_id = %conv_id, "ACP stdin EOF during turn");
                     let _ = mgr.cancel(&conv_id).await;
                     break;

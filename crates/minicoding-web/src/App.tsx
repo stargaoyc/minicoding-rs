@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX } from "lucide-react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Undo2 } from "lucide-react";
+import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
@@ -16,7 +16,7 @@ import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
 import { useSessions } from "./hooks/useSessions";
-import { cancelTurn, setApiBase } from "./api/client";
+import { cancelTurn, setApiBase, undoSession } from "./api/client";
 import type { Task } from "./api/generated";
 
 const queryClient = new QueryClient({
@@ -111,6 +111,7 @@ function AppInner() {
   const { activeSessionId, taskPanelOpen, toggleTaskPanel, setSettingsOpen } = useUIStore();
   const permissions = usePermissions();
   const { data: sessions } = useSessions();
+  const qc = useQueryClient();
 
   // 从 session list 提取当前会话的任务列表
   const activeSession = sessions?.find((s) => s.id === activeSessionId);
@@ -153,6 +154,26 @@ function AppInner() {
     }
   }, [activeSessionId]);
 
+  // FE-6（2026-08-25 R2 审查）：回滚最近一步文件改动——服务端路由此前已就绪
+  // 但 Web 前端零消费（四形态能力矩阵漂移）。失败文件以 toast 式 alert 兜底展示。
+  const handleUndo = useCallback(() => {
+    if (!activeSessionId) return;
+    undoSession(activeSessionId)
+      .then((r) => {
+        qc.invalidateQueries({ queryKey: ["messages", activeSessionId] });
+        qc.invalidateQueries({ queryKey: ["workspace", "diff", activeSessionId] });
+        if (r.failed_files.length > 0) {
+          console.warn("[undo] 冲突未回滚:", r.failed_files);
+          window.alert(
+            `已回滚 ${r.restored_files.length} 个文件；${r.failed_files.length} 个冲突未回滚（详见控制台）`,
+          );
+        }
+      })
+      .catch(() => {
+        console.warn("undo failed");
+      });
+  }, [activeSessionId, qc]);
+
   const turnBusy = sendMessage.isPending || isStreaming;
 
   return (
@@ -170,6 +191,16 @@ function AppInner() {
               <span className="text-sm text-[var(--color-text-muted)]">选择或创建一个会话</span>
             )}
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleUndo}
+            disabled={!activeSessionId}
+            title="回滚最近一步文件改动（/undo）"
+          >
+            <Undo2 className="h-4 w-4" />
+            回滚
+          </Button>
           <Button
             variant="ghost"
             size="sm"

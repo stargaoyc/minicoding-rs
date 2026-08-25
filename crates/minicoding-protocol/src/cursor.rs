@@ -113,6 +113,22 @@ impl EventCursor {
         self.next_seq.saturating_sub(1)
     }
 
+    /// 播种 seq 空间（FE-1，2026-08-25 R2 审查：懒恢复会话跨重启续接）。
+    ///
+    /// 磁盘会话恢复后调用：`persisted_seq` 为持久化事件流的最大 seq。
+    /// - `next_seq` 推进到 `max(当前, persisted+1)`——此后新事件在持久化 seq
+    ///   之后**连续编号**，不再从 1 重发与重启前记录撞号；
+    /// - `durable_seq` 提升到 `max(当前, persisted)`——老客户端携带
+    ///   `Last-Event-ID ≤ persisted` 重连时，即使内存 buffer 尚无该区间，
+    ///   也正确落入 durable recovery（`EventStore::load_after`）路径，
+    ///   而非被误判为不可恢复。
+    ///
+    /// 取 max 保证重复播种/播种晚于若干 push 的顺序安全（幂等）。
+    pub fn seed(&mut self, persisted_seq: u64) {
+        self.next_seq = self.next_seq.max(persisted_seq.saturating_add(1));
+        self.durable_seq = self.durable_seq.max(persisted_seq);
+    }
+
     /// 更新 durable seq（持久化完成后调用）。
     pub fn set_durable(&mut self, seq: u64) {
         self.durable_seq = seq;

@@ -366,7 +366,7 @@ fn build_router(
 
     let api_routes = Router::new()
         .route("/sessions", post(create_session).get(list_sessions))
-        .route("/sessions/{id}", get(get_session))
+        .route("/sessions/{id}", get(get_session).delete(delete_session))
         .route("/sessions/{id}/messages", post(send_message))
         .route("/sessions/{id}/cancel", post(cancel_turn))
         // 2026-08-25 审查 F-routes：补齐 Undo 与 SetPermissionMode（对齐 NDJSON 命令）
@@ -746,7 +746,18 @@ async fn send_message(
     ))
 }
 
-/// `POST /sessions/{id}/cancel` — 取消当前 turn。
+/// `DELETE /sessions/{id}` — 删除会话（FE-13，2026-08-25 R2 审查）。
+///
+/// 仅从活跃会话表移除并关闭其事件通道；磁盘上的会话文件（消息日志/事件流）
+/// 保留（数据不可逆删除须独立审计设计，见 roadmap）。此前
+/// `SessionManager::delete` 为死代码，无任何 HTTP 入口。
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let removed = state.mgr.delete(&session_id);
+    Ok(Json(serde_json::json!({ "deleted": removed })))
+}
 async fn cancel_turn(
     State(state): State<AppState>,
     Path(session_id): Path<String>,

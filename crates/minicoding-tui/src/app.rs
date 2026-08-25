@@ -193,6 +193,8 @@ pub struct App {
     ui_tx: mpsc::Sender<UiCommand>,
     lines: Vec<ChatLine>,
     streaming: String,
+    /// FE-8（2026-08-25 R2 审查）：reasoning 增量缓冲（turn 内累计，固化时清除）
+    reasoning: String,
     input: InputState,
     is_turning: bool,
     should_exit: bool,
@@ -239,6 +241,7 @@ impl App {
             ui_tx,
             lines: Vec::new(),
             streaming: String::new(),
+            reasoning: String::new(),
             input: InputState::default(),
             is_turning: false,
             should_exit: false,
@@ -322,8 +325,17 @@ impl App {
             RuntimeEvent::Token(text) => {
                 self.streaming.push_str(&text);
             }
+            RuntimeEvent::ReasoningDelta(text) => {
+                // FE-8（2026-08-25 R2 审查）：reasoning 增量进独立缓冲——此前
+                // TUI 丢弃该事件，思考过程仅 Web/SDK 可见。以暗色 System 行
+                // 前缀区分正文（不固化，turn 结束时随 streaming 一起落行）。
+                self.reasoning.push_str(&text);
+            }
             RuntimeEvent::MessageAppended(msg) => {
                 // 流式累积固化为消息；若为 assistant 文本，先落 streaming 再覆盖
+                if !self.reasoning.is_empty() {
+                    self.reasoning.clear();
+                }
                 if !self.streaming.is_empty() && msg.role == Role::Assistant {
                     self.lines
                         .push(ChatLine::Assistant(std::mem::take(&mut self.streaming)));
@@ -376,6 +388,7 @@ impl App {
             }
             RuntimeEvent::TurnEnd { .. } => {
                 self.is_turning = false;
+                self.reasoning.clear();
                 if !self.streaming.is_empty() {
                     self.lines
                         .push(ChatLine::Assistant(std::mem::take(&mut self.streaming)));
@@ -649,6 +662,7 @@ impl App {
                     area,
                     &self.lines,
                     &self.streaming,
+                    &self.reasoning,
                     self.scroll_offset,
                 );
             }
@@ -663,6 +677,7 @@ impl App {
                     chunks[0],
                     &self.lines,
                     &self.streaming,
+                    &self.reasoning,
                     self.scroll_offset,
                 );
                 crate::view::tool_panel::render_tool_panel(frame, chunks[1], &self.lines);
@@ -678,6 +693,7 @@ impl App {
                     chunks[0],
                     &self.lines,
                     &self.streaming,
+                    &self.reasoning,
                     self.scroll_offset,
                 );
                 crate::view::task_panel::render_task_panel(

@@ -55,8 +55,12 @@ interface DesktopState {
   error: string | null;
   /** 编辑模式保存成功后设置为 true，提示用户需要重启。 */
   restartRequired: boolean;
-  /** 初始化桌面环境（App mount 时调用）。 */
+  /** 初始化桌面环境（App mount 时调用；幂等——并发调用复用首次 promise）。 */
   init: () => Promise<void>;
+  /** 首次 init 的共享 promise（FE-12 幂等守卫内部用）。 */
+  initPromise: Promise<void> | null;
+  /** 实际初始化逻辑（由 init 首次调用）。 */
+  initInner: () => Promise<void>;
   /** 保存 provider 配置 + API key。首次启动后自动 init；编辑模式仅保存并提示重启。 */
   saveConfig: (input: ProviderInput) => Promise<void>;
   /** 清除 restartRequired 标志（用户确认后）。 */
@@ -100,7 +104,24 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
 
   clearRestartRequired: () => set({ restartRequired: false }),
 
+  // FE-12（2026-08-25 R2 审查）：init 幂等守卫——React StrictMode dev 双挂载
+  // 会并发调用 init()，此前两次都会走到 startSession() 拉起两个 sidecar
+  // （SidecarProcess 只存最后一个句柄，前者成孤儿）。用模块级 promise 复用
+  // 首次调用。
+  initPromise: null as Promise<void> | null,
+
   init: async () => {
+    if (get().initPromise) {
+      return get().initPromise as Promise<void>;
+    }
+    const p = (async () => {
+      await get().initInner();
+    })();
+    set({ initPromise: p });
+    return p;
+  },
+
+  initInner: async () => {
     // Web 模式（非 Tauri）：直接就绪，API base 走同源 / VITE_API_BASE
     if (!isTauri()) {
       setApiBase("");

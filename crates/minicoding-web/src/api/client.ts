@@ -203,6 +203,31 @@ export function cancelTurn(sessionId: string): Promise<void> {
   return http<void>(`/sessions/${sessionId}/cancel`, { method: "POST" });
 }
 
+/** FE-6（2026-08-25 R2 审查）：`POST /sessions/{id}/undo` — 回滚最近 N 步文件改动。 */
+export interface UndoResponse {
+  undone_entries: number;
+  restored_files: string[];
+  failed_files: { path: string; reason: string }[];
+}
+
+export function undoSession(sessionId: string, steps = 1): Promise<UndoResponse> {
+  return http<UndoResponse>(`/sessions/${sessionId}/undo`, {
+    method: "POST",
+    body: JSON.stringify({ steps }),
+  });
+}
+
+/** FE-6：`POST /sessions/{id}/permission-mode` — 运行中切换权限模式。 */
+export function setPermissionMode(
+  sessionId: string,
+  mode: import("./generated").PermissionMode,
+): Promise<{ ok: boolean; mode: import("./generated").PermissionMode }> {
+  return http(`/sessions/${sessionId}/permission-mode`, {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
 export function resolvePermission(
   sessionId: string,
   pid: string,
@@ -296,6 +321,7 @@ export function subscribeEvents(
   onEvent: (event: EventDto) => void,
   onError?: (e: Event) => void,
   onOpen?: () => void,
+  onRehydrate?: () => void,
 ): SSESubscription {
   // S1：EventSource 不能自定义请求头，token 走查询参数（服务端仅接受该端点的 query 形式）
   const authQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
@@ -305,9 +331,29 @@ export function subscribeEvents(
   // 排查用：SSE 事件统计（token/reasoning_delta 高频事件按计数合并输出）
   let highFreqCount = 0;
 
+  // FE-4（2026-08-25 R2 审查）：RehydrateRequired 检测——服务端在 broadcast
+  // 溢出/重放不可恢复时发送 `{session_id, last_known_seq, reason}`（无 `type`
+  // 字段，非 EventDto）。此前被 isEventDto guard 静默丢弃 → UI 与服务端
+  // 永久失同步。识别后回调 onRehydrate 由 hooks 层重拉 snapshot。
+  const isRehydratePayload = (v: unknown): boolean => {
+    if (typeof v !== "object" || v === null) return false;
+    const o = v as Record<string, unknown>;
+    return (
+      "session_id" in o &&
+      "last_known_seq" in o &&
+      "reason" in o &&
+      !("type" in o)
+    );
+  };
+
   source.onmessage = (ev) => {
     try {
       const parsed: unknown = JSON.parse(ev.data);
+      if (isRehydratePayload(parsed)) {
+        console.warn("[sse] 收到 RehydrateRequired：本地事件流不完整，重拉 snapshot");
+        onRehydrate?.();
+        return;
+      }
       if (!isEventDto(parsed)) {
         console.warn("[sse] 未知事件类型，已丢弃:", ev.data.slice(0, 120));
         return;
@@ -323,7 +369,7 @@ export function subscribeEvents(
       }
       onEvent(dto);
     } catch {
-      // 忽略解析失败的事件（如 RehydrateRequired 等非 EventDto 消息）
+      // 忽略解析失败的事件
       console.debug("[sse] 无法解析的事件数据已忽略");
     }
   };

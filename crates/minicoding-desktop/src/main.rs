@@ -169,8 +169,10 @@ fn main() {
         }
     };
     app.run(|handle, event| {
-        // 应用退出（托盘"退出"、`restart_app` 重启）时清理 sidecar 进程。
-        // 窗口关闭只是隐藏到托盘（prevent_close），不触发 Exit，sidecar 保持运行。
+        // 应用退出（托盘"退出"、关窗、`restart_app` 重启）时清理 sidecar 进程。
+        // FE-10（2026-08-25 R2 审查）：注释与上方 setup 段自相矛盾——关窗即
+        // 退出（无 prevent_close）会触发 Exit，sidecar 一并终止；原"窗口关闭
+        // 只是隐藏到托盘"为陈旧描述，已删除。
         if let tauri::RunEvent::Exit = event {
             sidecar::kill_sidecar(handle);
         }

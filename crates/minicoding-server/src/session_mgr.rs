@@ -122,6 +122,16 @@ impl ServerSession {
         seq
     }
 
+    /// 按 Runtime 持久化进度播种 cursor（FE-1，2026-08-25 R2 审查）。
+    ///
+    /// 懒恢复/首次 turn 的 `init_event_stream` 之后调用：cursor 从持久化流
+    /// 最大 seq 之后连续编号（不再从 1 撞号），且 `Last-Event-ID ≤ persisted`
+    /// 的重连可走 durable recovery。取 max 幂等，重复调用安全。
+    pub async fn seed_cursor_from_runtime(&self) {
+        let persisted = self.runtime.next_event_seq().await.saturating_sub(1);
+        self.cursor.lock().await.seed(persisted);
+    }
+
     /// 订阅已分配 seq 的事件流（实时推送用）。
     ///
     /// 返回 `(seq, EventKind)` 广播 receiver——事件已由单一写者（sequencer task）
@@ -340,6 +350,34 @@ impl SessionManager {
             }
         }
         let session = Arc::new(ServerSession::new(runtime, pending));
+
+        // FE-3（2026-08-25 R2 审查）：最终插入用 entry 语义**原子判定**——此前
+        // 开头查重与末尾无条件 insert 之间存在 TOCTOU：并发 get_or_load 同一
+        // 未加载会话会产生双 Runtime/双 sequencer，败者的订阅 task 环永不退出、
+        // 双写同一会话 jsonl。冲突时丢弃本实例（task 尚未 spawn，无泄漏）。
+        {
+            let mut guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = guard.get(&session_id) {
+                let existing = existing.clone();
+                drop(guard);
+                return existing;
+            }
+            guard.insert(session_id, session.clone());
+            // Metrics：活跃会话数 gauge
+            metrics::set_active_sessions(guard.len() as u64);
+        }
+
+        Self::spawn_session_tasks(&session);
+        session
+    }
+
+    /// 为已确认注册的会话 spawn 常驻 task（`TaskUpdated` 订阅镜像 + seq sequencer）。
+    ///
+    /// 仅在会话进入会话表之后调用（FE-3：保证失败方不遗留孤儿 task）。
+    fn spawn_session_tasks(session: &Arc<ServerSession>) {
         let subscriber = session.clone();
         tokio::spawn(async move {
             let mut rx = subscriber.runtime.events().subscribe();
@@ -386,15 +424,6 @@ impl SessionManager {
                 }
             }
         });
-
-        let mut guard = self
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(session_id, session.clone());
-        // Metrics：活跃会话数 gauge
-        metrics::set_active_sessions(guard.len() as u64);
-        session
     }
 
     /// 查找会话（同步——`std::sync::Mutex` 的 `HashMap` 查找不需 await）。
@@ -500,6 +529,12 @@ impl SessionManager {
     /// 恢复后 `Runtime` 的 `workdir` 为会话原工作目录（事件流/Snapshot 中的值），
     /// 使文件工具/sandbox/journal 与创建时一致。
     ///
+    /// FE-7（2026-08-25 R2 审查，已知取舍如实记录）：会话原 `permission_mode`
+    /// 与 sandbox preset **不随会话持久化**（Session/Snapshot 数据模型未含该
+    /// 字段），重启恢复后回落 server 启动默认值。若原会话以 plan/full-access
+    /// 运行，恢复后的权限语义与中断前不同——显式 warn 提醒；持久化安全上下文
+    /// 需扩展 snapshot schema（roadmap"2026-08-25 R2 审查遗留"）。
+    ///
     /// # Errors
     /// 会话不存在时返回 `NotFound`；磁盘加载或 Runtime 构造失败时返回
     /// `BuildFailed`。
@@ -524,15 +559,22 @@ impl SessionManager {
         let runtime = Arc::new(runtime);
         // 3. 回填上下文 + 初始化事件流（幂等：新/旧会话路径见 `init_event_stream`）
         runtime
-            .restore_history()
-            .await
-            .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
-        runtime
             .init_event_stream()
             .await
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
         // 4. 注册（insert_session 内部查重，并发恢复安全）
-        Ok(self.insert_session(runtime, pending))
+        let session = self.insert_session(runtime, pending);
+        // 5. FE-1（2026-08-25 R2 审查）：按持久化进度播种 SSE cursor——
+        //    此后新事件 seq 与重启前连续，Last-Event-ID 重连可走 durable
+        //    recovery 而非误判不可恢复。
+        session.seed_cursor_from_runtime().await;
+        // FE-7：安全上下文回落显式提醒（取舍说明见方法 doc）
+        tracing::warn!(
+            session = %session_id,
+            "restored session falls back to server-default permission_mode/sandbox preset \
+             (security context is not persisted across restarts)"
+        );
+        Ok(session)
     }
 
     /// 从磁盘加载 `Session`（snapshot + 事件流重放优先，消息日志回退）。
@@ -670,6 +712,9 @@ impl SessionManager {
             .init_event_stream()
             .await
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
+        // FE-1：播种 cursor（新会话 SessionCreated seq=1 后同样适用；取 max
+        // 幂等，与 restore 路径的播种叠加安全）
+        session.seed_cursor_from_runtime().await;
 
         // 驱动 turn。`runtime` 是 owned `Arc<Runtime>`，`run_turn(&self)` 借用
         // `&*runtime`（局部借用，future 自包含）。

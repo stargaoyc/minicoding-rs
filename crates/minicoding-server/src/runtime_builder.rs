@@ -7,7 +7,8 @@
 //! 与 CLI builder 的差异：
 //! - 无 `SessionLoadMode`（server 端每个 session 新建或由客户端指定 id 恢复）；
 //! - 无 `ReplayPolicy`（server 端不处理 `--replay`）；
-//! - 无 Hook/Journal（M8 MVP 不启用，后续可 feature gate）；
+//! - 无 Hook registry（Hook 未接线；Journal 已注入——FE-14，2026-08-25 R2
+//!   审查修正此前"无 Hook/Journal"的失实文档）；
 //! - prompter 恒为 `ServerPrompter`（外部注入，不由 builder 构造）。
 
 use anyhow::{Context, Result};

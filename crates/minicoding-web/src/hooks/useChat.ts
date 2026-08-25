@@ -199,6 +199,13 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         console.warn(`SSE connection error for session ${sessionId}`);
       },
       refreshPending,
+      // FE-4（2026-08-25 R2 审查）：RehydrateRequired → 重拉消息 snapshot。
+      // 此前该信号被静默丢弃，broadcast 溢出/断线丢失的事件区间永久缺失。
+      () => {
+        qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+        qc.invalidateQueries({ queryKey: ["sessions"] });
+        refreshPending();
+      },
     );
     return () => subRef.current?.close();
   }, [sessionId, handleEvent, handlePermissionRequested]);

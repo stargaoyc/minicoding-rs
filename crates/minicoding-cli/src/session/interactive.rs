@@ -317,6 +317,15 @@ async fn run_one_turn(rt: &Runtime, line: String) -> usize {
                     let _ = write!(lock, "{text}");
                     let _ = lock.flush();
                 }
+                // FE-8（2026-08-25 R2 审查）：reasoning 增量以暗色渲染——此前
+                // CLI 丢弃 ReasoningDelta，思考过程仅 Web/SDK 可见（四形态
+                // 能力矩阵漂移）。
+                Ok(Event::ReasoningDelta(text)) => {
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    let _ = write!(lock, "{DIM}{text}{DIM:#}");
+                    let _ = lock.flush();
+                }
                 Ok(Event::ToolCallStarted { tool, .. }) => {
                     anstream::eprintln!();
                     anstream::eprintln!("{DIM}[工具调用: {tool}]{DIM:#}");

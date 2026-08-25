@@ -100,6 +100,15 @@ impl Runtime {
         *self.durable_seq.lock().await
     }
 
+    /// 返回下一个待分配的事件 seq（`init_event_stream` 后 = 持久化最大 seq + 1）。
+    ///
+    /// FE-1（2026-08-25 R2 审查）：server 懒恢复会话据此播种 SSE cursor，
+    /// 使新事件的 seq 与重启前持久化记录连续，断线重连跨重启可恢复。
+    #[must_use]
+    pub async fn next_event_seq(&self) -> u64 {
+        *self.event_seq.lock().await
+    }
+
     /// 持久化事件到 `EventStore` + 触发周期 snapshot（Event Sourcing 核心）。
     ///
     /// 由 `run_turn` 在 `events.emit(event)` 后调用。流程：
