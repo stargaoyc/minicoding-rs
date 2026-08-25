@@ -4,6 +4,64 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.4] - 2026-08-25
+
+> 本版本为 `docs/project-review-20260825-r2.md` 第二轮全面审查修复版：
+> R1'–R6' 六个阶段收口约 70 项新发现（含 3 个 P1 安全/正确性缺陷与多项
+> "接线空转"类功能失效），并复核首轮 R1–R7 全部修复的落地质量。
+
+### Security
+
+- **policy：会话级 Allow 缓存与持久化查表同门控**——C-23/C-27 的 restricted
+  ask（不可 Always）此前可被同工具此前的 AllowAlways 批准静默击穿（指令性
+  auto.md 写入不再弹窗，记忆投毒通道）；目录粒度前缀匹配先词法规范化路径
+  （`src/gen/../secret.txt` 不再逃出批准目录）
+- **sandbox：Landlock 分级降级**——FS ABI 逐级探测（V3/V2/V1）、网络限制按
+  内核能力启用：内核 <6.7 此前每次 spawn 必失败并把用户推向关闭沙箱；
+  doctor 如实报告探测 ABI 与网络限制范围；`.git` 文件形式（worktree/
+  submodule）纳入 VCS 保护
+- **sandbox：Windows Job Object pid 键控**——单槽覆盖不再静默杀死运行中的
+  后台进程树；策略快照改 FIFO 队列；ResumeThread 失败不再误报成功
+- **policy：shell 黑名单补 Windows cmd 破坏性动词**（del/erase/rd/rmdir/
+  move/copy 等）与复合语句控制关键字剥离（`for..; do rm AGENTS.md; done`
+  段首动词判定逃逸封堵）；journal 恢复拒绝符号链接穿透；事件流 append
+  seq 单调性校验（跨进程重复 fail-closed）；policy.toml 原子写防并发半写
+
+### Fixed
+
+- **core：C-30 沙箱硬熔断强制 TurnEnd**——HardTripped 后本轮立即终止，
+  LLM 无视劝阻文本重试到 max_iters 的路径被切断；`RuntimeConfig.tools`
+  超时/输出上限三字段接线生效（用户配置不再被硬编码 120s/1MiB 静默截杀）；
+  cancel_token 下传 ToolContext；Failed/Err 路径补发 TurnEnd 终结事件；
+  库边界 `Result<_, String>` 收敛为具体错误类型
+- **providers：Anthropic thinking 输出上限修正**——budget≥8192 时 clamp 到
+  8192 使 max_tokens≤budget_tokens 必 400（0.3.3 修复引入的回归），thinking
+  路径上限提升至 64K 且保证严格大于 budget；OpenAI 推理系补 top_p gate
+- **tools/mcp：mcp serve 只读暴露统一为 SideEffect::None 判据**——shell.run、
+  git.apply、web.* 此前绕过 `--expose-write-tools` 无条件直通执行；后台 shell
+  淘汰主动终止进程（孤儿进程消除）；web.search 补超时+有界缓冲；
+  shell.output 输出经脱敏（C-04 后台旁路消除）；merge 失败保留分支不销毁
+  未合并改动副本
+- **server/web：懒恢复会话 SSE cursor 按持久化进度播种**——跨重启断线重连
+  可走 durable recovery（此前 Last-Event-ID 重连永久黑屏）；insert_session
+  TOCTOU 双 sequencer 消除；Web 前端识别 RehydrateRequired 重拉 snapshot；
+  Web/Desktop 补齐 /undo 与 /permission-mode 入口；CLI/TUI 渲染 reasoning
+  增量（四形态能力矩阵对齐）
+- **context/memory：Auto memory 并发丢更新竞态修复**（RMW 全程持锁）；
+  async load 与 load_sync 错误语义对齐；压缩审计移到熔断器锁外；
+  post-compact read 路径改为压缩前提取（L3/L4 丢弃后注入恒空修复）
+
+### Changed
+
+- CI 三 workflow 补 concurrency 组与 timeout-minutes；pre-push hook 导出
+  `MINICODING_PRE_PUSH=1` 激活推送阶段完整门禁；cliff.toml Security 解析器
+  移至 catch-all 前（原永不可达）；`[workspace.lints]` 收敛 18 个 crate 的
+  clippy deny 声明并使集成测试纳入 pedantic；secrets 正则覆盖 `.env.*`
+- 文档体系第二轮对齐：Event 枚举以 `core/runtime/event.rs` 为权威源
+  （清除 HookRun/FileUndone 等幽灵变体）、沙箱驱动表按代码事实重写、
+  libseccomp 五处失实声明修正、统计口径逐行重算（54/83/66≈204）、
+  roadmap 新增 R2 审查遗留立项清单（12 项）
+
 ## [0.3.3] - 2026-08-25
 
 > 本版本为 `docs/project-review-20260825.md` 全面审查（7 路并行评审）修复版：
