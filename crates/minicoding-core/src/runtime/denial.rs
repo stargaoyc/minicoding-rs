@@ -327,12 +327,23 @@ mod tests {
 
     #[test]
     fn structured_errno_matches_io_eperm_and_eacces() {
-        assert_eq!(structured_denial_errno(&eperm_io_error()), Some(1));
+        // 平台无关断言：与常量比较而非字面量（Windows 上 EPERM=5 非 unix 的 1）
+        assert_eq!(
+            structured_denial_errno(&eperm_io_error()),
+            Some(ERRNO_EPERM)
+        );
         assert_eq!(
             structured_denial_errno(&crate::model::ToolError::Io(
                 std::io::Error::from_raw_os_error(ERRNO_EACCES)
             )),
-            Some(13)
+            Some(ERRNO_EACCES)
+        );
+        // 非 deny-list errno 不构成权威信号
+        assert_eq!(
+            structured_denial_errno(&crate::model::ToolError::Io(
+                std::io::Error::from_raw_os_error(0)
+            )),
+            None
         );
     }
 

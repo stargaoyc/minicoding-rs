@@ -908,6 +908,13 @@ async fn sandbox_denial_authoritative_eperm_records_breaker() {
     };
     use minicoding_core::tool::ToolContext;
 
+    /// 平台正确的 EPERM 编码（Windows raw_os_error 体系不同：1=ERROR_INVALID_FUNCTION，
+    /// 权限拒绝是 5——与 core denial.rs 的 ERRNO_EPERM 平台取值保持一致）
+    #[cfg(windows)]
+    const TEST_EPERM: i32 = 5;
+    #[cfg(not(windows))]
+    const TEST_EPERM: i32 = 1;
+
     /// 以 `ToolError::Io(raw_errno)` 失败的 mock 工具（结构化 errno 通道）。
     struct IoFailTool;
     impl minicoding_core::tool::Tool for IoFailTool {
@@ -930,7 +937,9 @@ async fn sandbox_denial_authoritative_eperm_records_breaker() {
             _params: serde_json::Value,
             _ctx: &ToolContext,
         ) -> BoxFuture<'_, Result<minicoding_core::model::ToolResult, ToolError>> {
-            Box::pin(async move { Err(ToolError::Io(std::io::Error::from_raw_os_error(1))) })
+            Box::pin(
+                async move { Err(ToolError::Io(std::io::Error::from_raw_os_error(TEST_EPERM))) },
+            )
         }
     }
 
@@ -938,7 +947,8 @@ async fn sandbox_denial_authoritative_eperm_records_breaker() {
     struct MarkerDetector;
     impl SandboxDenialDetector for MarkerDetector {
         fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
-            if !error_text.contains("Operation not permitted") {
+            // 匹配 Runtime 合成的内部标记（平台无关）；OS 文案跨平台不可靠
+            if !error_text.contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX) {
                 return None;
             }
             Some(DenialMatch {

@@ -3,17 +3,16 @@
 /**
  * 压缩追溯区间（M-07，R-02）：本消息替代的事件 seq 区间。
  */
-export type CompressedRange = {
-  /**
-   * 被替代区间起始事件 seq（含）。
-   */
-  from_seq: bigint;
-  /**
-   * 被替代区间结束事件 seq（含）。
-   */
-  to_seq: bigint;
-  /**
-   * 被替代消息的 token 总量（压缩掉的 token）。
-   */
-  dropped_tokens: number;
-};
+export type CompressedRange = { 
+/**
+ * 被替代区间起始事件 seq（含）。
+ */
+from_seq: bigint, 
+/**
+ * 被替代区间结束事件 seq（含）。
+ */
+to_seq: bigint, 
+/**
+ * 被替代消息的 token 总量（压缩掉的 token）。
+ */
+dropped_tokens: number, };
