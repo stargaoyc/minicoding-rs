@@ -97,12 +97,19 @@ impl DenialDetector {
 
 impl SandboxDenialDetector for DenialDetector {
     fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
+        // S-6：Runtime 合成的 errno 标记优先判定权威性。`\x01`/`\x02` 控制字符
+        // 序列无法被子进程 stderr 输出可靠伪造，且标记由 Runtime 在进程内合成
+        // （仅当错误携带结构化 EPERM/EACCES 时追加）——命中即内核级硬反馈；
+        // 仅传统文本模式命中的为 advisory（可能来自业务失败或提示注入伪造）。
+        let authoritative =
+            error_text.contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX);
         for sig in PLATFORM_SIGNATURES {
             if error_text.contains(sig.pattern) {
                 return Some(DenialMatch {
                     signature: *sig,
                     tool: tool.to_string(),
                     kind: deny_kind_from_label(sig.kind_label, sig.reason, error_text),
+                    authoritative,
                 });
             }
         }
@@ -224,6 +231,37 @@ mod tests {
             .unwrap();
         assert_eq!(m.signature.reason, "EPERM");
         assert_eq!(m.tool, "shell.run");
+        // S-6：纯文本命中为 advisory（不计熔断）
+        assert!(!m.authoritative, "纯文本命中应为 advisory");
+    }
+
+    #[test]
+    fn detect_runtime_errno_marker_is_authoritative() {
+        // S-6：Runtime 合成标记命中 → authoritative=true（内核级硬反馈）。
+        // 模拟 build_denial_result 组装的检测文本：原始错误 + 标记行。
+        use minicoding_core::sandbox::{DENIED_ERRNO_MARKER_PREFIX, DENIED_ERRNO_MARKER_SUFFIX};
+        let d = DenialDetector::new();
+        let text = format!(
+            "io: Operation not permitted\n{PREFIX}1{SUFFIX}",
+            PREFIX = DENIED_ERRNO_MARKER_PREFIX,
+            SUFFIX = DENIED_ERRNO_MARKER_SUFFIX
+        );
+        let m = d.detect("fs.write", &text).unwrap();
+        assert!(m.authoritative, "errno 标记命中应为 authoritative");
+
+        // 同一签名，无标记 → advisory
+        let m = d.detect("fs.write", "io: Operation not permitted").unwrap();
+        assert!(!m.authoritative);
+    }
+
+    #[test]
+    fn forged_marker_without_control_chars_is_not_authoritative() {
+        // S-6 防伪：子进程输出若试图打印字面量 "MINICODING_DENIED_ERRNO=1"，
+        // 缺少 \x01 控制字符前缀则不构成权威判定
+        let d = DenialDetector::new();
+        let text = "echo MINICODING_DENIED_ERRNO=1 done\nOperation not permitted";
+        let m = d.detect("shell.run", text).unwrap();
+        assert!(!m.authoritative);
     }
 
     #[test]

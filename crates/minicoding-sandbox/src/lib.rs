@@ -5,6 +5,8 @@
 //! ## 技术选型
 //!
 //! - **Linux**：`landlock` crate（Landlock LSM，MIT/Apache-2.0）——文件系统隔离；
+//!   可选 feature `seccomp` 追加危险 syscall 拒绝过滤器（`libseccomp` crate，
+//!   默认不开——需系统 libseccomp C 库头文件，见 `seccomp` 模块文档）；
 //! - **macOS**：`sandbox_init(3)` FFI（Seatbelt，10.5+ 内置）——文件系统隔离；
 //! - **Windows**：`windows-sys` crate（Job Object + UI 限制，MIT/Apache-2.0）——
 //!   进程级遏制（文件系统隔离需 AppContainer，作为后续增强）。
@@ -34,6 +36,10 @@ mod hardening;
 /// 如实报告内核实际能力，SEC-2）。
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+/// seccomp 危险 syscall 拒绝过滤器（A1，feature gate `seccomp`，仅 Linux）。
+#[cfg(all(target_os = "linux", feature = "seccomp"))]
+mod seccomp;
 
 #[cfg(target_os = "macos")]
 mod macos;

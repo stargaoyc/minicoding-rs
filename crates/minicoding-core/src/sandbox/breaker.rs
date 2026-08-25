@@ -18,6 +18,18 @@
 use crate::sandbox::SandboxDenyKind;
 use crate::util::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 
+/// Runtime 合成的权威 denial 标记行前缀（S-6）。
+///
+/// `build_denial_result` 在错误携带结构化 errno（EPERM/EACCES 的
+/// `raw_os_error`）时，向检测文本追加 `\x01MINICODING_DENIED_ERRNO={n}\x02`
+/// 标记行：`\x01`/`\x02` 是控制字符，子进程 stderr 输出无法可靠伪造（终端/
+/// shell 会转义或剥离），且标记由 Runtime 在进程内合成——检测器命中该标记
+/// 即可判定为**权威**沙箱拒绝；仅文本模式命中的为 advisory。
+pub const DENIED_ERRNO_MARKER_PREFIX: &str = "\x01MINICODING_DENIED_ERRNO=";
+
+/// 权威 denial 标记行的结束字符（S-6，见 [`DENIED_ERRNO_MARKER_PREFIX`]）。
+pub const DENIED_ERRNO_MARKER_SUFFIX: &str = "\x02";
+
 /// 单条 denial 签名（匹配 stderr 子串或 errno 文本）。
 #[derive(Debug, Clone, Copy)]
 pub struct DenialSignature {
@@ -41,6 +53,12 @@ pub struct DenialMatch {
     pub tool: String,
     /// 结构化拒绝类型（M-09，透传到 `ToolResultMeta.sandbox_denied`）。
     pub kind: SandboxDenyKind,
+    /// 是否为**权威**判定（S-6）：
+    /// - `true`：检测文本含 Runtime 合成的 errno 标记（内核级硬反馈），计入
+    ///   熔断（C-30）；
+    /// - `false`：advisory——仅文本启发式命中，可能来自业务逻辑失败或提示注入
+    ///   伪造的输出，返回提示性结果但**不计熔断**。
+    pub authoritative: bool,
 }
 
 /// 沙箱拒绝熔断状态（单 turn 内有效，turn 结束重置）。

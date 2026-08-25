@@ -15,12 +15,19 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 
+# 可选 feature：seccomp 系统调用过滤（A1）。默认不开——链接系统 libseccomp C 库
+# 需要 -dev 头文件，避免 CI/发行版构建强依赖；开启后子进程额外获得危险 syscall
+# 拒绝过滤器（deny-list，见 src/seccomp.rs）。
+[features]
+seccomp = ["dep:libseccomp"]
+
 # 平台重依赖按 target cfg 隔离（见 modules.md §7.4、tech-stack.md §11）
-# Linux：Landlock LSM（文件系统隔离，内核 5.13+）。libseccomp（系统调用过滤）作为
-# 后续增强，需系统 libseccomp C 库，M4 先交付 Landlock 核心隔离（C-22 文件越界写拦截）。
+# Linux：Landlock LSM（文件系统隔离，内核 5.13+）。libseccomp（系统调用过滤，
+# A1）为可选增强（feature `seccomp`），默认关闭。
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 libc = "0.2"
+libseccomp = { workspace = true, optional = true }
 
 # macOS：Seatbelt（sandbox_init FFI，10.5+ 内置），无外部 crate 依赖（FFI 直连 libsystem）
 

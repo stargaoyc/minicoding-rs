@@ -15,6 +15,28 @@ use crate::policy::{Decision, PermissionPrompt};
 use crate::sandbox::{BreakerState, SandboxPolicy};
 use crate::tool::ToolContext;
 
+/// S-6：从工具错误中提取结构化沙箱 errno。
+///
+/// 仅匹配 `ToolError::Io` 且 OS error code 为 `EPERM`(1)/`EACCES`(13)——这是
+/// 内核级硬反馈的可靠信号。子进程 stderr **文本**可被业务失败或提示注入间接
+/// 控制，不可作为熔断依据；结构化 errno 由 Rust 进程内的 `io::Error` 携带，
+/// LLM 无法伪造。
+fn structured_denial_errno(error: &crate::model::ToolError) -> Option<i32> {
+    match error {
+        crate::model::ToolError::Io(e) => match e.raw_os_error() {
+            Some(code @ (ERRNO_EPERM | ERRNO_EACCES)) => Some(code),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `EPERM`（errno 1，操作不允许）。
+const ERRNO_EPERM: i32 = 1;
+
+/// `EACCES`（errno 13，权限不足）。
+const ERRNO_EACCES: i32 = 13;
+
 impl Runtime {
     /// 判断工具错误是否为"沙箱初始化失败"（`apply`/`post_spawn`）。
     ///
@@ -99,11 +121,8 @@ impl Runtime {
 
     /// 沙箱拒绝检测与熔断处理（T-M4-5）。
     ///
-    /// 检测工具错误是否为沙箱拒绝（EPERM/EACCES/landlock 等）。若是：
-    /// - 更新熔断器计数；
-    /// - 软熔断（≥3 次）：附加方向提醒返回；
-    /// - 硬熔断（≥5 次）：返回带总结的错误；
-    /// - 未熔断：返回带 denial 标识的错误，提示 LLM/用户。
+    /// 见 [`Self::build_denial_result`]：权威判定（结构化 errno 标记命中）
+    /// 更新熔断器并按软/硬阈值处理；advisory 命中仅返回提示性结果。
     ///
     /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
     /// 返回 `None` 表示非 denial，调用方原样传播错误。
@@ -124,11 +143,13 @@ impl Runtime {
 
     /// 沙箱拒绝检测（M-09 起为静态辅助：只读并行桶与副作用串行路径共用）。
     ///
-    /// 检测工具错误是否为沙箱拒绝（EPERM/EACCES/landlock 等）。若是：
-    /// - 更新熔断器计数；
-    /// - 软熔断（≥3 次）：附加方向提醒返回；
-    /// - 硬熔断（≥5 次）：返回带总结的错误；
-    /// - 未熔断：返回带 denial 标识的错误，提示 LLM/用户。
+    /// 检测工具错误是否为沙箱拒绝。错误携带结构化 errno（EPERM/EACCES，S-6）
+    /// 时向检测文本追加 Runtime 合成的权威标记行；检测结果分两路：
+    /// - **authoritative**（标记命中）：内核级硬反馈——更新熔断器（C-30），
+    ///   软/硬熔断分支仅在此路径可达；
+    /// - **advisory**（仅文本模式命中）：疑似拒绝但未经结构化确认——返回提示性
+    ///   `ToolResult` 但不计熔断、不动 `set_circuit_breaker` 指标（日志与
+    ///   metrics 类目标注 advisory）。
     ///
     /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
     /// 返回 `None` 表示非 denial，调用方原样传播错误。
@@ -139,11 +160,44 @@ impl Runtime {
         error: &crate::model::ToolError,
     ) -> Option<ToolResult> {
         let error_text = error.to_string();
-        let m = detector.detect(tool, &error_text)?;
+        // S-6：组装检测文本——结构化 errno 存在时追加合成标记行。子进程输出
+        // 无法伪造 `\x01`/`\x02` 控制字符序列，且标记由 Runtime 进程内合成，
+        // 据此区分权威判定与 advisory 命中。回灌 LLM 的文本保持原始错误
+        // （不带标记），避免控制字符进入上下文。
+        let detect_text = match structured_denial_errno(error) {
+            Some(errno) => format!(
+                "{error_text}\n{prefix}{errno}{suffix}",
+                prefix = crate::sandbox::DENIED_ERRNO_MARKER_PREFIX,
+                suffix = crate::sandbox::DENIED_ERRNO_MARKER_SUFFIX
+            ),
+            None => error_text.clone(),
+        };
+        let m = detector.detect(tool, &detect_text)?;
+        if !m.authoritative {
+            // advisory：文本启发式命中，可能来自业务失败或伪造输出——不计熔断
+            tracing::info!(
+                tool = %m.tool,
+                reason = m.signature.reason,
+                platform = m.signature.platform,
+                "sandbox denial signature matched (advisory, not counted)"
+            );
+            metrics::record_error("sandbox_advisory");
+            let mut result = ToolResult::err_text(format!(
+                "sandbox denied ({reason}) [advisory]: {error_text}\n\
+                 提示：该错误疑似沙箱拒绝但未经内核级确认，未计入熔断计数",
+                reason = m.signature.reason
+            ));
+            result.metadata.sandbox_denied = Some(crate::model::SandboxDenyInfo {
+                kind: m.kind,
+                detail: error_text,
+            });
+            return Some(result);
+        }
         tracing::warn!(
             tool = %m.tool,
             reason = m.signature.reason,
             platform = m.signature.platform,
+            authoritative = true,
             "sandbox denial detected"
         );
         let state = breaker.record_denial();
@@ -207,5 +261,171 @@ impl Runtime {
                 result
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! S-6 回归测试：结构化 errno → authoritative（计入熔断）；
+    //! 纯文本命中 → advisory（不计熔断）。软/硬熔断分支仅权威路径可达。
+
+    use super::*;
+    use crate::sandbox::{
+        DENIED_ERRNO_MARKER_PREFIX, DenialMatch, DenialSignature, NoopDenialTracker,
+        SandboxDenialDetector, SandboxDenialTracker, SandboxDenyKind,
+    };
+
+    /// 测试检测器：模拟 `minicoding-sandbox` 的真实语义——文本模式命中返回
+    /// advisory，检测文本含 Runtime 合成标记时置 authoritative。
+    struct FakeDetector;
+
+    impl SandboxDenialDetector for FakeDetector {
+        fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
+            const PATTERN: &str = "Operation not permitted";
+            if !error_text.contains(PATTERN) {
+                return None;
+            }
+            Some(DenialMatch {
+                signature: DenialSignature {
+                    platform: "any",
+                    pattern: PATTERN,
+                    reason: "EPERM",
+                    kind_label: "syscall_blocked",
+                },
+                tool: tool.to_string(),
+                kind: SandboxDenyKind::SyscallBlocked {
+                    syscall: PATTERN.to_string(),
+                },
+                authoritative: error_text.contains(crate::sandbox::DENIED_ERRNO_MARKER_PREFIX),
+            })
+        }
+    }
+
+    fn eperm_io_error() -> crate::model::ToolError {
+        crate::model::ToolError::Io(std::io::Error::from_raw_os_error(ERRNO_EPERM))
+    }
+
+    /// 提取结果文本（测试辅助）。
+    fn text_of(result: &ToolResult) -> String {
+        match &result.content {
+            crate::model::ToolContent::Text(t) => t.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_errno_matches_io_eperm_and_eacces() {
+        assert_eq!(structured_denial_errno(&eperm_io_error()), Some(1));
+        assert_eq!(
+            structured_denial_errno(&crate::model::ToolError::Io(
+                std::io::Error::from_raw_os_error(ERRNO_EACCES)
+            )),
+            Some(13)
+        );
+    }
+
+    #[test]
+    fn structured_errno_ignores_non_sandbox_sources() {
+        // 文本类错误无 errno——LLM 可间接影响的通道不得作为熔断依据
+        assert_eq!(
+            structured_denial_errno(&crate::model::ToolError::Exec(
+                "Operation not permitted".into()
+            )),
+            None
+        );
+        // 其他 errno（如 ENOENT=2）不是沙箱拒绝信号
+        assert_eq!(
+            structured_denial_errno(&crate::model::ToolError::Io(
+                std::io::Error::from_raw_os_error(2)
+            )),
+            None
+        );
+        assert_eq!(
+            structured_denial_errno(&crate::model::ToolError::Cancelled),
+            None
+        );
+    }
+
+    #[test]
+    fn advisory_hit_returns_result_without_breaker_record() {
+        let breaker = NoopDenialTracker::default_thresholds();
+        let error = crate::model::ToolError::Exec("Operation not permitted".into());
+        let result = Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error)
+            .expect("纯文本命中应产出提示性结果");
+        assert!(result.is_error);
+        let text = text_of(&result);
+        assert!(
+            text.contains("[advisory]"),
+            "advisory 结果应标注 [advisory]，实际: {text}"
+        );
+        assert!(
+            breaker.count() == 0 && matches!(breaker.state(), BreakerState::Closed),
+            "advisory 命中不得计入熔断"
+        );
+        // 结构化透传仍保留（前端渲染卡片），detail 为原始错误（不含标记）
+        let info = result.metadata.sandbox_denied.expect("metadata 透传");
+        assert!(!info.detail.contains(DENIED_ERRNO_MARKER_PREFIX));
+    }
+
+    #[test]
+    fn authoritative_eperm_records_breaker() {
+        let breaker = NoopDenialTracker::default_thresholds();
+        let error = eperm_io_error();
+        let result = Runtime::build_denial_result(&FakeDetector, &breaker, "fs.write", &error)
+            .expect("Io(EPERM) 应判定为 denial");
+        assert!(result.is_error);
+        assert_eq!(breaker.count(), 1, "authoritative 命中应递增熔断计数");
+    }
+
+    #[test]
+    fn soft_hard_trip_only_reachable_via_authoritative_path() {
+        // soft=2/hard=3：第 1 次权威拒绝 Closed、第 2 次软熔断、第 3 次硬熔断
+        let breaker = NoopDenialTracker::new(2, 3);
+        let first =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
+                .unwrap();
+        assert_eq!(breaker.count(), 1);
+        assert!(
+            !text_of(&first).contains("连续"),
+            "Closed 态不应带软熔断提醒，实际: {}",
+            text_of(&first)
+        );
+        let second =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
+                .unwrap();
+        assert_eq!(breaker.count(), 2);
+        assert!(
+            text_of(&second).contains("连续"),
+            "软熔断提醒应回灌，实际: {}",
+            text_of(&second)
+        );
+        let third =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
+                .unwrap();
+        assert!(matches!(breaker.state(), BreakerState::HardTripped));
+        assert!(
+            text_of(&third).contains("熔断"),
+            "硬熔断总结应回灌，实际: {}",
+            text_of(&third)
+        );
+
+        // advisory 路径在已 HardTripped 时仍不改变计数/状态（分支不可达验证）
+        let before = breaker.count();
+        let error = crate::model::ToolError::Exec("Operation not permitted".into());
+        let advisory =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error).unwrap();
+        assert!(text_of(&advisory).contains("[advisory]"));
+        assert_eq!(breaker.count(), before);
+        assert!(matches!(breaker.state(), BreakerState::HardTripped));
+    }
+
+    #[test]
+    fn non_denial_errors_propagate_none() {
+        let breaker = NoopDenialTracker::default_thresholds();
+        let error = crate::model::ToolError::Exec("file not found".into());
+        assert!(
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error).is_none(),
+            "未命中签名应返回 None（原样传播错误）"
+        );
     }
 }
