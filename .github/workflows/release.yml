@@ -65,11 +65,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+      # taiki-e/install-action 内置版本钉住与 checksum 校验（E2），
+      # 替代原 curl | sh 无校验安装（版本与 dist-workspace.toml 的 cargo-dist-version 一致）
+      - uses: taiki-e/install-action@v2
+        name: Install dist
+        with:
+          tool: dist@0.32.0
       - name: Cache dist
         uses: actions/upload-artifact@v7
         with:

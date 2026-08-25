@@ -264,7 +264,7 @@ chmod\s+-R\s+777\s+/
 - 拒绝回环 `127/8` / `::1`（除非 `SsrfOptions::local_dev()` 或配置 `allow_loopback`，用于本地 Ollama）；
 - 拒绝非公网 IP：`0.0.0.0/8`（当前网络）、`100.64/10`（CGNAT）、`fc00::/7`（IPv6 ULA）、`fe80::/10`（IPv6 链路本地）；
 - **解析策略**：用 `Url::host()` 而非 `host_str()` 取主机枚举，IPv6 字面量直接拿到 `Ipv6Addr`（避免 `[::1]` 带方括号导致 `IpAddr::from_str` 失败误走 DNS 路径）；域名经 `to_socket_addrs` 解析为 IP 后逐个校验；
-- **未覆盖**：DNS 重绑定（TOCTOU，解析后到连接前 IP 可能变化）M5+ 接入二次校验。
+- **DNS pinning（A2，2026-08-25 R2 批次）**：此前披露的 DNS 重绑定 TOCTOU 窗口已关闭——每跳先解析出全部 IP 并**逐 IP** 过 SSRF 复检，再经 reqwest `.resolve()` 把连接钉在已校验的 IP 上，保证"校验的 IP = 实际连接的 IP"；重定向手动逐跳跟随（S22，上限 5）时每跳重复该过程。测试态（wiremock）跳过校验与 pinning。
 
 ### 5.2 域名策略
 
@@ -393,7 +393,7 @@ pub enum SandboxPolicy {
 | 平台 | 技术 | 实现 | crate |
 |------|------|------|-------|
 | macOS 12+ | `sandbox_init`(3) FFI（Seatbelt，自研胶水） | 父进程生成 Seatbelt profile 写临时文件（0600），`Command::pre_exec` 在子进程 fork 后 exec 前调 `sandbox_init` 加载（原 ~~`sandbox-run`~~ 方案因 EUPL-1.2 弃用）；VCS 目录默认只读；不依赖外部 crate | `minicoding-sandbox`（FFI 直连） |
-| Linux 5.13+ | `landlock` 直连（自研 pre_exec 胶水）；`libseccomp` 待接入 | 自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前调 landlock `restrict_self()` 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`），不手写 BPF；seccomp syscall 白名单为后续增强 | `landlock` + `libc` |
+| Linux 5.13+ | `landlock` 直连（自研 pre_exec 胶水）；`libseccomp` 可选 feature（默认关，A1） | 自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前调 landlock `restrict_self()` 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`），不手写 BPF；启用 `--features seccomp` 后同一 pre_exec 内追加危险 syscall deny-list 过滤（见 §8.11） | `landlock` + `libc`（+ 可选 `libseccomp`） |
 | Windows | AppContainer / Job Object（评估） | 受限 token + Job 限制写路径；初期降级为应用层 + 用户提示 | `windows` crate |
 | 全平台兜底 | 容器 / VM | CI/不可信任务推荐在容器内运行 `minicoding` | 外部 |
 
@@ -507,7 +507,7 @@ shell.run / fs.write 执行
    └─ ≥ 5 次  → 强制 TurnEnd，回灌错误总结给 LLM 与用户
 ```
 
-熔断阈值可配（`[sandbox] denial_threshold = 3`，`hard_threshold = 5`）。熔断事件打 OTel span event（`circuit_breaker.tripped`），便于事后分析 Agent 行为模式。该机制与 `design.md` §2.4 的 `max_tool_iters` 互补：后者防"工具调用死循环"，前者防"沙箱拒绝死循环"。
+熔断阈值可配（`[sandbox] denial_threshold = 3`，`hard_threshold = 5`）。熔断事件打 OTel span event（`circuit_breaker.tripped`），便于事后分析 Agent 行为模式。该机制与 `design.md` §2.4 的 `max_tool_iters` 互补：后者防"工具调用死循环"，前者防"沙箱拒绝死循环"。**A4（2026-08-25 R2 批次）后**：计数只由**权威**（authoritative）拒绝驱动——纯文本 advisory 命中不进熔断器（见 §8.13）。
 
 ### 8.9 Auto-Review 子代理（参考 Codex Guardian）
 
@@ -552,6 +552,69 @@ High risk 询问（C-22 用户显式选定）：
 - 决策经 `PermissionRequested`/`PermissionResolved` 事件广播（Web/桌面前端自动弹窗）并落 `audit.log`（source=tool，detail 含 `sandbox-fallback` 标记，AGENTS.md §5.5）；
 - 与 `full-access` 预设同语义（`DangerFullAccess`），但**仅对当前调用生效**，不改变会话策略；
 - 该回退**不可被 LLM 触发**：询问只在工具执行返回沙箱初始化错误时由 Runtime 发起，LLM 无法通过文本声明跳过沙箱（C-30 精神一致）。
+
+### 8.11 seccomp 危险 syscall deny-list（A1，2026-08-25 R2 批次）
+
+Landlock 只覆盖文件系统访问面；内核攻击面（调试/模块加载/命名空间逃逸等 syscall）由
+seccomp 过滤补齐。实现为 `minicoding-sandbox` 的**可选 cargo feature `seccomp`（默认关）**：
+
+```bash
+cargo build --features seccomp   # 链接系统 libseccomp C 库（需 -dev 头文件）
+```
+
+默认关闭的原因：链接系统 `libseccomp` C 库需要发行版 `-dev` 包，强制依赖会破坏
+CI 与发行包构建的零外部依赖承诺。开启后同一 `pre_exec` 胶水内、landlock 规则之后
+加载过滤器。
+
+**deny-list 策略**（默认 Allow，仅对列明 syscall 返回 `EPERM`——不用 allow-list，
+避免误杀正常命令的合法 syscall 组合；EPERM 而非 KillProcess 让子进程收到可诊断的
+失败而非信号）。20 个危险 syscall 分五类：
+
+| 类别 | syscall |
+|------|---------|
+| 调试/进程注入 | `ptrace` |
+| 内核镜像/模块 | `kexec_load`/`kexec_file_load`/`init_module`/`finit_module`/`delete_module` |
+| 内核接口/提权 | `bpf`/`userfaultfd` |
+| 跨进程内存读取 | `process_vm_readv`/`process_vm_writev` |
+| 密钥环/持久化/命名空间 | `keyctl`/`add_key`/`request_key`/`swapon`/`swapoff`/`reboot`/`setns`/`unshare` |
+
+真实内核集成测试（`tests/seccomp.rs`，仅启用 feature 时运行）验证沙箱内 `unshare`
+被拒。诚实边界：deny-list 是纵深防御的收窄而非完备隔离——未知 0day syscall 不在表内；
+强对抗场景仍以容器/VM 外层隔离兜底。
+
+### 8.12 HOME 只读白名单语义变更（A3，2026-08-25 R2 批次）
+
+旧语义：Linux landlock 对 `$HOME` **整体只读放行**——沙箱内命令可读取 `~/.ssh`/
+`~/.aws`/`~/.gnupg` 等全部用户凭证并复制进可写的 workdir（数据外泄通道，T6）。
+
+新语义：改为**存在性过滤的细粒度只读白名单**（环境变量优先于 `$HOME/<默认名>`，
+不存在的条目跳过）：`$CARGO_HOME`||`~/.cargo`、`$RUSTUP_HOME`||`~/.rustup`、
+`~/.config`、`~/.cache`、`~/.local`、`$NVM_DIR`||`~/.nvm`、`$VOLTA_HOME`||
+`~/.volta`、`~/.npm`、`~/go`、`$GOPATH`。landlock 未列入规则的路径连读都拒绝；
+生效集经 `tracing::info` 打印（可观测、可审计）。
+
+- 凭证目录（`.ssh`/`.aws` 等）不在白名单内，**不可读**——刻意不含 `$HOME` 本身；
+- 代价是白名单外的私有工具链在沙箱内不可见，此类场景走 `external-sandbox`
+  兜底（声明依赖外层隔离，§8.1）；macOS Seatbelt / Windows 无此变更（各自独立语义）。
+
+### 8.13 沙箱拒绝权威/advisory 双轨判定（A4，2026-08-25 R2 批次）
+
+§8.7 签名库检测与 §8.8 熔断器之间引入结构化信号分级（`DenialMatch.authoritative`
+字段），消除"LLM echo 伪造拒绝文本触发熔断"的攻击面（首轮 S-6 遗留）：
+
+| 级别 | 判定来源 | 熔断器（C-30） |
+|------|---------|:---:|
+| **authoritative** | 内核级硬反馈：Io 错误（EPERM/EACCES）经 Runtime 合成内部标记后才置权威 | 计数，可达软/硬阈值 |
+| **advisory** | 仅纯文本模式命中（可能来自业务逻辑失败或提示注入伪造） | **不计数**，返回带 `[advisory]` 标注的提示性结果 |
+
+关键不变式：
+
+- 权威信号来自 Runtime 自身对 IO errno 的合成标记（内部常量前缀），**不可由 LLM
+  通过错误文本伪造**——纯文本命中无论多"像"拒绝签名都只是 advisory；
+- 回灌 LLM 的文本保持原始错误内容不变（自我修正能力不受影响），仅 advisory 额外
+  附 `[advisory]` 标注；软/硬熔断分支只有权威路径可达；
+- 结构化 `SandboxDenyKind`（M-09，§8.7）透传路径不受影响，advisory 命中同样产出
+  kind 供前端渲染，只是不计熔断并打 `sandbox_advisory` metrics。
 
 ---
 

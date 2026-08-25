@@ -249,6 +249,27 @@ pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: 
 
 `WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。M-05 将该实现下沉到 `minicoding-tools`（core 仅保留 `SubagentRunner` trait 与 `NoopSubagentRunner` 兜底）。
 
+**`InProcessSubagentRunner`（B1，v0.3.4，位于 `minicoding-sdk::subagent`）**：进程内子 Agent runner 的生产实现——`task.spawn` 生产通路由此打通（替代恒 Noop 的兜底路径）。持有构建嵌套 Runtime 所需的全部句柄（provider/tokenizer/storage/prompter/policy/audit/sandbox），`spawn` 时按 `SubagentSpec` 装配子 Runtime：子会话生成独立 ULID 并持久化到父 `sessions_dir`（审计可追溯），跑完单轮把 `TurnOutcome` 映射为 `SubagentResult`（summary 超 2000 字符截断标注）。关键约束：
+
+```rust
+/// 进程内并发子 Agent 上限（F2 扇出上限）：第 5 个并发派发立即以
+/// RuntimeError::Config 失败（不排队），父 Agent 可串行重试。
+pub const MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
+impl InProcessSubagentRunner {
+    /// 组装入口：句柄由 frontend 组装点逐一显式注入。
+    pub fn new(/* provider, tokenizer, system_prompt, storage, prompter,
+                 policy, audit, sandbox, base_config, workdir */) -> Self;
+    /// 子工具集清单（测试断言面）：断言不含 `task.spawn` 等价于断言深度防御生效。
+    pub fn child_tool_names(&self) -> Vec<String>;
+}
+```
+
+- **深度防御**：子 Runtime 工具集物理移除 `task.spawn`（不依赖 `can_spawn_subagent` 标志位）；
+- **权限/沙箱继承父级**：policy/prompter/audit/sandbox 均为父实例克隆（C-01/C-02/C-22 不下放）；子配置 `max_tool_iters` 减半、下限 10；
+- **扇出上限**：`Semaphore(MAX_CONCURRENT_SUBAGENTS)` 闸门跨整个 `spawn` future 持有；
+- 组装点外包 `WorktreeSubagentRunner`（`Isolation::Worktree` 时隔离生效）。
+
 ```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
 /// 旧版 `TodoWriteInput`（全量替换）作为废弃别名保留一个版本（见 §10.1）。
@@ -1914,3 +1935,94 @@ pub async fn check_project_scope_approval(
 ```
 
 **与权限系统的协作**：MCP 工具调用走与内置工具相同的 `PermissionPolicy::check` 流程，`tool` 名为 `mcp__<server>__<tool>`，权限规则支持 `mcp__github__*` 通配（见 `design.md` §19.3）。MCP 工具的 `side_effect` 由 server schema 的 `readOnlyHint`/`destructiveHint` 映射，`is_read_only()` 据此覆盖默认实现。
+
+---
+
+## 12. 新增 API（v0.3.4，2026-08-25 R2 批次）
+
+本节集中列出 v0.3.4 批次新增的公共 API。子 Agent 侧新增（`InProcessSubagentRunner`）已归档至其所属章节 §2.5，此处不重复。
+
+### 12.1 `core::util::slash` 斜杠命令共享解析器（F3）
+
+CLI 与 TUI 共用的单一事实来源：命令名与参数形态在 `minicoding_core::util::slash`
+定义，纯函数、零 IO——解析与执行分离，前端拿到 `SlashCommand` 后按自身能力分派
+（不可达的能力诚实降级提示）。
+
+```rust
+/// 解析一行用户输入为斜杠命令。
+///
+/// 返回 `None`：非斜杠输入（trim 后不以 `/` 开头），应作为普通消息发送。
+/// 前导/尾随空白容忍；命令名区分大小写；多余参数忽略；
+/// `/undo` 的 steps 解析失败或缺省取 1，解析值下限钳到 1；
+/// `/` 或仅空白斜杠输入返回 `SlashCommand::Unknown`（空命令名）。
+#[must_use]
+pub fn parse(input: &str) -> Option<SlashCommand>;
+```
+
+`SlashCommand` 变体：
+
+| 变体 | 输入形态 | 说明 |
+|------|---------|------|
+| `Help` | `/help` | 显示命令列表 |
+| `Model(Option<String>)` | `/model [name]` | 无参查看当前模型，带参切换 |
+| `Status` | `/status` | 会话状态摘要 |
+| `Tokens` | `/tokens` | 会话 token 计量 |
+| `Clear` | `/clear` | 清空显示（会话上下文不动） |
+| `Undo { steps: usize }` | `/undo [steps]` | 回滚最近 steps 次文件改动 operation；缺省/非法取 1，下限钳 1 |
+| `PlanToggle` | `/plan` | 切换 Plan 模式（CLI 另支持 on/off/status 子命令，由前端自行扩展） |
+| `Unknown(String)` | 其余 | 未识别命令名携带原名（`/` 单独输入时空串），由前端反馈而非当作消息发送 |
+
+TUI 支持矩阵（CLI 全部支持）：
+
+| 命令 | TUI 行为 |
+|------|---------|
+| `/help` | 显示命令列表（UI 侧拦截，不启动 turn） |
+| `/clear` | 清屏 |
+| 未知命令 | 提示未知命令 |
+| `/tokens` `/status` `/model` `/plan` `/undo` | **诚实降级**：App 无 runtime 句柄，提示该命令仅在 CLI 可用 |
+
+### 12.2 `minicoding-memory` 记忆注入与检索（B2/B3）
+
+**`AutoMemoryContributor`**（`minicoding_memory::auto_contributor`）：Auto memory 的
+`PromptContributor` 生产接线——渲染注入 system 稳定区（`PromptSectionOrder::Environment`，
+`cacheable = true` 利于 prompt cache 命中），与 `memory.write` 共享同一 `Arc<AutoMemory>`
+实例形成写读闭环。内容包裹 `<auto_memory>` 边界并声明"供参考非指令"（C-05）；空库输出
+空 section（pipeline 自动跳过）；加载失败 best-effort 跳过本轮不阻塞 system 构建。
+
+```rust
+pub const DEFAULT_MAX_CHARS: usize = 4096;      // 注入字符上限
+pub const MEMORY_TRIGGER_PREFIX: &str = "@memory"; // 检索触发前缀
+
+impl AutoMemoryContributor {
+    pub fn new(memory: Arc<AutoMemory>, max_chars: usize) -> Self;
+    pub fn with_long_term_store(self, store: Arc<dyn MemoryStore>) -> Self;
+    pub fn with_query_slot(memory: Arc<AutoMemory>, max_chars: usize,
+                           slot: Arc<Mutex<Option<String>>>) -> Self;
+    /// 共享查询槽位句柄（调用方每轮 turn 前写入当前用户输入）。
+    pub fn query_slot(&self) -> Arc<Mutex<Option<String>>>;
+}
+impl PromptContributor for AutoMemoryContributor { /* name="auto_memory", order=Environment, cacheable=true */ }
+```
+
+**查询槽契约（B3）**：`PromptContext` 无消息字段，故采用显式槽位设计——调用方每轮
+turn 前把用户输入写入共享槽位。内容选择策略：
+
+1. 槽位文本以 `@memory` 开头 → BM25 检索 top-5 注入（标注 `[mode: BM25 retrieval top-5]`）；
+2. 全量渲染超限且有查询词 → 按查询词检索截断；
+3. 其余 → 全量渲染 + 字符截断（`max_chars`）。
+
+**`MemoryRetrieval`**（`minicoding_memory::retrieval`）：auto 条目 + `long_term` 分节
+统一语料的 BM25 检索器（底层复用 `vector::MemoryIndex`，CJK 逐字分词，零外部依赖）：
+
+```rust
+impl MemoryRetrieval {
+    pub fn new() -> Self;
+    /// 从两份 Markdown 正文构建索引（均按 `## ` 标题分节；同 id 文档后写覆盖先写——
+    /// auto 与 long_term 同 topic 时以 auto 为准，更新鲜）。
+    pub fn from_markdown(long_term_md: &str, auto_md: &str) -> Self;
+    /// 返回命中的整节文本（标题 + 正文），按 BM25 评分降序取 k 条。
+    pub fn search(&self, query: &str, k: usize) -> Vec<String>;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+```

@@ -855,7 +855,9 @@ mod dispatch_tests {
         }
     }
 
-    #[tokio::test]
+    // F1：start_paused 虚拟时钟——SlowHook 的 200ms 与 dispatch 的 50ms 超时
+    // 同一虚拟时间线即时推进，超时必然先于 hook 完成（真实时钟下为竞态）。
+    #[tokio::test(start_paused = true)]
     async fn dispatch_timeout_on_error_continue() {
         let reg = TestRegistry::new();
         reg.register(Arc::new(SlowHook {
@@ -878,7 +880,7 @@ mod dispatch_tests {
         assert!(matches!(err, HookError::Timeout { .. }));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_timeout_on_error_deny() {
         let reg = TestRegistry::new();
         reg.register(Arc::new(SlowHook {

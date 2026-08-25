@@ -5,6 +5,11 @@
 //! 覆盖）。`reset_to_initial` 清空 journal（回到会话启动状态）。
 //!
 //! 恢复路径经 `validate_restore_path` 校验，拒绝 `..` 越界（C-03/C-28）。
+//!
+//! 内存上限（D3）：账本最多保留 [`MAX_JOURNAL_ENTRIES`]（200）条 entry，
+//! `record` 超限丢弃最旧条目——undo 仅保证最近 200 步。取舍是内存上限换
+//! 语义边界：无界账本在长会话中持续增长直至耗尽内存，而交互式 /undo 的
+//! 实际回溯窗口远小于该值。
 
 use crate::JournalError;
 use minicoding_core::journal::{ChangeEntry, DiffEntry, FileChange, Journal, UndoReport};
@@ -13,10 +18,17 @@ use minicoding_core::provider::BoxFuture;
 use std::sync::Mutex;
 use tokio::fs;
 
+/// journal entry 数上限（D3）：`record` 后超过此数即丢弃最旧条目。
+///
+/// 取舍见模块 doc；C-28 行为文档由主控统一收口。
+const MAX_JOURNAL_ENTRIES: usize = 200;
+
 /// 文件改动 journal（纯内存，不落盘，C-28）。
 ///
 /// 持有按操作顺序追加的 `ChangeEntry` 列表。`Mutex<Vec<ChangeEntry>>` 保护并发
 /// 访问（Runtime 内 `Arc<dyn Journal>` 共享）。`undo` 从尾部反向遍历。
+///
+/// 列表长度受 [`MAX_JOURNAL_ENTRIES`] 约束，超限丢最旧（D3）。
 ///
 /// `workdir` 用于恢复路径校验（拒绝越界恢复，C-03/C-28）。若 `None`，路径校验
 /// 仅拒绝绝对路径外的 `..` 逃逸（保守）。
@@ -66,6 +78,17 @@ impl Journal for FileChangeJournal {
                 .lock()
                 .map_err(|e| JournalError::Conflict(format!("journal lock poisoned: {e}")))?;
             guard.push(entry);
+            // D3 内存上限：超限从头部丢弃最旧条目。只截头部最旧段，尾部 LIFO
+            // 撤销序与 S-7 失败回推尾部原位的语义均不受影响（失败条目仅在
+            // 之后又累计等量新写入时才会被挤出，属预期的容量行为）。
+            if guard.len() > MAX_JOURNAL_ENTRIES {
+                let dropped = guard.len() - MAX_JOURNAL_ENTRIES;
+                guard.drain(..dropped);
+                tracing::debug!(
+                    journal.dropped = dropped,
+                    "journal 条目达上限，已丢弃最旧条目"
+                );
+            }
             Ok(())
         })
     }
@@ -996,5 +1019,64 @@ mod tests {
         let path = Utf8PathBuf::from("a/../b.txt");
         let res = validate_restore_path(&path, None);
         assert!(matches!(res, Err(JournalError::PathEscaped(_))));
+    }
+
+    // === D3 内存上限：写入 MAX+5 条，超限丢最旧 ===
+
+    #[tokio::test]
+    async fn record_evicts_oldest_beyond_max() {
+        let j = FileChangeJournal::new(None);
+        // 每条挂一个 Created change（文件不存在，undo 走幂等路径，无需建文件）
+        let mut paths = Vec::new();
+        for i in 0..MAX_JOURNAL_ENTRIES + 5 {
+            let file = Utf8PathBuf::from(format!("/tmp/evict-m{i}.txt"));
+            j.record(entry(
+                &format!("op-{i}"),
+                vec![FileChange::Created {
+                    path: file.clone(),
+                    content: b"x".to_vec(),
+                }],
+            ))
+            .await
+            .unwrap();
+            paths.push(file);
+        }
+        // len 封顶为 MAX；最旧 5 条（op-0..op-4）已被丢弃
+        assert_eq!(j.len(), MAX_JOURNAL_ENTRIES);
+        let d = j.diff().await.unwrap();
+        assert_eq!(d.len(), MAX_JOURNAL_ENTRIES);
+        assert_eq!(d[0].op_id, "op-5", "最旧的 op-0..op-4 应已被淘汰");
+        assert_eq!(
+            d[d.len() - 1].op_id,
+            format!("op-{}", MAX_JOURNAL_ENTRIES + 4),
+            "最新条目应保留在尾部"
+        );
+        // undo 一次弹的是最新条目（LIFO），被淘汰的最旧条目不可 undo
+        let report = j.undo(1).await.unwrap();
+        assert_eq!(report.undone_entries, 1);
+        assert_eq!(
+            report.restored_files,
+            vec![paths[paths.len() - 1].clone()],
+            "应撤销最新条目而非最旧条目"
+        );
+        assert_eq!(j.len(), MAX_JOURNAL_ENTRIES - 1);
+    }
+
+    // === D3 边界：恰好 MAX 条不丢弃 ===
+
+    #[tokio::test]
+    async fn record_at_exact_max_keeps_all_entries() {
+        let j = FileChangeJournal::new(None);
+        for i in 0..MAX_JOURNAL_ENTRIES {
+            j.record(entry(&format!("op-{i}"), vec![])).await.unwrap();
+        }
+        assert_eq!(j.len(), MAX_JOURNAL_ENTRIES);
+        let d = j.diff().await.unwrap();
+        assert_eq!(d.len(), MAX_JOURNAL_ENTRIES);
+        assert_eq!(d[0].op_id, "op-0", "恰好达到上限不应丢弃任何条目");
+        assert_eq!(
+            d[d.len() - 1].op_id,
+            format!("op-{}", MAX_JOURNAL_ENTRIES - 1)
+        );
     }
 }

@@ -415,19 +415,19 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 
 | 事项 | 一句话理由 |
 |------|-----------|
-| seccomp 接入 | syscall 白名单是纵深防御的最后一块（当前仅 Landlock 文件面），需系统 `libseccomp` C 库与跨发行版验证，独立立项 |
-| DNS 解析-连接 IP pinning | web.fetch 的 SSRF 复检在"解析后、连接前"存在 TOCTOU 窗口，需 socket 层 pinning，改动面涉及 reqwest 连接器定制 |
-| HOME 白名单细粒度化 | 路径沙箱对 `$HOME` 下敏感目录（`.ssh`/`.aws` 等）的排除粒度不足，需逐目录 deny 规则与迁移兼容评估 |
-| EventBus 双通道拆分 | 高频 token 事件与控制事件共用 broadcast 有界通道，慢消费者丢控制事件风险需优先级双通道方案 |
+| seccomp 接入 | ✅ 已完成（2026-08-25 R2 批次）：`minicoding-sandbox` 新增可选 feature `seccomp`（默认关），deny-list 拦截 20 个危险 syscall（ptrace/bpf/kexec/module*/keyctl/userfaultfd/process_vm_*/swapon/reboot/setns/unshare 等→EPERM），pre_exec 内 landlock 之后加载；`tests/seccomp.rs` 真实内核测试通过（unshare 被拒） |
+| DNS 解析-连接 IP pinning | ✅ 已完成（2026-08-25 R2 批次）：web.fetch 逐跳 resolve→逐 IP SSRF 复检→reqwest `.resolve()` 钉住连接 IP，"解析后、连接前"TOCTOU rebinding 窗口关闭 |
+| HOME 白名单细粒度化 | ✅ 已完成（2026-08-25 R2 批次）：landlock 不再整体放行 `$HOME` 只读，改为存在性过滤白名单（cargo/rustup/config/cache/local/nvm/volta/npm/go/GOPATH 落点），凭证目录（`.ssh`/`.aws` 等）不可读；生效集经 `tracing::info` 打印，白名单外场景走 external-sandbox 兜底 |
+| EventBus 双通道拆分 | ✅ 已完成（2026-08-25 R2 批次）：以容量扩容（256→1024，`DEFAULT_CAPACITY`）+ `design.md` §11.2 如实口径（无优先级丢弃、durable 重放兜底）替代双通道拆分——保持单通道顺序不变量，不再立项拆分 |
 | Tauri 自动更新 | 桌面壳分发后的更新通道（签名 + updater 插件）未接，属 M9 发布运维项 |
-| TUI 斜杠命令体系 | TUI 侧 `/undo`/`/plan` 等命令注册与补全框架未成体系，先在 CLI REPL 验证语义后统一 |
-| evals 框架（含压缩质量量化评估） | 压缩摘要质量目前无量化基准，需任务集 + 评分器基建才能回归调参 |
+| TUI 斜杠命令体系 | ✅ 已完成（2026-08-25 R2 批次）：`core::util::slash` 共享解析器落地（`SlashCommand` 枚举 + `parse`），CLI 换用共享解析入口；TUI 支持 `/help`/`/clear`/未知命令提示，`/tokens`/`/status`/`/model`/`/plan`/`/undo` 诚实降级（App 无 runtime 句柄） |
+| evals 框架（含压缩质量量化评估） | ✅ 已完成（2026-08-25 R2 批次）：压缩质量最小确定性评估框架落地（`context/tests/compression_eval.rs` 九个测试：配对完整性/token 降幅区间/seq 单调/哨兵词/确定性锁/分级冒烟） |
 | 多 provider 故障切换 | provider router 故障转移需重试预算与幂等约束设计，避免双计费与重复副作用 |
 | 成本核算与支出上限 | token 用量统计与 per-session 支出熔断缺失，长循环失控成本不可见 |
-| task.spawn 扇出上限 | 子 Agent 并发无全局上限配置，防资源耗尽（C-07 同源）需补 fan-out cap |
-| auto memory 注入接线 | `inject_auto_memory` 生产链路零调用（仅单测覆盖），Auto memory 写入后不回流上下文 |
-| BM25 @memory 语义检索接线 | memory 检索索引已建但 `@memory` 引用语法未接查询链路 |
-| loader 全局层/@import 扩展 | AGENTS.md loader 仅项目层，全局层发现与 `@import` 组合语义待扩展 |
+| task.spawn 扇出上限 | ✅ 已完成（2026-08-25 R2 批次）：`InProcessSubagentRunner` 以 `Semaphore(4)` 扇出上限收口（超限报错不排队，父 Agent 可串行重试） |
+| auto memory 注入接线 | ✅ 已完成（2026-08-25 R2 批次）：`AutoMemoryContributor` 注入 system 稳定区（cacheable），与 `memory.write` 共享实例形成写读闭环 |
+| BM25 @memory 语义检索接线 | ✅ 已完成（2026-08-25 R2 批次）：`MemoryRetrieval` 统一语料 BM25 索引 + 显式查询槽契约（`@memory` 前缀触发 top-5 注入；无槽退化全量渲染+截断） |
+| loader 全局层/@import 扩展 | ✅ 已完成（2026-08-25 R2 批次）：`$MINICODING_HOME/AGENTS.md` 全局层（`with_global_layer` opt-in 默认关）+ `@import` 展开（depth≤3 + canonicalize 环检测） |
 
 ### 2026-08-25 R2 审查补充登记（ENG-4，第二轮审查后新增）
 
@@ -435,15 +435,15 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 
 | 事项 | 一句话理由 |
 |------|-----------|
-| InProcessSubagentRunner 立项（含 PTM-3 接线） | 子 Agent 进程内 Runtime 组装缺失：`task.spawn` 生产路径恒 Noop（NotConfigured），`with_can_spawn_subagent(false)` 深度防御随之落地 |
-| 会话安全上下文持久化（FE-7） | permission_mode/sandbox preset 不随 snapshot 持久化，重启回落 server 默认；需扩展 snapshot schema 并做兼容迁移 |
-| denial echo 触发加固 | denial detector 纯文本子串匹配，LLM 可 echo 伪造拒绝文本触发熔断（首轮 S-6 遗留） |
-| journal 内存上限 | journal 条目纯内存无上限，长会话内存增长（首轮 Low 遗留） |
-| SDK semver host API 校验 | ExtensionManifest version 字段无 host API 版本核对（首轮遗留） |
-| extension manifest permissions 接线核实 | 静态校验声明未见生产调用点核实（首轮遗留） |
+| InProcessSubagentRunner 立项（含 PTM-3 接线） | ✅ 已完成（2026-08-25 R2 批次）：`task.spawn` 生产通路打通——嵌套 Runtime 组装、子工具集物理移除 `task.spawn`（深度防御）、`Semaphore(4)` 扇出上限、子会话独立 ULID 落盘审计、组装点外包 `WorktreeSubagentRunner` |
+| 会话安全上下文持久化（FE-7） | ✅ 已完成（2026-08-25 R2 批次）：`SessionState`/`SessionSnapshot` 增 `permission_mode`/`sandbox_preset`（serde default 兼容旧快照）、SCHEMA_VERSION 2→3；server restore 与 CLI `--resume` 恢复 mode（preset 仅对比 warn） |
+| denial echo 触发加固 | ✅ 已完成（2026-08-25 R2 批次）：`DenialMatch.authoritative` 字段——Io(EPERM/EACCES) 经 Runtime 合成内部标记为权威信号才计熔断，纯文本匹配降级 advisory（不计熔断），S-6 echo 触发熔断攻击面消除 |
+| journal 内存上限 | ✅ 已完成（2026-08-25 R2 批次）：`MAX_JOURNAL_ENTRIES=200` 超限丢最旧（undo 保证最近 200 步） |
+| SDK semver host API 校验 | ✅ 已完成（2026-08-25 R2 批次）：`HOST_API_VERSION` semver `^主版本` 兼容校验（以 manifest.version 为载体），不兼容拒绝加载 |
+| extension manifest permissions 接线核实 | ✅ 已完成（2026-08-25 R2 批次）：permissions 白名单校验已接线生产路径（默认只读保守集，diff 报错，init 失败 bundle 整体丢弃） |
 | MSRV stable 可达性 | rust-version=1.99 声明当前仅 nightly-2026-08-18 可编译（stable 1.98 因上游 ICE 不可用），需上游修复后补 CI 校验 job（ENG-11） |
-| 测试时钟改造（31 处真实 sleep） | tokio time pause/pause_auto 改造批量进行，避免 CI 时钟脆弱性（首轮 E-3 遗留） |
-| redact 整行替换误杀收窄 | sk- 行内任意位置整行吞的误杀面大，需按值边界精确替换（PTM-14） |
-| Windows cmd 动词表持续维护 | SEC-6 已补 del/rd/move 等，PowerShell 场景（Remove-Item 等）词表待扩 |
+| 测试时钟改造（31 处真实 sleep） | ✅ 已完成（2026-08-25 R2 批次）：33 处真实 sleep 收敛至 11 处——22 处经 start_paused 虚拟化/消除，保留的 11 处为真实 OS 子进程/mtime 场景并加注释说明 |
+| redact 整行替换误杀收窄 | ✅ 已完成（2026-08-25 R2 批次）：`shell/run.rs redact_secrets` 改值边界精确替换（KEY=value 值片段/前缀 token），行内上下文保留 |
+| Windows cmd 动词表持续维护 | ✅ 已完成（2026-08-25 R2 批次）：builtin 黑名单补齐 PowerShell 动词 remove-item/set-content/out-file/clear-content/add-content/new-item/move-item/copy-item 及别名（A5，前瞻性收口） |
 | desktop 依赖纳入 cargo deny 扫描 | deny.toml 整体豁免 minicoding-desktop（Tauri 依赖树部分许可证不在白名单），发行包依赖不经供应链扫描；需逐依赖评估后决定白名单扩充或替代（ENG-3） |
-| release.yml dist 安装脚本校验和钉版 | `curl \| sh` 无 checksum 校验（ENG-10，供应链弱信号） |
+| release.yml dist 安装脚本校验和钉版 | ✅ 已完成（2026-08-25 R2 批次）：dist 安装改用 taiki-e/install-action@v2 + dist@0.32.0 校验和钉版，不再 `curl \| sh` |

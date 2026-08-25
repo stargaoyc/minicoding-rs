@@ -2,9 +2,11 @@
 
 pub mod circuit_breaker;
 pub mod fs_private;
+pub mod slash;
 
 pub use circuit_breaker::{BreakerState, CircuitBreaker, CircuitBreakerConfig};
 pub use fs_private::write_private;
+pub use slash::{SlashCommand, parse as parse_slash};
 
 /// 生成 API 鉴权 token（S1）：ULID 两拼接（160bit 表示，80×2 bit 随机）。
 ///

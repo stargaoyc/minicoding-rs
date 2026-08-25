@@ -24,6 +24,7 @@ use anstyle::{AnsiColor, Color, Style};
 use minicoding_core::model::{ToolContent, TurnOutcome, UserInput};
 use minicoding_core::policy::PermissionMode;
 use minicoding_core::runtime::{Event, Runtime};
+use minicoding_core::util::slash::{self, SlashCommand};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
@@ -108,57 +109,49 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
             continue;
         }
 
-        // 斜杠命令分派（T-M5-8：新增 /plan、/undo）
+        // 斜杠命令分派（T-M5-8；F3：解析下沉 `core::util::slash` 共享，
+        // TUI/CLI 单一事实来源）。`/quit`、`/exit`（退出语义）与 `/plan`
+        // 的 `on|off|status` 子命令不在共享 parser 语义内，保留 CLI 原生处理。
         if let Some(cmd) = trimmed.strip_prefix('/') {
-            let mut parts = cmd.split_whitespace();
-            let name = parts.next().unwrap_or("");
-            match name {
-                "quit" | "exit" => break,
-                "help" => {
-                    print_help();
-                    continue;
+            let name = cmd.split_whitespace().next().unwrap_or("");
+            if matches!(name, "quit" | "exit") {
+                break;
+            }
+            if name == "plan" {
+                handle_plan_command(rt, cmd.split_whitespace().nth(1)).await;
+                continue;
+            }
+            match slash::parse(trimmed) {
+                Some(SlashCommand::Help) => print_help(),
+                Some(SlashCommand::Model(Some(m))) => {
+                    rt.set_model(&m);
+                    anstream::eprintln!("{GREEN}模型已切换（会话级）：{m}{GREEN:#}");
                 }
-                "plan" => {
-                    handle_plan_command(rt, parts.next()).await;
-                    continue;
+                Some(SlashCommand::Model(None)) => {
+                    anstream::eprintln!("{DIM}当前模型：{}{DIM:#}", rt.model());
                 }
-                "undo" => {
-                    handle_undo_command(rt).await;
-                    continue;
-                }
-                "model" => {
-                    match parts.next() {
-                        Some(m) if !m.is_empty() => {
-                            rt.set_model(m);
-                            anstream::eprintln!("{GREEN}模型已切换（会话级）：{m}{GREEN:#}");
-                        }
-                        _ => anstream::eprintln!("{DIM}当前模型：{}{DIM:#}", rt.model()),
-                    }
-                    continue;
-                }
-                "status" => {
+                Some(SlashCommand::Status) => {
                     handle_status_command(rt, session_tokens, turn_count).await;
-                    continue;
                 }
-                "tokens" => {
-                    print_tokens(session_tokens, turn_count);
-                    continue;
-                }
-                "clear" => {
+                Some(SlashCommand::Tokens) => print_tokens(session_tokens, turn_count),
+                Some(SlashCommand::Clear) => {
                     // 软清屏：仅清终端显示，会话上下文保留（清上下文需
                     // ContextManager 截断 API，暂未提供）
                     anstream::eprint!("\x1b[2J\x1b[H");
                     anstream::eprintln!("{DIM}已清屏（会话上下文保留）{DIM:#}");
-                    continue;
                 }
-                "" => {
-                    continue;
-                }
-                _ => {
+                Some(SlashCommand::Undo { steps }) => handle_undo_command(rt, steps).await,
+                // 行为保持：裸 "/" 此前静默跳过
+                Some(SlashCommand::Unknown(name)) if name.is_empty() => {}
+                Some(SlashCommand::Unknown(name)) => {
                     anstream::eprintln!("{RED}未知命令: /{name}（/help 查看可用命令）{RED:#}");
-                    continue;
                 }
+                // `/plan` 已在上方原生处理，parser 的 PlanToggle 分支不可达；
+                // 显式展开以应对 parser 未来扩展
+                Some(SlashCommand::PlanToggle) => handle_plan_command(rt, None).await,
+                None => {}
             }
+            continue;
         }
 
         let _ = rl.add_history_entry(&line);
@@ -215,9 +208,10 @@ async fn handle_plan_command(rt: &Runtime, sub: Option<&str>) {
 
 /// 处理 `/undo` 命令（T-M5-8）。
 ///
-/// 调用 `Journal::undo(1)` 回滚最近一次文件改动 operation。`file-undo` feature
-/// 未启用或 journal 未注入时打印提示。回滚结果（成功/冲突）打印到 stderr。
-async fn handle_undo_command(rt: &Runtime) {
+/// 调用 `Journal::undo(steps)` 回滚最近 `steps` 次文件改动 operation（共享
+/// parser 保证 `steps ≥ 1`）。`file-undo` feature 未启用或 journal 未注入时
+/// 打印提示。回滚结果（成功/冲突）打印到 stderr。
+async fn handle_undo_command(rt: &Runtime, steps: usize) {
     let Some(journal) = rt.journal() else {
         anstream::eprintln!(
             "{YELLOW}/undo 不可用：未启用 file-undo feature（重新编译时加 --features file-undo）{YELLOW:#}"
@@ -226,7 +220,7 @@ async fn handle_undo_command(rt: &Runtime) {
     };
     let span = tracing::info_span!("undo", session = %rt.session().id, otel.name = "undo");
     let _enter = span.enter();
-    match journal.undo(1).await {
+    match journal.undo(steps).await {
         Ok(report) => {
             anstream::eprintln!(
                 "{GREEN}已回滚 {} 个 operation（{} 文件恢复，{} 文件冲突）{GREEN:#}",

@@ -12,4 +12,10 @@ export MINICODING_PRE_PUSH=1
 echo "[pre-push] cargo test --workspace --exclude minicoding-desktop --all-features ..."
 cargo test --workspace --exclude minicoding-desktop --all-features
 
+echo "[pre-push] cargo check --target x86_64-pc-windows-msvc (sandbox/desktop/tools) ..."
+# D1：windows-sys FFI 分支与 desktop 在 Linux 门禁均不可达，推送前交叉 check
+# 提前拦截（SEC-4 QueryInformationJobObject 教训）。与 CI windows-target-check
+# 口径差异：此处多含 desktop（本地已验证可通过）。
+cargo check --target x86_64-pc-windows-msvc -p minicoding-sandbox -p minicoding-desktop -p minicoding-tools
+
 echo "[pre-push] done.（audit/coverage 由 pre-commit 的 MINICODING_PRE_PUSH 分支执行）"

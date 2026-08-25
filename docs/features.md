@@ -64,7 +64,7 @@
 | T-10 | `web.search` | 网页搜索（DuckDuckGo HTML，无需 API key） | Network | M8 | 已实现 |
 | T-11 | `git.diff` | 查看 diff（只读，路径沙箱） | None | M8 | 已实现 |
 | T-12 | `git.apply` | 应用 patch（路径沙箱 + 权限审批） | FileWrite | M8 | 已实现 |
-| T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现 |
+| T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现（InProcessSubagentRunner 已接入生产通路，扇出上限 4，见 `api.md` §2.5） |
 | T-14 | `task.create`/`update`/`list` | 增量任务管理 + 依赖 + 持久化（替代 todo.write） | None | M3 | 已实现 |
 | T-15 | `plan.exit` | 退出 Plan 模式并提交计划 | None | M5 | 已实现 |
 | T-15b | `plan.list` | 查询 Plan 模式状态与预批准命令（M-11 新增；只读，穿透 Plan 硬门；输出 `PlanModeController::snapshot()` 的 mode + allowed_prompts，前端渲染为表格 `tool`/`prompt`） | None | M11 | 已实现 |
@@ -98,14 +98,15 @@
 | M-04 | mtime 缓存注入 | 无变更零 IO/分词 | M3 | 已实现 |
 | M-05 | 隐式摘要 + 失败降级链 | 主→备用→启发式兜底 | M3 | 已实现 |
 | M-06 | 显式 `memory.write` | 用户"记住 X" | M3 | 已实现 |
-| M-07 | AGENTS.md 项目记忆 | 分层加载 + override + fallback | M3 | 已实现 |
+| M-07 | AGENTS.md 项目记忆 | 分层加载 + override + fallback | M3 | 已实现（2026-08-25 R2 批次补全：`$MINICODING_HOME/AGENTS.md` 全局层 `with_global_layer` opt-in 默认关 + `@import` 展开 depth≤3/canonicalize 环检测） |
 
 > **编号说明（DOC-4，2026-08-25 R2 审查）**：本表 M-07=AGENTS.md 记忆、M-08=向量检索，
 > 而 `rules.md` §6 / `design.md` 的 M-07=压缩追溯、M-08=循环打断软升级——两套
 > M-xx 属不同命名空间（里程碑功能 vs 约束映射），同名不同物。对照表属待建项
 > （AGENTS §4.5），引用时以各自文档内定义为准。
 
-| M-08 | 向量检索（`@memory`） | BM25 语义检索（零外部依赖，CJK 逐字分词） | M8 | 已实现 |
+| M-08 | 向量检索（`@memory`） | BM25 语义检索（零外部依赖，CJK 逐字分词） | M8 | 已实现（@memory 接线完成：显式查询槽契约，前缀触发 top-5 注入；无槽退化全量渲染+截断，见 `api.md` §12.2） |
+| M-09 | Auto memory 注入（B2/B3） | `AutoMemoryContributor` 渲染注入 system 稳定区（cacheable），与 `memory.write` 共享实例形成写读闭环；检索语料 auto+long_term 统一入 BM25 索引 | M3 | 已实现（2026-08-25 R2 批次接线，此前生产链路零调用） |
 
 ## 6. 权限与安全
 
@@ -308,7 +309,7 @@
 | LLM Provider | 9 |
 | 工具系统 | 25 |
 | 上下文管理 | 10 |
-| 记忆 | 8 |
+| 记忆 | 9 |
 | 权限与安全 | 28 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
@@ -320,9 +321,9 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 20 |
-| **合计** | **204** |
+| **合计** | **205** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 54 项；M3–M5 扩展与安全约 83 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（DOC-5，2026-08-25 R2 审查：按主表逐行里程碑列重新统计，四段相加 ≈ 203 与合计一致；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 54 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（DOC-5，2026-08-25 R2 审查：按主表逐行里程碑列重新统计，四段相加 ≈ 204 与合计一致；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 
 ---
 
@@ -337,7 +338,7 @@
 | 优先级 | 里程碑 | 含义 | 功能数 |
 |:---:|------|------|:---:|
 | **P0** | M0–M2 | MVP 必交付，缺则不可用 | ~54 |
-| **P1** | M3–M5 | 扩展与安全，缺则不具备生产可用性 | ~83 |
+| **P1** | M3–M5 | 扩展与安全，缺则不具备生产可用性 | ~84 |
 | **P2** | M6–M8 + M9（W-01..W-20） | 高级形态与 Web/桌面，可后续迭代 | ~66 |
 
 - P0 功能阻塞 MVP 发布；任何 P0 延期需触发 roadmap 评审。

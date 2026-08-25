@@ -25,6 +25,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use minicoding_core::model::{Role, Task};
 use minicoding_core::policy::{Decision, PermissionPrompt, PromptOption, TuiPermissionRequest};
 use minicoding_core::runtime::Event as RuntimeEvent;
+use minicoding_core::util::slash::{self, SlashCommand};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -595,17 +596,71 @@ impl App {
     }
 
     /// 提交输入：发送给 Runtime 桥接，加入历史。
+    ///
+    /// 斜杠命令（F3）在 UI 侧拦截：解析命中 [`SlashCommand`] 后不启动 turn，
+    /// 纯 UI 命令（`/help`、`/clear`）就地执行；需要 Runtime 数据的命令因
+    /// `App` 仅持有 `ui_tx`（现有 `UiCommand` 无查询变体，桥接层不在本次
+    /// 改动范围）诚实降级为 System 提示行。
     fn submit_input(&mut self) {
         if self.is_turning {
             return; // 一轮未结束，忽略提交
         }
         if let Some(text) = self.input.submit() {
+            // 斜杠命令拦截：解析与执行分离（core::util::slash 单一事实来源）
+            if let Some(cmd) = slash::parse(&text) {
+                self.handle_slash(cmd, &text);
+                return;
+            }
             // 立即在 UI 显示用户消息（不等待 MessageAppended 事件，提升响应感）
             self.scroll_offset = 0;
             self.lines.push(ChatLine::User(text.clone()));
             let _ = self.ui_tx.try_send(UiCommand::Submit(text));
             self.is_turning = true;
             self.status_msg = "等待响应…".to_string();
+        }
+    }
+
+    /// 执行斜杠命令（F3）。
+    ///
+    /// 所有分支只操作本地状态或发送 channel 消息，不阻塞 UI 线程、不 panic。
+    fn handle_slash(&mut self, cmd: SlashCommand, raw: &str) {
+        // 回显命令本身，保持对话流可读
+        self.scroll_offset = 0;
+        self.lines.push(ChatLine::User(raw.to_string()));
+        match cmd {
+            SlashCommand::Help => {
+                for line in help_lines() {
+                    self.lines.push(ChatLine::System(line));
+                }
+                self.status_msg = "就绪".to_string();
+            }
+            SlashCommand::Clear => {
+                // 仅清聊天区显示；会话上下文在 Runtime/ContextManager 中不动
+                self.lines.clear();
+                self.streaming.clear();
+                self.reasoning.clear();
+                self.scroll_offset = 0;
+                self.status_msg = "已清屏（会话上下文保留）".to_string();
+            }
+            SlashCommand::Unknown(name) => {
+                let hint = if name.is_empty() {
+                    "空命令。输入 /help 查看可用命令".to_string()
+                } else {
+                    format!("未知命令: /{name}（输入 /help 查看可用命令）")
+                };
+                self.lines.push(ChatLine::System(hint));
+                self.status_msg = "未知命令".to_string();
+            }
+            SlashCommand::Tokens
+            | SlashCommand::Status
+            | SlashCommand::Model(_)
+            | SlashCommand::PlanToggle
+            | SlashCommand::Undo { .. } => {
+                self.lines.push(ChatLine::System(format!(
+                    "当前版本 TUI 暂不支持 {cmd}：UI 进程未持有 Runtime 查询通道"
+                )));
+                self.status_msg = "暂不支持".to_string();
+            }
         }
     }
 
@@ -819,6 +874,22 @@ fn option_label(opt: PromptOption) -> String {
     }
 }
 
+/// `/help` 的 System 行列表（F3）。标注各命令在 TUI 的支持状态：
+/// 纯 UI 命令就地可用；Runtime 数据类命令诚实降级（App 无 Runtime 查询通道）。
+fn help_lines() -> Vec<String> {
+    vec![
+        "可用命令：".to_string(),
+        "  /help    显示此帮助".to_string(),
+        "  /clear   清空聊天区显示（会话上下文保留）".to_string(),
+        "  /tokens  本会话 token 计量（当前版本 TUI 暂不支持）".to_string(),
+        "  /status  会话状态摘要（当前版本 TUI 暂不支持）".to_string(),
+        "  /model   查看/切换模型（当前版本 TUI 暂不支持）".to_string(),
+        "  /plan    切换 Plan 模式（当前版本 TUI 暂不支持）".to_string(),
+        "  /undo    回滚文件改动（当前版本 TUI 暂不支持）".to_string(),
+        "其他输入作为提问发送给助手。Ctrl-C 中断/退出，Ctrl-D 退出。".to_string(),
+    ]
+}
+
 /// 从 `Arc<Runtime>` 提取 cancel token 用于中断（主循环 Ctrl-C 调用）。
 ///
 /// 返回 `Arc` 的引用便于 UI 在中断时调用 `cancel()`。
@@ -922,5 +993,80 @@ mod tests {
         assert_eq!(s.cursor_col(), 3);
         s.cursor_left();
         assert_eq!(s.cursor_col(), 2);
+    }
+
+    // ===== 斜杠命令（F3）状态机测试 =====
+
+    /// 构造无 Runtime 依赖的 App（斜杠命令为纯 UI 路径，无需桥接在位）。
+    fn make_app() -> App {
+        let (ui_tx, _ui_rx) = mpsc::channel::<UiCommand>(16);
+        App::new(ui_tx, Vec::new(), "test-session".to_string())
+    }
+
+    /// 模拟键入文本后回车提交。
+    fn type_and_submit(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.input.insert_char(c);
+        }
+        app.submit_input();
+    }
+
+    #[test]
+    fn slash_help_pushes_system_help_lines() {
+        let mut app = make_app();
+        type_and_submit(&mut app, "/help");
+        assert!(
+            app.lines
+                .iter()
+                .any(|l| matches!(l, ChatLine::System(s) if s.contains("/clear"))),
+            "帮助应含 /clear 条目: {:?}",
+            app.lines
+        );
+        // 命令不启动 turn
+        assert!(!app.is_turning);
+    }
+
+    #[test]
+    fn slash_unknown_command_shows_hint() {
+        let mut app = make_app();
+        type_and_submit(&mut app, "/frobnicate");
+        assert!(
+            app.lines.iter().any(|l| matches!(
+                l,
+                ChatLine::System(s) if s.contains("未知命令: /frobnicate")
+            )),
+            "应有未知命令提示: {:?}",
+            app.lines
+        );
+        assert!(!app.is_turning);
+    }
+
+    #[test]
+    fn slash_clear_empties_chat_lines_only() {
+        let mut app = make_app();
+        type_and_submit(&mut app, "/help");
+        assert!(!app.lines.is_empty());
+        type_and_submit(&mut app, "/clear");
+        assert!(app.lines.is_empty(), "clear 应清空聊天区: {:?}", app.lines);
+        assert!(!app.is_turning, "clear 不启动 turn");
+    }
+
+    #[test]
+    fn slash_runtime_commands_degrade_gracefully() {
+        let mut app = make_app();
+        for raw in ["/tokens", "/status", "/model gpt-x", "/plan", "/undo 2"] {
+            type_and_submit(&mut app, raw);
+        }
+        let degraded = app
+            .lines
+            .iter()
+            .filter(|l| matches!(l, ChatLine::System(s) if s.contains("当前版本 TUI 暂不支持")))
+            .count();
+        assert_eq!(
+            degraded, 5,
+            "5 个 Runtime 类命令均应诚实降级: {:?}",
+            app.lines
+        );
+        assert!(!app.is_turning);
     }
 }

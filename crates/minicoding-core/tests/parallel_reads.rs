@@ -113,7 +113,9 @@ fn build_runtime(parallel_reads: u32, base: RuntimeConfig) -> (Runtime, Arc<Atom
 }
 
 /// 验收 1（design.md M-12）：`parallel_reads = 0` → 只读工具串行执行。
-#[tokio::test]
+// F1：start_paused 虚拟时钟——ProbeTool 的 30ms 时间窗即时推进，
+// 并发重叠语义不变（并行桶内 3 个调用 park 于同一线，唤醒时 peak 观测不变）
+#[tokio::test(start_paused = true)]
 async fn parallel_reads_0_serial() {
     let (rt, peak) = build_runtime(0, RuntimeConfig::default());
     rt.run_turn(UserInput::from_text("run three"))
@@ -124,7 +126,9 @@ async fn parallel_reads_0_serial() {
 
 /// 验收 2：`parallel_reads = 4` → 只读工具并行，且并发不超过配置上限
 /// （3 个调用全部并行 → 峰值 3，且 ≤ 4）。
-#[tokio::test]
+// F1：start_paused 虚拟时钟——ProbeTool 的 30ms 时间窗即时推进，
+// 并发重叠语义不变（并行桶内 3 个调用 park 于同一线，唤醒时 peak 观测不变）
+#[tokio::test(start_paused = true)]
 async fn parallel_reads_4_bounds_concurrency() {
     let (rt, peak) = build_runtime(4, RuntimeConfig::default());
     rt.run_turn(UserInput::from_text("run three"))
@@ -142,7 +146,9 @@ async fn parallel_reads_4_bounds_concurrency() {
 ///
 /// `Event::ConfigChanged` 通知到达本身已有 watcher 单测覆盖，此处验证
 /// `reload_safe_config` 在真实 turn 边界应用白名单字段（best-effort 读文件）。
-#[tokio::test]
+// F1：start_paused 虚拟时钟——ProbeTool 的 30ms 时间窗即时推进，
+// 并发重叠语义不变（并行桶内 3 个调用 park 于同一线，唤醒时 peak 观测不变）
+#[tokio::test(start_paused = true)]
 async fn turn_boundary_whitelist_applies_parallel_reads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("config.toml");

@@ -188,6 +188,29 @@ jobs:
         env:
           OPENAI_API_KEY: sk-test-ci-mock-not-real
 
+  # D1（2026-08-25）：Windows 目标交叉编译检查。本轮两次发布 CI 失败根因相同——
+  # windows-sys FFI 分支只在真实 Windows runner 的 cross-platform job 中才被编译，
+  # Linux 本地任何门禁均不可达，问题直到推送后才暴露。SEC-4 教训：
+  # QueryInformationJobObject FFI 声明错误本可在 ubuntu 上用 `--target` check
+  # 提前拦截。纯 check 无需 MSVC linker；ring/aws-lc 不在下列 crate 的
+  # windows 依赖闭包中。并发取消沿用 workflow 级 concurrency 组，无需 job 级配置。
+  # 不含 minicoding-desktop：其 windows 依赖闭包重且 sidecar 占位二进制按目标
+  # 平台命名，desktop 由 cross-platform(windows-latest) 原生覆盖。
+  windows-target-check:
+    name: cargo check (x86_64-pc-windows-msvc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-18
+      - name: Add Windows MSVC target
+        run: rustup target add x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --target x86_64-pc-windows-msvc
+        run: cargo check --target x86_64-pc-windows-msvc -p minicoding-core -p minicoding-sandbox -p minicoding-tools -p minicoding-journal -p minicoding-policy -p minicoding-storage
+
   # M-14/R-10：前端单测基建（Vitest + MSW，AGENTS.md §8.8）。
   # oxlint/oxfmt/tsc/vitest/vite build 与 Rust 侧 fmt/clippy/test 门禁对齐；
   # 测试不连真实后端（MSW 拦截 REST + mock EventSource 重放 SSE fixture）。

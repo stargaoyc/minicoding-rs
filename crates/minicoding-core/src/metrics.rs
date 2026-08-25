@@ -344,10 +344,12 @@ mod tests {
         record_error("sandbox");
     }
 
-    #[test]
-    fn record_duration_calculates_ms() {
+    // F1：start_paused 虚拟时钟——原 std::thread::sleep(10ms) 仅为了让
+    // elapsed 非零；本测试只验证 record_elapsed 不 panic，虚拟推进等价。
+    #[tokio::test(start_paused = true)]
+    async fn record_duration_calculates_ms() {
         let start = std::time::Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         record_elapsed("test_metric", "tool", "test", start);
     }
 

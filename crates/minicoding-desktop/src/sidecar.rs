@@ -7,8 +7,6 @@
 
 use crate::SessionInfo;
 use anyhow::{Context, Result};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -197,7 +195,11 @@ pub fn kill_sidecar(app: &tauri::AppHandle) {
 fn force_kill_by_pid(pid: u32) {
     #[cfg(windows)]
     {
-        // CREATE_NO_WINDOW：本函数在 GUI 子系统进程内执行，避免闪烁控制台窗口
+        // CREATE_NO_WINDOW：本函数在 GUI 子系统进程内执行，避免闪烁控制台窗口。
+        // `std::process::Command` 的 `creation_flags` 需显式引入 trait（局部
+        // 导入避免非 desktop feature 的 Windows 构建报 unused import）；
+        // `tokio::process::Command` 同名方法为固有方法，无需此导入。
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .creation_flags(0x0800_0000)
