@@ -149,6 +149,14 @@ use windows_sys::Win32::System::JobObjects::{
 /// Job Object 句柄包装：Drop 时自动 CloseHandle（触发 `KILL_ON_JOB_CLOSE`）。
 struct JobHandle(HANDLE);
 
+// SAFETY: Windows 内核对象句柄**非线程亲和**——HANDLE 只是不透明标识符，
+// CloseHandle/AssignProcessToJobObject 等均可从任意线程调用（与 socket fd
+// 不同，无线程局部状态）。驱动侧经 `Mutex<Option<JobHandle>>` 串行访问
+// （S24 串行 spawn 不变式），不存在并发 use-after-close；Drop 仅发生在
+// 驱动释放时。满足 `SandboxDriver: Send + Sync` 的要求。
+unsafe impl Send for JobHandle {}
+unsafe impl Sync for JobHandle {}
+
 impl Drop for JobHandle {
     fn drop(&mut self) {
         if self.0 != INVALID_HANDLE_VALUE && !self.0.is_null() {
