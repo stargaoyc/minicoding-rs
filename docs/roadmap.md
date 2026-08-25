@@ -445,3 +445,5 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 | 测试时钟改造（31 处真实 sleep） | tokio time pause/pause_auto 改造批量进行，避免 CI 时钟脆弱性（首轮 E-3 遗留） |
 | redact 整行替换误杀收窄 | sk- 行内任意位置整行吞的误杀面大，需按值边界精确替换（PTM-14） |
 | Windows cmd 动词表持续维护 | SEC-6 已补 del/rd/move 等，PowerShell 场景（Remove-Item 等）词表待扩 |
+| desktop 依赖纳入 cargo deny 扫描 | deny.toml 整体豁免 minicoding-desktop（Tauri 依赖树部分许可证不在白名单），发行包依赖不经供应链扫描；需逐依赖评估后决定白名单扩充或替代（ENG-3） |
+| release.yml dist 安装脚本校验和钉版 | `curl \| sh` 无 checksum 校验（ENG-10，供应链弱信号） |

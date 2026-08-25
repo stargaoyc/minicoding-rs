@@ -261,3 +261,28 @@ CT-1（超时✔ 锁收窄以文档化取舍替代+compress/mod.rs:120 硬编码
 | R6' 文档工程 | DOC-1~11, ENG-1~11 | Event 枚举权威源修正（以 core/runtime/event.rs 为准）、seccomp 五处、驱动表、M-07/M-08 说明、统计口径、TaskStatus、axum/ts-rs 条目、TanStack 口径、modules 措辞、门禁计数、gen-types 命令；CI concurrency+timeout、deny desktop 收窄评估、roadmap 补登记、git-hooks export、cliff 顺序、release 权限收敛、workspace.lints、secrets 正则、MSRV 登记 |
 
 **明确延期项**（需立项非修补，续登 roadmap）：seccomp 接入、DNS IP pinning、HOME 细粒度白名单、EventBus 双通道、Tauri updater、TUI 斜杠命令体系、evals 框架、多 provider 故障切换、成本核算、31 处 sleep 时钟改造、MSRV stable 可达（依赖上游 rustc 修复）。
+
+---
+
+## 8. 修复执行记录（2026-08-25 R2 当日收口）
+
+R1'–R6' 全部阶段已实施并逐批提交，全量验证通过（`cargo fmt --check` /
+`clippy --workspace -D warnings` pedantic 全绿（workspace.lints 后含集成测试）/
+56 个测试目标全绿 / web 侧 tsc+oxlint+vitest 13 用例通过）。关键 P0/P1 发现
+（CORE-1 熔断未强制、SEC-1 会话缓存击穿、FE-1 seq 分叉）经人工逐行复核后修复。
+
+| 阶段 | 提交 | 覆盖发现 |
+|---|---|---|
+| R2'0 报告基线 | 303e3ba | 本报告 |
+| R1' 安全 | 29f81c2 | SEC-1~14（会话缓存同门控、Landlock 分级降级、Windows Job pid 键控、cmd 动词表、控制关键字剥离、journal symlink 防护、seq 单调校验、policy.toml 原子写、DenyAlways 兑现、.git 文件形式等） |
+| R2' core | 82e3e76 | CORE-1~15（熔断强制 TurnEnd、ToolExecLimits 接线、canceller 下传、span 清理收尾、Failed 广播 TurnEnd、错误类型收敛、保序测试；附带 PTM-1/FE-2/FE-5/PTM-13） |
+| R3' 上下文记忆 | f643389 | CTX-1~8 + CT-5 残留（RMW 锁内、loader 语义对齐、审计出锁、组件级前缀、post_compact 路径校验、SummarizeConfig/熔断配置端到端接线、read 路径压缩前提取） |
+| R4' providers/tools/mcp | 84c8e73 | PTM-2~13（anthropic budget clamp 回归修复、openai top_p gate、evict kill 语义、search 超时上限、shell.output 脱敏、ndjson/glob 同族问题、merge 分支保护、redirect RFC 合并） |
+| R5' 前端 | a694394 | FE-1~14（cursor 播种、insert TOCTOU、RehydrateRequired 重拉、undo/mode Web 消费、CLI/TUI reasoning 渲染、init 幂等、DELETE 路由等） |
+| R6' 文档工程化 | 4fdd856 | DOC-1~11 + ENG-1~9（Event 权威源修正、seccomp 五处、驱动表、CI concurrency/timeout、git-hooks 协议激活、cliff 顺序、workspace.lints 收敛、roadmap 补登记 12 项） |
+
+**本轮仍开放**（已全部登记 roadmap"R2 审查补充登记"，共 12 项）：InProcessSubagentRunner
+立项、会话安全上下文持久化、denial echo 加固、journal 内存上限、SDK semver 校验、
+extension permissions 核实、MSRV 可达性、31 处 sleep 时钟改造、redact 误杀收窄、
+PowerShell 动词表、desktop deny 扫描豁免收窄（ENG-3）、release.yml 校验和钉版（ENG-10）。
+另 PTM-14（redact 整行误杀）与 PTM-3 的深度接线随上述立项处理。
