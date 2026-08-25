@@ -5,29 +5,28 @@ import type { MessageSource } from "./MessageSource";
 /**
  * 消息元数据。
  */
-export type MessageMeta = {
-  /**
-   * 该消息的 token 数（LLM 返回或启发式估算）。
-   */
-  tokens: number | null;
-  /**
-   * 是否固定（压缩时不裁剪）。
-   */
-  pinned: boolean;
-  /**
-   * 是否已被摘要替换。
-   */
-  summarized: boolean;
-  /**
-   * 消息来源。
-   */
-  source: MessageSource;
-  /**
-   * 本消息替代了事件 seq 区间 `[from_seq, to_seq]`（压缩追溯，R-02/M-07）。
-   *
-   * 压缩摘要/合并消息携带被替换消息的 seq 区间，审计可追溯"这轮压缩掉了
-   * 什么"（`AuditKind::Compress`）。`None` = 非压缩产物。wire 兼容：
-   * 旧数据无此字段，反序列化时默认 `None`。
-   */
-  compressed_range: CompressedRange | null;
-};
+export type MessageMeta = { 
+/**
+ * 该消息的 token 数（LLM 返回或启发式估算）。
+ */
+tokens: number | null, 
+/**
+ * 是否固定（压缩时不裁剪）。
+ */
+pinned: boolean, 
+/**
+ * 是否已被摘要替换。
+ */
+summarized: boolean, 
+/**
+ * 消息来源。
+ */
+source: MessageSource, 
+/**
+ * 本消息替代了事件 seq 区间 `[from_seq, to_seq]`（压缩追溯，R-02/M-07）。
+ *
+ * 压缩摘要/合并消息携带被替换消息的 seq 区间，审计可追溯"这轮压缩掉了
+ * 什么"（`AuditKind::Compress`）。`None` = 非压缩产物。wire 兼容：
+ * 旧数据无此字段，反序列化时默认 `None`。
+ */
+compressed_range: CompressedRange | null, };

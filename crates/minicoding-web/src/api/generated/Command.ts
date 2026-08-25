@@ -7,17 +7,4 @@ import type { SessionConfig } from "./SessionConfig";
 /**
  * 前端→后端命令（JSON-RPC method 参数）。
  */
-export type Command =
-  | { command: "create_session"; config: SessionConfig }
-  | {
-      command: "send_user_message";
-      session_id: string;
-      text: string;
-      attachments: Array<Attachment>;
-    }
-  | { command: "cancel"; session_id: string }
-  | { command: "undo"; session_id: string; steps: number }
-  | { command: "list_sessions" }
-  | { command: "get_session"; session_id: string }
-  | { command: "set_permission_mode"; session_id: string; mode: PermissionMode }
-  | { command: "resolve_permission"; id: string; decision: Decision };
+export type Command = { "command": "create_session", config: SessionConfig, } | { "command": "send_user_message", session_id: string, text: string, attachments: Array<Attachment>, } | { "command": "cancel", session_id: string, } | { "command": "undo", session_id: string, steps: number, } | { "command": "list_sessions" } | { "command": "get_session", session_id: string, } | { "command": "set_permission_mode", session_id: string, mode: PermissionMode, } | { "command": "resolve_permission", id: string, decision: Decision, };

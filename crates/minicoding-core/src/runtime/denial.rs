@@ -31,10 +31,18 @@ fn structured_denial_errno(error: &crate::model::ToolError) -> Option<i32> {
     }
 }
 
-/// `EPERM`（errno 1，操作不允许）。
+/// `EPERM`（unix errno 1，操作不允许）。
+///
+/// 平台差异（2026-08-25 第三次 v0.3.4 CI 教训）：Windows 的 raw OS error code
+/// 体系不同——`raw_os_error(1)` 在 Windows 是 `ERROR_INVALID_FUNCTION`，权限
+/// 拒绝是 code 5。权威判定按平台取正确编码。
+#[cfg(not(target_os = "windows"))]
 const ERRNO_EPERM: i32 = 1;
+/// Windows `ERROR_ACCESS_DENIED`（5）。
+#[cfg(target_os = "windows")]
+const ERRNO_EPERM: i32 = 5;
 
-/// `EACCES`（errno 13，权限不足）。
+/// `EACCES`（unix errno 13，权限不足）。
 const ERRNO_EACCES: i32 = 13;
 
 impl Runtime {
@@ -282,7 +290,11 @@ mod tests {
     impl SandboxDenialDetector for FakeDetector {
         fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
             const PATTERN: &str = "Operation not permitted";
-            if !error_text.contains(PATTERN) {
+            // 权威路径：Runtime 合成的内部 errno 标记（平台无关——Windows 上
+            // io::Error Display 不是 "Operation not permitted"，此前按 OS 文案
+            // 匹配导致 windows runner 测试失败）
+            let authoritative = error_text.contains(crate::sandbox::DENIED_ERRNO_MARKER_PREFIX);
+            if !authoritative && !error_text.contains(PATTERN) {
                 return None;
             }
             Some(DenialMatch {
@@ -296,7 +308,7 @@ mod tests {
                 kind: SandboxDenyKind::SyscallBlocked {
                     syscall: PATTERN.to_string(),
                 },
-                authoritative: error_text.contains(crate::sandbox::DENIED_ERRNO_MARKER_PREFIX),
+                authoritative,
             })
         }
     }
