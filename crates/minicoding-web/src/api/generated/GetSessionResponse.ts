@@ -5,8 +5,11 @@ import type { Task } from "./Task";
 /**
  * `GetSession` 响应。
  */
-export type GetSessionResponse = { session_id: string, messages: Array<Message>, 
-/**
- * 任务列表快照（`task_state`，见 `SessionManager`）。
- */
-tasks: Array<Task>, };
+export type GetSessionResponse = {
+  session_id: string;
+  messages: Array<Message>;
+  /**
+   * 任务列表快照（`task_state`，见 `SessionManager`）。
+   */
+  tasks: Array<Task>;
+};
