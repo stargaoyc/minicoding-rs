@@ -9,6 +9,33 @@ use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{RenderIntent, Tool};
 use tokio::process::Command;
 
+/// PTM-6：git ref 安全校验（`git-check-ref-format` 安全子集）。
+///
+/// 拒绝：空值、选项形态（`-` 开头）、`..`（区间语法可携带 `--output` 等变体）、
+/// 空白/控制字符、ref 规则禁用字符（`~^:?*[\` 与 `@{`）。
+/// 注入样本（`--output=/x`、`--no-index /etc/passwd /dev/null`、`HEAD --output=x`）
+/// 均以 `-` 开头或含空白，全部拦截。
+fn validate_git_ref(r: &str) -> Result<(), ToolError> {
+    let invalid = r.is_empty()
+        || r.starts_with('-')
+        || r.starts_with('/')
+        || r.ends_with('/')
+        || r.ends_with('.')
+        || r.contains("..")
+        || r.contains("@{")
+        || r.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        });
+    if invalid {
+        return Err(ToolError::InvalidInput(format!(
+            "非法 git ref `{r}`：ref 不能以 `-` 开头，且不得包含空白或 `~^:?*[\\ .. @{{` 等字符"
+        )));
+    }
+    Ok(())
+}
+
 /// `git.diff` 工具。
 pub struct GitDiff {
     schema: ToolSchema,
@@ -73,6 +100,14 @@ impl Tool for GitDiff {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         Box::pin(async move {
+            // PTM-6（2026-08-26 R3 审查）：ref 直通 argv 存在 option 注入面
+            // （`--output=<file>` 沙箱外任意写、`--no-index /etc/passwd` 跨边界
+            // 读、`--ext-diff` 外部程序执行），且本工具 side_effect=None 进只读
+            // 桶免审批、不接 OS 沙箱——三层防线全部旁路。按 git-check-ref-format
+            // 的安全子集校验：拒绝选项形态与 ref 非法字符，注入即报错。
+            if let Some(r) = &git_ref {
+                validate_git_ref(r)?;
+            }
             let mut cmd = Command::new("git");
             cmd.current_dir(workdir.as_std_path());
             cmd.arg("diff");
@@ -291,5 +326,30 @@ mod tests {
     fn diff_schema_has_correct_name() {
         let tool = GitDiff::new();
         assert_eq!(tool.name(), "git.diff");
+    }
+
+    // PTM-6（2026-08-26 R3 审查）：ref 注入面回归锁
+    #[test]
+    fn diff_rejects_option_injection_refs() {
+        for bad in [
+            "--output=/home/u/.bashrc",
+            "--no-index /etc/passwd /dev/null",
+            "-U0",
+            "HEAD --output=x",
+            "main..other --ext-diff",
+            "a b",
+            "",
+            "@{upstream}",
+            "feature/../evil",
+        ] {
+            assert!(validate_git_ref(bad).is_err(), "应拒绝: {bad}");
+        }
+    }
+
+    #[test]
+    fn diff_accepts_legit_refs() {
+        for good in ["HEAD", "main", "origin/main", "v1.2.3", "feature/x_y-z"] {
+            assert!(validate_git_ref(good).is_ok(), "应接受: {good}");
+        }
     }
 }

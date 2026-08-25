@@ -593,6 +593,20 @@ async fn create_session(
     if body.plan_mode && params.permission_mode == PermissionMode::Default {
         params.permission_mode = PermissionMode::Plan;
     }
+    // SEC-2（2026-08-26 R3 审查）：C-22 二次确认补口——此前 confirm_danger 只
+    // 门控 preset 路径，请求体直携 `permission_mode: "bypass_permissions"` 可
+    // 无确认创建全自动会话。最终解析出的模式为 BypassPermissions 时一律要求
+    // 显式确认（preset full-access 已确认的路径天然满足，不受影响）。
+    if params.permission_mode == PermissionMode::BypassPermissions
+        && body.confirm_danger != Some(true)
+    {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "权限模式 `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+                      自动放行。请在 UI 确认红色警告后在请求体携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        });
+    }
 
     let session = state.mgr.create_session(Some(params))?;
     let session_id = session.session_id().clone();
@@ -780,6 +794,9 @@ struct UndoBody {
 struct SetPermissionModeBody {
     /// 目标权限模式（`default`/`accept_edits`/`plan`/`auto`/`bypass_permissions`）。
     mode: PermissionMode,
+    /// 升级到 `bypass_permissions` 时必带（C-22 二次确认，SEC-2）。
+    #[serde(default)]
+    confirm_danger: Option<bool>,
 }
 
 /// `POST /sessions/{id}/undo` — 回滚最近 n 批文件改动（2026-08-25 审查 F-routes）。
@@ -875,10 +892,32 @@ async fn set_permission_mode(
     Path(session_id): Path<String>,
     Json(body): Json<SetPermissionModeBody>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
+    // SEC-2（2026-08-26 R3 审查）：升级到 BypassPermissions 与会话创建同门控
+    // （C-22：显式选定 + 二次确认）。降级方向（离开 Bypass）无需确认。
     let session = state.mgr.get_or_load(&session_id).await?;
+    if body.mode == PermissionMode::BypassPermissions && body.confirm_danger != Some(true) {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "权限模式 `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+                      自动放行。请在 UI 确认红色警告后携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        });
+    }
     let mode = body.mode;
     session.runtime.plan_controller().set_mode(mode).await;
     tracing::info!(session = %session_id, to = ?mode, "permission mode switched via HTTP");
+    // SEC-2 配套：权限模式变更落审计（AGENTS.md §5.5——此前仅 info 日志）。
+    let audit_rec = minicoding_core::storage::AuditRecord {
+        ts: time::OffsetDateTime::now_utc(),
+        session: session_id.clone(),
+        kind: minicoding_core::storage::AuditKind::PermissionResolved,
+        tool: None,
+        decision: Some(format!("mode_switch:{mode:?}")),
+        detail: "permission mode switched via HTTP endpoint".to_string(),
+    };
+    if let Err(e) = session.runtime.audit().record(audit_rec).await {
+        tracing::warn!(error = %e, "permission-mode switch audit failed (best-effort)");
+    }
     Ok(Json(serde_json::json!({ "ok": true, "mode": mode })))
 }
 

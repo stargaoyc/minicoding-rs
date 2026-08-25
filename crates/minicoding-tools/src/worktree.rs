@@ -31,6 +31,20 @@ use minicoding_core::model::{
 use minicoding_core::provider::BoxFuture;
 use std::sync::Arc;
 
+/// PTM-11（2026-08-26 R3 审查）：构造环境白名单化的 git 子进程命令。
+///
+/// 此前本模块的 git 子进程继承完整进程环境——git 在 cherry-pick/merge/worktree
+/// add 时会执行仓库侧 hook（core.hooksPath），完整环境含 `OPENAI_API_KEY` 等
+/// 凭证，恶意仓库钩子可窃取（C-04 旁路）。统一 `env_clear` + `SAFE_ENV_WHITELIST`
+/// 白名单，与 `git/diff.rs`、`shell/run.rs` 同款防线。
+fn git_cmd(workdir: &camino::Utf8PathBuf) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workdir.as_std_path());
+    cmd.env_clear();
+    cmd.envs(minicoding_core::tool::sanitized_env());
+    cmd
+}
+
 /// Worktree 隔离子 Agent runner（装饰器，A-15）。
 ///
 /// 包裹内部 runner，在 `spawn` 前后处理 git worktree 创建/合并/清理。
@@ -55,7 +69,7 @@ impl WorktreeSubagentRunner {
 
     /// 检查 `workdir` 是否是 git 仓库。
     async fn is_git_repo(&self) -> bool {
-        let output = tokio::process::Command::new("git")
+        let output = git_cmd(&self.workdir)
             .arg("rev-parse")
             .arg("--is-inside-work-tree")
             .current_dir(&self.workdir)
@@ -79,7 +93,7 @@ impl WorktreeSubagentRunner {
             })?;
         }
 
-        let output = tokio::process::Command::new("git")
+        let output = git_cmd(&self.workdir)
             .arg("worktree")
             .arg("add")
             .arg("-b")
@@ -109,7 +123,7 @@ impl WorktreeSubagentRunner {
         keep_branch: bool,
     ) {
         // 删除 worktree
-        let _ = tokio::process::Command::new("git")
+        let _ = git_cmd(&self.workdir)
             .arg("worktree")
             .arg("remove")
             .arg("--force")
@@ -127,7 +141,7 @@ impl WorktreeSubagentRunner {
         }
 
         // 删除分支
-        let _ = tokio::process::Command::new("git")
+        let _ = git_cmd(&self.workdir)
             .arg("branch")
             .arg("-D")
             .arg(branch)
@@ -141,7 +155,7 @@ impl WorktreeSubagentRunner {
         match strategy {
             MergeStrategy::None => Ok(()),
             MergeStrategy::CherryPick => {
-                let output = tokio::process::Command::new("git")
+                let output = git_cmd(&self.workdir)
                     .arg("cherry-pick")
                     .arg(branch)
                     .current_dir(&self.workdir)
@@ -150,7 +164,7 @@ impl WorktreeSubagentRunner {
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     // cherry-pick 冲突时 abort，返回错误让父 Agent 处理
-                    let _ = tokio::process::Command::new("git")
+                    let _ = git_cmd(&self.workdir)
                         .arg("cherry-pick")
                         .arg("--abort")
                         .current_dir(&self.workdir)
@@ -163,7 +177,7 @@ impl WorktreeSubagentRunner {
                 Ok(())
             }
             MergeStrategy::MergeCommit => {
-                let output = tokio::process::Command::new("git")
+                let output = git_cmd(&self.workdir)
                     .arg("merge")
                     .arg("--no-ff")
                     .arg(branch)
@@ -174,7 +188,7 @@ impl WorktreeSubagentRunner {
                     .await?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let _ = tokio::process::Command::new("git")
+                    let _ = git_cmd(&self.workdir)
                         .arg("merge")
                         .arg("--abort")
                         .current_dir(&self.workdir)

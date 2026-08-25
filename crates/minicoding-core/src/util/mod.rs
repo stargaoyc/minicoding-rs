@@ -23,43 +23,109 @@ pub fn generate_auth_token() -> String {
 /// 下只能复制），任一侧加规则另一侧不同步即出现旁路。两 crate 均依赖 core，
 /// 下沉至此零新增依赖边。
 ///
+/// CTX-1/SEC-4（2026-08-26 R3 审查）重写匹配算法：旧版仅做**行首字面前缀**
+/// 匹配，Markdown 列表（`- Never ...`，AGENTS.md 最常见形态）、有序列表、
+/// 加粗强调、多级标题、敬语前缀等常规写法全部漏检——auto.md 构成跨会话全局
+/// 持久注入通道。现版本先**剥离 Markdown 修饰前缀**（列表符/引用/任意级标题/
+/// 有序列表号），再对剥离后的行首做祈使词匹配；section 头判定同步放宽为
+/// 任意标题级别 + 扩充词表。中文 `应` 单字前缀误报率高（"应用服务器"），
+/// 收紧为双字以上组合。
+///
 /// 命中任一模式返回 `true`：
-/// - 英文祈使/模态（行首，忽略大小写）：`Always use`/`Never`/`Must`/
+/// - 英文祈使/模态（剥前缀后行首，忽略大小写）：`Always use`/`Never`/`Must`/
 ///   `Do not`/`Don't`/`Should`；
-/// - 中文祈使（行首）：`总是`/`永远`/`禁止`/`必须`/`不要`/`不得`/`应当`/`应`；
-/// - `AGENTS.md` 风格 section 头：`## Rules`/`## Constraints`/`## 规则`/`## 约束`。
+/// - 中文祈使（剥前缀后行首）：`总是`/`永远`/`禁止`/`必须`/`不要`/`不得`/
+///   `应当`/`应该`/`务必`/`切记`；
+/// - section 头（剥 `#` 后词首）：`Rules`/`Constraints`/`Guidelines`/
+///   `Instructions`/`Conventions`/`规则`/`约束`/`规范`（后随行尾/冒号/空白）。
+///
+/// 诚实边界：本函数是启发式（无法覆盖 base64 编码、语义级指令改写等变形），
+/// 是 C-27 纵深防御的一层而非全部——命中后降级 Ask + 注入侧 `<auto_memory>`
+/// data-not-instructions 边界声明共同兜底。
 #[must_use]
 pub fn contains_directive(content: &str) -> bool {
     for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
+        let stripped = strip_markdown_prefixes(raw);
+        if stripped.is_empty() {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("always use")
-            || lower.starts_with("never ")
-            || lower.starts_with("must ")
+        let lower = stripped.to_ascii_lowercase();
+        // 词级祈使判定（取首个字母词）：覆盖 `Always use/run/...`、
+        // `Never** force push`（强调符紧随）等形态
+        let word_end = lower
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(lower.len());
+        let first_word = &lower[..word_end];
+        if matches!(first_word, "always" | "never" | "must" | "should")
             || lower.starts_with("do not ")
+            || lower.starts_with("do not.")
             || lower.starts_with("don't ")
-            || lower.starts_with("should ")
+            || lower.starts_with("don't.")
         {
             return true;
         }
-        if line.starts_with("总是")
-            || line.starts_with("永远")
-            || line.starts_with("禁止")
-            || line.starts_with("必须")
-            || line.starts_with("不要")
-            || line.starts_with("不得")
-            || line.starts_with("应当")
-            || line.starts_with("应")
+        // 中文祈使：双字以上组合（`应` 单字误报率高，CTX-15）
+        for kw in [
+            "总是", "永远", "禁止", "必须", "不要", "不得", "应当", "应该", "务必", "切记",
+        ] {
+            if stripped.starts_with(kw) {
+                return true;
+            }
+        }
+        // section 头：剥掉标题符后按词首匹配（`## Rules` / `### 规则：` 等）
+        if is_section_header(&lower, stripped) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 迭代剥离行首 Markdown 修饰：无序列表符（`-`/`*`/`+`）、引用（`>`）、
+/// 任意级标题（`#`）、有序列表号（`\d+[.)]`）、强调符号（`*`/`_`/`` ` ``）。
+/// 循环直到稳定，处理 `- **必须**...` 这类嵌套修饰。
+fn strip_markdown_prefixes(raw: &str) -> &str {
+    let mut s = raw.trim();
+    loop {
+        let before = s;
+        s = s.trim_start_matches(['-', '*', '+', '>', '#', '_', '`', ' ']);
+        // 有序列表："1." / "12)"
+        let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 {
+            let rest = &s[digits..];
+            if rest.starts_with('.') || rest.starts_with(')') {
+                s = rest[1..].trim_start();
+            }
+        } else {
+            s = s.trim_start();
+        }
+        if s == before {
+            return s;
+        }
+    }
+}
+
+/// 判定是否 section 头：英文关键词后随行尾/冒号/空白；中文关键词后随行尾/冒号。
+fn is_section_header(lower: &str, original: &str) -> bool {
+    for en in [
+        "rules",
+        "constraints",
+        "guidelines",
+        "instructions",
+        "conventions",
+    ] {
+        if let Some(rest) = lower.strip_prefix(en)
+            && (rest.is_empty()
+                || rest.starts_with(':')
+                || rest.starts_with(' ')
+                || rest.starts_with("：")
+                || rest.starts_with("**"))
         {
             return true;
         }
-        if lower.starts_with("## rules")
-            || lower.starts_with("## constraints")
-            || line.starts_with("## 规则")
-            || line.starts_with("## 约束")
+    }
+    for zh in ["规则", "约束", "规范"] {
+        if let Some(rest) = original.strip_prefix(zh)
+            && (rest.is_empty() || rest.starts_with('：') || rest.starts_with(':'))
         {
             return true;
         }

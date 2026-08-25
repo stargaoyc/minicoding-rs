@@ -1130,7 +1130,8 @@ impl Runtime {
             .with_sandbox(self.sandbox_driver.clone(), self.sandbox_policy.clone())
             .with_journal_opt(self.journal.clone())
             .with_prompter_opt(Some(self.prompter.clone()))
-            .with_events_opt(Some(self.events.clone()));
+            .with_events_opt(Some(self.events.clone()))
+            .with_audit_opt(Some(self.audit.clone()));
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
         // S14：查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch

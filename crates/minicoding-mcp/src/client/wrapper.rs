@@ -219,6 +219,7 @@ mod tests {
             journal: None,
             prompter: None,
             events: None,
+            audit: None,
         }
     }
 

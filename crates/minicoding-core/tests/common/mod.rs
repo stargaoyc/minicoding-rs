@@ -145,6 +145,19 @@ impl MockTool {
         }
     }
 
+    /// 创建文件写入类 mock 工具（`SideEffect::FileWrite`，走 `check_file_write`
+    /// 权限路径——C-23 restricted ask 回归测试用）。
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn file_write(name: &str, response: impl Into<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            side_effect: SideEffect::FileWrite,
+            response: response.into(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
     /// 创建执行必失败的 mock 工具（M-09 沙箱拒绝检测测试用）。
     #[must_use]
     #[allow(dead_code)]

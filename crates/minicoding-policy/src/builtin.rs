@@ -135,8 +135,12 @@ fn matches_pre_approved(tool: &str, input: &Value, allowed: &[PreApprovedPrompt]
         return false;
     };
     // 复合命令一律不继承预批准（S6）。换行同为命令分隔符——缺失会使
-    // `"cargo build\ngit push"` 借前缀命中直接放行第二条命令（S2 同根）
-    if [";", "&&", "||", "`", "$(", "|", "\n", "\r"]
+    // `"cargo build\ngit push"` 借前缀命中直接放行第二条命令（S2 同根）。
+    // SEC-5（2026-08-26 R3 审查）：补齐重定向族与后台分隔符——`>`/`<`/`&`
+    // 单字符即可覆盖 `>>`/`<<`/`<>`/`&>`/`>|`/`&>>`/`&&` 全部变体与 `<(` 进程
+    // 替换；此前缺失使 `cargo build > ~/.ssh/authorized_keys` 可借词边界前缀
+    // 命中免弹窗（Windows Job Object 无文件系统隔离时该写入真实发生）。
+    if [";", "&&", "||", "`", "$(", "|", "\n", "\r", ">", "<", "&"]
         .iter()
         .any(|op| command_text.contains(op))
     {
@@ -186,11 +190,14 @@ fn check_memory_write(tool: &str, input: &Value) -> Verdict {
         )),
         Some("auto") => {
             if minicoding_core::util::contains_directive(content) {
+                // CTX-1/SEC-4（2026-08-26 R3 审查）：降级 Ask 采用与项目约束
+                // 文件同款 restricted options（不含 AllowAlways）——指令性内容
+                // 若允许"始终放行"，一次批准即成永久投毒通道，违背 C-27 本意。
                 Verdict::Ask(make_prompt(
                     tool,
                     "写入 Auto memory：内容含指令性模式，需确认（C-27）".to_string(),
                     Risk::Medium,
-                    full_options(),
+                    project_doc_options(),
                 ))
             } else {
                 Verdict::Allow
@@ -1592,9 +1599,42 @@ mod tests {
         assert!(minicoding_core::util::contains_directive("不要直接修改"));
         assert!(minicoding_core::util::contains_directive("不得绕过权限"));
         assert!(minicoding_core::util::contains_directive("应当遵循规范"));
-        assert!(minicoding_core::util::contains_directive("应保持简洁"));
+        // CTX-15（2026-08-26 R3 审查）：单字 `应` 误报率高（"应用服务器"），
+        // 收紧为双字以上组合——原 "应保持简洁" 断言随之改为双字形态。
+        assert!(minicoding_core::util::contains_directive("应该保持简洁"));
         assert!(minicoding_core::util::contains_directive("## 规则"));
         assert!(minicoding_core::util::contains_directive("## 约束"));
+    }
+
+    /// CTX-1/SEC-4（2026-08-26 R3 审查）：Markdown 修饰前缀旁路样本回归锁。
+    #[test]
+    fn is_instructional_content_markdown_prefix_bypass_blocked() {
+        // 旧版逐条漏检的真实攻击样本（列表/加粗/多级标题/有序列表）
+        assert!(minicoding_core::util::contains_directive(
+            "- Never commit secrets to main"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "1. Always run cargo fmt before push"
+        ));
+        assert!(minicoding_core::util::contains_directive(
+            "*必须* 使用 Rust 2024 edition"
+        ));
+        assert!(minicoding_core::util::contains_directive("### Rules"));
+        assert!(minicoding_core::util::contains_directive("> 禁止上传密钥"));
+        assert!(minicoding_core::util::contains_directive(
+            "- **Never** force push"
+        ));
+    }
+
+    /// CTX-15：陈述性记录不应被误判（警告疲劳会反过来削弱防线价值）。
+    #[test]
+    fn is_instructional_content_negative_no_false_positive_on_ying() {
+        assert!(!minicoding_core::util::contains_directive(
+            "应用服务器部署在 k8s 上"
+        ));
+        assert!(!minicoding_core::util::contains_directive(
+            "性能优异，压测通过"
+        ));
     }
 
     #[test]

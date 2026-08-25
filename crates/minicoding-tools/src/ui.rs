@@ -12,13 +12,16 @@
 //!
 //! ## 已知限制
 //!
-//! 经工具路径触发的提问**不落 `audit.log`、不持久化 `PermissionResolved` 事件**
-//! （那是 Runtime 权限链的职责）；问答结果由 LLM 转述进对话消息，随会话落盘。
+//! 经工具路径触发的提问不持久化 `PermissionResolved` 事件（那是 Runtime 权限
+//! 链的职责）；问答结果由 LLM 转述进对话消息，随会话落盘。
+//! PTM-12（2026-08-26 R3 审查）：Allow/Deny 决策现经 `ToolContext.audit`
+//! 落 `audit.log`（AGENTS.md §5.5：任何权限决策必落审计）；未注入时跳过。
 
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::policy::{Decision, PermissionPrompt, PromptOption};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::runtime::{Event, EventBus};
+use minicoding_core::storage::{AuditKind, AuditRecord};
 use minicoding_core::tool::{RenderIntent, Tool, ToolContext};
 
 /// LLM 主动向用户提问的工具（二值：同意/拒绝）。
@@ -98,6 +101,9 @@ impl Tool for UiAsk {
             });
         };
         let events = ctx.events.clone();
+        let audit = ctx.audit.clone();
+        let session_id = ctx.session_id.clone();
+        let question_for_audit = question.clone();
         Box::pin(async move {
             let prompt = PermissionPrompt {
                 id: format!("ask-{}", ulid::Ulid::new()),
@@ -124,6 +130,20 @@ impl Tool for UiAsk {
                     decision: decision.clone(),
                 },
             );
+            // PTM-12：决策落审计（best-effort，失败仅 warn 不阻塞问答）
+            if let Some(sink) = &audit {
+                let rec = AuditRecord {
+                    ts: time::OffsetDateTime::now_utc(),
+                    session: session_id.clone(),
+                    kind: AuditKind::PermissionResolved,
+                    tool: Some("ui.ask".to_string()),
+                    decision: Some(format!("{decision:?}")),
+                    detail: format!("ui.ask interactive question: {question_for_audit}"),
+                };
+                if let Err(e) = sink.record(rec).await {
+                    tracing::warn!(error = %e, "ui.ask audit record failed (best-effort)");
+                }
+            }
             let answer = match &decision {
                 Decision::Allow | Decision::AllowAlways => "yes".to_string(),
                 Decision::Deny(r) if r.is_empty() => "no".to_string(),

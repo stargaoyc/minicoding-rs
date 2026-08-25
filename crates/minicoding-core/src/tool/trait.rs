@@ -72,6 +72,9 @@ pub struct ToolContext {
     /// 事件总线（可选，`ui.ask` 广播 PermissionRequested/Resolved 用——与
     /// 权限链同一 UX 通路）。未注入时 `ui.ask` 仍可走无 UI 的 prompter。
     pub events: Option<crate::runtime::EventBus>,
+    /// 审计 sink（可选，PTM-12：`ui.ask` 的 Allow/Deny 决策落 `audit.log`
+    /// 用——AGENTS.md §5.5 要求任何权限决策必落审计；未注入时跳过）。
+    pub audit: Option<Arc<dyn crate::storage::AuditSink>>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -106,6 +109,7 @@ impl ToolContext {
             journal: None,
             prompter: None,
             events: None,
+            audit: None,
         }
     }
 
@@ -151,6 +155,13 @@ impl ToolContext {
     #[must_use]
     pub fn with_events_opt(mut self, events: Option<crate::runtime::EventBus>) -> Self {
         self.events = events;
+        self
+    }
+
+    /// 链式注入审计 sink（可选版本，PTM-12：`ui.ask` 决策落 `audit.log`）。
+    #[must_use]
+    pub fn with_audit_opt(mut self, audit: Option<Arc<dyn crate::storage::AuditSink>>) -> Self {
+        self.audit = audit;
         self
     }
 

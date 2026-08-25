@@ -496,16 +496,12 @@ impl Runtime {
             Verdict::Allow => Ok((Decision::Allow, None, None)),
             Verdict::Deny(msg) => Ok((Decision::Deny(msg.clone()), None, None)),
             Verdict::Ask(prompt) => {
-                // 会话级 Allow 缓存（S-1）：无路径工具的 AllowAlways 落在此处，
-                // 本会话内同工具后续调用免弹窗（会话结束即失效，不跨项目）。
-                if self
-                    .session_allows
-                    .lock()
-                    .is_ok_and(|s| s.contains(&call.name))
-                {
-                    tracing::info!(tool = %call.name, "session-scoped allow hit, skipping prompt");
-                    return Ok((Decision::Allow, None, None));
-                }
+                // RT-1（2026-08-26 R3 审查）：此处曾有**未门控**的 session_allows
+                // 早退——同工具先获 Always 后，restricted ask（C-23/C-27 的
+                // AGENTS.md/auto.md 写入，options 不含 AllowAlways）会被静默
+                // 放行，击穿"不可 Always"通道。已删除：缓存命中统一走下方
+                // SEC-1 门控版本（先过 Hook 再按 options 判定），语义等价且
+                // 审计溯源不失真。
                 // PermissionRequest Hook（Verdict::Ask 时、prompter 前）
                 let hook_input = self
                     .build_hook_input(
@@ -591,6 +587,46 @@ impl Runtime {
                             risk: prompt.risk,
                         });
                         let mut d = self.prompter.prompt(prompt.clone()).await;
+                        // SEC-3（2026-08-26 R3 审查）：决策入口最后防线——本
+                        // prompt 未提供 `AllowAlways` 选项时，前端回传的
+                        // Always 决策一律折叠为一次性语义（C-23/C-27：不可被
+                        // Always 放行）。策略层正确下发了 restricted prompt，
+                        // 但 Web 等前端曾恒渲染"始终允许"按钮（协议 DTO 未携带
+                        // options）——约束必须在 core 决策入口强制，而非依赖
+                        // 各前端自觉。DenyAlways 折叠为 Deny 方向 fail-closed。
+                        let always_offered = prompt
+                            .options
+                            .contains(&crate::policy::PromptOption::AllowAlways);
+                        if !always_offered {
+                            let collapsed = match d {
+                                Decision::AllowAlways => Some(Decision::Allow),
+                                Decision::DenyAlways(ref r) => Some(Decision::Deny(r.clone())),
+                                _ => None,
+                            };
+                            if let Some(folded) = collapsed {
+                                tracing::warn!(
+                                    tool = %call.name,
+                                    "always decision received but AllowAlways not offered; collapsed to one-shot"
+                                );
+                                d = folded;
+                                // 直接进入事件广播与返回（跳过持久化分支）
+                                let event = Event::PermissionResolved {
+                                    id: prompt_id.clone(),
+                                    decision: d.clone(),
+                                };
+                                self.persist_event(&event).await;
+                                self.events.emit(event);
+                                return Ok((
+                                    d,
+                                    Some(prompt_id),
+                                    Some(format!(
+                                        "{tool}: always not offered by policy; \
+                                         frontend always decision collapsed to one-shot",
+                                        tool = call.name
+                                    )),
+                                ));
+                            }
+                        }
                         // 遗留#3：Always 决策持久化后折叠为一次性语义执行。
                         // S-1 粒度收敛（2026-08-25 审查）：带路径工具按**父目录**
                         // 持久化（`tool@目录`，与 decision_for_path 查询对齐）；
