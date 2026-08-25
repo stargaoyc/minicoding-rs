@@ -206,3 +206,97 @@ async fn turn_boundary_whitelist_applies_parallel_reads() {
         "turn 边界应应用文件中的 parallel_reads=0（串行）"
     );
 }
+
+/// 记录执行顺序的工具（CORE-15，2026-08-25 R2 审查）：把自身名字推入共享
+/// 序列。`side_effect` 可配置以构造"副作用在前、只读在后"的乱序场景。
+struct OrderProbeTool {
+    name: &'static str,
+    side_effect: SideEffect,
+    order: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Tool for OrderProbeTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn schema(&self) -> &ToolSchema {
+        static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| ToolSchema {
+            name: String::new(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        })
+    }
+    fn side_effect(&self) -> SideEffect {
+        self.side_effect
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
+        let order = self.order.clone();
+        let name = self.name.to_string();
+        Box::pin(async move {
+            order.lock().expect("order lock").push(name);
+            Ok(ToolResult::ok_text("done"))
+        })
+    }
+}
+
+/// 验收 4（A-P1 保序回退，CORE-15）：LLM 原始顺序为 [写, 读] 时，
+/// "先并行读再串行写"的常规调度会颠倒语义——必须回退为**全串行且按原始
+/// 顺序**执行。锁定 read-after-write 的顺序不变式。
+#[tokio::test]
+async fn mixed_order_falls_back_to_serial_in_llm_order() {
+    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(OrderProbeTool {
+        name: "w",
+        side_effect: SideEffect::FileWrite,
+        order: order.clone(),
+    }));
+    tools.register(Arc::new(OrderProbeTool {
+        name: "r",
+        side_effect: SideEffect::None,
+        order: order.clone(),
+    }));
+
+    let provider = ScriptedProvider::new(vec![
+        vec![
+            // 原始顺序：先写后读（读在副作用之后 → 禁用并行桶）
+            Delta::ToolCall(ToolCallDelta {
+                index: 0,
+                id: Some("cw".into()),
+                name: Some("w".into()),
+                args_chunk: Some("{}".into()),
+            }),
+            Delta::ToolCall(ToolCallDelta {
+                index: 1,
+                id: Some("cr".into()),
+                name: Some("r".into()),
+                args_chunk: Some("{}".into()),
+            }),
+            Delta::Stop(StopReason::ToolUse),
+        ],
+        text_deltas("done"),
+    ]);
+
+    let rt = RuntimeBuilder::new()
+        .provider(Arc::new(provider))
+        .context(Arc::new(TestContext::new("test")))
+        .storage(Arc::new(InMemoryStorage::new()))
+        .tools(tools)
+        .config(RuntimeConfig::default())
+        .workdir(Utf8PathBuf::from("."))
+        .build()
+        .expect("runtime build");
+
+    rt.run_turn(UserInput::from_text("write then read"))
+        .await
+        .expect("turn ok");
+
+    let seq = order.lock().expect("order lock").clone();
+    assert_eq!(seq, vec!["w".to_string(), "r".to_string()],
+        "写在前读在后时必须按 LLM 原始顺序全串行执行（read-after-write 保序）");
+}

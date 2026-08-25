@@ -25,6 +25,21 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// policy.toml 持久化错误（CORE-14：由裸 `String` 收敛为具体类型，
+/// AGENTS §2.3 thiserror 约定）。
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyPersistError {
+    /// 既有文件解析失败。
+    #[error("policy.toml 解析失败: {0}")]
+    Parse(String),
+    /// 序列化失败。
+    #[error("policy.toml 序列化失败: {0}")]
+    Serialize(String),
+    /// 文件 IO 失败（创建目录/写 tmp/rename）。
+    #[error("policy.toml 写入失败: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// 持久化策略存储（tool / `tool@path-prefix` → 决策）。
 #[derive(Debug, Clone)]
 pub struct PolicyPersist {
@@ -106,8 +121,8 @@ impl PolicyPersist {
     /// 记录工具级 allow 规则并原子落盘（unix 0600）。
     ///
     /// # Errors
-    /// 读/序列化/写入失败时返回错误字符串。
-    pub fn set_allow(&self, tool: &str) -> Result<(), String> {
+    /// 读/序列化/写入失败时返回 [`PolicyPersistError`]。
+    pub fn set_allow(&self, tool: &str) -> Result<(), PolicyPersistError> {
         self.mutate(|f| {
             f.allow.insert(tool.to_string(), true);
             f.deny.remove(tool);
@@ -118,7 +133,7 @@ impl PolicyPersist {
     ///
     /// # Errors
     /// 同 [`Self::set_allow`]。
-    pub fn set_deny(&self, tool: &str, reason: &str) -> Result<(), String> {
+    pub fn set_deny(&self, tool: &str, reason: &str) -> Result<(), PolicyPersistError> {
         let reason = reason.to_string();
         self.mutate(move |f| {
             f.deny.insert(tool.to_string(), reason);
@@ -130,7 +145,7 @@ impl PolicyPersist {
     ///
     /// # Errors
     /// 同 [`Self::set_allow`]。
-    pub fn set_allow_path(&self, tool: &str, prefix: &str) -> Result<(), String> {
+    pub fn set_allow_path(&self, tool: &str, prefix: &str) -> Result<(), PolicyPersistError> {
         self.mutate(|f| {
             f.allow.insert(format!("{tool}@{prefix}"), true);
         })
@@ -140,26 +155,30 @@ impl PolicyPersist {
     ///
     /// # Errors
     /// 同 [`Self::set_allow`]。
-    pub fn set_deny_path(&self, tool: &str, prefix: &str, reason: &str) -> Result<(), String> {
+    pub fn set_deny_path(
+        &self,
+        tool: &str,
+        prefix: &str,
+        reason: &str,
+    ) -> Result<(), PolicyPersistError> {
         let reason = reason.to_string();
         self.mutate(move |f| {
             f.deny.insert(format!("{tool}@{prefix}"), reason);
         })
     }
 
-    fn mutate(&self, f: impl FnOnce(&mut PolicyFile)) -> Result<(), String> {
+    fn mutate(&self, f: impl FnOnce(&mut PolicyFile)) -> Result<(), PolicyPersistError> {
         let mut file = match std::fs::read_to_string(&self.path) {
             Ok(text) => toml::from_str::<PolicyFile>(&text)
-                .map_err(|e| format!("policy.toml 解析失败: {e}"))
+                .map_err(|e| PolicyPersistError::Parse(e.to_string()))
                 .unwrap_or_default(),
             Err(_) => PolicyFile::default(),
         };
         f(&mut file);
-        let bytes =
-            toml::to_string_pretty(&file).map_err(|e| format!("policy.toml 序列化失败: {e}"))?;
+        let bytes = toml::to_string_pretty(&file)
+            .map_err(|e| PolicyPersistError::Serialize(e.to_string()))?;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent.as_std_path())
-                .map_err(|e| format!("创建目录失败: {e}"))?;
+            std::fs::create_dir_all(parent.as_std_path()).map_err(PolicyPersistError::Io)?;
         }
         // 0600 创建收敛到 util::fs_private（S7 单一事实源；unix 下 OpenOptions
         // 原子指定 mode，避免"先写后 chmod"竞态，且对已存在的宽权限文件兜底收紧）。
@@ -174,11 +193,8 @@ impl PolicyPersist {
         ));
         let write_result =
             crate::util::fs_private::write_private(tmp.as_std_path(), bytes.as_bytes())
-                .map_err(|e| format!("{e}"))
-                .and_then(|()| {
-                    std::fs::rename(tmp.as_std_path(), self.path.as_std_path())
-                        .map_err(|e| format!("rename 失败: {e}"))
-                });
+                .and_then(|()| std::fs::rename(tmp.as_std_path(), self.path.as_std_path()))
+                .map_err(PolicyPersistError::Io);
         if write_result.is_err() {
             // 清理残留 tmp（best effort）
             drop(std::fs::remove_file(tmp.as_std_path()));

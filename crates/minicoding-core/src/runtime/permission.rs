@@ -13,6 +13,7 @@ use crate::model::{RuntimeError, SideEffect, ToolCall, ToolCallId, ToolResult};
 use crate::otel::span_name;
 use crate::policy::{Decision, PermissionContext, Verdict};
 use std::time::Duration;
+use tracing::Instrument;
 
 /// S4：合并两个 Verdict 取较严者（Deny > Ask > Allow）。
 ///
@@ -123,6 +124,11 @@ impl Runtime {
         // `permission` span（design.md §15.1）：包裹权限决策流程（策略判定 →
         // Hook → prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
         // `permission.verdict` 在决策确定后通过 `Span::current().record()` 填充。
+        //
+        // CORE-4（2026-08-25 R2 审查）：用 `.instrument()` 而非 `span.enter()`——
+        // `Entered` guard 跨 await 持有会在线程局部 span 上失真（prompter 等待
+        // 用户决策可达数百秒），且使 future 非 `Send`。instrument 把 span 绑定
+        // 到整个 future，语义与线程无关。
         let span = tracing::info_span!(
             "permission",
             session.id = %self.session.id,
@@ -131,7 +137,19 @@ impl Runtime {
             permission.verdict = tracing::field::Empty,
             otel.name = span_name::PERMISSION_CHECK,
         );
-        let _enter = span.enter();
+        self.execute_side_effect_call_inner(call, ctx, side_effect)
+            .instrument(span)
+            .await
+    }
+
+    /// [`Self::execute_side_effect_call`] 的主体（span 经 instrument 注入）。
+    #[allow(clippy::too_many_lines)]
+    async fn execute_side_effect_call_inner(
+        &self,
+        call: &ToolCall,
+        ctx: &crate::tool::ToolContext,
+        side_effect: SideEffect,
+    ) -> Result<(ToolCallId, ToolResult), RuntimeError> {
         tracing::info!(
             tool.name = %call.name,
             call_id = %call.id,
@@ -419,7 +437,13 @@ impl Runtime {
         }
         // asyncRewake 接线（遗留#6 全量）：hook 声明后台继续时，经调度器在
         // 后台重新派发同一 hook 收集最终输出（C-26/C-32 由调度器与脚本层保证）。
-        if let Some(spec) = result.async_rewake.clone() {
+        // CORE-13（2026-08-25 R2 审查）：契约门控——`PreToolUse` 按协议不支持
+        // async_rewake（trait_def `supports_async_rewake`）。ScriptHookRegistry
+        // 已过滤，此处再校验是对自定义 `HookRegistry` 实现的纵深防御：防止
+        // 未按契约过滤的实现把 PreToolUse 的 rewake 注入本同步路径。
+        if let Some(spec) = result.async_rewake.clone()
+            && HookEvent::PreToolUse.supports_async_rewake()
+        {
             let hook_input = self
                 .build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict))
                 .await;

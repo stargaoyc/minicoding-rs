@@ -452,7 +452,9 @@ impl ClientBuilder {
             builder = builder.events(events);
         }
 
-        let runtime = builder.build().map_err(SdkError::Build)?;
+        let runtime = builder
+            .build()
+            .map_err(|e| SdkError::Build(e.to_string()))?;
         Ok(Client {
             runtime: Arc::new(runtime),
         })

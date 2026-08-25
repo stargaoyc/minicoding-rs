@@ -122,21 +122,34 @@ async fn main() -> Result<()> {
         }
     });
 
-    // S1：鉴权 token——显式指定 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭
+    // S1：鉴权 token——显式指定 > env 下传 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭
+    let token_from_env = if cli.auth_token.is_none() {
+        std::env::var("MINICODING_AUTH_TOKEN").ok()
+    } else {
+        None
+    };
     let auth_token = if cli.no_auth {
         eprintln!(
             "WARNING: API 鉴权已禁用（--no-auth）：本机任意进程可读取会话、代答权限、执行命令"
         );
         None
+    } else if let Some(t) = token_from_env {
+        // FE-5（2026-08-25 R2 审查）：token 经 env 下传（desktop sidecar 场景）
+        // 时不回显明文到 stdout——desktop 会把每行 stdout 写入日志文件，原样
+        // 记录等于把鉴权 token 落盘（C-04）。打印掩码供人工核对；完整值由
+        // 下传方自持。
+        let cut = t.char_indices().nth(4).map_or(t.len(), |(i, _)| i);
+        println!("SERVER_TOKEN={}*** (from MINICODING_AUTH_TOKEN)", &t[..cut]);
+        Some(t)
     } else {
-        Some(
-            cli.auth_token
-                .unwrap_or_else(minicoding_server::generate_auth_token),
-        )
-    };
-    if let Some(t) = &auth_token {
+        let t = cli
+            .auth_token
+            .unwrap_or_else(minicoding_server::generate_auth_token);
+        // CLI 直连场景：本进程生成或 --auth-token 显式指定，打印明文供用户
+        // 复制配置 Web 前端（终端输出不落盘）。
         println!("SERVER_TOKEN={t}");
-    }
+        Some(t)
+    };
 
     let cfg = ServerConfig {
         bind,

@@ -118,7 +118,13 @@ pub struct Runtime {
     pub(crate) journal: Option<Arc<dyn Journal>>,
     /// 沙箱拒绝检测器（M-05 抽象注入，默认 `NoopDenialDetector` 兜底）。
     pub(crate) denial_detector: Arc<dyn crate::sandbox::SandboxDenialDetector>,
-    /// 当前 turn 序号（S23：PermissionContext.turn 用，0-based；run_turn 入口自增）。
+    /// 当前 turn 内 LLM 迭代下标（0-based，每次循环迭代覆写）。
+    ///
+    /// CORE-8（2026-08-25 R2 审查）：字段文档此前声称"run_turn 入口自增的会话
+    /// 轮次号"与实现相反——实际存的是 `for iter in 0..max_iters` 的迭代值，
+    /// `HookInput.turn`/`PermissionContext.turn` 拿到的是**本 turn 第几次工具
+    /// 循环**而非第几个用户轮次。按实现如实修正语义描述；跨 turn 轮次号无
+    /// 消费方，如未来需要应另立 `session_turn` 计数器而非复用此字段。
     pub(crate) current_turn: std::sync::atomic::AtomicU32,
     /// 沙箱拒绝熔断器（单 turn 内有效，C-30 不可被 LLM 绕过；M-05 抽象注入）。
     pub(crate) sandbox_breaker: Arc<dyn crate::sandbox::SandboxDenialTracker>,
@@ -523,6 +529,16 @@ impl Runtime {
             }
 
             // 1. 构造用户消息并入库
+            // CORE-11（2026-08-25 R2 审查）：`attachments`/`context_hint` 字段
+            // 尚无消费方（图片/文件附件管道未实现）——显式 warn 拒绝静默丢失，
+            // 提醒调用方当前不生效；实现接线后移除本告警。
+            if !user_input.attachments.is_empty() {
+                tracing::warn!(
+                    attachments = user_input.attachments.len(),
+                    context_hint = ?user_input.context_hint,
+                    "UserInput.attachments/context_hint are not yet consumed and will be dropped"
+                );
+            }
             let user_msg = Message::user_text(user_input.text);
             if let Err(e) = self.storage.append(&self.session.id, &user_msg).await {
                 metrics::record_error("storage");
@@ -665,6 +681,11 @@ impl Runtime {
                             let reminder = Message::system_text(format!(
                                 "[系统提醒] 检测到重复工具调用 {fp} 已达 {lvl} 次。若陷入死循环，请改变策略或调用 'stop' 结束本轮。"
                             ));
+                            // CORE-10（2026-08-25 R2 审查）：与 hook_context 同策略
+                            // ——只进 ctx 不落盘不广播（run-time 提示非 transcript
+                            // 事实）。已知取舍：resume 重建的历史不含本提醒，模型
+                            // 可见历史在 resume 前后存在差异；若未来要求一致，需
+                            // 连同 storage.append + persist_event 三处同步。
                             self.ctx.append(reminder).await;
                             tracing::warn!(fingerprint = %fp, lvl, "injected soft repeat reminder");
                         }
@@ -729,6 +750,29 @@ impl Runtime {
                     let event = Event::StepEnded { iter };
                     self.persist_event(&event).await;
                     self.events.emit(event);
+
+                    // 7.2 C-30 硬熔断强制 TurnEnd（CORE-1，2026-08-25 R2 审查）：
+                    //     沙箱拒绝熔断器进入 HardTripped 后本轮立即终止——此前仅
+                    //     回灌劝阻文案，循环照常继续，LLM 可无视劝阻重试到
+                    //     max_iters（"显示器没接刹车"）。拒绝结果仍可见于模型/用户
+                    //     （上方已落盘），但不再发起下一轮 LLM 调用。副作用串行与
+                    //     只读并行桶在此汇合，单点检查覆盖两条路径。
+                    if matches!(
+                        self.sandbox_breaker.state(),
+                        crate::sandbox::BreakerState::HardTripped
+                    ) {
+                        tracing::warn!("sandbox denial breaker hard-tripped: forcing turn end");
+                        metrics::record_error("sandbox");
+                        self.append_terminal_notice("[沙箱拒绝硬熔断：已强制终止本轮]").await;
+                        let event = Event::TurnEnd {
+                            stop_reason: StopReason::Stopped,
+                        };
+                        self.persist_event(&event).await;
+                        self.events.emit(event);
+                        return Ok(TurnOutcome::Finished(Message::assistant_text(
+                            "[沙箱拒绝硬熔断：连续多次被内核级拒绝，已强制终止本轮]".to_string(),
+                        )));
+                    }
                 }
 
                 // 达到 max_iters 上限
@@ -792,6 +836,18 @@ impl Runtime {
                 }
                 outcome = turn_fut => outcome,
             };
+            // CORE-6（2026-08-25 R2 审查）：Failed/Err 路径补发 TurnEnd——此前仅
+            // Finished/Interrupted 发终结事件，事件流消费者无从感知终结（CLI 被
+            // 迫加 500ms 兜底超时、LSP 进度条悬挂在 Begin 态）。run_turn 入口的
+            // 早退 Err（如用户消息落盘失败）不经过此处：彼时尚未广播任何流开始
+            // 事件，补发反而产生孤儿 TurnEnd。
+            if matches!(&result, Ok(TurnOutcome::Failed(_)) | Err(_)) {
+                let event = Event::TurnEnd {
+                    stop_reason: StopReason::Stopped,
+                };
+                self.persist_event(&event).await;
+                self.events.emit(event);
+            }
             // 详细日志：turn 结果摘要（重复工具循环/超时/取消均可从日志定位）
             match &result {
                 Ok(o) => tracing::info!(
@@ -809,6 +865,11 @@ impl Runtime {
             // 永久 cancelled，不重建则后续 turn 全部秒取消（会话被砖化，用户
             // 反馈"手动终止后无法再回复"）。重建对 CLI Ctrl-C 无影响——handler
             // 每轮经 `cancel_token()` 重新获取当前 token。
+            // CORE-9（2026-08-25 R2 审查）：先释放 turn_active 再重建——若顺序
+            // 相反，两步之间到达的 `cancel()` 会取消**新** token，下一次 run_turn
+            // 秒取消一轮（再下一轮自愈）。窗口内新 run_turn 被 `_turn_gate` 排除，
+            // 无其他竞态。
+            drop(_turn_guard);
             *self
                 .cancel_token
                 .lock()
@@ -1044,8 +1105,28 @@ impl Runtime {
         calls: &[ToolCall],
     ) -> Result<Vec<(ToolCallId, ToolResult)>, RuntimeError> {
         // 构造 ToolContext：注入沙箱驱动/策略/journal（M4，shell.run/fs 用）+
-        // 点对点 prompter（`ui.ask` 主动提问用，与权限链同一实例）
+        // 点对点 prompter（`ui.ask` 主动提问用，与权限链同一实例）。
+        // CORE-2/CORE-3（2026-08-25 R2 审查）：执行限制来自 `RuntimeConfig.tools`
+        // （此前死配置）；cancel_token 下传（此前孤立 token，协作式取消空转）。
+        let (timeout_sec, max_out, max_read) = {
+            let cfg = self
+                .config
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Duration::from_secs(cfg.tools.shell_timeout_sec),
+                cfg.tools.shell_max_output_bytes,
+                cfg.tools.fs_max_read_bytes,
+            )
+        };
+        let cancel_token = self
+            .cancel_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let ctx = ToolContext::new(self.workdir.read().await.clone(), self.session.id.clone())
+            .with_limits(timeout_sec, max_out, max_read)
+            .with_canceller(cancel_token)
             .with_sandbox(self.sandbox_driver.clone(), self.sandbox_policy.clone())
             .with_journal_opt(self.journal.clone())
             .with_prompter_opt(Some(self.prompter.clone()))
@@ -1172,19 +1253,21 @@ impl Runtime {
                 // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
                 // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
                 let call: ToolCall = (**call).clone();
-                let fut: ToolFuture = Box::pin(async move {
-                    // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立 span。
+                // `tool_call` span（design.md §15.1）：只读桶并行执行，每个调用独立
+                // span。CORE-4（2026-08-25 R2 审查）：`.instrument()` 替代
+                // `span.enter()`——buffer_unordered 下 future 会被 tokio 在 worker
+                // 线程间迁移，`Entered` 的线程局部语义在迁移后失真。
+                let span = tracing::debug_span!(
+                    "tool_call",
+                    session.id = %ctx.session_id,
+                    tool.name = %tool_name,
+                    tool.side_effect = "none",
+                    tool.parallel = true,
+                    call_id = %call_id,
+                    otel.name = span_name::TOOL_CALL,
+                );
+                let body = async move {
                     let tool_timer = metrics::start_timer();
-                    let span = tracing::debug_span!(
-                        "tool_call",
-                        session.id = %ctx.session_id,
-                        tool.name = %tool_name,
-                        tool.side_effect = "none",
-                        tool.parallel = true,
-                        call_id = %call_id,
-                        otel.name = span_name::TOOL_CALL,
-                    );
-                    let _enter = span.enter();
                     tracing::info!(
                         tool.name = %tool_name,
                         call_id = %call_id,
@@ -1236,7 +1319,8 @@ impl Runtime {
                         tool_timer,
                     );
                     Ok::<_, RuntimeError>((call.id.clone(), result))
-                });
+                };
+                let fut: ToolFuture = Box::pin(body.instrument(span));
                 fut
             })
             .collect();

@@ -82,10 +82,26 @@ impl Tool for FsRead {
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let workdir = ctx.workdir.clone();
         let max_output_bytes = ctx.max_output_bytes;
+        // CORE-2（2026-08-25 R2 审查）：读取上限来自 RuntimeConfig.tools 接线
+        let max_read_bytes = ctx.max_read_bytes;
         Box::pin(async move {
             let args: ReadInput = serde_json::from_value(input)
                 .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
             let path = resolve_path(&workdir, &args.path)?;
+
+            // PTM-13（2026-08-25 R2 审查）：先查文件大小再读——此前全量
+            // read_to_string 入内存后才截断，超大文本（如误指二进制/日志）
+            // 可打爆内存。超限直接报错并提示 offset/limit 分段读取。
+            if let Ok(meta) = tokio::fs::metadata(&path).await
+                && meta.len() > max_read_bytes as u64
+            {
+                return Err(ToolError::Io(std::io::Error::other(format!(
+                    "file too large: {} bytes > limit {} bytes; \
+                     use offset/limit to read in segments",
+                    meta.len(),
+                    max_read_bytes
+                ))));
+            }
 
             let content = tokio::fs::read_to_string(&path)
                 .await

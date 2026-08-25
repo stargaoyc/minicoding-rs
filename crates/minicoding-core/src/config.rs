@@ -7,9 +7,9 @@
 //! 支持 last-known-good 回退（解析失败时用上次成功的配置，见 `design.md` §12）。
 
 use crate::hooks::OnHookError;
+use crate::model::RuntimeError;
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub mod watcher;
 pub use watcher::ConfigWatcher;
@@ -338,11 +338,15 @@ pub fn resolve_env_vars(config: &mut RuntimeConfig) {
 ///
 /// # Errors
 /// 仅当配置文件存在但解析失败 **且** last-known-good 也不可用时返回错误。
-pub fn load_config() -> Result<RuntimeConfig, String> {
-    let config_path = paths::config_path().map_err(|e| e.to_string())?;
+pub fn load_config() -> Result<RuntimeConfig, RuntimeError> {
+    // CORE-14（2026-08-25 R2 审查）：错误类型收敛为 `RuntimeError::Config`——
+    // 库 crate 边界不再返回裸 `String`（AGENTS §2.3 thiserror 约定）。
+    let config_path =
+        paths::config_path().map_err(|e| RuntimeError::Config(e.to_string()))?;
 
     if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let raw = std::fs::read_to_string(&config_path)
+            .map_err(|e| RuntimeError::Config(e.to_string()))?;
         match toml::from_str::<RuntimeConfig>(&raw) {
             Ok(mut cfg) => {
                 // S7：解析前快照写 LKG（保留 env: 引用、剥离明文 key、0600）
@@ -369,7 +373,9 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
                     resolve_env_vars(&mut lkg_cfg);
                     return Ok(lkg_cfg);
                 }
-                return Err(format!("config.toml 解析失败且无 last-known-good: {e}"));
+                return Err(RuntimeError::Config(format!(
+                        "config.toml 解析失败且无 last-known-good: {e}"
+                    )));
             }
         }
     }
@@ -428,16 +434,10 @@ pub fn provider_from_env() -> ProviderConfig {
     p
 }
 
-/// 占位：环境变量映射（用于 Hook/MCP 子进程环境）。
-#[must_use]
-// 返回 HashMap 需固定 hasher 以保证子进程 env 收集语义确定
-#[allow(clippy::implicit_hasher)]
-pub fn sanitize_env(env: &HashMap<String, String>) -> HashMap<String, String> {
-    env.iter()
-        .filter(|(k, _)| !k.contains("API_KEY") && !k.contains("TOKEN") && !k.contains("SECRET"))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
+// CORE-12（2026-08-25 R2 审查）：原 `sanitize_env` 占位（黑名单式三词匹配，
+// api_key/password/authorization 全漏）已删除——零调用且作为 pub API 留存即
+// 一旦接线的 C-04 缺口。子进程 env 白名单的唯一事实源在 `tool::sanitized_env`
+// （tool/trait.rs），Hook/MCP 子进程环境一律经该白名单构造。
 
 #[cfg(test)]
 mod tests {

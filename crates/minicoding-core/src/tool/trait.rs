@@ -54,6 +54,9 @@ pub struct ToolContext {
     pub env: HashMap<String, String>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    /// 单次文件读取上限（`fs.read` 用；CORE-2 接线：此前
+    /// `RuntimeConfig.tools.fs_max_read_bytes` 无消费者，读取上限硬编码）。
+    pub max_read_bytes: usize,
     /// OS 沙箱驱动（可选，`shell.run` 用）。
     pub sandbox_driver: Option<Arc<dyn SandboxDriver>>,
     /// OS 沙箱策略（可选，与 `sandbox_driver` 配套）。
@@ -97,12 +100,41 @@ impl ToolContext {
             env: sanitized_env(),
             timeout: Duration::from_secs(120),
             max_output_bytes: 1024 * 1024,
+            max_read_bytes: 1024 * 1024,
             sandbox_driver: None,
             sandbox_policy: None,
             journal: None,
             prompter: None,
             events: None,
         }
+    }
+
+    /// 链式注入执行限制（CORE-2，2026-08-25 R2 审查）：超时与输出/读取上限
+    /// 来自 `RuntimeConfig.tools`——此前三字段死配置，`ToolContext` 硬编码
+    /// 120s/1MiB，用户配置被静默截杀（C-07 可配承诺落空）。
+    #[must_use]
+    pub fn with_limits(
+        mut self,
+        timeout: Duration,
+        max_output_bytes: usize,
+        max_read_bytes: usize,
+    ) -> Self {
+        self.timeout = timeout;
+        self.max_output_bytes = max_output_bytes;
+        self.max_read_bytes = max_read_bytes;
+        self
+    }
+
+    /// 链式注入协作取消令牌（CORE-3，2026-08-25 R2 审查）。
+    ///
+    /// 此前每次构造新建孤立 token，Runtime 的 cancel_token 从不下传、22 个内置
+    /// 工具无一读取——协作式取消契约空转，Ctrl-C 只能靠 drop future 硬中断。
+    /// 注入后长任务工具可轮询 `canceller.is_cancelled()` 优雅收尾（分批落盘/
+    /// 清理子进程后再返回）。
+    #[must_use]
+    pub fn with_canceller(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.canceller = token;
+        self
     }
 
     /// 链式注入点对点交互器（可选版本，便于 `Runtime` 透传）。

@@ -294,12 +294,23 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
     // 解析 provider 配置（CLI > env > config.toml > 默认）
     let resolved = resolve_provider_config(cmd);
 
-    // S1：鉴权 token——显式指定 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭
+    // S1：鉴权 token——显式指定 > 自动生成（打印 SERVER_TOKEN=）> --no-auth 关闭。
+    // FE-5（2026-08-25 R2 审查）：token 经 MINICODING_AUTH_TOKEN env 下传时
+    // （desktop sidecar 场景）不回显明文——stdout 可能被父进程落日志。
+    let token_from_env = if cmd.auth_token.is_none() {
+        std::env::var("MINICODING_AUTH_TOKEN").ok()
+    } else {
+        None
+    };
     let auth_token = if cmd.no_auth {
         eprintln!(
             "WARNING: API 鉴权已禁用（--no-auth）：本机任意进程可读取会话、代答权限、执行命令"
         );
         None
+    } else if let Some(t) = token_from_env {
+        let cut = t.char_indices().nth(4).map_or(t.len(), |(i, _)| i);
+        println!("SERVER_TOKEN={}*** (from MINICODING_AUTH_TOKEN)", &t[..cut]);
+        Some(t)
     } else {
         Some(
             cmd.auth_token
@@ -307,7 +318,10 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
                 .unwrap_or_else(minicoding_server::generate_auth_token),
         )
     };
-    if let Some(t) = &auth_token {
+    if let Some(t) = &auth_token
+        && cmd.auth_token.is_none()
+        && std::env::var("MINICODING_AUTH_TOKEN").as_deref() != Ok(t.as_str())
+    {
         println!("SERVER_TOKEN={t}");
     }
 
@@ -353,20 +367,34 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
     //    shell.run + task.create/update/list/spawn + plan.exit）。
     //    不注入 EventBus（task 工具退化为本地状态，不广播 TaskUpdated 事件——MCP
     //    server 模式下没有 Runtime 事件总线消费者）。
+    //
+    //    PTM-1/FE-2（2026-08-25 R2 审查）：只读暴露的判据统一为
+    //    `SideEffect::None`——此前旗标只 gate 了 fs 写工具，shell.run（Command）、
+    //    git.apply（FileWrite）、web.fetch/search（Network）无条件注册且
+    //    prompter=None 直通 execute，"默认只读"名不副实。现在凡有副作用的
+    //    工具组一律需要 `--expose-write-tools`。
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
-    // 遗留#5：MCP server 模式默认只读暴露（对端无审批通道，写 fail-closed）。
-    // 仅在显式传入 `--expose-write-tools` 时注册写类工具——此前旗标之后紧跟一条
-    // 无条件注册调用，导致 fail-closed 完全失效（2026-08-25 审查修复）。
-    if cmd.expose_write_tools {
-        register_write_tools(&mut tools);
-    }
-    register_shell_tools(&mut tools);
-    // T-M8-5：git + web 工具组
-    minicoding_tools::register_git_tools(&mut tools);
-    #[cfg(feature = "web")]
-    minicoding_tools::register_web_tools(&mut tools);
     register_task_tools(&mut tools, None);
+    if cmd.expose_write_tools {
+        // 遗留#5：MCP server 模式默认只读暴露（对端无审批通道，写 fail-closed）。
+        // 仅在显式传入 `--expose-write-tools` 时注册副作用工具——此前旗标之后
+        // 紧跟一条无条件注册调用，导致 fail-closed 完全失效（2026-08-25 审查修复）。
+        register_write_tools(&mut tools);
+        register_shell_tools(&mut tools);
+        // T-M8-5：git + web 工具组（git.diff 只读但与 apply 同组注册；
+        // web.* 为 Network 副作用，同属需显式暴露）
+        minicoding_tools::register_git_tools(&mut tools);
+        #[cfg(feature = "web")]
+        minicoding_tools::register_web_tools(&mut tools);
+    } else {
+        // 只读暴露保留 git.diff（SideEffect::None）
+        let mut git_all = ToolRegistry::new();
+        minicoding_tools::register_git_tools(&mut git_all);
+        if let Some(diff) = git_all.get("git.diff") {
+            tools.register(diff.clone());
+        }
+    }
 
     // 3. 构造 ToolContext 模板（每轮 call_tool clone 一份）
     //    - 不注入 sandbox_driver / sandbox_policy：shell.run 退化为无 OS 沙箱（MCP
@@ -384,6 +412,7 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
         env: minicoding_core::tool::sanitized_env(),
         timeout: std::time::Duration::from_secs(cmd.permission_timeout_sec),
         max_output_bytes: 1024 * 1024,
+        max_read_bytes: 1024 * 1024,
         sandbox_driver: None,
         sandbox_policy: None,
         journal: None,

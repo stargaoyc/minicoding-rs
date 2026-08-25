@@ -12,6 +12,7 @@ use crate::extension::{ExtensionHost, NoopExtensionHost};
 use crate::hooks::{HookRegistry, NoopHookRegistry};
 use crate::journal::Journal;
 use crate::memory::SessionSummarizer;
+use crate::model::RuntimeError;
 use crate::model::Session;
 use crate::policy::{
     NoopPolicy, NoopPrompter, PermissionMode, PermissionPolicy, PermissionPrompter,
@@ -424,12 +425,22 @@ impl RuntimeBuilder {
     /// 事件（新会话首事件）。
     ///
     /// # Errors
-    /// 必填项缺失时返回错误字符串。
-    pub fn build(self) -> Result<Runtime, String> {
-        let provider = self.provider.ok_or("provider is required")?;
-        let ctx = self.ctx.ok_or("context manager is required")?;
-        let storage = self.storage.ok_or("storage is required")?;
-        let workdir = self.workdir.ok_or("workdir is required")?;
+    /// 必填项缺失时返回 [`RuntimeError::Config`]。
+    /// CORE-14（2026-08-25 R2 审查）：错误类型由裸 `String` 收敛为
+    /// [`RuntimeError::Config`]（AGENTS §2.3 thiserror 约定）。
+    pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let provider = self
+            .provider
+            .ok_or_else(|| RuntimeError::Config("provider is required".into()))?;
+        let ctx = self
+            .ctx
+            .ok_or_else(|| RuntimeError::Config("context manager is required".into()))?;
+        let storage = self
+            .storage
+            .ok_or_else(|| RuntimeError::Config("storage is required".into()))?;
+        let workdir = self
+            .workdir
+            .ok_or_else(|| RuntimeError::Config("workdir is required".into()))?;
 
         let session = self
             .session

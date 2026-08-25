@@ -213,6 +213,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             timeout: std::time::Duration::from_secs(60),
             max_output_bytes: 10_000,
+            max_read_bytes: 10_000,
             sandbox_driver: None,
             sandbox_policy: None,
             journal: None,

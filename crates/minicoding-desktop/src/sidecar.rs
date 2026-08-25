@@ -101,7 +101,7 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {
         while let Ok(Some(line)) = reader.next_line().await {
-            log::info!("sidecar stdout: {line}");
+            log::info!("sidecar stdout: {}", redact_token_line(&line));
             if let Some(p) = parse_port(&line) {
                 return Ok(p);
             }
@@ -130,6 +130,23 @@ fn parse_port(line: &str) -> Option<u16> {
     let port_str: String = rest.chars().take_while(char::is_ascii_digit).collect();
     let p = port_str.parse::<u16>().ok()?;
     (1024..=65535).contains(&p).then_some(p)
+}
+
+/// 日志脱敏（FE-5，2026-08-25 R2 审查）：sidecar stdout 会含 server 打印的
+/// `SERVER_TOKEN=<token>` 行——desktop 把每行 stdout 以 info 级写入日志文件，
+/// 原样记录等于把鉴权 token 落盘（C-04）。所有 sidecar 输出经本函数清洗后再
+/// 进日志；desktop 自身已知 token（env 下传方），无需从日志读取。
+#[must_use]
+fn redact_token_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("SERVER_TOKEN=") {
+        let token = rest.trim();
+        if token.len() <= 4 {
+            return "SERVER_TOKEN=***".to_string();
+        }
+        return format!("SERVER_TOKEN={}***", &token[..4]);
+    }
+    line.to_string()
 }
 
 // ─── Tauri 集成（feature gate `desktop`）────────────────────────────────────
@@ -268,7 +285,7 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
             match event {
                 CommandEvent::Stdout(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes);
-                    log::info!("sidecar stdout: {}", line.trim());
+                    log::info!("sidecar stdout: {}", redact_token_line(line.trim()));
                     if let Some(p) = parse_port(&line) {
                         return Ok(p);
                     }
@@ -290,7 +307,8 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line_bytes) => {
-                    log::info!("sidecar: {}", String::from_utf8_lossy(&line_bytes).trim());
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    log::info!("sidecar: {}", redact_token_line(line.trim()));
                 }
                 CommandEvent::Stderr(line_bytes) => {
                     log::warn!("sidecar: {}", String::from_utf8_lossy(&line_bytes).trim());
