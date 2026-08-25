@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 minicoding-core = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -21,7 +22,6 @@ tokio = { workspace = true }
 # A8 架构守卫：复用 core 的 manifest 断言
 minicoding-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
-semver = { workspace = true }
 
 # 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
 [lints]

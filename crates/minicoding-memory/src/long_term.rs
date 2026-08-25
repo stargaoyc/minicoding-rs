@@ -286,13 +286,16 @@ mod tests {
         mem.save("v1").await.unwrap();
         let _ = mem.load().await.unwrap(); // 填充缓存
 
-        // 外部直接覆写正文（绕过 save），并推进 mtime 以触发缓存失效。
+        // 外部直接覆写正文（绕过 save），并显式回拨 mtime 以触发缓存失效。
         let path = tmp.path().join(LONG_TERM_FILE);
         std::fs::write(&path, "v2-external").unwrap();
 
-        // 同秒内多次写可能 mtime 不变，这里 sleep 后再写一次以推进 mtime。
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        std::fs::write(&path, "v2-external").unwrap();
+        // F1：以 set_modified 显式改写文件时间戳替代真实 sleep——原实现靠
+        // sleep(1.1s) 跨越 mtime 粒度（慢且在粗粒度文件系统上仍可能抖动）；
+        // 回拨 60s 与缓存的 save 时刻必然不同，判定确定性成立。
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
 
         let loaded = mem.load().await.unwrap();
         assert_eq!(

@@ -10,14 +10,14 @@ use minicoding_core::config::{ProviderConfig, SmallProviderConfig, config_hash};
 use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
-use minicoding_core::provider::{BoxFuture, LlmProvider};
+use minicoding_core::provider::{BoxFuture, LlmProvider, Tokenizer};
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
 use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
 use minicoding_memory::{
-    AutoCategory, AutoMemory, LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl,
-    inject_project_doc_sync,
+    AutoCategory, AutoMemory, AutoMemoryContributor, LongTermMemory, ProjectDocLoaderImpl,
+    SessionSummarizerImpl, inject_project_doc_sync,
 };
 use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter, ReplayPolicy};
 use minicoding_providers::{
@@ -264,9 +264,18 @@ pub fn build_runtime(
     );
     let system_prompt = load_and_inject_project_doc(&workdir_path, &base_system);
 
+    // 4b-0. Auto memory 实例（B2 接线）：`AutoMemoryContributor`（prompt 注入）与
+    //     `memory.write` 工具（6b 步）共享同一实例，写入后下一轮 system 即见新条目
+    //     （AutoMemory 内部 mtime 缓存保证零重复 IO）。
+    let auto_memory: Arc<AutoMemory> = Arc::new(AutoMemory::default());
+
     // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
     //     9 个内置 contributor 由 `minicoding-extension-sdk::builtin_contributors` 提供，
     //     CLI 注入 user_rules（long_term.md）+ project_rules（AGENTS.md）+ git_info。
+    //     B2：额外注入 `auto_memory` contributor（stable 区，cacheable=true）——此前
+    //     AutoMemory 已在 builder 构建但 `inject_auto_memory` 零生产调用。
+    //     B3：@memory 检索契约经 contributor 的 query slot 生效（无调用方设置时
+    //     退化为全量渲染/超长截断），见 `AutoMemoryContributor` 文档。
     //     `enabled_tools` 字段在 `build_chat_request` 时由 `tools.schemas()` 动态填充。
     #[cfg(feature = "extensions")]
     let prompt_pipeline: Option<(
@@ -290,7 +299,13 @@ pub fn build_runtime(
                     content: project_rules.content,
                     layers: project_rules.layers,
                 });
-        let contributors = minicoding_extension_sdk::builtin_contributors(&identity);
+        let mut contributors = minicoding_extension_sdk::builtin_contributors(&identity);
+        // B2/B3：auto memory 注入 stable 区（order=Environment，cacheable=true，
+        // 排在 environment 段之前——同 order 内按 contributor_name 稳定排序）。
+        contributors.push(Arc::new(AutoMemoryContributor::new(
+            auto_memory.clone(),
+            minicoding_memory::auto_contributor::DEFAULT_MAX_CHARS,
+        )));
         let pipeline = Arc::new(minicoding_core::prompt::PromptPipeline::with_contributors(
             contributors,
         ));
@@ -308,57 +323,65 @@ pub fn build_runtime(
     //
     //    `extensions` feature 启用时注入 PromptPipeline（动态 system prompt，9 段拼接）；
     //    未启用时走静态 `system_prompt`（已含 project_doc 注入）。
-    let ctx: Arc<dyn minicoding_core::context::ContextManager> =
+    //
+    //    B1：tokenizer 提前构造并保底——子 Agent runner（11b-0 步）需同一实例；
+    //    tiktoken 不可用时子代理退化为字符计数分词（仅影响预算精度，不影响正确性）。
+    let tokenizer: Option<Arc<dyn Tokenizer>> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
-            Ok(tokenizer) => {
-                // 上下文窗口取 provider 声明的 capability（Claude 200K 等；
-                // 2026-08-23 审查 §8-P1：此前硬编码 128K，Claude 白白浪费 35%
-                // 预算提前压缩，小窗口模型则预算虚高直接超限）
-                let context_window = summary_provider.capabilities().context_window;
-                let mut mgr = ContextManagerImpl::new(
-                    system_prompt.clone(),
-                    Arc::new(tokenizer),
-                    context_window,
-                    Some(summary_provider.clone()),
-                )
-                // CT-4/CTX-8（2026-08-25 R2 审查）：熔断与 L2 摘要配置端到端接线
-                //（此前 builder 定义零生产调用、SummarizeConfig 硬编码 default）
-                .with_circuit_breaker_config(minicoding_context::CircuitBreakerConfig {
-                    fail_threshold: config.context.compress_breaker_fail_threshold,
-                    force_end_threshold: config.context.compress_breaker_force_end_threshold,
-                    thrash_threshold: config.context.compress_breaker_thrash_threshold,
-                    cooldown: std::time::Duration::from_secs(
-                        config.context.compress_breaker_cooldown_sec,
-                    ),
-                })
-                .with_summarize_config(minicoding_context::SummarizeConfig {
-                    ratio: config.context.summarize_ratio,
-                    max_summary_tokens: config.context.summarize_max_tokens,
-                    llm_timeout_secs: config.context.summarize_timeout_secs,
-                });
-                // M-07（R-02）：注入压缩审计 sink
-                mgr.set_audit(audit.clone());
-                #[cfg(feature = "extensions")]
-                let mgr = {
-                    if let Some((pipeline, ctx_template)) = prompt_pipeline {
-                        mgr.with_prompt_pipeline(pipeline, ctx_template)
-                    } else {
-                        mgr
-                    }
-                };
-                Arc::new(mgr)
-            }
+            Ok(t) => Some(Arc::new(t)),
             Err(e) => {
                 tracing::warn!(
-                    "Tiktoken 分词器构造失败（{e}），降级为 SimpleContextManager（无压缩）"
+                    "Tiktoken 分词器构造失败（{e}），主上下文降级 SimpleContextManager，\
+                     子代理降级字符计数分词"
                 );
-                Arc::new(SimpleContextManager::new(system_prompt.clone()))
+                None
             }
         };
+    let ctx: Arc<dyn minicoding_core::context::ContextManager> = match tokenizer.clone() {
+        Some(tokenizer) => {
+            // 上下文窗口取 provider 声明的 capability（Claude 200K 等；
+            // 2026-08-23 审查 §8-P1：此前硬编码 128K，Claude 白白浪费 35%
+            // 预算提前压缩，小窗口模型则预算虚高直接超限）
+            let context_window = summary_provider.capabilities().context_window;
+            let mut mgr = ContextManagerImpl::new(
+                system_prompt.clone(),
+                tokenizer,
+                context_window,
+                Some(summary_provider.clone()),
+            )
+            // CT-4/CTX-8（2026-08-25 R2 审查）：熔断与 L2 摘要配置端到端接线
+            //（此前 builder 定义零生产调用、SummarizeConfig 硬编码 default）
+            .with_circuit_breaker_config(minicoding_context::CircuitBreakerConfig {
+                fail_threshold: config.context.compress_breaker_fail_threshold,
+                force_end_threshold: config.context.compress_breaker_force_end_threshold,
+                thrash_threshold: config.context.compress_breaker_thrash_threshold,
+                cooldown: std::time::Duration::from_secs(
+                    config.context.compress_breaker_cooldown_sec,
+                ),
+            })
+            .with_summarize_config(minicoding_context::SummarizeConfig {
+                ratio: config.context.summarize_ratio,
+                max_summary_tokens: config.context.summarize_max_tokens,
+                llm_timeout_secs: config.context.summarize_timeout_secs,
+            });
+            // M-07（R-02）：注入压缩审计 sink
+            mgr.set_audit(audit.clone());
+            #[cfg(feature = "extensions")]
+            let mgr = {
+                if let Some((pipeline, ctx_template)) = prompt_pipeline {
+                    mgr.with_prompt_pipeline(pipeline, ctx_template)
+                } else {
+                    mgr
+                }
+            };
+            Arc::new(mgr)
+        }
+        None => Arc::new(SimpleContextManager::new(system_prompt.clone())),
+    };
 
     // 6. 构造 storage
     let sessions_dir = minicoding_core::paths::sessions_dir().context("无法确定会话存储目录")?;
-    let storage = JsonlStorage::new(sessions_dir.clone());
+    let storage = Arc::new(JsonlStorage::new(sessions_dir.clone()));
 
     // 6a. 构造 EventStore + SnapshotStore（Event Sourcing，见 `design.md` §25）
     //     与 `JsonlStorage` 共用 `sessions_dir`：`{id}.events.jsonl` + `{id}.snapshot.json`
@@ -394,8 +417,9 @@ pub fn build_runtime(
     //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
     //     LongTermMemory::default / AutoMemory::default 在 home 不可解析时退化为相对路径。
     let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
+    // 与 4b-0 的 prompt contributor 共享同一 AutoMemory 实例（B2 接线闭环）。
     let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter {
-        inner: Arc::new(AutoMemory::default()),
+        inner: auto_memory.clone(),
     });
     tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
 
@@ -456,6 +480,8 @@ pub fn build_runtime(
     // 11. 组装 Runtime（provider/ctx 已是 Arc，直接传入）
     //     `config` 在此处 move 进 builder，所有需读 `config` 字段的逻辑（如 hooks）
     //     必须在 move 之前完成（见下方 hooks registry 提前构建）。
+    //     B1：先克隆一份给子 Agent runner（子配置在此基础上 max_tool_iters 减半）。
+    let child_config = config.clone();
     let initial_mode = if start_in_plan_mode {
         PermissionMode::Plan
     } else {
@@ -478,10 +504,55 @@ pub fn build_runtime(
     let config_watcher =
         minicoding_core::config::ConfigWatcher::start(&config_path, event_bus.clone());
 
+    // 11b-0. 构造子 Agent runner（B1：替换 NoopSubagentRunner 默认，F2 扇出上限 4）。
+    //        内层 `InProcessSubagentRunner` 组装嵌套 Runtime；外层包
+    //        `WorktreeSubagentRunner`（A-15 worktree 隔离装饰器，非 git 目录自动
+    //        降级 Shared）。沙箱驱动/策略、provider/prompter/policy/audit/config
+    //        全部继承父会话（C-01/C-22 不因嵌套而失效）。
+    //        注入必须在 `build()` 之前——`task.spawn` 工具经 `rt.subagent_runner()`
+    //        拿到的引用即此处注入的实现（12 步）。
+    let sandbox_pair: Option<(Arc<dyn SandboxDriver>, SandboxPolicy)> = {
+        let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+            workdir: workdir_path.clone(),
+            writable: Vec::new(),
+        });
+        #[cfg(feature = "sandbox")]
+        {
+            Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
+        }
+        #[cfg(not(feature = "sandbox"))]
+        {
+            // sandbox feature 未启用：父 Runtime 走 NoopDriver，子代理同样不启用
+            // （第二道防线缺失时父子一致，不制造虚假隔离声明）。
+            None
+        }
+    };
+    let child_tokenizer: Arc<dyn Tokenizer> = tokenizer
+        .clone()
+        .unwrap_or_else(crate::subagent::fallback_tokenizer);
+    let subagent_inner = crate::subagent::InProcessSubagentRunner::new(
+        main_provider.clone(),
+        child_tokenizer,
+        system_prompt.clone(),
+        storage.clone(),
+        prompter.clone(),
+        policy.clone(),
+        audit.clone(),
+        // 11b 步还需同一 driver/policy 注入父 Runtime，此处克隆（Arc 廉价）。
+        sandbox_pair.clone(),
+        child_config,
+        workdir_path.clone(),
+    );
+    let subagent_runner: Arc<dyn minicoding_core::agent::SubagentRunner> =
+        Arc::new(minicoding_tools::WorktreeSubagentRunner::new(
+            Arc::new(subagent_inner),
+            workdir_path.clone(),
+        ));
+
     let mut builder = RuntimeBuilder::new()
         .provider(main_provider)
         .context(ctx)
-        .storage(Arc::new(storage))
+        .storage(storage.clone())
         .tools(tools)
         .config(config)
         .workdir(workdir_path.clone())
@@ -491,6 +562,7 @@ pub fn build_runtime(
         .session_summarizer(summarizer)
         .permission_mode(initial_mode)
         .events(event_bus)
+        .subagent_runner(subagent_runner)
         .with_config_watcher(config_watcher)
         .with_config_path(config_path)
         // 遗留#3：AllowAlways/DenyAlways 持久化（~/.minicoding/policy.toml）
@@ -515,15 +587,9 @@ pub fn build_runtime(
         .snapshot_store(Arc::new(snapshot_store));
 
     // 11b. 注入沙箱驱动 + 策略（T-M4-9，C-22：沙箱为第二道防线）
-    //      `sandbox_override` 来自 `exec --sandbox`；默认 `WorkspaceWrite { workdir, [] }`。
-    //      沙箱驱动由 `detect_driver()` 探测（Linux Landlock / 降级 NoopDriver）。
-    let sandbox_policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
-        workdir: workdir_path.clone(),
-        writable: Vec::new(),
-    });
+    //      与 11b-0 共用同一 driver/policy 实例（父子沙箱行为严格一致）。
     #[cfg(feature = "sandbox")]
-    {
-        let driver: Arc<dyn SandboxDriver> = Arc::from(minicoding_sandbox::detect_driver());
+    if let Some((driver, sandbox_policy)) = sandbox_pair {
         builder = builder
             .sandbox_driver(driver)
             .sandbox_policy(sandbox_policy)
@@ -532,11 +598,6 @@ pub fn build_runtime(
             .sandbox_denial_breaker(Arc::new(
                 minicoding_sandbox::SandboxCircuitBreaker::default_thresholds(),
             ));
-    }
-    #[cfg(not(feature = "sandbox"))]
-    {
-        // sandbox feature 未启用时不注入（RuntimeBuilder 默认 NoopDriver + WorkspaceWrite）。
-        let _ = sandbox_policy;
     }
 
     // 11c. 注入 journal（`file-undo` feature 启用时，C-28：/undo 可用）

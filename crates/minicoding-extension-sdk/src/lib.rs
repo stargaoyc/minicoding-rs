@@ -32,4 +32,6 @@ pub mod registrar;
 
 pub use bundled::{BundledExtensionHost, LoadedExtension};
 pub use contributors::builtin_contributors;
-pub use registrar::{BundleRegistrar, RegistrationBundle};
+pub use registrar::{
+    BundleRegistrar, DEFAULT_ALLOWED_PERMISSIONS, HOST_API_VERSION, RegistrationBundle,
+};

@@ -3,6 +3,11 @@
 //! 设计要点（见 `design.md` §8.6）：
 //! - **分层加载**：从 `repo_root` 逐级向下走到 `cwd`，每级按优先级
 //!   （`AGENTS.md` > `CLAUDE.md` > `.cursorrules`）取首个命中文件；
+//! - **全局层**（B4）：可选在分层链头部插入 `$MINICODING_HOME/AGENTS.md`
+//!   （见 [`crate::global_agents_path`]），来源标注 `# source: <global>`，
+//!   经 `with_global_layer_from_env` 显式启用（测试路径默认关闭，保证封闭性）；
+//! - **@import 展开**（B4）：行首 `@import <path>` 替换为所引文件内容，递归
+//!   深度 ≤ [`MAX_IMPORT_DEPTH`]，环检测经 canonicalize 后集合判定；
 //! - **拼接**：root → leaf 顺序，以 `---` 分隔并标注来源路径；
 //! - **截断**：累计超过 `max_bytes`（默认 32 KiB）时静默截断末尾并标注
 //!   `[... truncated]`；
@@ -18,6 +23,7 @@ use minicoding_core::memory::ProjectDocLoader;
 use minicoding_core::model::MemoryError;
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
+use std::collections::HashSet;
 use tokio::fs;
 
 /// 默认项目文档最大字节数（32 KiB，见 `design.md` §8.6）。
@@ -25,6 +31,36 @@ pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32_768;
 
 /// 截断标注（追加到截断内容末尾）。
 const TRUNCATED_MARKER: &str = "\n[... truncated]";
+
+/// @import 行前缀（允许缩进；目标为相对或绝对路径）。
+const IMPORT_PREFIX: &str = "@import ";
+
+/// @import 最大递归深度（含顶层文件的直接 import 共 3 层间接展开）。
+pub const MAX_IMPORT_DEPTH: usize = 3;
+
+/// @import 超深跳过标注。
+const IMPORT_SKIP_DEPTH: &str = "<!-- import skipped: depth -->";
+/// @import 环引用跳过标注。
+const IMPORT_SKIP_CYCLE: &str = "<!-- import skipped: cycle -->";
+/// @import 目标缺失/不可读跳过标注。
+fn import_skip_unreadable(path: &Utf8Path) -> String {
+    format!("<!-- import skipped: not found ({path}) -->")
+}
+
+/// 解析 @import 行的目标路径；非 import 行返回 `None`。
+fn parse_import_line(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix(IMPORT_PREFIX)?.trim();
+    (!rest.is_empty()).then(|| rest.trim_matches('"').trim_matches('\'').to_string())
+}
+
+/// 规范化 key（环检测用）：优先 filesystem canonicalize，失败退化为词法绝对路径。
+fn canonical_key(path: &Utf8Path) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) if path.is_absolute() => path.to_string(),
+        Err(_) => Utf8PathBuf::from(".").join(path).to_string(),
+    }
+}
 
 /// 组件级路径包含判定（CTX-5）：`dir` 与 `base` 逐组件比较前缀，
 /// 消除裸字符串 `starts_with` 的兄弟目录误判与尾斜杠退化。
@@ -52,10 +88,15 @@ pub struct ProjectDocLoaderImpl {
     max_bytes: usize,
     /// 子 Agent 跳过标志。
     skip: bool,
+    /// 全局层文件（B4，默认 `None`；`with_global_layer_from_env` 启用）。
+    ///
+    /// 显式 opt-in 而非构造即读 env：保证既有测试封闭性（不受开发机
+    /// `~/.minicoding/AGENTS.md` 存在与否影响），生产路径由 builder 打开。
+    global_layer: Option<Utf8PathBuf>,
 }
 
 impl ProjectDocLoaderImpl {
-    /// 构造加载器，`max_bytes` 默认 32 KiB，`skip` 默认 `false`。
+    /// 构造加载器，`max_bytes` 默认 32 KiB，`skip` 默认 `false`，全局层默认关闭。
     ///
     /// `repo_root` 与 `cwd` 应为一致形式（同为规范化或同非规范化路径）；
     /// 若 `cwd` 不在 `repo_root` 之下，加载时退化为仅读取 `cwd` 一级。
@@ -66,6 +107,7 @@ impl ProjectDocLoaderImpl {
             cwd,
             max_bytes: DEFAULT_PROJECT_DOC_MAX_BYTES,
             skip: false,
+            global_layer: None,
         }
     }
 
@@ -81,6 +123,20 @@ impl ProjectDocLoaderImpl {
     pub fn with_skip(mut self, skip: bool) -> Self {
         self.skip = skip;
         self
+    }
+
+    /// 设置全局层文件（B4 builder）。`Some(path)` 时作为分层链头部注入，
+    /// 来源标注 `# source: <global>`。
+    #[must_use]
+    pub fn with_global_layer(mut self, path: Option<Utf8PathBuf>) -> Self {
+        self.global_layer = path;
+        self
+    }
+
+    /// 从环境解析全局层（B4 builder）：`$MINICODING_HOME/AGENTS.md` 存在才启用。
+    #[must_use]
+    pub fn with_global_layer_from_env(self) -> Self {
+        self.with_global_layer(crate::global_agents_path())
     }
 
     /// 计算从 `repo_root` 到 `cwd` 的目录链（含两端，root 在前）。
@@ -118,7 +174,9 @@ impl ProjectDocLoaderImpl {
     /// 同步加载项目文档（builder 启动期用，tokio runtime 未创建）。
     ///
     /// 与 `load` 同语义，但用 `std::fs` 同步读取。失败时返回 `MemoryError`，
-    /// 单个文件读取失败时跳过（best effort，与 async 版一致）。
+    /// 单个文件读取失败时跳过（best effort，与 async 版一致）。全局层（如启用）
+    /// 在分层链之前注入，来源标注 `# source: <global>`；各文件内容先经
+    /// `expand_imports_sync` 预处理。
     ///
     /// # Errors
     /// 路径解析失败时返回错误；单个文件读取失败时跳过而非报错。
@@ -127,10 +185,29 @@ impl ProjectDocLoaderImpl {
             return Ok(String::new());
         }
 
-        let chain = self.dir_chain();
         let mut parts: Vec<String> = Vec::new();
-        for dir in &chain {
-            let Some(path) = find_project_doc(dir) else {
+
+        // B4 全局层：链头注入（root 之前），来源标注固定为 `<global>`。
+        if let Some(global_path) = &self.global_layer {
+            match std::fs::read_to_string(global_path) {
+                Ok(content) => {
+                    let mut visited = HashSet::new();
+                    visited.insert(canonical_key(global_path));
+                    let expanded = expand_imports_sync(
+                        &content,
+                        global_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
+                        0,
+                        &mut visited,
+                    );
+                    push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
+                }
+                // 全局层不可读不阻塞项目层加载（best effort）。
+                Err(e) => tracing::warn!("skip unreadable global AGENTS.md {}: {e}", global_path),
+            }
+        }
+
+        for dir in self.dir_chain() {
+            let Some(path) = find_project_doc(&dir) else {
                 continue;
             };
             let content = match std::fs::read_to_string(&path) {
@@ -140,34 +217,166 @@ impl ProjectDocLoaderImpl {
                     continue;
                 }
             };
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(self.repo_root.as_str())
-                .map_or_else(|_| path.as_str(), Utf8Path::as_str);
-            let entry = format!("# source: {rel}\n\n{trimmed}");
-            parts.push(entry);
+            let mut visited = HashSet::new();
+            visited.insert(canonical_key(&path));
+            let expanded = expand_imports_sync(
+                &content,
+                path.parent().unwrap_or_else(|| Utf8Path::new(".")),
+                0,
+                &mut visited,
+            );
+            push_part(
+                &mut parts,
+                &expanded,
+                path.as_str(),
+                self.repo_root.as_str(),
+            );
         }
 
-        if parts.is_empty() {
-            return Ok(String::new());
-        }
-
-        let merged = parts.join("\n\n---\n\n");
-        if merged.len() <= self.max_bytes {
-            return Ok(merged);
-        }
-
-        let mut end = self.max_bytes.min(merged.len());
-        while end > 0 && !merged.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut truncated = String::from(&merged[..end]);
-        truncated.push_str(TRUNCATED_MARKER);
-        Ok(truncated)
+        Ok(merge_parts(&parts, self.max_bytes))
     }
+}
+
+/// 展开一节内容并追加到 parts（来源标注优先相对 `repo_root`）。
+fn push_part(parts: &mut Vec<String>, content: &str, source: &str, repo_root: &str) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let rel = Utf8Path::new(source)
+        .strip_prefix(repo_root)
+        .map_or_else(|_| source.to_string(), ToString::to_string);
+    parts.push(format!("# source: {rel}\n\n{trimmed}"));
+}
+
+/// 合并 parts 并按 `max_bytes` 截断（char 边界安全）。
+fn merge_parts(parts: &[String], max_bytes: usize) -> String {
+    if parts.is_empty() {
+        return String::new();
+    }
+    let merged = parts.join("\n\n---\n\n");
+    if merged.len() <= max_bytes {
+        return merged;
+    }
+    let mut end = max_bytes.min(merged.len());
+    while end > 0 && !merged.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::from(&merged[..end]);
+    truncated.push_str(TRUNCATED_MARKER);
+    truncated
+}
+
+/// 同步 `@import` 展开（B4）。
+///
+/// 行首（允许缩进）`@import <path>` 替换为所引文件内容并递归展开：
+/// - 相对路径基于当前文件所在目录；
+/// - 环检测：canonicalize 后的 key 已在 `visited` → 插入 cycle 标注；
+/// - 深度防护：当前深度 ≥ [`MAX_IMPORT_DEPTH`] 时插入 depth 标注；
+/// - 目标缺失/不可读插入 not found 标注（不 panic、不中断其余行）。
+pub fn expand_imports_sync<S: std::hash::BuildHasher>(
+    content: &str,
+    cur_dir: &Utf8Path,
+    depth: usize,
+    visited: &mut HashSet<String, S>,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        match parse_import_line(line) {
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            Some(target) => {
+                if depth >= MAX_IMPORT_DEPTH {
+                    out.push_str(IMPORT_SKIP_DEPTH);
+                    out.push('\n');
+                    continue;
+                }
+                let target_path = if Utf8Path::new(&target).is_absolute() {
+                    Utf8PathBuf::from(&target)
+                } else {
+                    cur_dir.join(&target)
+                };
+                let key = canonical_key(&target_path);
+                if !visited.insert(key) {
+                    out.push_str(IMPORT_SKIP_CYCLE);
+                    out.push('\n');
+                    continue;
+                }
+                if let Ok(inner) = std::fs::read_to_string(&target_path) {
+                    let inner_dir = target_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                    out.push_str(&expand_imports_sync(
+                        inner.trim_end(),
+                        inner_dir,
+                        depth + 1,
+                        visited,
+                    ));
+                    out.push('\n');
+                } else {
+                    out.push_str(&import_skip_unreadable(&target_path));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 异步 `@import` 展开（B4）：与同步版同语义，读文件用 `tokio::fs`。
+///
+/// 环/深度判定与标注格式与 [`expand_imports_sync`] 完全一致——两版必须同步演化，
+/// 否则启动期（sync）与会话内（async）加载结果漂移。
+async fn expand_imports_async<S: std::hash::BuildHasher>(
+    content: &str,
+    cur_dir: &Utf8Path,
+    depth: usize,
+    visited: &mut HashSet<String, S>,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        match parse_import_line(line) {
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            Some(target) => {
+                if depth >= MAX_IMPORT_DEPTH {
+                    out.push_str(IMPORT_SKIP_DEPTH);
+                    out.push('\n');
+                    continue;
+                }
+                let target_path = if Utf8Path::new(&target).is_absolute() {
+                    Utf8PathBuf::from(&target)
+                } else {
+                    cur_dir.join(&target)
+                };
+                let key = canonical_key(&target_path);
+                if !visited.insert(key) {
+                    out.push_str(IMPORT_SKIP_CYCLE);
+                    out.push('\n');
+                    continue;
+                }
+                if let Ok(inner) = fs::read_to_string(&target_path).await {
+                    let inner_dir = target_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                    // 递归 async fn 需显式 boxing（E0733）。
+                    let expanded = Box::pin(expand_imports_async(
+                        inner.trim_end(),
+                        inner_dir,
+                        depth + 1,
+                        visited,
+                    ))
+                    .await;
+                    out.push_str(&expanded);
+                    out.push('\n');
+                } else {
+                    out.push_str(&import_skip_unreadable(&target_path));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
 }
 
 impl ProjectDocLoader for ProjectDocLoaderImpl {
@@ -178,10 +387,31 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                 return Ok(String::new());
             }
 
-            let chain = self.dir_chain();
             let mut parts: Vec<String> = Vec::new();
-            for dir in &chain {
-                let Some(path) = find_project_doc(dir) else {
+
+            // B4 全局层：链头注入（与 load_sync 同语义）。
+            if let Some(global_path) = &self.global_layer {
+                match fs::read_to_string(global_path).await {
+                    Ok(content) => {
+                        let mut visited = HashSet::new();
+                        visited.insert(canonical_key(global_path));
+                        let expanded = expand_imports_async(
+                            &content,
+                            global_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
+                            0,
+                            &mut visited,
+                        )
+                        .await;
+                        push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
+                    }
+                    Err(e) => {
+                        tracing::warn!("skip unreadable global AGENTS.md {}: {e}", global_path);
+                    }
+                }
+            }
+
+            for dir in self.dir_chain() {
+                let Some(path) = find_project_doc(&dir) else {
                     continue;
                 };
                 // CTX-2（2026-08-25 R2 审查）：单个不可读文件 warn+跳过，
@@ -194,35 +424,24 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                         continue;
                     }
                 };
-                let trimmed = content.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                // 标注来源路径：优先相对 `repo_root`，否则用绝对路径。
-                let rel = path
-                    .strip_prefix(self.repo_root.as_str())
-                    .map_or_else(|_| path.as_str(), Utf8Path::as_str);
-                let entry = format!("# source: {rel}\n\n{trimmed}");
-                parts.push(entry);
+                let mut visited = HashSet::new();
+                visited.insert(canonical_key(&path));
+                let expanded = expand_imports_async(
+                    &content,
+                    path.parent().unwrap_or_else(|| Utf8Path::new(".")),
+                    0,
+                    &mut visited,
+                )
+                .await;
+                push_part(
+                    &mut parts,
+                    &expanded,
+                    path.as_str(),
+                    self.repo_root.as_str(),
+                );
             }
 
-            if parts.is_empty() {
-                return Ok(String::new());
-            }
-
-            let merged = parts.join("\n\n---\n\n");
-            if merged.len() <= self.max_bytes {
-                return Ok(merged);
-            }
-
-            // 截断到 char 边界，末尾标注（标注本身不计入 max_bytes）。
-            let mut end = self.max_bytes.min(merged.len());
-            while end > 0 && !merged.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut truncated = String::from(&merged[..end]);
-            truncated.push_str(TRUNCATED_MARKER);
-            Ok(truncated)
+            Ok(merge_parts(&parts, self.max_bytes))
         })
     }
 }
@@ -362,5 +581,157 @@ mod tests {
         let doc = loader.load().await.unwrap();
         assert!(doc.contains("root via agents"));
         assert!(doc.contains("sub via claude"));
+    }
+
+    // === B4：全局层注入 ===
+
+    #[tokio::test]
+    async fn global_layer_is_prepended_with_source_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "AGENTS.md", "project rules");
+        let global_dir = tempfile::tempdir().unwrap();
+        write(global_dir.path(), "AGENTS.md", "global rules");
+        let global_path = Utf8PathBuf::from_path_buf(global_dir.path().join("AGENTS.md")).unwrap();
+
+        let dir = utf8(tmp.path());
+        let loader =
+            ProjectDocLoaderImpl::new(dir.clone(), dir).with_global_layer(Some(global_path));
+        for doc in [loader.load().await.unwrap(), loader.load_sync().unwrap()] {
+            assert!(doc.contains("# source: <global>"), "应标注全局来源: {doc}");
+            assert!(doc.contains("global rules"));
+            assert!(doc.contains("project rules"));
+            // 全局层必须在项目层之前。
+            assert!(doc.find("global rules").unwrap() < doc.find("project rules").unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_global_layer_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "AGENTS.md", "project rules");
+        let dir = utf8(tmp.path());
+        let loader = ProjectDocLoaderImpl::new(dir.clone(), dir);
+        let doc = loader.load().await.unwrap();
+        assert!(!doc.contains("<global>"), "默认不启用全局层: {doc}");
+    }
+
+    #[tokio::test]
+    async fn unreadable_global_layer_degrades_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "AGENTS.md", "project rules");
+        // 指向不存在的全局文件 → warn 跳过，不影响项目层。
+        let missing =
+            Utf8PathBuf::from_path_buf(tmp.path().join("nope").join("AGENTS.md")).unwrap();
+        let dir = utf8(tmp.path());
+        let loader = ProjectDocLoaderImpl::new(dir.clone(), dir).with_global_layer(Some(missing));
+        let doc = loader.load().await.unwrap();
+        assert!(doc.contains("project rules"));
+        assert!(!doc.contains("<global>"));
+    }
+
+    // === B4：@import 展开（sync/async 同语义） ===
+
+    #[tokio::test]
+    async fn import_basic_expansion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        write(root, "AGENTS.md", "top\n@import docs/shared.md\ntail");
+        write(&root.join("docs"), "shared.md", "shared rules 中文");
+
+        let loader = ProjectDocLoaderImpl::new(utf8(root), utf8(root));
+        let sync_doc = loader.load_sync().unwrap();
+        let async_doc = loader.load().await.unwrap();
+        for doc in [sync_doc, async_doc] {
+            assert!(doc.contains("shared rules 中文"), "import 应展开: {doc}");
+            assert!(
+                doc.contains("top") && doc.contains("tail"),
+                "宿主行保留: {doc}"
+            );
+            assert!(!doc.contains("@import"), "指令行不应残留: {doc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn import_cycle_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "AGENTS.md", "a\n@import b.md");
+        write(tmp.path(), "b.md", "b\n@import AGENTS.md");
+
+        let loader = ProjectDocLoaderImpl::new(utf8(tmp.path()), utf8(tmp.path()));
+        let sync_doc = loader.load_sync().unwrap();
+        let async_doc = loader.load().await.unwrap();
+        for doc in [sync_doc, async_doc] {
+            assert!(doc.contains(IMPORT_SKIP_CYCLE), "环引用应标注: {doc}");
+            assert!(
+                doc.contains('a') && doc.contains('b'),
+                "两层内容保留: {doc}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn import_depth_limit_enforced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // A → B → C → D → E：E 在第 4 层间接，超 MAX_IMPORT_DEPTH 应跳过。
+        write(root, "AGENTS.md", "A\n@import b.md");
+        write(root, "b.md", "B\n@import c.md");
+        write(root, "c.md", "C\n@import d.md");
+        write(root, "d.md", "D\n@import e.md");
+        write(root, "e.md", "E");
+
+        let loader = ProjectDocLoaderImpl::new(utf8(root), utf8(root));
+        let sync_doc = loader.load_sync().unwrap();
+        let async_doc = loader.load().await.unwrap();
+        for doc in [sync_doc, async_doc] {
+            assert!(
+                doc.contains('A') && doc.contains('B') && doc.contains('C') && doc.contains('D'),
+                "深度 3 层内全部展开: {doc}"
+            );
+            assert!(doc.contains(IMPORT_SKIP_DEPTH), "第 4 层应超深标注: {doc}");
+            assert!(!doc.lines().any(|l| l == "E"), "E 不应被加载: {doc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn import_missing_target_marks_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "AGENTS.md", "@import ghost.md\nafter");
+
+        let loader = ProjectDocLoaderImpl::new(utf8(tmp.path()), utf8(tmp.path()));
+        let sync_doc = loader.load_sync().unwrap();
+        let async_doc = loader.load().await.unwrap();
+        for doc in [sync_doc, async_doc] {
+            assert!(
+                doc.contains("import skipped: not found"),
+                "缺失目标应标注: {doc}"
+            );
+            assert!(doc.contains("after"));
+        }
+    }
+
+    #[test]
+    fn expand_imports_relative_paths_resolve_against_current_file() {
+        // 相对 import 基于当前文件目录而非 cwd：子目录文件引同目录兄弟文件。
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("pkg");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("inner.md"), "inner\n@import sibling.md").unwrap();
+        std::fs::write(sub.join("sibling.md"), "sibling content").unwrap();
+
+        let inner = Utf8PathBuf::from_path_buf(sub.join("inner.md")).unwrap();
+        let mut visited = HashSet::new();
+        visited.insert(canonical_key(&inner));
+        let out = expand_imports_sync(
+            "@import sibling.md",
+            inner.parent().unwrap(),
+            0,
+            &mut visited,
+        );
+        assert!(
+            out.contains("sibling content"),
+            "相对路径应基于当前文件目录: {out}"
+        );
     }
 }

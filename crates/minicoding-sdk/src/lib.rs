@@ -40,6 +40,9 @@ pub mod cred;
 pub mod mcp_setup;
 mod store;
 mod stream;
+pub mod subagent;
+
+pub use subagent::{InProcessSubagentRunner, MAX_CONCURRENT_SUBAGENTS};
 
 #[allow(deprecated)]
 pub use store::InMemoryStorage;
@@ -159,8 +162,9 @@ impl Client {
 
     /// 订阅事件流（`Event::Token`/`ToolCallStarted`/`PermissionRequested` 等）。
     ///
-    /// 返回 `broadcast::Receiver`，调用方 `recv().await` 消费。容量 256，
-    /// 消费慢时丢弃最旧事件（与 `EventBus` 语义一致，见 `core::runtime::event`）。
+    /// 返回 `broadcast::Receiver`，调用方 `recv().await` 消费。容量与
+    /// `EventBus::DEFAULT_CAPACITY`（1024）一致，消费慢时丢弃最旧事件
+    /// （与 `EventBus` 语义一致，见 `core::runtime::event`）。
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.runtime.events().subscribe()
@@ -638,7 +642,9 @@ mod tests {
         assert!(!client.session_id().is_empty());
     }
 
-    #[tokio::test]
+    // F1：start_paused——50ms 延迟只为让 cancel 晚于 ask 启动，虚拟时钟下
+    // 即时推进（ask 的 SlowProvider 无定时器，cancel 必然先于其完成）。
+    #[tokio::test(start_paused = true)]
     async fn cancel_returns_interrupted() {
         // 用一个会等待的 provider 模拟长 turn，cancel 后应返回 Interrupted。
         use std::time::Duration;

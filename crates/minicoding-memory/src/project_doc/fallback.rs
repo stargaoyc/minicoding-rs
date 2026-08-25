@@ -41,7 +41,7 @@ pub fn find_project_doc(dir: &Utf8Path) -> Option<Utf8PathBuf> {
 /// 逐级向上检查 `.git`/`.hg`/`.svn` 标记，命中即返回该级目录；探到文件系统根仍未
 /// 命中则返回 `None`，调用方可退化为以 `start` 作为仓库根。
 ///
-/// CTX-5（2026-08-25 R2 审查）：`.git` 允许是**文件**（worktree/submodule 的
+/// CTX-5（2026-08-25 审查）：`.git` 允许是**文件**（worktree/submodule 的
 /// gitdir 指针），`is_dir()` 过滤会漏掉这类形态导致 `repo_root` 探测失败——
 /// 改为 `exists()`（`.hg`/`.svn` 实际总是目录，放宽无害）。
 ///
@@ -62,6 +62,18 @@ pub fn find_repo_root(start: &Utf8Path) -> Option<Utf8PathBuf> {
         }
         current = current.parent()?;
     }
+}
+
+/// 全局层 AGENTS.md 路径（B4）：`$MINICODING_HOME/AGENTS.md`（缺省 `~/.minicoding/`）。
+///
+/// 文件存在时返回 `Some`，供 [`crate::ProjectDocLoaderImpl`] 作为分层链头部
+/// （root 之前）注入；不存在返回 `None`。路径解析复用 `core::paths::minicoding_home`
+/// （env 覆盖优先），不在本 crate 重复实现 home 探测。
+#[must_use]
+pub fn global_agents_path() -> Option<Utf8PathBuf> {
+    let home = minicoding_core::paths::minicoding_home().ok()?;
+    let path = home.join("AGENTS.md");
+    path.is_file().then_some(path)
 }
 
 #[cfg(test)]
@@ -128,5 +140,61 @@ mod tests {
         // tempdir 位于 /tmp 下，祖先路径无 .git/.hg/.svn。
         let tmp = tempfile::tempdir().unwrap();
         assert!(find_repo_root(&utf8(tmp.path())).is_none());
+    }
+
+    // === B4：global_agents_path（env 驱动，串行化防并行竞争） ===
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 设置环境变量并在 Drop 时恢复（与 `core::paths` 测试同构）。
+    struct EnvGuard {
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(value: &std::path::Path) -> Self {
+            let original = std::env::var("MINICODING_HOME").ok();
+            // SAFETY: ENV_LOCK 串行化所有 MINICODING_HOME 读写，无并发竞争；
+            // 测试进程内无其他线程依赖该变量。
+            unsafe { std::env::set_var("MINICODING_HOME", value) };
+            Self { original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: 同 set()，ENV_LOCK 保证串行；Drop 与测试同 scope 同步执行。
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var("MINICODING_HOME", v) },
+                None => unsafe { std::env::remove_var("MINICODING_HOME") },
+            }
+        }
+    }
+
+    #[test]
+    fn global_agents_path_requires_existing_file() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 无 AGENTS.md → None。
+        let _guard = EnvGuard::set(tmp.path());
+        assert!(
+            global_agents_path().is_none(),
+            "expected None: no AGENTS.md"
+        );
+
+        // 有 AGENTS.md → Some 且指向该文件。
+        std::fs::write(tmp.path().join("AGENTS.md"), "global").unwrap();
+        let _guard = EnvGuard::set(tmp.path());
+        let found = global_agents_path().expect("AGENTS.md 存在应返回 Some");
+        assert!(found.as_str().ends_with("AGENTS.md"));
+
+        // CLAUDE.md 不算全局层（fallback 文件名不适用于全局层）。
+        std::fs::remove_file(tmp.path().join("AGENTS.md")).unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude").unwrap();
+        let _guard = EnvGuard::set(tmp.path());
+        assert!(global_agents_path().is_none(), "CLAUDE.md 不构成全局层");
     }
 }
