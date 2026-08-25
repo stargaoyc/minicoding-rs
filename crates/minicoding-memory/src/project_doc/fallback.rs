@@ -38,8 +38,12 @@ pub fn find_project_doc(dir: &Utf8Path) -> Option<Utf8PathBuf> {
 
 /// 从 `start` 向上探测仓库根目录。
 ///
-/// 逐级向上检查 `.git`/`.hg`/`.svn` 目录，命中即返回该级目录；探到文件系统根仍未
+/// 逐级向上检查 `.git`/`.hg`/`.svn` 标记，命中即返回该级目录；探到文件系统根仍未
 /// 命中则返回 `None`，调用方可退化为以 `start` 作为仓库根。
+///
+/// CTX-5（2026-08-25 R2 审查）：`.git` 允许是**文件**（worktree/submodule 的
+/// gitdir 指针），`is_dir()` 过滤会漏掉这类形态导致 `repo_root` 探测失败——
+/// 改为 `exists()`（`.hg`/`.svn` 实际总是目录，放宽无害）。
 ///
 /// # Examples
 /// ```no_run
@@ -52,7 +56,7 @@ pub fn find_repo_root(start: &Utf8Path) -> Option<Utf8PathBuf> {
     let mut current = start;
     loop {
         for &marker in REPO_MARKERS {
-            if current.join(marker).is_dir() {
+            if current.join(marker).exists() {
                 return Some(current.to_owned());
             }
         }

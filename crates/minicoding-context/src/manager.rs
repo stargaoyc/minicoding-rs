@@ -26,7 +26,8 @@ use tokio::sync::Mutex;
 use crate::budget::TokenBudget;
 use crate::compress::{
     CircuitBreaker, CircuitBreakerConfig, CompressResult, PostCompactConfig, PredictiveTracker,
-    StateKeep, compress_pipeline, extract_read_files, inject_post_compact, should_predict_compact,
+    StateKeep, SummarizeConfig, compress_pipeline, extract_read_files, inject_post_compact,
+    should_predict_compact,
 };
 
 /// 根据压缩结果计算压缩级别（0-4，用于 metrics 维度）。
@@ -88,6 +89,9 @@ pub struct ContextManagerImpl {
     // M-07（R-02）：会话 id（`set_session_hint` 由 Runtime 构造时注入）。
     // std Mutex：`set_session_hint` 是 sync trait 方法，不能 await tokio 锁。
     session_id: std::sync::Mutex<Option<String>>,
+    // CTX-8（2026-08-25 R2 审查）：L2 摘要配置——此前 compress/mod.rs 硬编码
+    // `SummarizeConfig::default()`，llm_timeout_secs 端到端不可配。
+    summarize_config: SummarizeConfig,
 }
 
 impl ContextManagerImpl {
@@ -116,6 +120,7 @@ impl ContextManagerImpl {
             append_seq: AtomicU64::new(0),
             audit: None,
             session_id: std::sync::Mutex::new(None),
+            summarize_config: SummarizeConfig::default(),
         }
     }
 
@@ -158,6 +163,14 @@ impl ContextManagerImpl {
     #[must_use]
     pub fn with_circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker = Mutex::new(CircuitBreaker::with_config(config));
+        self
+    }
+
+    /// 注入 L2 摘要配置（CTX-8，2026-08-25 R2 审查）：`ratio`/`max_summary_tokens`
+    /// /`llm_timeout_secs` 由调用方透传，不再硬编码 default。
+    #[must_use]
+    pub fn with_summarize_config(mut self, config: SummarizeConfig) -> Self {
+        self.summarize_config = config;
         self
     }
 
@@ -294,6 +307,7 @@ impl ContextManagerImpl {
                 provider_ref,
                 backup_before_compress,
                 anchor_seq,
+                &self.summarize_config,
             )
             .await;
             // 压缩后重算 token 缓存（messages 可能已变更）
@@ -312,15 +326,21 @@ impl ContextManagerImpl {
         metrics::record_context_tokens("before_compress", tokens_before as u64);
         metrics::record_context_tokens("after_compress", new_tokens as u64);
 
+        // CTX-4（2026-08-25 R2 审查）：审计落盘在熔断器锁**之外**——audit 是
+        // 文件 IO await，此前在 breaker 锁内执行，并发 build_chat_request 的
+        // 预检会被无谓阻塞。level 在两个 match 分支各自重算（纯函数，开销可忽略）。
+        if let Ok(result) = &outcome {
+            let level = compress_level(result);
+            self.record_compress_audit(result, level, tokens_before, new_tokens)
+                .await;
+        }
+
         let threshold = self.budget.compact_threshold();
         let mut breaker = self.circuit_breaker.lock().await;
 
         match outcome {
             Ok(result) => {
                 let level = compress_level(&result);
-                // M-07（R-02）：压缩完成落审计（可追溯压缩区间与掉 token 量）
-                self.record_compress_audit(&result, level, tokens_before, new_tokens)
-                    .await;
                 if new_tokens > threshold {
                     Self::handle_oversize(&mut breaker, level, new_tokens, threshold)?;
                 } else {
@@ -486,40 +506,52 @@ impl ContextManager for ContextManagerImpl {
             // 检查是否触发压缩阈值（缓存计数，无需加锁）；超阈值先压缩再读消息，
             // 避免 compress 的写锁与下方读锁死锁（RwLock 不可重入）。
             // compress=off 时跳过压缩直通（C-18 软约束，用户显式关闭）。
-            let did_compress =
-                if compress_enabled && (current_tokens > threshold || need_predictive) {
-                    // C-29：熔断状态机在 Runtime 层，压缩前检查是否已熔断。
-                    {
-                        let breaker = self.circuit_breaker.lock().await;
-                        if breaker.should_trip() || breaker.is_thrashing() {
-                            tracing::warn!(
-                                fail_count = breaker.fail_count(),
-                                consecutive_oversize = breaker.consecutive_oversize(),
-                                "压缩熔断已触发，拒绝 build_chat_request"
-                            );
-                            metrics::record_error("context");
-                            metrics::record_compress(0, "skipped");
-                            return Err(RuntimeError::BudgetExceeded {
-                                used: current_tokens,
-                                budget: threshold,
-                            });
-                        }
-                    } // 熔断器锁释放
-                    self.compress(backup_before_compress).await?;
-                    true
-                } else {
-                    false
-                };
+            //
+            // CT-5 残留修复（2026-08-25 R2 审查）：read 路径在压缩**前**提取——
+            // 此后在压缩后的历史里提取，恰在 L3/L4 丢弃 fs.read 消息、最需要
+            // 恢复的场景提取恒空（design §3.10 要求的独立环形缓冲仍列为后续项，
+            // 本修复保证"压缩当次"注入有效）。
+            let will_compress = compress_enabled && (current_tokens > threshold || need_predictive);
+            let pre_compress_read_files = if will_compress {
+                let guard = self.messages.read().await;
+                let files = extract_read_files(&guard, post_compact_cfg.max_files);
+                drop(guard);
+                files
+            } else {
+                Vec::new()
+            };
+            let did_compress = if will_compress {
+                // C-29：熔断状态机在 Runtime 层，压缩前检查是否已熔断。
+                {
+                    let breaker = self.circuit_breaker.lock().await;
+                    if breaker.should_trip() || breaker.is_thrashing() {
+                        tracing::warn!(
+                            fail_count = breaker.fail_count(),
+                            consecutive_oversize = breaker.consecutive_oversize(),
+                            "压缩熔断已触发，拒绝 build_chat_request"
+                        );
+                        metrics::record_error("context");
+                        metrics::record_compress(0, "skipped");
+                        return Err(RuntimeError::BudgetExceeded {
+                            used: current_tokens,
+                            budget: threshold,
+                        });
+                    }
+                } // 熔断器锁释放
+                self.compress(backup_before_compress).await?;
+                true
+            } else {
+                false
+            };
 
             // 构建基础 system prompt：pipeline 启用时动态构建，否则用静态字段。
             // post-compact 注入在 base 之上叠加（无论 pipeline/static 都适用）。
             let base_system = self.build_base_system_prompt(&tool_schemas).await?;
 
             // C-09：post-compact 上下文恢复——压缩后重新注入最近读过的文件
+            //（路径已在压缩前提取，见上方 CT-5 残留修复）
             let system = if did_compress {
-                let guard = self.messages.read().await;
-                let read_files = extract_read_files(&guard, post_compact_cfg.max_files);
-                drop(guard);
+                let read_files = pre_compress_read_files;
                 if read_files.is_empty() {
                     base_system
                 } else {

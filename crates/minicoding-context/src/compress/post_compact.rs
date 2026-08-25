@@ -100,11 +100,22 @@ pub async fn inject_post_compact(
     let mut total_tokens = 0usize;
 
     for path_str in file_paths {
-        let full_path = if Path::new(path_str).is_absolute() {
+        // CTX-7（2026-08-25 R2 审查）：注入路径必须落在 workdir 内——绝对路径
+        // 此前直接读取，TOCTOU 窗口内被换成 symlink 可把任意文件内容回灌进
+        // system 段。组件级包含判定 + `..` 拒绝（与 journal validate 同口径）。
+        let joined = if Path::new(path_str).is_absolute() {
             Path::new(path_str).to_path_buf()
         } else {
             workdir.join(path_str)
         };
+        if !path_within_workdir(&joined, workdir) {
+            tracing::debug!(
+                file = %path_str,
+                "post-compact: 跳过 workdir 外的路径"
+            );
+            continue;
+        }
+        let full_path = joined;
 
         let content = match tokio::fs::read_to_string(&full_path).await {
             Ok(c) => c,
@@ -147,6 +158,18 @@ pub async fn inject_post_compact(
 }
 
 /// 按 token 数截断文本（保留前 `max_tokens` 个 token 对应的字符）。
+/// 组件级 workdir 包含判定（CTX-7）：拒绝 `..` 段与 workdir 外路径。
+fn path_within_workdir(path: &Path, workdir: &Path) -> bool {
+    for comp in path.components() {
+        if matches!(comp, std::path::Component::ParentDir) {
+            return false;
+        }
+    }
+    let p: Vec<_> = path.components().collect();
+    let w: Vec<_> = workdir.components().collect();
+    p.len() >= w.len() && p[..w.len()] == w[..]
+}
+
 fn truncate_to_tokens(text: &str, max_tokens: usize, tokenizer: &dyn Tokenizer) -> String {
     if tokenizer.count(text) <= max_tokens {
         return text.to_string();

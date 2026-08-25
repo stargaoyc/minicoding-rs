@@ -320,7 +320,22 @@ pub fn build_runtime(
                     Arc::new(tokenizer),
                     context_window,
                     Some(summary_provider.clone()),
-                );
+                )
+                // CT-4/CTX-8（2026-08-25 R2 审查）：熔断与 L2 摘要配置端到端接线
+                //（此前 builder 定义零生产调用、SummarizeConfig 硬编码 default）
+                .with_circuit_breaker_config(minicoding_context::CircuitBreakerConfig {
+                    fail_threshold: config.context.compress_breaker_fail_threshold,
+                    force_end_threshold: config.context.compress_breaker_force_end_threshold,
+                    thrash_threshold: config.context.compress_breaker_thrash_threshold,
+                    cooldown: std::time::Duration::from_secs(
+                        config.context.compress_breaker_cooldown_sec,
+                    ),
+                })
+                .with_summarize_config(minicoding_context::SummarizeConfig {
+                    ratio: config.context.summarize_ratio,
+                    max_summary_tokens: config.context.summarize_max_tokens,
+                    llm_timeout_secs: config.context.summarize_timeout_secs,
+                });
                 // M-07（R-02）：注入压缩审计 sink
                 mgr.set_audit(audit.clone());
                 #[cfg(feature = "extensions")]

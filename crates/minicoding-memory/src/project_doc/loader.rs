@@ -26,6 +26,14 @@ pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32_768;
 /// 截断标注（追加到截断内容末尾）。
 const TRUNCATED_MARKER: &str = "\n[... truncated]";
 
+/// 组件级路径包含判定（CTX-5）：`dir` 与 `base` 逐组件比较前缀，
+/// 消除裸字符串 `starts_with` 的兄弟目录误判与尾斜杠退化。
+fn path_within(dir: &Utf8Path, base: &Utf8Path) -> bool {
+    let d: Vec<_> = dir.components().collect();
+    let b: Vec<_> = base.components().collect();
+    d.len() >= b.len() && d[..b.len()] == b[..]
+}
+
 /// 项目文档加载器实现。
 ///
 /// 从 `repo_root` 逐级向下走到 `cwd`，每级目录按优先级
@@ -79,11 +87,16 @@ impl ProjectDocLoaderImpl {
     ///
     /// `cwd` 等于 `repo_root` 时返回 `[cwd]`；`cwd` 不在 `repo_root` 之下时
     /// 退化为 `[cwd]`（仅读取 cwd 一级，不向上回溯 `repo_root`）。
+    ///
+    /// CTX-5（2026-08-25 R2 审查）：包含性判定用**组件级**比较——裸字符串
+    /// `starts_with` 会把 `/repo2`（兄弟目录）误判为 `/repo` 的子目录，且
+    /// 尾斜杠形态不匹配时退化到 cwd 单级；最坏情况沿 parent 链一路加载到
+    /// 文件系统根的 AGENTS.md。
     fn dir_chain(&self) -> Vec<Utf8PathBuf> {
         if self.cwd.as_str() == self.repo_root.as_str() {
             return vec![self.cwd.clone()];
         }
-        if !self.cwd.starts_with(self.repo_root.as_str()) {
+        if !path_within(&self.cwd, &self.repo_root) {
             return vec![self.cwd.clone()];
         }
         let mut chain = Vec::new();
@@ -171,7 +184,16 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                 let Some(path) = find_project_doc(dir) else {
                     continue;
                 };
-                let content = fs::read_to_string(&path).await?;
+                // CTX-2（2026-08-25 R2 审查）：单个不可读文件 warn+跳过，
+                // 与 `load_sync` 同语义——此前 async 版 `?` 向上传播使整条
+                // 分层链失败，doc comment 却声称两版一致。
+                let content = match fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("skip unreadable project doc {}: {e}", path);
+                        continue;
+                    }
+                };
                 let trimmed = content.trim();
                 if trimmed.is_empty() {
                     continue;

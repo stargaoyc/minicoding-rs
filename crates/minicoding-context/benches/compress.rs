@@ -91,6 +91,7 @@ fn bench_compress(c: &mut Criterion) {
                             None,
                             false,
                             None,
+                            &minicoding_context::SummarizeConfig::default(),
                         )
                         .await
                         .expect("compress_pipeline should succeed");

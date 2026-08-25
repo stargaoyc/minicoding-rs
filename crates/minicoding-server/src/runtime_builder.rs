@@ -190,16 +190,34 @@ pub fn build_runtime(
 
     // 5. 构造 context manager（ContextManagerImpl + TiktokenTokenizer + 4 级压缩）
     //    L2 摘要 provider 用 small（如有）降本，回退到主 provider（与 CLI 一致）。
+    //    CT-4/CTX-8（2026-08-25 R2 审查）：熔断与 L2 摘要配置端到端接线。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
-                let context_window = 128_000;
-                Arc::new(ContextManagerImpl::new(
-                    system_prompt,
-                    Arc::new(tokenizer),
-                    context_window,
-                    Some(summary_provider.clone()),
-                ))
+                let context_window = summary_provider.capabilities().context_window;
+                Arc::new(
+                    ContextManagerImpl::new(
+                        system_prompt,
+                        Arc::new(tokenizer),
+                        context_window,
+                        Some(summary_provider.clone()),
+                    )
+                    .with_circuit_breaker_config(minicoding_context::CircuitBreakerConfig {
+                        fail_threshold: config.context.compress_breaker_fail_threshold,
+                        force_end_threshold: config.context.compress_breaker_force_end_threshold,
+                        thrash_threshold: config.context.compress_breaker_thrash_threshold,
+                        cooldown: std::time::Duration::from_secs(
+                            config.context.compress_breaker_cooldown_sec,
+                        ),
+                    })
+                    .with_summarize_config(
+                        minicoding_context::SummarizeConfig {
+                            ratio: config.context.summarize_ratio,
+                            max_summary_tokens: config.context.summarize_max_tokens,
+                            llm_timeout_secs: config.context.summarize_timeout_secs,
+                        },
+                    ),
+                )
             }
             Err(e) => {
                 tracing::warn!("Tiktoken 构造失败（{e}），降级为 SimpleContextManager（无压缩）");

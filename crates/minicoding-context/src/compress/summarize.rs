@@ -124,7 +124,10 @@ pub async fn summarize_old_messages(
         let total = messages.len();
         let from_index = to_summarize[0];
         let to_index = to_summarize[to_summarize.len() - 1];
-        let seq_of = |i: usize| anchor - (total as u64 - 1 - i as u64);
+        // CTX-3（2026-08-25 R2 审查）：与 mod.rs `seq_of` 同用 saturating_sub
+        // ——裸减法在 anchor < total-1-i（anchor 与历史长度口径不一致时）
+        // debug 下 panic、release 回绕出天文序号进审计与消息 metadata。
+        let seq_of = |i: usize| anchor.saturating_sub(total as u64 - 1 - i as u64);
         let from_seq = seq_of(from_index);
         let to_seq = seq_of(to_index);
         let dropped_tokens: usize = selected

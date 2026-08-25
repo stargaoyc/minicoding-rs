@@ -297,6 +297,9 @@ async fn mixed_order_falls_back_to_serial_in_llm_order() {
         .expect("turn ok");
 
     let seq = order.lock().expect("order lock").clone();
-    assert_eq!(seq, vec!["w".to_string(), "r".to_string()],
-        "写在前读在后时必须按 LLM 原始顺序全串行执行（read-after-write 保序）");
+    assert_eq!(
+        seq,
+        vec!["w".to_string(), "r".to_string()],
+        "写在前读在后时必须按 LLM 原始顺序全串行执行（read-after-write 保序）"
+    );
 }

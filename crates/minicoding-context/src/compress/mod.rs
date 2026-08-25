@@ -93,6 +93,7 @@ pub async fn compress_pipeline(
     provider: Option<&dyn LlmProvider>,
     backup_before_compress: bool,
     anchor_seq: Option<u64>,
+    summarize_config: &SummarizeConfig,
 ) -> Result<CompressResult, RuntimeError> {
     let mut result = CompressResult::default();
     let threshold = budget.compact_threshold();
@@ -117,7 +118,7 @@ pub async fn compress_pipeline(
             messages,
             tokenizer,
             p,
-            &SummarizeConfig::default(),
+            summarize_config,
             &mut result,
             anchor_seq,
         )
@@ -274,9 +275,17 @@ mod tests {
         let budget = TokenBudget::new(10_000); // threshold = (10000-4096-1024)*0.85 = 4148
         let mut msgs = vec![Message::user_text("hello"), Message::user_text("world")];
         // 10 tokens < 4148，不应触发任何压缩级别
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, None)
-            .await
-            .expect("compress_pipeline 应成功");
+        let result = compress_pipeline(
+            &mut msgs,
+            &tokenizer,
+            &budget,
+            None,
+            false,
+            None,
+            &SummarizeConfig::default(),
+        )
+        .await
+        .expect("compress_pipeline 应成功");
         assert_eq!(result.clipped_count, 0);
         assert_eq!(result.summarized_count, 0);
         assert_eq!(result.dropped_count, 0);
@@ -302,9 +311,17 @@ mod tests {
         let tokens_before = tokenizer.count_messages(&msgs);
         assert!(tokens_before > budget.compact_threshold());
 
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, None)
-            .await
-            .expect("compress_pipeline 应成功");
+        let result = compress_pipeline(
+            &mut msgs,
+            &tokenizer,
+            &budget,
+            None,
+            false,
+            None,
+            &SummarizeConfig::default(),
+        )
+        .await
+        .expect("compress_pipeline 应成功");
         // L1 应裁剪该 tool_result（9000 > 2000 阈值字符）
         assert!(result.clipped_count > 0, "L1 应裁剪大 tool_result");
         // 裁剪后应降至阈值下，L3/L4 不触发
@@ -335,9 +352,17 @@ mod tests {
         assert!(tokens_before > budget.compact_threshold());
 
         // anchor=30：追溯区间 [1,10]（丢弃最旧 10 条）
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, Some(30))
-            .await
-            .expect("compress_pipeline 应成功");
+        let result = compress_pipeline(
+            &mut msgs,
+            &tokenizer,
+            &budget,
+            None,
+            false,
+            Some(30),
+            &SummarizeConfig::default(),
+        )
+        .await
+        .expect("compress_pipeline 应成功");
         // M-07：L3 丢弃区间与 token 量
         assert_eq!(
             result.dropped_range,
@@ -381,9 +406,17 @@ mod tests {
         assert!(tokens_before > budget.compact_threshold());
 
         // anchor=30：L3 丢 [1,10]，L4 丢 [11,14]（10 字符 ×4 条）
-        let result = compress_pipeline(&mut msgs, &tokenizer, &budget, None, false, Some(30))
-            .await
-            .expect("compress_pipeline 应成功");
+        let result = compress_pipeline(
+            &mut msgs,
+            &tokenizer,
+            &budget,
+            None,
+            false,
+            Some(30),
+            &SummarizeConfig::default(),
+        )
+        .await
+        .expect("compress_pipeline 应成功");
         // L3 丢弃 10 条
         assert_eq!(result.dropped_count, 10, "L3 应丢弃 10 条");
         // M-07：L4 追溯区间（L3 后剩 20 条 200 tokens，丢 3 条 → 170 ≤ 阈值 [11,13]）
@@ -435,6 +468,7 @@ mod tests {
             Some(&provider),
             false,
             Some(10),
+            &SummarizeConfig::default(),
         )
         .await
         .expect("compress_pipeline 应成功");

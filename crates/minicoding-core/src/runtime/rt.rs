@@ -120,9 +120,9 @@ pub struct Runtime {
     pub(crate) denial_detector: Arc<dyn crate::sandbox::SandboxDenialDetector>,
     /// 当前 turn 内 LLM 迭代下标（0-based，每次循环迭代覆写）。
     ///
-    /// CORE-8（2026-08-25 R2 审查）：字段文档此前声称"run_turn 入口自增的会话
+    /// CORE-8（2026-08-25 R2 审查）：字段文档此前声称 "`run_turn` 入口自增的会话
     /// 轮次号"与实现相反——实际存的是 `for iter in 0..max_iters` 的迭代值，
-    /// `HookInput.turn`/`PermissionContext.turn` 拿到的是**本 turn 第几次工具
+    /// `HookInput.turn` / `PermissionContext.turn` 拿到的是**本 turn 第几次工具
     /// 循环**而非第几个用户轮次。按实现如实修正语义描述；跨 turn 轮次号无
     /// 消费方，如未来需要应另立 `session_turn` 计数器而非复用此字段。
     pub(crate) current_turn: std::sync::atomic::AtomicU32,
@@ -491,7 +491,7 @@ impl Runtime {
             // turn 开始：标记运行中（`cancel()` 仅在 turn 运行时生效，
             // 见字段注释）；guard drop 时复位（含 `?` 早退/panic 路径）。
             self.turn_active.store(true, std::sync::atomic::Ordering::SeqCst);
-            let _turn_guard = TurnActiveGuard(&self.turn_active);
+            let turn_guard = TurnActiveGuard(&self.turn_active);
 
             // turn 开始：重置沙箱拒绝熔断器（单 turn 内有效，C-30）
             self.sandbox_breaker.reset();
@@ -868,8 +868,8 @@ impl Runtime {
             // CORE-9（2026-08-25 R2 审查）：先释放 turn_active 再重建——若顺序
             // 相反，两步之间到达的 `cancel()` 会取消**新** token，下一次 run_turn
             // 秒取消一轮（再下一轮自愈）。窗口内新 run_turn 被 `_turn_gate` 排除，
-            // 无其他竞态。
-            drop(_turn_guard);
+            // 无其他竞态。显式 drop 复位 guard（`_` 前缀仅为避免未读告警）。
+            drop(turn_guard);
             *self
                 .cancel_token
                 .lock()

@@ -127,7 +127,7 @@ impl ToolContext {
 
     /// 链式注入协作取消令牌（CORE-3，2026-08-25 R2 审查）。
     ///
-    /// 此前每次构造新建孤立 token，Runtime 的 cancel_token 从不下传、22 个内置
+    /// 此前每次构造新建孤立 token，Runtime 的 `cancel_token` 从不下传、22 个内置
     /// 工具无一读取——协作式取消契约空转，Ctrl-C 只能靠 drop future 硬中断。
     /// 注入后长任务工具可轮询 `canceller.is_cancelled()` 优雅收尾（分批落盘/
     /// 清理子进程后再返回）。

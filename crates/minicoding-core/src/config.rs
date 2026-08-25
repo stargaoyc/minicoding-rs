@@ -116,6 +116,22 @@ pub struct ContextConfig {
     pub post_compact_token_budget: usize,
     /// C-09：post-compact 单文件最大 token 数（默认 `5000`）。
     pub post_compact_max_tokens_per_file: usize,
+    /// CT-4（2026-08-25 R2 审查）：压缩熔断"中止本轮"阈值（默认 3）。
+    pub compress_breaker_fail_threshold: usize,
+    /// CT-4：压缩熔断"强制 TurnEnd"阈值（默认 5）。
+    pub compress_breaker_force_end_threshold: usize,
+    /// CT-4：压缩 Thrash 判定阈值（默认 2）。
+    pub compress_breaker_thrash_threshold: usize,
+    /// CT-4：熔断后半开冷却窗口秒数（默认 60；0 = 永不放行）。
+    pub compress_breaker_cooldown_sec: u64,
+    /// CTX-8（2026-08-25 R2 审查）：L2 摘要选取比例（默认 0.5）。
+    pub summarize_ratio: f64,
+    /// CTX-8：单次摘要最大 token 数（默认 200）。
+    pub summarize_max_tokens: usize,
+    /// CTX-8：L2 摘要 LLM 调用超时秒数（默认 30）。
+    ///
+    /// 此前该值在 context crate 内硬编码，端到端不可配。
+    pub summarize_timeout_secs: u64,
 }
 
 impl Default for ContextConfig {
@@ -131,6 +147,13 @@ impl Default for ContextConfig {
             post_compact_max_files: 5,
             post_compact_token_budget: 50_000,
             post_compact_max_tokens_per_file: 5_000,
+            compress_breaker_fail_threshold: 3,
+            compress_breaker_force_end_threshold: 5,
+            compress_breaker_thrash_threshold: 2,
+            compress_breaker_cooldown_sec: 60,
+            summarize_ratio: 0.5,
+            summarize_max_tokens: 200,
+            summarize_timeout_secs: 30,
         }
     }
 }
@@ -341,8 +364,7 @@ pub fn resolve_env_vars(config: &mut RuntimeConfig) {
 pub fn load_config() -> Result<RuntimeConfig, RuntimeError> {
     // CORE-14（2026-08-25 R2 审查）：错误类型收敛为 `RuntimeError::Config`——
     // 库 crate 边界不再返回裸 `String`（AGENTS §2.3 thiserror 约定）。
-    let config_path =
-        paths::config_path().map_err(|e| RuntimeError::Config(e.to_string()))?;
+    let config_path = paths::config_path().map_err(|e| RuntimeError::Config(e.to_string()))?;
 
     if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)
@@ -374,8 +396,8 @@ pub fn load_config() -> Result<RuntimeConfig, RuntimeError> {
                     return Ok(lkg_cfg);
                 }
                 return Err(RuntimeError::Config(format!(
-                        "config.toml 解析失败且无 last-known-good: {e}"
-                    )));
+                    "config.toml 解析失败且无 last-known-good: {e}"
+                )));
             }
         }
     }

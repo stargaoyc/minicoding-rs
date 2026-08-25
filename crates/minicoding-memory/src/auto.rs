@@ -176,6 +176,10 @@ impl AutoMemory {
         category: AutoCategory,
         confidence: f64,
     ) -> Result<usize, MemoryError> {
+        // CTX-1（2026-08-25 R2 审查）：读-改-写全程持 save_lock——此前仅 save
+        // 半程持锁，并发 add_entry（Arc<AutoMemory> 跨会话共享）同基线各自
+        // 追加后串行落盘，后者整表覆盖前者丢更新。load_entries 不取锁，无死锁。
+        let _save_guard = self.save_lock.lock().await;
         let mut entries = self.load_entries().await?;
         let now = OffsetDateTime::now_utc();
         let confidence = confidence.clamp(0.0, 1.0);
@@ -201,7 +205,7 @@ impl AutoMemory {
         evict_until_fit(&mut entries);
 
         let count = entries.len();
-        self.save_entries(&entries).await?;
+        self.save_entries_locked(&entries).await?;
         Ok(count)
     }
 
@@ -210,6 +214,10 @@ impl AutoMemory {
     /// # Errors
     /// 删除失败时返回 `MemoryError`。
     pub async fn clear(&self) -> Result<(), MemoryError> {
+        // CTX-6（2026-08-25 R2 审查）：与 add_entry/save 互斥——否则并发交错可
+        // 复活刚清空的条目（add 的 RMW 以清空前状态为基线落盘）。同时重置
+        // mtime 基准使后续 load 重新读盘，不依赖已删除文件的旧 mtime 缓存。
+        let _save_guard = self.save_lock.lock().await;
         let _ = fs::remove_file(&self.path).await;
         let _ = fs::remove_file(&self.index_path).await;
         *lock(&self.cached_entries) = Some(Vec::new());
@@ -228,10 +236,8 @@ impl AutoMemory {
         Ok(self.render(&entries))
     }
 
-    /// 原子写入索引与渲染后的正文，刷新缓存。
-    async fn save_entries(&self, entries: &[AutoEntry]) -> Result<(), MemoryError> {
-        // 串行化并发 save（2026-08-25 审查 MM-5，见字段注释）
-        let _save_guard = self.save_lock.lock().await;
+    /// 原子写入索引与渲染后的正文，刷新缓存（调用方须已持 `save_lock`）。
+    async fn save_entries_locked(&self, entries: &[AutoEntry]) -> Result<(), MemoryError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).await?;
         }
