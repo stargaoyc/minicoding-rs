@@ -32,6 +32,9 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
+# TUI 入口 tracing subscriber（文件日志，见 main.rs init_tui_tracing）
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "registry"] }
+tracing-appender = { workspace = true }
 anyhow = { workspace = true }
 camino = { workspace = true }
 time = { workspace = true }
@@ -43,3 +46,6 @@ crossterm = { workspace = true }
 # 继承 workspace lints（clippy::all + pedantic deny）
 [lints]
 workspace = true
+
+[dev-dependencies]
+minicoding-core = { workspace = true, features = ["test-util"] }

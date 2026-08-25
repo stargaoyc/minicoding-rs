@@ -24,7 +24,11 @@ use crate::tool::ToolContext;
 fn structured_denial_errno(error: &crate::model::ToolError) -> Option<i32> {
     match error {
         crate::model::ToolError::Io(e) => match e.raw_os_error() {
+            // EACCES 权威信号仅限 unix（Windows code 13 语义不同）
+            #[cfg(not(target_os = "windows"))]
             Some(code @ (ERRNO_EPERM | ERRNO_EACCES)) => Some(code),
+            #[cfg(target_os = "windows")]
+            Some(code @ ERRNO_EPERM) => Some(code),
             _ => None,
         },
         _ => None,
@@ -43,6 +47,13 @@ const ERRNO_EPERM: i32 = 1;
 const ERRNO_EPERM: i32 = 5;
 
 /// `EACCES`（unix errno 13，权限不足）。
+///
+/// Windows 的 raw code 13 是
+/// `ERROR_INVALID_DATA`（数据错误），与权限无关——若不平台化，普通业务 IO
+/// 失败携带 code 13 会被误判为权威沙箱拒绝并计入 C-30 熔断（累计 5 次硬熔断
+/// 误杀正常负载）。Windows 权限拒绝统一为 code 5（上方 `ERRNO_EPERM`），
+/// 故 Windows 下不设 EACCES 权威信号。
+#[cfg(not(target_os = "windows"))]
 const ERRNO_EACCES: i32 = 13;
 
 impl Runtime {
@@ -140,13 +151,45 @@ impl Runtime {
         tool: &str,
         error: &crate::model::ToolError,
     ) -> Option<(ToolCallId, ToolResult)> {
-        Self::build_denial_result(
+        let result = Self::build_denial_result(
             self.denial_detector.as_ref(),
             self.sandbox_breaker.as_ref(),
             tool,
             error,
         )
-        .map(|r| (call_id.clone(), r))
+        .map(|r| (call_id.clone(), r));
+        // 沙箱拒绝落 audit.log——authoritative
+        // 熔断是最值得取证的事件，此前仅 tracing（非 append-only、无 0600
+        // 保证），与 §5.5 审计标准不对齐。best-effort：审计失败不影响拒绝语义。
+        if let Some((_, r)) = &result
+            && let Some(info) = &r.metadata.sandbox_denied
+        {
+            // 权威性代理：结构化 errno 存在 ⇒ 标记合成路径 ⇒ authoritative
+            let authoritative = structured_denial_errno(error).is_some();
+            let rec = crate::storage::AuditRecord {
+                ts: time::OffsetDateTime::now_utc(),
+                session: self.session.id.clone(),
+                kind: crate::storage::AuditKind::ToolResult,
+                tool: Some(tool.to_string()),
+                decision: Some("sandbox_denied".to_string()),
+                detail: format!(
+                    "authoritative={authoritative} kind={kind:?} breaker={breaker} detail={detail}",
+                    kind = info.kind,
+                    breaker = self.sandbox_breaker.count(),
+                    detail = info.detail
+                ),
+            };
+            let audit = self.audit.clone();
+            return result.map(|(id, r)| {
+                tokio::spawn(async move {
+                    if let Err(e) = audit.record(rec).await {
+                        tracing::warn!(error = %e, "sandbox denial audit failed (best-effort)");
+                    }
+                });
+                (id, r)
+            });
+        }
+        result
     }
 
     /// 沙箱拒绝检测（为静态辅助：只读并行桶与副作用串行路径共用）。
@@ -332,12 +375,27 @@ mod tests {
             structured_denial_errno(&eperm_io_error()),
             Some(ERRNO_EPERM)
         );
-        assert_eq!(
-            structured_denial_errno(&crate::model::ToolError::Io(
-                std::io::Error::from_raw_os_error(ERRNO_EACCES)
-            )),
-            Some(ERRNO_EACCES)
-        );
+        // EACCES 权威信号仅 unix 存在；Windows 下 code 13 是
+        // ERROR_INVALID_DATA，不得命中（平台条件断言）
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                structured_denial_errno(&crate::model::ToolError::Io(
+                    std::io::Error::from_raw_os_error(ERRNO_EACCES)
+                )),
+                Some(ERRNO_EACCES)
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                structured_denial_errno(&crate::model::ToolError::Io(
+                    std::io::Error::from_raw_os_error(13)
+                )),
+                None,
+                "Windows code 13 = ERROR_INVALID_DATA，不是权限拒绝"
+            );
+        }
         // 非 deny-list errno 不构成权威信号
         assert_eq!(
             structured_denial_errno(&crate::model::ToolError::Io(

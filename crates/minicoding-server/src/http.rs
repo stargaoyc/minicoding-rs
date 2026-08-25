@@ -445,14 +445,23 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
-/// 请求是否携带有效凭证（`Authorization: Bearer <t>` 或 `?token=<t>`——后者仅供
-/// 浏览器 `EventSource` 使用，其无法自定义请求头）。
+/// 请求是否携带有效凭证。
+///
+/// `?token=` 查询参数**仅限 SSE 事件端点**
+/// （浏览器 `EventSource` 无法自定义请求头，这是唯一豁免场景）——查询串会
+/// 落入反代访问日志/浏览器历史，POST/DELETE 等常规端点一律仅接受 Bearer
+/// header，把泄漏面压到最小。
 fn request_authorized(req: &axum::extract::Request, expected: &str) -> bool {
     if let Some(v) = req.headers().get(axum::http::header::AUTHORIZATION)
         && let Ok(s) = v.to_str()
         && let Some(bearer) = s.strip_prefix("Bearer ")
     {
         return constant_time_eq(bearer, expected);
+    }
+    // 查询参数豁免：仅 `/sessions/{id}/events`（SSE）
+    let path = req.uri().path();
+    if !path.starts_with("/sessions/") || !path.ends_with("/events") {
+        return false;
     }
     req.uri().query().is_some_and(|q| {
         q.split('&').any(|kv| {
@@ -489,10 +498,14 @@ pub async fn serve(cfg: ServerConfig) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .map_err(|e| anyhow::anyhow!("bind {addr} 失败: {e}", addr = cfg.bind))?;
-    // 输出实际监听地址（端口 0 时由 OS 分配，sidecar 依赖此日志解析端口）
+    // 输出实际监听地址（端口 0 时由 OS 分配）。：
+    // 追加**机读行** `MINICODING_LISTENING_PORT=<port>`——desktop sidecar 此前
+    // 依赖 rfind(':') 启发式解析 tracing 日志文本，stdout fmt layer 未关 ANSI
+    // 时色码即可破坏提取。机读行与 `SERVER_TOKEN=` 同风格，解析方优先匹配。
     let local_addr = listener
         .local_addr()
         .map_err(|e| anyhow::anyhow!("获取监听地址失败: {e}"))?;
+    println!("MINICODING_LISTENING_PORT={}", local_addr.port());
     tracing::info!(addr = %local_addr, web_dir = ?cfg.web_dir, "minicoding-server 启动");
     axum::serve(listener, app)
         .await
@@ -593,6 +606,20 @@ async fn create_session(
     if body.plan_mode && params.permission_mode == PermissionMode::Default {
         params.permission_mode = PermissionMode::Plan;
     }
+    // C-22 二次确认补口——此前 confirm_danger 只
+    // 门控 preset 路径，请求体直携 `permission_mode: "bypass_permissions"` 可
+    // 无确认创建全自动会话。最终解析出的模式为 BypassPermissions 时一律要求
+    // 显式确认（preset full-access 已确认的路径天然满足，不受影响）。
+    if params.permission_mode == PermissionMode::BypassPermissions
+        && body.confirm_danger != Some(true)
+    {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "权限模式 `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+                      自动放行。请在 UI 确认红色警告后在请求体携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        });
+    }
 
     let session = state.mgr.create_session(Some(params))?;
     let session_id = session.session_id().clone();
@@ -630,7 +657,9 @@ fn ensure_danger_preset_confirmed(
 /// - `full-access`：`DangerFullAccess` + `BypassPermissions` 全自动——沙箱外运行，
 ///   仅受信隔离容器内使用（C-22：red 警告 + 显式选定；API 传参视为显式选定，
 ///   返回警告供调用方/日志展示）。
-fn build_preset_policy(
+/// # Errors
+/// 未知预设名时返回 400（可选值见函数体 `match`）。
+pub fn build_preset_policy(
     preset: &str,
     workdir: &Utf8PathBuf,
 ) -> Result<(PermissionMode, SandboxPolicy, Option<String>), HttpError> {
@@ -780,6 +809,9 @@ struct UndoBody {
 struct SetPermissionModeBody {
     /// 目标权限模式（`default`/`accept_edits`/`plan`/`auto`/`bypass_permissions`）。
     mode: PermissionMode,
+    /// 升级到 `bypass_permissions` 时必带（C-22 二次确认）。
+    #[serde(default)]
+    confirm_danger: Option<bool>,
 }
 
 /// `POST /sessions/{id}/undo` — 回滚最近 n 批文件改动。
@@ -875,10 +907,32 @@ async fn set_permission_mode(
     Path(session_id): Path<String>,
     Json(body): Json<SetPermissionModeBody>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
+    // 升级到 BypassPermissions 与会话创建同门控
+    // （C-22：显式选定 + 二次确认）。降级方向（离开 Bypass）无需确认。
     let session = state.mgr.get_or_load(&session_id).await?;
+    if body.mode == PermissionMode::BypassPermissions && body.confirm_danger != Some(true) {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "权限模式 `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+                      自动放行。请在 UI 确认红色警告后携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        });
+    }
     let mode = body.mode;
     session.runtime.plan_controller().set_mode(mode).await;
     tracing::info!(session = %session_id, to = ?mode, "permission mode switched via HTTP");
+    //  配套：权限模式变更落审计（AGENTS.md §5.5——此前仅 info 日志）。
+    let audit_rec = minicoding_core::storage::AuditRecord {
+        ts: time::OffsetDateTime::now_utc(),
+        session: session_id.clone(),
+        kind: minicoding_core::storage::AuditKind::PermissionResolved,
+        tool: None,
+        decision: Some(format!("mode_switch:{mode:?}")),
+        detail: "permission mode switched via HTTP endpoint".to_string(),
+    };
+    if let Err(e) = session.runtime.audit().record(audit_rec).await {
+        tracing::warn!(error = %e, "permission-mode switch audit failed (best-effort)");
+    }
     Ok(Json(serde_json::json!({ "ok": true, "mode": mode })))
 }
 
@@ -1120,13 +1174,28 @@ mod tests {
     #[tokio::test]
     async fn auth_query_token_accepted_for_sse() {
         let app = test_app(Some("secret-token"));
-        // EventSource 场景：?token= 查询参数（此处用 /config 端点验证 query 通道）
+        // ?token= 豁免仅限 SSE 事件端点（EventSource 无法自定义 header）
+        let req = axum::http::Request::builder()
+            .uri("/sessions/s1/events?token=secret-token")
+            .body(Body::empty())
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert!(
+            resp.status() != StatusCode::UNAUTHORIZED,
+            "SSE 端点 ?token= 应通过认证（会话不存在是另一回事）"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_query_token_rejected_for_non_sse() {
+        let app = test_app(Some("secret-token"));
+        // 非 SSE 端点不再接受 query token（泄漏面收缩）
         let req = axum::http::Request::builder()
             .uri("/config?token=secret-token")
             .body(Body::empty())
             .expect("req");
         let resp = app.oneshot(req).await.expect("resp");
-        assert_eq!(resp.status(), StatusCode::OK, "?token= 应放行");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "?token= 仅限 SSE");
     }
 
     #[tokio::test]

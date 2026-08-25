@@ -28,7 +28,7 @@
 - `docs/design.md` §15：OTel 初始设计（span 名、采样策略、资源属性）
 - `docs/security.md`：审计日志、权限决策记录
 - `docs/rules.md` C-29/C-30：压缩熔断/沙箱拒绝不可被 LLM 绕过，需可观测
-- `docs/modules.md` §15.7：各 crate 的可观测性职责
+- `docs/modules.md` §15.2（crate 职责）与 `docs/observability.md` 本篇：可观测性职责
 
 本文档**扩展** `design.md` §15，补充 metrics 设计和 span 覆盖盲区。
 

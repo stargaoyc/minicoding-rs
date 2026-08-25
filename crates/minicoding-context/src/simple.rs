@@ -69,6 +69,7 @@ impl ContextManager for SimpleContextManager {
                 stop: Vec::new(),
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             };
             Ok(ChatRequest {
                 system: self.system_prompt.clone(),

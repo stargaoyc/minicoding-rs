@@ -51,7 +51,6 @@ ts-rs = { workspace = true, optional = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-hyper = { version = "1", features = ["http1", "http2"] }
 clap = { workspace = true }
 
 # OS keyring 凭证 fallback（C-04：sidecar 模式下 API key 从 keyring 读取，不通过参数/env 传递）
@@ -76,6 +75,7 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+minicoding-core = { workspace = true, features = ["test-util"] }
 # F1（测试时钟改造）：`start_paused = true` 虚拟时钟需要 test-util
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }

@@ -170,6 +170,7 @@ async fn call_llm_summary(provider: &dyn LlmProvider, input: &str) -> Result<Str
             stop: Vec::new(),
             seed: None,
             thinking_budget_tokens: None,
+            cache_key: None,
         },
     };
 

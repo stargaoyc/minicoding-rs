@@ -4,4 +4,4 @@
 
 mod interactive;
 
-pub use interactive::run_interactive_session;
+pub use interactive::{run_interactive_session, run_interactive_session_with_memory_slot};
