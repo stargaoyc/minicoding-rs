@@ -221,7 +221,7 @@ impl Runtime {
         } else {
             dispatch_cfg
         };
-        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+        let is_hard_deny = matches!(verdict, Verdict::Deny(_));
 
         // PreToolUse 直出决策与合并 verdict 冲突时取严（Hook Allow 不能越过重查 Deny）
         let pre_decision = match (&pre_decision, &verdict) {
@@ -245,7 +245,7 @@ impl Runtime {
                 },
                 side_effect,
                 &dispatch_cfg,
-                is_builtin_deny,
+                is_hard_deny,
             )
             .await?
         };
@@ -459,13 +459,14 @@ impl Runtime {
     /// 返回 `(Decision, Option<prompt_id>, Option<audit_note>)`：`prompt_id` 为
     /// `Some` 表示经用户交互；`audit_note` 为 `Some` 时覆盖审计 detail（Always
     /// 决策折叠后仍能区分"持久化@目录"/"会话级"来源，2026-08-25 审查 S-1）。
+    #[allow(clippy::too_many_lines)] // Ask 分支含会话缓存/持久化查表/Hook/交互四段决策路径，拆分反而切断因果链
     async fn resolve_decision(
         &self,
         verdict: &Verdict,
         call: &ToolCall,
         side_effect: SideEffect,
         dispatch_cfg: &DispatchConfig,
-        is_builtin_deny: bool,
+        is_hard_deny: bool,
     ) -> Result<(Decision, Option<String>, Option<String>), RuntimeError> {
         match verdict {
             Verdict::Allow => Ok((Decision::Allow, None, None)),
@@ -498,7 +499,7 @@ impl Runtime {
                     return Err(RuntimeError::Hook(fatal.to_string()));
                 }
                 match result.decision {
-                    HookDecision::Allow if !is_builtin_deny => {
+                    HookDecision::Allow if !is_hard_deny => {
                         // Hook 自动批准，跳过 prompter
                         Ok((Decision::Allow, None, None))
                     }
@@ -510,16 +511,52 @@ impl Runtime {
                     }
                     _ => {
                         // fs.* 类工具取 input.path 相对路径（持久化查表与目录
-                        // 粒度 Always 持久化共用）
-                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
-                        // 遗留#3：持久化规则查表（仅当本 prompt 提供 Always 选项——
-                        // C-23 受保护文件的 restricted ask 不查，防绕过）
-                        if prompt
+                        // 粒度 Always 持久化共用）。SEC-3（2026-08-25 R2 审查）：
+                        // 先做词法规范化——原始输入可能含 `..`/`.` 段，未规范化
+                        // 的前缀匹配会把 `src/gen/../secret.txt` 误判进已批准的
+                        // `src/gen` 目录范围。
+                        let rule_path = call
+                            .input
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .map(crate::util::normalize_lexical_rel_path);
+                        // SEC-1（2026-08-25 R2 审查）：持久化查表与会话级缓存
+                        // **同门控**——仅当本 prompt 提供 Always 选项时才可命中。
+                        // C-23/C-27 的 restricted ask（options 不含 AllowAlways）
+                        // 若被此前对同工具的 Always 批准静默放行，即击穿"不可
+                        // Always"通道（如指令性 auto.md 写入的记忆投毒路径）。
+                        let always_allowed = prompt
                             .options
-                            .contains(&crate::policy::PromptOption::AllowAlways)
-                            && let Some(decision) = self.lookup_persisted_decision(call, rule_path)
-                        {
-                            return Ok((decision, None, None));
+                            .contains(&crate::policy::PromptOption::AllowAlways);
+                        if always_allowed {
+                            // S-1：无路径工具的 AllowAlways 会话级缓存命中免弹窗
+                            //（会话结束即失效，不跨项目）。SEC-14：审计注记保留
+                            // "session-scoped cache hit" 来源，与首次批准同源可追溯。
+                            if self
+                                .session_allows
+                                .lock()
+                                .is_ok_and(|s| s.contains(&call.name))
+                            {
+                                tracing::info!(
+                                    tool = %call.name,
+                                    "session-scoped allow hit, skipping prompt"
+                                );
+                                return Ok((
+                                    Decision::Allow,
+                                    None,
+                                    Some(format!(
+                                        "user allowed {tool} always \
+                                         (session-scoped cache hit)",
+                                        tool = call.name
+                                    )),
+                                ));
+                            }
+                            // 遗留#3：持久化规则查表
+                            if let Some(decision) =
+                                self.lookup_persisted_decision(call, rule_path.as_deref())
+                            {
+                                return Ok((decision, None, None));
+                            }
                         }
                         // Hook 未决策 → 走 prompter 交互
                         let prompt_id = prompt.id.clone();
@@ -535,8 +572,8 @@ impl Runtime {
                         // 持久化（`tool@目录`，与 decision_for_path 查询对齐）；
                         // 无路径工具只做会话级放行——杜绝"一次按键=跨会话/跨项目
                         // 全局永久放行"。
-                        let rule_dir = rule_path.and_then(|p| {
-                            camino::Utf8Path::new(p)
+                        let rule_dir = rule_path.as_ref().and_then(|p| {
+                            camino::Utf8Path::new(p.as_str())
                                 .parent()
                                 .filter(|dir| !dir.as_str().is_empty())
                                 .map(std::string::ToString::to_string)

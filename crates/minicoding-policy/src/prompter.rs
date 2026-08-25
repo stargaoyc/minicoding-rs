@@ -103,7 +103,7 @@ impl PermissionPrompter for InteractivePrompter {
                 } else {
                     eprintln!("[permission] [y]允许 / [a]始终允许 / [n/N]拒绝");
                 }
-                match tokio::task::spawn_blocking(read_ynad).await {
+                match tokio::task::spawn_blocking(move || read_ynad(deny_always_offered)).await {
                     Ok(Some(Decision::Allow)) => Decision::Allow,
                     Ok(Some(d @ (Decision::AllowAlways | Decision::DenyAlways(_)))) => d,
                     _ => Decision::Deny("denied by user".to_string()),
@@ -121,20 +121,25 @@ impl PermissionPrompter for InteractivePrompter {
     }
 }
 
-/// 读取一行并解析 y/a/n（遗留#3）：`Some(Allow)`=y、`Some(AllowAlways)`=a，
-/// 其余（n/N/空/无法解析）=一次性 [`Decision::Deny`]。`DenyAlways` 不经键盘
-/// 映射——CLI 提示层仅在选项集含 `DenyAlways` 时提示 `N`，当前 v1 统一折叠
-/// 为一次性 Deny（持久化拒绝规则由 Web/TUI 的显式按钮路径写入）。
-fn read_ynad() -> Option<Decision> {
+/// 读取一行并解析 y/a/n/N（遗留#3 + SEC-12）：`Some(Allow)`=y、
+/// `Some(AllowAlways)`=a、大写 `N`=持久化 [`Decision::DenyAlways`]（仅当本
+/// prompt 实际提供 `DenyAlways` 选项时——与提示文案"[N]始终拒绝"兑现一致；
+/// 此前永不返回 DenyAlways，承诺与行为背离）、其余（n/空/无法解析）=
+/// 一次性 [`Decision::Deny`]。
+fn read_ynad(deny_always_offered: bool) -> Option<Decision> {
     use std::io::BufRead;
     let mut line = String::new();
     let stdin = std::io::stdin();
     if stdin.lock().read_line(&mut line).is_err() {
         return None;
     }
-    match line.trim().to_ascii_lowercase().as_str() {
+    let trimmed = line.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(Decision::Allow),
         "a" => Some(Decision::AllowAlways),
+        _ if trimmed == "N" && deny_always_offered => {
+            Some(Decision::DenyAlways("denied always by user".to_string()))
+        }
         _ => Some(Decision::Deny("denied by user".to_string())),
     }
 }

@@ -30,8 +30,10 @@ mod driver;
 mod external;
 mod hardening;
 
+/// Linux Landlock 驱动（`probe_fs_abi`/`net_restriction_supported` 供 doctor
+/// 如实报告内核实际能力，SEC-2）。
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 
 #[cfg(target_os = "macos")]
 mod macos;

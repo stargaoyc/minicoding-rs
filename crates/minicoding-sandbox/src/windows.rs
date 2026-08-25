@@ -35,23 +35,23 @@ const CREATE_SUSPENDED: u32 = 0x00000004;
 /// `apply` 设置 `CREATE_SUSPENDED`，`post_spawn` 创建 Job Object 并恢复线程。
 /// 存储策略供 `post_spawn` 使用（Windows 不支持 `pre_exec`，策略无法在闭包中传递）。
 pub struct WindowsJobDriver {
-    /// 最近一次 `apply` 的策略快照（供 `post_spawn` 读取）。
-    /// 使用 `Mutex` 保证线程安全（`SandboxDriver: Send + Sync`）。
+    /// 最近 `apply` 的策略快照队列（FIFO，供 `post_spawn` 按序消费）。
     ///
-    /// S24 已知限制（文档化）：共享同一 driver 实例**并发** spawn 时，
-    /// apply(A)/apply(B)/post_spawn(A) 交错会使 A 拿到 B 的策略。实际无风险：
-    /// Runtime 对副作用工具严格串行（design.md §2.3 规则 2），且 builder 每个
-    /// Runtime 独立 `detect_driver()`——不存在跨 Runtime 共享 driver 的路径。
-    /// 若未来引入并发 spawn 场景，需改为 pid→policy 映射或 apply 返回句柄。
-    last_policy: std::sync::Mutex<Option<SandboxPolicy>>,
-    /// 活跃 Job Object 句柄（2026-08-25 审查 §6.2-S5）。
+    /// S24 已知限制（文档化）：共享同一 driver 实例**并发** spawn 时（如前台
+    /// shell.run 与后台 shell.background 同时启动），apply/post_spawn 交错可能
+    /// 使策略错配。SEC-4（2026-08-25 R2 审查）将单槽改为 FIFO 队列：串行场景
+    /// 语义不变；交错场景下消费顺序确定（先 apply 先消费），残余风险为"A 拿
+    /// 到 B 的策略"而非"拿到 None 裸奔 resume"。彻底消除需扩展
+    /// `SandboxDriver` trait 的 apply↔post_spawn 关联句柄（列入 roadmap）。
+    last_policy: std::sync::Mutex<std::collections::VecDeque<SandboxPolicy>>,
+    /// pid → 活跃 Job Object 句柄表。
     ///
-    /// 此前 `assign_process_to_job` 后 JobHandle 立即 drop——运行期失去 kill
-    /// 整个 Job 的能力，`KILL_ON_JOB_CLOSE` 的泄漏防护承诺落空（该标志绑定
-    /// "最后句柄关闭"事件）。句柄保存在驱动内：随驱动（即 Runtime）drop 时
-    /// 关闭并按 `KILL_ON_JOB_CLOSE` 终止残留沙箱子进程。串行 spawn 不变式下
-    /// 同一时刻至多一个活跃 Job。
-    active_job: std::sync::Mutex<Option<JobHandle>>,
+    /// SEC-4（2026-08-25 R2 审查）：此前为单槽 `Option<JobHandle>`——后台 shell
+    /// 运行中下一条前台命令的 post_spawn 会覆盖槽位，旧 JobHandle drop 触发
+    /// `KILL_ON_JOB_CLOSE` **静默杀死整个后台进程树**。改为按 pid 键控；过期
+    /// 条目（ActiveProcesses==0）在每次 post_spawn 时惰性清理（关闭句柄仅释放
+    /// 内核对象，进程已退出无杀灭副作用）。句柄随驱动 drop 时统一关闭兜底。
+    active_jobs: std::sync::Mutex<std::collections::HashMap<u32, JobHandle>>,
 }
 
 impl WindowsJobDriver {
@@ -59,8 +59,8 @@ impl WindowsJobDriver {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            last_policy: std::sync::Mutex::new(None),
-            active_job: std::sync::Mutex::new(None),
+            last_policy: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            active_jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -71,6 +71,58 @@ impl Default for WindowsJobDriver {
     }
 }
 
+impl WindowsJobDriver {
+    /// 清理已结束（`ActiveProcesses == 0`）的 Job 条目（SEC-4）。
+    ///
+    /// 进程树全部退出后，关闭句柄只是释放内核对象；若仍有活跃进程则保留
+    /// 句柄（维持运行期 kill 整个 Job 的能力与 KILL_ON_JOB_CLOSE 泄漏防护）。
+    fn prune_dead_jobs(&self) {
+        let mut jobs = self
+            .active_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if jobs.is_empty() {
+            return;
+        }
+        let dead: Vec<u32> = jobs
+            .iter()
+            .filter(|(pid, job)| {
+                let _ = pid;
+                job_active_processes(job).is_ok_and(|n| n == 0)
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        for pid in dead {
+            if jobs.remove(&pid).is_some() {
+                tracing::debug!(pid, "pruned finished sandbox job object");
+            }
+        }
+    }
+}
+
+/// 查询 Job Object 当前活跃进程数（查询失败返回 Err，调用方保守保留条目）。
+fn job_active_processes(job: &JobHandle) -> Result<u32, io::Error> {
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject,
+    };
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: handle 有效，info 为栈上 POD 结构体，尺寸匹配查询类别。
+    let ret = unsafe {
+        QueryInformationJobObject(
+            job.0,
+            JobObjectBasicAccountingInformation,
+            &mut info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if ret == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.ActiveProcesses)
+}
+
 impl SandboxDriver for WindowsJobDriver {
     fn apply(
         &self,
@@ -79,11 +131,11 @@ impl SandboxDriver for WindowsJobDriver {
     ) -> Result<(), SandboxError> {
         match policy {
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
-                // 存储策略快照供 post_spawn 使用
-                *self
-                    .last_policy
+                // 策略快照入队供 post_spawn 按序消费（SEC-4 FIFO）
+                self.last_policy
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(policy.clone());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(policy.clone());
 
                 // 设置 CREATE_SUSPENDED：进程创建后挂起，post_spawn 分配 Job Object 后恢复
                 use std::os::windows::process::CommandExt;
@@ -95,11 +147,15 @@ impl SandboxDriver for WindowsJobDriver {
     }
 
     fn post_spawn(&self, pid: u32) -> Result<(), SandboxError> {
+        // SEC-4：先惰性清理已结束的 Job（ActiveProcesses==0），防止句柄表无界增长；
+        // 关闭句柄时进程树已退出，KILL_ON_JOB_CLOSE 无杀灭副作用。
+        self.prune_dead_jobs();
+
         let policy = self
             .last_policy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .pop_front();
 
         let Some(policy) = policy else {
             // 无策略（ExternalSandbox/DangerFullAccess 或 apply 未调用）：仅恢复线程
@@ -114,10 +170,10 @@ impl SandboxDriver for WindowsJobDriver {
             let _ = resume_thread(pid);
             return Err(e);
         }
-        *self
-            .active_job
+        self.active_jobs
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pid, job);
         resume_thread(pid)?;
         Ok(())
     }
@@ -318,10 +374,22 @@ fn try_resume_thread(pid: u32) -> Result<bool, SandboxError> {
             let thread_handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if !thread_handle.is_null() && thread_handle != INVALID_HANDLE_VALUE {
                 // SAFETY: thread_handle 有效，ResumeThread 恢复挂起的线程。
-                let _ = unsafe { ResumeThread(thread_handle) };
+                // SEC-5（2026-08-25 R2 审查）：返回值为前次挂起计数，`u32::MAX`
+                //（即 -1）表示失败——此前 `let _ =` 丢弃导致失败仍记 resumed=true，
+                // 子进程永久挂起泄漏至驱动 drop。
+                let prev = unsafe { ResumeThread(thread_handle) };
+                if prev == u32::MAX {
+                    tracing::warn!(
+                        pid,
+                        tid = entry.th32ThreadID,
+                        error = %io::Error::last_os_error(),
+                        "ResumeThread failed"
+                    );
+                } else {
+                    resumed = true;
+                }
                 // SAFETY: 关闭线程句柄。
                 unsafe { CloseHandle(thread_handle) };
-                resumed = true;
             }
         }
         // SAFETY: 继续枚举。

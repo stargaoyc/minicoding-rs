@@ -61,15 +61,31 @@ fn print_security_report() {
             .join(", ");
         println!("vcs protected:   {vcs_list}");
 
-        // Landlock 特定信息（仅 Linux）：通过 driver kind 判断可用性
+        // Landlock 特定信息（仅 Linux）：通过 driver kind 判断可用性。
+        // SEC-2（2026-08-25 R2 审查）：如实报告探测到的实际 ABI 与网络限制
+        // 可用性——此前固定宣称 "V3 (Linux 6.2+, target ABI)"，旧内核上与
+        // 实际执行能力不符；网络拒绝需 ABI≥4（Linux 6.7+），且仅覆盖 TCP
+        // （UDP/DNS 残留通道见 security.md §8）。
         #[cfg(target_os = "linux")]
         {
-            let abi = if matches!(kind, minicoding_sandbox::DriverKind::Landlock) {
-                "V3 (Linux 6.2+, target ABI)"
-            } else {
-                "unavailable (kernel < 5.13 or disabled)"
-            };
-            println!("landlock abi:    {abi}");
+            match kind {
+                minicoding_sandbox::DriverKind::Landlock => {
+                    let abi_str = minicoding_sandbox::linux::probe_fs_abi()
+                        .map_or_else(|| "unknown".to_string(), |abi| format!("{abi:?}"));
+                    println!("landlock abi:    {abi_str} (probed)");
+                    let net = minicoding_sandbox::linux::net_restriction_supported();
+                    if net {
+                        println!(
+                            "net restrict:    tcp-deny (UDP/DNS NOT restricted; seccomp pending)"
+                        );
+                    } else {
+                        println!("net restrict:    unavailable (requires Linux 6.7+)");
+                    }
+                }
+                _ => {
+                    println!("landlock abi:    unavailable (kernel < 5.13 or disabled)");
+                }
+            }
         }
 
         if !hardened {

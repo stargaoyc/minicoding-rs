@@ -162,14 +162,33 @@ impl PolicyPersist {
                 .map_err(|e| format!("创建目录失败: {e}"))?;
         }
         // 0600 创建收敛到 util::fs_private（S7 单一事实源；unix 下 OpenOptions
-        // 原子指定 mode，避免"先写后 chmod"竞态，且对已存在的宽权限文件兜底收紧）
-        let tmp = Utf8PathBuf::from(format!("{}.tmp", self.path.as_str()));
-        crate::util::fs_private::write_private(tmp.as_std_path(), bytes.as_bytes())
-            .map_err(|e| format!("{e}"))?;
-        std::fs::rename(tmp.as_std_path(), self.path.as_std_path())
-            .map_err(|e| format!("rename 失败: {e}"))
+        // 原子指定 mode，避免"先写后 chmod"竞态，且对已存在的宽权限文件兜底收紧）。
+        // SEC-10（2026-08-25 R2 审查）：tmp 名加 pid+原子计数——固定 `{path}.tmp`
+        // 在多会话并发 mutate 时互相覆盖或让 rename 发布半写文件。
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = Utf8PathBuf::from(format!(
+            "{}.{}.{}.tmp",
+            self.path.as_str(),
+            std::process::id(),
+            seq,
+        ));
+        let write_result =
+            crate::util::fs_private::write_private(tmp.as_std_path(), bytes.as_bytes())
+                .map_err(|e| format!("{e}"))
+                .and_then(|()| {
+                    std::fs::rename(tmp.as_std_path(), self.path.as_std_path())
+                        .map_err(|e| format!("rename 失败: {e}"))
+                });
+        if write_result.is_err() {
+            // 清理残留 tmp（best effort）
+            drop(std::fs::remove_file(tmp.as_std_path()));
+        }
+        write_result
     }
 }
+
+/// mutate 的 tmp 文件序号（SEC-10：tmp 名含 pid+序号，防并发覆盖）。
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {

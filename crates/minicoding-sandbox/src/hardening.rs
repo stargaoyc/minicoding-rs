@@ -90,7 +90,11 @@ fn harden_linux() -> Result<(), std::io::Error> {
 
 /// 返回 workdir 下应受写保护的 VCS 目录（`.git`/`.hg`/`.svn`）。
 ///
-/// 仅返回实际存在的目录（避免 `landlock` `PathFd` 打开不存在路径报错）。
+/// 仅返回实际存在的条目（避免 `landlock` `PathFd` 打开不存在路径报错）。
+/// SEC-13（2026-08-25 R2 审查）：`.git` 允许是**文件**（worktree/submodule 的
+/// gitdir 指针形式），`is_dir()` 过滤会漏掉这类形态导致 `ReadOnly` 场景失去
+/// 内核级 VCS 保护——改为 `exists()`，landlock 的 path-beneath 规则与 Seatbelt
+/// 的 `subpath` deny 对文件同样生效。
 /// 供 landlock 只读规则（workdir 只读场景）与 policy builtin 黑名单（workdir
 /// 可写场景）使用（C-22 VCS 保护）。
 #[must_use]
@@ -99,7 +103,7 @@ pub fn vcs_protected_dirs(workdir: &Path) -> Vec<PathBuf> {
     VCS_NAMES
         .iter()
         .map(|name| workdir.join(name))
-        .filter(|p| p.is_dir())
+        .filter(|p| p.exists())
         .collect()
 }
 
@@ -117,6 +121,15 @@ mod tests {
         let dirs = vcs_protected_dirs(tmp.path());
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with(".git"));
+    }
+
+    #[test]
+    fn vcs_dirs_includes_git_file_form() {
+        // SEC-13：worktree/submodule 的 .git 是文件（gitdir 指针），不得被过滤
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: /elsewhere/.git\n").unwrap();
+        let dirs = vcs_protected_dirs(tmp.path());
+        assert_eq!(dirs.len(), 1, "文件形式的 .git 应纳入保护");
     }
 
     #[test]

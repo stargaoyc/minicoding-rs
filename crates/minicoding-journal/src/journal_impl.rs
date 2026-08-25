@@ -183,6 +183,11 @@ async fn restore_file(
 ) -> Result<camino::Utf8PathBuf, JournalError> {
     let path = change.path().clone();
     validate_restore_path(&path, workdir)?;
+    // SEC-8（2026-08-25 R2 审查）：拒绝符号链接目标——workdir 内文件被外部换成
+    // 指向外部（如 ~/.ssh）的 symlink 且内容恰与 after 一致时，恢复写会穿透
+    // symlink 出界。`symlink_metadata` 不跟随末段链接，词法校验
+    // （validate_restore_path）无法发现这类替换。
+    ensure_not_symlink(&path).await?;
 
     match change {
         FileChange::Written { before, after, .. } => {
@@ -274,6 +279,20 @@ async fn verify_current_matches(
                 )))
             }
         }
+        Err(e) => Err(JournalError::Io(e)),
+    }
+}
+
+/// 拒绝恢复目标为符号链接（SEC-8，见 `restore_file` 内注释）。
+///
+/// 文件不存在视为通过（`Deleted` 变体的恢复路径）；存在且是 symlink 则拒绝。
+async fn ensure_not_symlink(path: &camino::Utf8PathBuf) -> Result<(), JournalError> {
+    match fs::symlink_metadata(path.as_std_path()).await {
+        Ok(md) if md.file_type().is_symlink() => Err(JournalError::PathEscaped(format!(
+            "{path} is a symbolic link; refusing to restore through it"
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(JournalError::Io(e)),
     }
 }

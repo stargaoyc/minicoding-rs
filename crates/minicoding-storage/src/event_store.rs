@@ -117,6 +117,31 @@ impl EventStore for JsonlEventStore {
             .await
             .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
 
+            // SEC-9（2026-08-25 R2 审查）：seq 单调性校验。seq 由调用方（core
+            // Runtime 的内存计数器）在**本进程**锁内分配，但两个独立进程同时
+            // resume 同一会话时各自从文件尾播种计数器，会产出重复 seq——
+            // load_after/SSE cursor 去重随之失效。锁内校验"新 seq 必须 > 文件
+            // 尾 seq"，冲突 fail-closed 报错（事件文件低频追加，尾部读取成本可接受；
+            // 若未来成为热点可改 seek 读尾块）。
+            {
+                let content = match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty()) {
+                    let last_record: EventRecord = serde_json::from_str(last)
+                        .map_err(|e| StorageError::Corrupted(format!("last event line: {e}")))?;
+                    if record.seq <= last_record.seq {
+                        return Err(StorageError::Corrupted(format!(
+                            "event seq {} is not greater than persisted tail seq {} \
+                             (concurrent writer on the same session?)",
+                            record.seq, last_record.seq
+                        )));
+                    }
+                }
+            }
+
             // S19/C-04：事件流同样可能含敏感输出，0600 创建
             let mut opts = tokio::fs::OpenOptions::new();
             opts.append(true).create(true);

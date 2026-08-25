@@ -121,6 +121,10 @@ fn apply_seatbelt(
     // S26：tempfile 随机名 + 0600——消除 `/tmp` 可预测名的符号链接竞争窗口。
     // NamedTempFile 不 drop（disable_cleanup 等价：保留路径），由 pre_exec 内
     // sandbox_init 成功后删除；失败路径随 TempPath drop 清理。
+    // 残留窗口（SEC-11，2026-08-25 R2 审查，如实记录）：keep() 之后若 Command
+    // 在 fork 前（而非 exec 阶段）失败，父进程侧无清理钩子会残留一个 .sb 文件
+    // ——std 无"spawn 完成回调"，彻底闭环需调用方协作；exec 阶段失败
+    // （program-not-found 等）发生在 pre_exec 之后，子进程仍会正常删除。
     let tmp_file = tempfile::Builder::new()
         .prefix("minicoding-seatbelt")
         .suffix(".sb")
