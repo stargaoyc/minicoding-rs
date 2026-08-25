@@ -4,6 +4,62 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.3] - 2026-08-25
+
+> 本版本为 `docs/project-review-20260825.md` 全面审查（7 路并行评审）修复版：
+> R1–R7 七个阶段收口 3 个 High 安全缺陷与约 20 个 P0/P1 功能缺陷。
+
+### Security
+
+- **policy：shell 黑名单换行绕过封堵**——分段集合与预批准复合拦截补齐
+  `\n`/`\r`（`sh -c` 中换行即命令分隔符，此前 `"true\nrm AGENTS.md"`
+  完全逃逸 C-02 词法判定）；受保护文件名/VCS 组件剥离尾随点空格
+  （Win32 CreateFile 剥离语义导致的 C-23 绕过）
+- **core：AllowAlways 粒度收敛**——带路径工具按父目录持久化（`tool@目录`），
+  无路径工具仅会话级放行；杜绝"一次按键=跨会话/跨项目全局永久放行"；
+  审计 detail 区分持久化/会话来源；policy.toml 路径前缀组件边界匹配
+- **sandbox：Windows Job Object 修正**——移除 `BREAKAWAY_OK`（方向相反，
+  允许子进程脱离遏制）、JobHandle 保存在驱动内恢复 kill 整 Job 能力、
+  分配失败也 resume 防挂起进程泄漏；模块文档去除"受限令牌/CPU 内存上限"
+  失实表述；landlock 补 UDP/DNS 残留通道诚实边界注释
+- **storage：落盘原子性与权限**——事件流 append 加 SessionLock + 单次
+  write_all（消除并发半行损坏）；audit.log/fork 转录/index.json 收紧 0600
+- **desktop：auth-token 改经 `MINICODING_AUTH_TOKEN` 环境变量下传**，
+  不再出现在 `/proc/<pid>/cmdline`
+- **cli：serve 模式 MCP 写工具旗标失效修复**——删除无条件注册调用，
+  fail-closed 语义生效
+
+### Fixed
+
+- **tools：worktree 子 Agent 隔离接线**（此前 spec 无 workdir 字段，子 Agent
+  在父进程 CWD 工作、隔离整体空转）；merge_back 失败在结果中标注警告
+- **core：同批工具调用存在 写→读 依赖时退化为串行保序执行**（此前分桶调度
+  会让只读桶先执行读到旧数据）；取消/超时/上限/重复终止的终态提示先落盘
+  再广播（此前不入 transcript，resume 后 UI 与历史永久分歧）
+- **context：L2 摘要 LLM 调用加 30s 超时**（此前 provider 挂起即持写锁全局
+  停摆）；压缩选择按 tool_call/tool_result 配对组原子扩展（消除严格 provider
+  400 的孤儿消息根因）；hard_truncate 改 O(N) 单次计 token
+- **memory：BM25 snippet 多字节字符截断 panic 修复**；AutoMemory 双文件写
+  加串行锁
+- **providers：OpenAI o 系/gpt-5 兼容**——`max_completion_tokens` 替代已废弃
+  `max_tokens`、省略不支持的 temperature；Anthropic thinking 时 gate top_p；
+  流式 `"usage": null` 零值 delta 过滤；SSE 缓冲 16MiB 上限
+- **server/web：SSE seq 单一写者**（此前 turn 消费 task 与每个 SSE 订阅各自
+  分配 seq，重连出现重复事件）；新增 `POST /sessions/{id}/undo` 与
+  `/permission-mode` HTTP 路由（Web/Desktop 补齐回滚与权限模式切换）；
+  web event-guard 由 gen-types 管线自动再生成（真实 reasoning_delta 等
+  事件不再被静默丢弃）
+- **mcp：同名 server 重启前优雅关闭旧连接**；手写 base64 替换为 base64 crate
+
+### Changed
+
+- CI 工具链钉版对齐（pnpm 11.13.0/node 22/checkout v6）；desktop 发布流程
+  增加 Release 创建兜底消除并行竞态；移除 insta/assert_cmd 死依赖；
+  CHANGELOG 倒序为最新在上
+- 文档体系对齐：sandbox-run/seccomp 六处漂移修正、功能统计统一 204、
+  security.md 章节号重建、Event 命名以 design §11 为权威、roadmap 追加
+  审查遗留延期立项清单（13 项）
+
 ## [0.3.2] - 2026-08-24
 
 ### Fixed
