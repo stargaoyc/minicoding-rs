@@ -323,11 +323,11 @@ mod tests {
 
     #[test]
     fn truncate_extends_boundary_into_group() {
-        // 精确验证边界推进：非 system 序列 [u(4), A(7), T(4)]，thr 使纯预算
+        // 精确验证边界推进：非 system 序列 [u(4), A(7), T(4)]，阈值使纯预算
         // 判定 keep_from 落在 A 与 T 之间（即丢 u+A、留 T）→ 扩展为整组丢弃。
         let tokenizer = CharTokenizer;
-        // sys(6) 全保留。目标：sys+T ≤ thr < sys+A+T 且 sys+u+A+T > thr。
-        // T(4)：sys+4 ≤ thr；加 A(7)：sys+11 > thr → thr ∈ [10, 16)
+        // sys(6) 全保留。目标：sys+T ≤ 阈值 < sys+A+T 且 sys+u+A+T > 阈值。
+        // T(4)：sys+4 ≤ 阈值；加 A(7)：sys+11 > 阈值 → 阈值 ∈ [10, 16)
         let budget = TokenBudget {
             context_window: 13,
             reserved_output: 0,

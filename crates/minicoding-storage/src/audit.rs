@@ -34,6 +34,8 @@ impl AuditSink for FileAuditSink {
             let inner = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                 use std::io::Write;
                 let file = open_for_append(&path)?;
+                // tighten_existing 仅 unix 定义（Windows 无 POSIX 权限位）
+                #[cfg(unix)]
                 tighten_existing(&file);
                 let mut file = file;
                 writeln!(file, "{line}")?;
