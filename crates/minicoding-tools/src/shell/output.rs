@@ -81,9 +81,14 @@ impl Tool for ShellOutput {
                 .ok_or_else(|| ToolError::InvalidInput("shell_id 缺失".into()))?
                 .to_string();
             let status = store.output(shell_id).await?;
+            // PTM-6（2026-08-25 R2 审查）：后台输出同样经脱敏——此前仅前台
+            // shell.run 的 combined 输出走 redact，C-04 在 `shell.output` 路径
+            // 整体旁路（后台命令输出凭证原样回灌 LLM/前端）。
+            let stdout = minicoding_policy::redact(&status.stdout);
+            let stderr = minicoding_policy::redact(&status.stderr);
             Ok(ToolResult::ok_json(serde_json::json!({
-                "stdout": status.stdout,
-                "stderr": status.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
                 "exited": status.exited,
                 "exit_code": status.exit_code,
             })))

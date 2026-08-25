@@ -324,8 +324,12 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
 /// 淘汰最旧条目使 store 不超过 [`MAX_TRACKED_SHELLS`]（T-8，2026-08-25 审查）。
 ///
 /// 优先淘汰最旧的**已完成**条目（`exit_code` 已记录、缓冲不再增长）；若无已完成
-/// 条目则退化为淘汰全局最旧——保证硬上限成立。被淘汰的运行中进程经
-/// `kill_on_drop` 终止；`try_lock` 失败（正被 kill 等临界区持有）按未完成处理。
+/// 条目则退化为淘汰全局最旧——保证硬上限成立。
+///
+/// PTM-4（2026-08-25 R2 审查）：淘汰**运行中**条目时必须主动终止进程——此前
+/// 仅 `shells.remove`，而 wait task 持有 `Child` 的 Arc 克隆，`kill_on_drop`
+/// 永不触发，被淘汰条目退化为无人跟踪的孤儿进程（与模块文档承诺相反）。
+/// 终止路径与 `kill` 一致：unix 先 killpg 整树再 `start_kill` 兜底。
 fn evict_oldest(shells: &mut HashMap<String, ShellEntry>) {
     if shells.len() < MAX_TRACKED_SHELLS {
         return;
@@ -338,6 +342,24 @@ fn evict_oldest(shells: &mut HashMap<String, ShellEntry>) {
         })
         .map(|(id, _)| id.clone());
     if let Some(id) = victim {
+        if let Some(entry) = shells.get(&id) {
+            let running = entry.exit_code.try_lock().is_ok_and(|g| g.is_none());
+            if running
+                && let Ok(mut guard) = entry.child.try_lock()
+                && let Some(child) = guard.as_mut()
+            {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    // SAFETY: killpg 向目标进程组发送 SIGKILL；pid 来自 Child::id，
+                    // spawn 前 setpgid 保证 pgid == pid。同步调用非阻塞。
+                    unsafe {
+                        let _ = libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL);
+                    }
+                }
+                let _ = child.start_kill();
+                tracing::warn!(shell_id = %id, "后台 shell 条目达上限且仍在运行：已终止被淘汰的进程");
+            }
+        }
         shells.remove(&id);
         tracing::debug!(shell_id = %id, "后台 shell 条目已达上限，淘汰最旧条目");
     }

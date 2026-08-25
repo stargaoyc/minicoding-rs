@@ -99,7 +99,15 @@ impl WorktreeSubagentRunner {
     }
 
     /// 删除 git worktree 与分支。
-    async fn cleanup_worktree(&self, worktree_path: &camino::Utf8PathBuf, branch: &str) {
+    ///
+    /// PTM-10（2026-08-25 R2 审查）：`keep_branch = true`（合并失败）时跳过
+    /// `git branch -D`——分支保留供人工恢复未合并的改动副本。
+    async fn cleanup_worktree(
+        &self,
+        worktree_path: &camino::Utf8PathBuf,
+        branch: &str,
+        keep_branch: bool,
+    ) {
         // 删除 worktree
         let _ = tokio::process::Command::new("git")
             .arg("worktree")
@@ -109,6 +117,14 @@ impl WorktreeSubagentRunner {
             .current_dir(&self.workdir)
             .output()
             .await;
+
+        if keep_branch {
+            tracing::warn!(
+                branch = %branch,
+                "merge 失败：保留分支（含未合并提交），跳过 branch -D"
+            );
+            return;
+        }
 
         // 删除分支
         let _ = tokio::process::Command::new("git")
@@ -228,23 +244,35 @@ impl SubagentRunner for WorktreeSubagentRunner {
 
             // 处理 worktree 合并与清理
             if let Some((worktree_path, branch, wt_spec)) = worktree_info {
-                if let Err(e) = self.merge_back(&branch, wt_spec.merge_back).await {
+                let merge_result = self.merge_back(&branch, wt_spec.merge_back).await;
+                let merge_error = merge_result.as_ref().err().map(ToString::to_string);
+
+                // PTM-10（2026-08-25 R2 审查）：合并失败时**跳过** `git branch -D`
+                // ——auto_cleanup 的语义是"清理临时工作区"，不是"销毁唯一改动副本"。
+                // 此前强删分支会把刚在 summary 里警告"改动丢失"的未合并提交
+                // 连同 ref 一起永久销毁，用户连手工恢复的机会都没有。worktree
+                // 目录仍删除（--force 只作用于工作树），分支保留待人工处置。
+                let keep_branch = merge_error.is_some();
+                if wt_spec.auto_cleanup {
+                    self.cleanup_worktree(&worktree_path, &branch, keep_branch)
+                        .await;
+                    tracing::info!(
+                        branch = %branch,
+                        branch_kept = keep_branch,
+                        "worktree 已清理"
+                    );
+                }
+
+                if let Some(e) = merge_error {
                     tracing::warn!(error = %e, branch = %branch, "合并 worktree 改动失败");
-                    // T-2（2026-08-25 审查）：合并失败不能只记 warn——父 Agent 仅能
-                    // 看到 `SubagentResult`，若 summary 不注明，父 Agent 会误以为
-                    // 改动已落回主分支。侵入最小的方案：summary 前缀标注失败事实。
+                    // T-2（2026-08-25 审查）：合并失败必须让父 Agent 可感知——summary 前缀标注失败事实。
                     if let Ok(r) = result.as_mut() {
                         r.summary = format!(
                             "[警告] worktree 分支 {branch} 的改动合并回主分支失败（{e}），\
-                             以下结论基于 worktree 内的执行状态。\n{}",
+                             分支已保留供人工恢复；以下结论基于 worktree 内的执行状态。\n{}",
                             r.summary
                         );
                     }
-                }
-
-                if wt_spec.auto_cleanup {
-                    self.cleanup_worktree(&worktree_path, &branch).await;
-                    tracing::info!(branch = %branch, "worktree 已清理");
                 }
             }
 
@@ -530,7 +558,7 @@ mod tests {
         assert!(branch_exists(&workdir, branch).await);
 
         // 清理
-        runner.cleanup_worktree(&worktree_path, branch).await;
+        runner.cleanup_worktree(&worktree_path, branch, false).await;
 
         // worktree 目录应被删除，分支也应被删除
         assert!(!worktree_path.exists(), "worktree 目录应被删除");
@@ -559,7 +587,7 @@ mod tests {
         assert!(result.is_err(), "重复分支应导致失败");
 
         // 清理
-        runner.cleanup_worktree(&wt_path1, branch).await;
+        runner.cleanup_worktree(&wt_path1, branch, false).await;
     }
 
     #[tokio::test]

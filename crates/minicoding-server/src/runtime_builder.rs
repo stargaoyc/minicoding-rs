@@ -316,6 +316,11 @@ pub fn build_runtime(
     rt.register_dynamic_tool(Arc::new(minicoding_tools::PlanExit::new(
         plan_controller.clone(),
     )));
+    // PTM-3（2026-08-25 R2 审查）：顶层 Runtime 的 task.spawn 保持 can_spawn=true
+    //（顶层派发合法）。深度防御的 `with_can_spawn_subagent(false)` 属**子 Agent
+    // Runtime 组装点**的义务——当前生产装配不存在进程内嵌套 Runtime
+    // （runner 为 Noop，task.spawn 返回 NotConfigured），该接线随
+    // InProcessSubagentRunner 立项落地（roadmap"2026-08-25 R2 审查遗留"）。
     rt.register_dynamic_tool(Arc::new(minicoding_tools::TaskSpawn::new(
         subagent_runner,
         plan_controller,

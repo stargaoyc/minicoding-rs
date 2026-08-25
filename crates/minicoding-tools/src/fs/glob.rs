@@ -85,27 +85,34 @@ impl Tool for FsGlob {
             };
             ensure_dir(&base).await?;
 
-            let mut matched_paths = Vec::new();
-            let walker = ignore::WalkBuilder::new(&base).build();
-            for entry in walker {
-                let entry =
-                    entry.map_err(|e| ToolError::Io(std::io::Error::other(e.to_string())))?;
-                let Some(ft) = entry.file_type() else {
-                    continue;
-                };
-                if !ft.is_file() {
-                    continue;
+            // PTM-8（2026-08-25 R2 审查）：遍历移入阻塞线程池（与 fs.grep 的
+            // T-5 修复同型）——`ignore::WalkBuilder` 同步遍历大目录会长时间
+            // 占用 executor 线程饿死其他 task。
+            let out = tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
+                let mut matched_paths = Vec::new();
+                let walker = ignore::WalkBuilder::new(&base).build();
+                for entry in walker {
+                    let entry =
+                        entry.map_err(|e| ToolError::Io(std::io::Error::other(e.to_string())))?;
+                    let Some(ft) = entry.file_type() else {
+                        continue;
+                    };
+                    if !ft.is_file() {
+                        continue;
+                    }
+                    let rel = match entry.path().strip_prefix(base.as_std_path()) {
+                        Ok(p) => p.to_string_lossy().to_string(),
+                        Err(_) => entry.path().to_string_lossy().to_string(),
+                    };
+                    if matcher.is_match(&rel) {
+                        matched_paths.push(rel);
+                    }
                 }
-                let rel = match entry.path().strip_prefix(base.as_std_path()) {
-                    Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => entry.path().to_string_lossy().to_string(),
-                };
-                if matcher.is_match(&rel) {
-                    matched_paths.push(rel);
-                }
-            }
+                Ok(matched_paths.join("\n"))
+            })
+            .await
+            .map_err(|e| ToolError::Exec(format!("glob task join 失败: {e}")))??;
 
-            let out = matched_paths.join("\n");
             let (text, truncated) = truncate_output(out, max_output_bytes);
             let bytes = text.len();
             let mut result = ToolResult::ok_text(text);

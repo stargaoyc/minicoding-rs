@@ -13,6 +13,11 @@ use minicoding_core::model::LlmError;
 
 use super::sse::ByteStream;
 
+/// 单行字节上限（PTM-7，2026-08-25 R2 审查）：与 SSE 侧 `MAX_BUFFER_BYTES`
+/// 同型防御——恶意/故障服务端发送无换行的无限流时，缓冲无上限增长可 OOM。
+/// 超限 fail-closed 返回解析错误终止流（合法 NDJSON 行远小于该值）。
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
 /// NDJSON 解析流：逐行 yield JSON 字符串（已 trim，空行跳过）。
 pub struct NdjsonStream {
     inner: ByteStream,
@@ -79,6 +84,12 @@ impl Stream for NdjsonStream {
             // 3) 拉取底层流
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
+                    // PTM-7：行超限 fail-closed——无换行的无限流不再无限缓冲
+                    if self.buffer.len() + bytes.len() > MAX_LINE_BYTES {
+                        return Poll::Ready(Some(Err(LlmError::Parse(format!(
+                            "ndjson line exceeds {MAX_LINE_BYTES} bytes without newline"
+                        )))));
+                    }
                     self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(e))) => {

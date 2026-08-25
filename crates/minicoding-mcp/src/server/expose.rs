@@ -207,8 +207,10 @@ pub async fn serve_as_mcp_server(
 /// `input_schema`（`serde_json::Value::Object`）转为 `Arc<JsonObject>`；
 /// 非 object（如 Null）退化为空对象，避免 rmcp schema 校验失败。
 ///
-/// `annotations` 当前留 `None`（`ToolSchema` 不携带 `side_effect`，C-25 的
-/// `readOnlyHint`/`destructiveHint` 暂无法填充；MCP client 按保守默认处理）。
+/// PTM-11（2026-08-25 R2 审查）：本函数只做 schema 转换，**不填**
+/// `annotations`——readOnlyHint/destructiveHint 由调用方 `list_tools` 按本地
+/// registry 的 `side_effect` 填充（遗留#5 已落地），此前的过时注释与该实现
+/// 矛盾，已按现状修正。
 fn convert_schema_to_mcp_tool(schema: ToolSchema) -> rmcp::model::Tool {
     let input_schema = match schema.input_schema {
         serde_json::Value::Object(map) => Arc::new(map),

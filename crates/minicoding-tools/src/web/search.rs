@@ -61,8 +61,13 @@ impl Tool for WebSearch {
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &minicoding_core::tool::ToolContext,
+        ctx: &minicoding_core::tool::ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
+        // PTM-5（2026-08-25 R2 审查）：超时与有界缓冲对齐 web.fetch——此前
+        // client 零超时（挂起请求不受 ctx.timeout 约束，违反 C-07）、
+        // `resp.text()` 无界缓冲。
+        let timeout = ctx.timeout;
+        let max_body = ctx.max_output_bytes.max(64 * 1024);
         Box::pin(async move {
             let query: String = params
                 .get("query")
@@ -76,28 +81,34 @@ impl Tool for WebSearch {
                 .and_then(serde_json::Value::as_u64)
                 .map_or(5, |n| n as usize);
 
-            // 1. HTTP POST（DDG HTML 端点用 POST 表单）
+            // 1. HTTP POST（DDG HTML 端点用 POST 表单）：连接/读取超时 + 整体
+            //    ctx.timeout 兜底
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::limited(3))
+                .timeout(timeout)
+                .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .map_err(|e| ToolError::Exec(format!("HTTP client 构建失败: {e}")))?;
 
-            let resp = client
-                .post(DDG_HTML_ENDPOINT)
-                .form(&[("q", query.as_str())])
-                .header("User-Agent", "minicoding/0.1")
-                .send()
-                .await
-                .map_err(|e| ToolError::Exec(format!("搜索请求失败: {e}")))?;
+            let resp = tokio::time::timeout(
+                timeout,
+                client
+                    .post(DDG_HTML_ENDPOINT)
+                    .form(&[("q", query.as_str())])
+                    .header("User-Agent", "minicoding/0.1")
+                    .send(),
+            )
+            .await
+            .map_err(|_| ToolError::Exec(format!("搜索请求超时（>{}s）", timeout.as_secs())))?
+            .map_err(|e| ToolError::Exec(format!("搜索请求失败: {e}")))?;
 
             if !resp.status().is_success() {
                 return Err(ToolError::Exec(format!("HTTP {}", resp.status())));
             }
 
-            let html = resp
-                .text()
-                .await
-                .map_err(|e| ToolError::Exec(format!("读取响应体失败: {e}")))?;
+            // 有界读取：逐 chunk 累积到上限即停（DDG HTML 页远小于该上限，
+            // 上限只防御恶意/异常响应撑爆内存；与 web.fetch 共用实现）
+            let (html, _capped) = super::fetch::read_body_capped_with_limit(resp, max_body).await?;
 
             // 2. 解析结果（DDG HTML 结果页的 result__a / result__snippet class）
             let results = parse_ddg_results(&html, max_results);

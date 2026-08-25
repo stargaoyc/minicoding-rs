@@ -510,27 +510,40 @@ fn usize_from_option_opt(v: Option<&Value>) -> Option<usize> {
 /// 的 `max_output` 一致；超出会被 API 以 400 拒绝）。
 const MAX_OUTPUT_LIMIT: usize = 8_192;
 
-/// 计算 Anthropic `max_tokens` 请求值（2026-08-25 审查 PR-4）。
+/// thinking 路径的输出上限（PTM-2，2026-08-25 R2 审查）。
 ///
-/// - 未启用 thinking：用户配置值，缺省 4096（维持原行为）；
+/// Claude thinking 模型（3.7+）实际支持最高 64K 输出 token——此前沿用
+/// `MAX_OUTPUT_LIMIT`(8192) clamp，budget ≥ 8192 时产出 `max_tokens ≤
+/// budget_tokens`，违反 API "输出预算必须大于思考预算"约束直接 400。
+const THINKING_MAX_OUTPUT_LIMIT: usize = 64_000;
+
+/// 计算 Anthropic `max_tokens` 请求值（2026-08-25 审查 PR-4 + R2 审查 PTM-2）。
+///
+/// - 未启用 thinking：用户配置值，缺省 4096（维持原行为），clamp 到 8192；
 /// - 启用 thinking：输出预算必须**大于** `budget_tokens`（API 约束），取
 ///   `budget + max(用户配置或缺省值, 1024)`——此前仅 `budget + 1`，正文输出
-///   余量趋近于零，thinking 回复几乎必然被截断；最终 clamp 到能力上限防 400。
+///   余量趋近于零；上限用 [`THINKING_MAX_OUTPUT_LIMIT`]（64K），且保证结果
+///   至少 `budget + 1`（clamp 后仍须满足严格大于，否则请求必 400）。
 #[must_use]
 fn compute_max_tokens(max_output_tokens: Option<usize>, thinking_budget: Option<u32>) -> usize {
     const DEFAULT_MAX_TOKENS: usize = 4_096;
     const THINKING_MIN_HEADROOM: usize = 1_024;
     match thinking_budget {
-        None => max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        None => max_output_tokens
+            .unwrap_or(DEFAULT_MAX_TOKENS)
+            .min(MAX_OUTPUT_LIMIT),
         Some(budget) => {
             let headroom = max_output_tokens
                 .unwrap_or(DEFAULT_MAX_TOKENS)
                 .max(THINKING_MIN_HEADROOM);
             // u32 在 64 位平台必能装入 usize；转换失败（16 位平台）按 0 兜底
-            usize::try_from(budget)
+            let raw = usize::try_from(budget)
                 .unwrap_or_default()
-                .saturating_add(headroom)
-                .min(MAX_OUTPUT_LIMIT)
+                .saturating_add(headroom);
+            // clamp 到 thinking 上限后仍必须严格大于 budget（API 约束）
+            let clamped = raw.min(THINKING_MAX_OUTPUT_LIMIT);
+            let budget_usize = usize::try_from(budget).unwrap_or_default();
+            clamped.max(budget_usize.saturating_add(1))
         }
     }
 }
@@ -898,16 +911,32 @@ mod tests {
         // 未启用 thinking：用户值 / 缺省 4096，不 clamp 旧路径行为
         assert_eq!(compute_max_tokens(None, None), 4_096);
         assert_eq!(compute_max_tokens(Some(512), None), 512);
+        assert_eq!(compute_max_tokens(Some(9_999), None), MAX_OUTPUT_LIMIT);
         // thinking：budget + max(用户配置, 1024)
         assert_eq!(compute_max_tokens(None, Some(1_000)), 5_096);
         // 小配置走最小余量 1024
         assert_eq!(compute_max_tokens(Some(100), Some(500)), 1_524);
-        // clamp 到能力输出上限（防 API 400）
+        // PTM-2：clamp 到 thinking 上限后仍必须严格大于 budget（API 约束）——
+        // 此前 clamp 到 8192 使 budget≥8192 时 max_tokens ≤ budget 直接 400
+        assert_eq!(compute_max_tokens(Some(8_192), Some(8_000)), 8_000 + 8_192);
         assert_eq!(
-            compute_max_tokens(Some(8_192), Some(8_000)),
-            MAX_OUTPUT_LIMIT
+            compute_max_tokens(None, Some(9_000)),
+            9_000 + 4_096,
+            "budget+缺省余量，低于 64K 上限不 clamp"
         );
-        assert_eq!(compute_max_tokens(None, Some(9_000)), MAX_OUTPUT_LIMIT);
+        // budget 本身超过上限时，"严格大于 budget"的 API 约束优先于 clamp——
+        // 违反前者必 400；后者由上游对 budget 的合法性校验兜底
+        let over_budget: u32 = u32::try_from(THINKING_MAX_OUTPUT_LIMIT + 1_000)
+            .expect("fits in u32 on 64-bit");
+        assert_eq!(
+            compute_max_tokens(None, Some(over_budget)),
+            THINKING_MAX_OUTPUT_LIMIT + 1_001
+        );
+        assert_eq!(
+            compute_max_tokens(None, Some(63_000)),
+            THINKING_MAX_OUTPUT_LIMIT,
+            "budget < 上限：clamp 后仍严格大于 budget"
+        );
     }
 
     #[test]

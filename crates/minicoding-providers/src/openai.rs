@@ -143,14 +143,14 @@ impl OpenAiProvider {
             body["tools"] = Value::Array(tools);
         }
 
-        // 推理系模型（o1/o3/o4/gpt-5）拒绝自定义 temperature（发送即 400），
-        // 直接省略该参数；其余模型维持原行为（2026-08-25 审查 PR-2）
-        if !uses_max_completion_tokens(&req.params.model)
-            && let Some(t) = req.params.temperature
-        {
+        // 推理系模型（o1/o3/o4/gpt-5）拒绝自定义 temperature 与 top_p（发送即
+        // 400），直接省略；其余模型维持原行为（2026-08-25 审查 PR-2；
+        // PTM-9 补 top_p gate——此前只挡 temperature，gpt-5 带 top_p 仍 400）
+        let reasoning_model = uses_max_completion_tokens(&req.params.model);
+        if !reasoning_model && let Some(t) = req.params.temperature {
             body["temperature"] = json!(t);
         }
-        if let Some(t) = req.params.top_p {
+        if !reasoning_model && let Some(t) = req.params.top_p {
             body["top_p"] = json!(t);
         }
         if let Some(m) = req.params.max_output_tokens {
@@ -900,8 +900,11 @@ mod tests {
             body.get("temperature").is_none(),
             "o 系拒绝自定义 temperature，应省略"
         );
-        // top_p 未在禁发列表，维持原行为
-        assert_eq!(body["top_p"], json!(0.9_f32));
+        // PTM-9：top_p 同样在推理系禁发列表（gpt-5/o 系发送即 400）
+        assert!(
+            body.get("top_p").is_none(),
+            "o 系/gpt-5 拒绝自定义 top_p，应省略"
+        );
     }
 
     #[test]

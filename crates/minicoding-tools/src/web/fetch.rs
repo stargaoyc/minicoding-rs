@@ -95,14 +95,22 @@ const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// 用 `bytes_stream` 逐 chunk 累积，达到 [`MAX_BODY_BYTES`] 即停止消费
 /// （丢弃剩余连接），返回 `(body, 是否被截断)`；截断标记与下游
 /// `truncate_output`（`ctx.max_output_bytes`）的输出级截断衔接。
-async fn read_body_capped(resp: reqwest::Response) -> Result<(String, bool), ToolError> {
+pub(crate) async fn read_body_capped(resp: reqwest::Response) -> Result<(String, bool), ToolError> {
+    read_body_capped_with_limit(resp, MAX_BODY_BYTES).await
+}
+
+/// 同 [`read_body_capped`] 但上限由调用方给定（`web.search` 复用，PTM-5）。
+pub(crate) async fn read_body_capped_with_limit(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(String, bool), ToolError> {
     use futures::StreamExt;
     let mut stream = resp.bytes_stream();
     let mut body: Vec<u8> = Vec::new();
     let mut capped = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| ToolError::Exec(format!("读取响应体失败: {e}")))?;
-        let remain = MAX_BODY_BYTES.saturating_sub(body.len());
+        let remain = max_bytes.saturating_sub(body.len());
         if remain == 0 {
             capped = true;
             break;
@@ -208,6 +216,11 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
 }
 
 /// S22：解析相对 Location 为绝对 URL（同 scheme/host，路径合并）。
+///
+/// PTM-12（2026-08-25 R2 审查）：相对 Location 按 **RFC 3986 路径合并**解析
+/// ——此前一律拼到 origin 根，`https://a.com/b/c` 上的 `Location: d/e` 会错误
+/// 跳到 `https://a.com/d/e`（应为 `/b/d/e`）。以 `..`/`.` 开头的段同样按
+/// 规则消解；`//host/path` 形态按协议相对处理保留 authority。
 fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
     if location.starts_with("http://") || location.starts_with("https://") {
         return Ok(location.to_string());
@@ -219,12 +232,48 @@ fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
     let rest = &base[scheme_end + 3..];
     let authority_len = rest.find('/').unwrap_or(rest.len());
     let origin = &base[..scheme_end + 3 + authority_len];
-    if location.starts_with('/') {
-        Ok(format!("{origin}{location}"))
-    } else {
-        // 相对路径按当前目录合并（简化：直接拼 origin + "/" + location）
-        Ok(format!("{origin}/{location}"))
+    let base_path = rest.get(authority_len..).unwrap_or("");
+
+    if location.starts_with("//") {
+        // 协议相对：`//host/path` → scheme + location
+        let scheme_only = &base[..=scheme_end];
+        return Ok(format!("{scheme_only}{location}"));
     }
+    if location.starts_with('/') {
+        return Ok(format!("{origin}{location}"));
+    }
+
+    // 相对路径：基于当前路径的"目录"部分合并（去掉最后一段与 query）
+    let dir = match base_path.rfind('/') {
+        Some(idx) => &base_path[..=idx],
+        None => "/",
+    };
+    let mut segments: Vec<&str> = dir
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut trailing_slash = false;
+    for seg in location.split('/') {
+        match seg {
+            "" => trailing_slash = true,
+            "." => {}
+            ".." => {
+                segments.pop();
+                trailing_slash = false;
+            }
+            s => {
+                segments.push(s);
+                trailing_slash = false;
+            }
+        }
+    }
+    if trailing_slash {
+        let mut path = segments.join("/");
+        path.push('/');
+        return Ok(format!("{origin}/{path}"));
+    }
+    Ok(format!("{origin}/{}", segments.join("/")))
 }
 
 #[cfg(test)]
@@ -244,6 +293,23 @@ mod redirect_tests {
         assert_eq!(
             join_redirect_url("https://a.com/x/y", "/z").expect("rel"),
             "https://a.com/z"
+        );
+    }
+
+    #[test]
+    fn relative_location_resolves_against_current_directory() {
+        // PTM-12：相对 Location 基于当前路径目录合并（RFC 3986）
+        assert_eq!(
+            join_redirect_url("https://a.com/b/c", "d/e").expect("rel"),
+            "https://a.com/b/d/e"
+        );
+        assert_eq!(
+            join_redirect_url("https://a.com/b/c", "../d").expect("up"),
+            "https://a.com/d"
+        );
+        assert_eq!(
+            join_redirect_url("https://a.com/b", "./c/").expect("dot"),
+            "https://a.com/c/"
         );
     }
 
