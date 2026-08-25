@@ -236,9 +236,42 @@ fn shell_hits_blacklist(input: &Value) -> bool {
     // `del`/`erase`/`rd`/`rmdir`/`move`/`copy`/`robocopy` 是等价的破坏性/覆写
     // 动词——缺失会使 C-02 的 shell 旁路防护在 Windows 主机对约束文件基本
     // 失效。POSIX 上这些词不存在同名命令，跨平台并入无害。
+    // A5（2026-08-25 R2 审查）：追加小写 PowerShell 动词与别名——未来 pwsh
+    // 执行路径落地后同一黑名单即生效（前瞻性收口）；PS 别名与 cmd 动词并存
+    // 的原因同上：这些小写词在 POSIX 上无同名命令（或同名命令非写语义的
+    // 冲突面已被"动词+约束文件目标"组合判定覆盖），跨 shell 并入无害。
     const WRITE_VERBS: &[&str] = &[
-        "rm", "mv", "truncate", "dd", "unlink", "sed", "tee", "del", "erase", "rd", "rmdir",
-        "move", "copy", "xcopy", "robocopy",
+        "rm",
+        "mv",
+        "truncate",
+        "dd",
+        "unlink",
+        "sed",
+        "tee",
+        "del",
+        "erase",
+        "rd",
+        "rmdir",
+        "move",
+        "copy",
+        "xcopy",
+        "robocopy",
+        // PowerShell cmdlet 与别名
+        "remove-item",
+        "ri",
+        "set-content",
+        "sc",
+        "out-file",
+        "clear-content",
+        "cli",
+        "add-content",
+        "ac",
+        "new-item",
+        "ni",
+        "move-item",
+        "mi",
+        "copy-item",
+        "cpi",
     ];
     // SEC-7（2026-08-25 R2 审查）：复合语句切段后段首可能是控制关键字而非动词
     // （`for f in $(ls); do rm AGENTS.md; done` 切出的段首 token 是 `do`）——
@@ -1189,6 +1222,47 @@ mod tests {
             assert!(
                 is_blacklisted("shell.run", &input),
                 "{cmd} (cmd 动词) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_powershell_verbs_denied() {
+        // A5：PowerShell cmdlet 动词与别名（remove-item/set-content/new-item 等）
+        // 对约束文件的写入/删除应命中黑名单（未来 pwsh 执行路径前瞻收口）
+        for cmd in [
+            "remove-item AGENTS.md",
+            "ri AGENTS.md",
+            "set-content -Path AGENTS.md -Value x",
+            "clear-content CLAUDE.md",
+            "add-content AGENTS.md injected",
+            "ac AGENTS.md injected",
+            "new-item AGENTS.md",
+            "move-item CLAUDE.md \\tmp",
+            "copy-item evil.md AGENTS.md",
+            "cpi evil AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (PowerShell 动词) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_powershell_out_file_pipe_denied() {
+        // A5：out-file 不是重定向符，走动词判定路径——管道后段段首动词为
+        // out-file 时目标约束文件须命中
+        for cmd in [
+            "echo x | out-file CLAUDE.md",
+            "get-date | out-file AGENTS.md",
+            "echo x | out-file ./CLAUDE.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (out-file 写入) 应命中黑名单"
             );
         }
     }

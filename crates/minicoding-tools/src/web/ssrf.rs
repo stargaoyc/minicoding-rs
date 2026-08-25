@@ -1,6 +1,10 @@
 //! SSRF 防护（`security.md` §3.2）。
 //!
 //! URL 校验 + DNS 解析后 IP 黑名单检查，防止 LLM 通过域名绕过私有 IP 限制。
+//!
+//! A2：提供 [`validate_ip`]/[`resolve_and_validate_host`] 两层原语供
+//! web.fetch 的 DNS 解析-连接 IP pinning 复用（校验与连接钉住用同一套判定，
+//! 关闭"校验时解析 A、连接时解析 B"的 rebinding 窗口）。
 
 use minicoding_core::model::ToolError;
 use std::net::IpAddr;
@@ -11,6 +15,14 @@ use std::net::IpAddr;
 /// - 非 http/https scheme；
 /// - hostname 解析到 loopback/private/link-local/unspecified IP。
 pub async fn validate_url(url: &str) -> Result<(), ToolError> {
+    validate_url_resolved(url).await.map(|_| ())
+}
+
+/// 校验 URL 并返回 hostname 解析出的**全部已校验 IP**（A2 pinning 用）。
+///
+/// 与 [`validate_url`] 同一套判定；返回值供调用方从中选取钉住 IP——保证
+/// "校验所见的解析结果"与"实际连接目标"来自同一次解析，消除 TOCTOU 窗口。
+pub(crate) async fn validate_url_resolved(url: &str) -> Result<Vec<IpAddr>, ToolError> {
     let parsed =
         url::Url::parse(url).map_err(|e| ToolError::InvalidInput(format!("URL 解析失败: {e}")))?;
 
@@ -24,20 +36,43 @@ pub async fn validate_url(url: &str) -> Result<(), ToolError> {
         }
     }
 
-    // 2. hostname 解析 + IP 黑名单
+    // 2. hostname 解析 + IP 黑名单（fail-closed）
     let host = parsed
         .host_str()
         .ok_or_else(|| ToolError::InvalidInput("URL 缺少 hostname".into()))?;
     let port = parsed.port_or_known_default().unwrap_or(80);
+    resolve_and_validate_host(host, port).await
+}
 
+/// 校验单个 IP（SSRF 黑名单）。
+///
+/// # Errors
+/// IP 落在黑名单段（loopback/private/link-local/unspecified 及嵌 IPv4 变体）
+/// 时返回 `ToolError::InvalidInput`。
+pub(crate) fn validate_ip(ip: &IpAddr) -> Result<(), ToolError> {
+    if is_blocked_ip(ip) {
+        return Err(ToolError::InvalidInput(format!(
+            "SSRF 防护：IP `{ip}` 被拒绝（loopback/private/link-local）"
+        )));
+    }
+    Ok(())
+}
+
+/// 解析 host 并逐一校验全部结果，返回去重后的合规 IP 列表。
+///
+/// IP 字面量直接校验返回（不做 DNS）；域名经系统解析器取**全部**地址，任一
+/// IP 违规即拒绝整次请求（fail-closed，防多记录部分投毒）。
+///
+/// # Errors
+/// DNS 解析失败、无可用地址或任一 IP 违规时返回 `ToolError`。
+pub(crate) async fn resolve_and_validate_host(
+    host: &str,
+    port: u16,
+) -> Result<Vec<IpAddr>, ToolError> {
     // 直接 IP 字面量：直接检查
     if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(&ip) {
-            return Err(ToolError::InvalidInput(format!(
-                "SSRF 防护：IP `{ip}` 被拒绝（loopback/private/link-local）"
-            )));
-        }
-        return Ok(());
+        validate_ip(&ip)?;
+        return Ok(vec![ip]);
     }
 
     // 域名：DNS 解析后检查所有 IP
@@ -46,16 +81,17 @@ pub async fn validate_url(url: &str) -> Result<(), ToolError> {
         .await
         .map_err(|e| ToolError::Exec(format!("DNS 解析失败 `{host}`: {e}")))?;
 
+    let mut ips: Vec<IpAddr> = Vec::new();
     for sa in addrs {
-        let ip = sa.ip();
-        if is_blocked_ip(&ip) {
-            return Err(ToolError::InvalidInput(format!(
-                "SSRF 防护：域名 `{host}` 解析到被拒绝的 IP `{ip}`（loopback/private/link-local）"
-            )));
+        validate_ip(&sa.ip())?;
+        if !ips.contains(&sa.ip()) {
+            ips.push(sa.ip());
         }
     }
-
-    Ok(())
+    if ips.is_empty() {
+        return Err(ToolError::Exec(format!("DNS 解析 `{host}` 无可用地址")));
+    }
+    Ok(ips)
 }
 
 /// 判断 IP 是否在 SSRF 黑名单内。
@@ -161,6 +197,26 @@ fn is_ipv6_link_local(addr: &std::net::Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_ip_accepts_public_and_rejects_private() {
+        assert!(validate_ip(&"8.8.8.8".parse().unwrap()).is_ok());
+        assert!(validate_ip(&"2606:4700::1".parse().unwrap()).is_ok());
+        assert!(validate_ip(&"10.0.0.1".parse().unwrap()).is_err());
+        assert!(validate_ip(&"127.0.0.1".parse().unwrap()).is_err());
+        // IPv4-mapped IPv6 元数据地址同样拒绝（A2 pinning 复用入口）
+        assert!(
+            validate_ip(&"::ffff:169.254.169.254".parse().unwrap()).is_err(),
+            "mapped 元数据 IP 必须拒绝"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_and_validate_host_rejects_loopback_name() {
+        // localhost 在常规环境解析到 127.0.0.1/::1——均属黑名单，应 fail-closed；
+        // 即使解析失败（受限环境）同样返回 Err
+        assert!(resolve_and_validate_host("localhost", 80).await.is_err());
+    }
 
     #[test]
     fn blocks_ipv4_mapped_ipv6_metadata() {

@@ -7,6 +7,7 @@ use super::ssrf::validate_url;
 use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{RenderIntent, Tool};
+use std::net::{IpAddr, SocketAddr};
 
 /// `web.fetch` 工具。
 pub struct WebFetch {
@@ -131,24 +132,38 @@ pub(crate) async fn read_body_capped_with_limit(
 /// 抽取为自由函数便于单测：测试用 wiremock 起本地 server（127.0.0.1），
 /// 但 SSRF 会拒绝 loopback，故测试直接调用本函数绕过 SSRF（SSRF 由
 /// `validate_url` 单独覆盖，见 `ssrf.rs` 测试）。
+///
+/// A2：每一跳先校验 URL 并解析出全部合规 IP，再以 `Client::resolve()` 把
+/// 连接目标钉住为已校验 IP——"校验时解析"与"连接时解析"合并为同一次，
+/// 关闭 DNS rebinding 的 TOCTOU 窗口。测试态跳过校验与 pinning（wiremock
+/// 在 loopback，与逐跳复检同一豁免语义）。
 async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, ToolError> {
-    // S22：禁用自动重定向，手动逐跳跟随——每一跳都重过 SSRF 校验（防"公网入口
-    // 302 → 内网/元数据地址"绕过与 DNS rebinding）。首跳校验在此处显式执行
-    // （测试态下与原行为一致地绕过，见循环内注释）。
+    // S22：禁用自动重定向，手动逐跳跟随——每一跳都重过 SSRF 校验 + IP pinning
+    // （防"公网入口 302 → 内网/元数据地址"绕过与 DNS rebinding）。首跳校验在
+    // 调用方 `WebFetch::execute` 已执行，此处每跳强制复检。
     const MAX_REDIRECTS: usize = 5;
     let mut hops = 0usize;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| ToolError::Exec(format!("HTTP client 构建失败: {e}")))?;
 
     let mut current = url.to_string();
     let resp = loop {
-        // 测试态跳过逐跳复检：wiremock 起在本机 loopback，SSRF 会拒绝（首跳
-        // 校验由调用方 fetch_and_convert 承担；此处生产路径每跳强制复检）
-        if !cfg!(test) {
-            super::ssrf::validate_url(&current).await?;
+        // A2：校验 + 解析 + 钉住决策（生产路径）。测试态跳过：wiremock 起在本机
+        // loopback，SSRF/pinning 会拒绝——与原逐跳 validate_url 豁免语义一致。
+        let pinned_ip = if cfg!(test) {
+            None
+        } else {
+            let validated_ips = super::ssrf::validate_url_resolved(&current).await?;
+            let (host, port) = host_port_of(&current)?;
+            Some((pin_decision(&host, &validated_ips)?, port, host))
+        };
+        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if let Some((ip, port, ref host)) = pinned_ip {
+            tracing::debug!(host = %host, pinned = %ip, "web.fetch 连接目标已钉住");
+            builder = builder.resolve(host, SocketAddr::new(ip, port));
         }
+        let client = builder
+            .build()
+            .map_err(|e| ToolError::Exec(format!("HTTP client 构建失败: {e}")))?;
+
         let resp = client
             .get(&current)
             .header("User-Agent", "minicoding/0.1")
@@ -213,6 +228,41 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
     // T-6：响应体级截断与输出级截断统一标注 metadata.truncated
     result.metadata.truncated = was_truncated || body_capped;
     Ok(result)
+}
+
+/// A2：从 URL 提取 `(host, port)`（port 缺省按 scheme 补全）。
+fn host_port_of(url_str: &str) -> Result<(String, u16), ToolError> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| ToolError::InvalidInput(format!("URL 解析失败: {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidInput("URL 缺少 hostname".into()))?;
+    Ok((
+        host.to_string(),
+        parsed.port_or_known_default().unwrap_or(80),
+    ))
+}
+
+/// A2：DNS 解析-连接 IP pinning 决策（纯函数，便于单测）。
+///
+/// - host 为 IP 字面量：直接返回该 IP（上游 [`super::ssrf::validate_ip`] 已
+///   确认合规，字面量无解析环节、无 rebinding 窗口）；
+/// - 域名：对解析出的**全部**候选 IP 逐一过 SSRF 校验——任一违规即拒绝整次
+///   请求（fail-closed，防多记录部分投毒）；全部合规取第一个作钉住目标。
+///
+/// 调用方把返回的 IP 经 `Client::resolve()` 钉住，保证实际连接的就是校验时
+/// 见过的那次解析结果。
+fn pin_decision(host: &str, resolved_ips: &[IpAddr]) -> Result<IpAddr, ToolError> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(ip);
+    }
+    for ip in resolved_ips {
+        super::ssrf::validate_ip(ip)?;
+    }
+    resolved_ips
+        .first()
+        .copied()
+        .ok_or_else(|| ToolError::Exec(format!("无可钉住的解析地址 `{host}`（fail-closed）")))
 }
 
 /// S22：解析相对 Location 为绝对 URL（同 scheme/host，路径合并）。
@@ -316,6 +366,57 @@ mod redirect_tests {
     #[test]
     fn invalid_base_rejected() {
         assert!(join_redirect_url("not-a-url", "/z").is_err());
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    #![allow(clippy::pedantic)]
+    use super::{IpAddr, host_port_of, pin_decision};
+
+    fn ips(list: &[&str]) -> Vec<IpAddr> {
+        list.iter().map(|s| s.parse().expect("test ip")).collect()
+    }
+
+    #[test]
+    fn ip_literal_passes_through_without_resolution() {
+        // IP 字面量直通：无解析环节，直接作为钉住目标
+        let ip = pin_decision("93.184.216.34", &[]).expect("literal");
+        assert_eq!(ip, "93.184.216.34".parse::<IpAddr>().unwrap());
+        let v6 = pin_decision("2606:4700::1111", &[]).expect("v6 literal");
+        assert_eq!(v6.to_string(), "2606:4700::1111");
+    }
+
+    #[test]
+    fn all_valid_ips_pinned_to_first() {
+        // 多 IP 全合规：取第一个作钉住目标
+        let candidates = ips(&["8.8.8.8", "1.1.1.1", "9.9.9.9"]);
+        let pinned = pin_decision("dns.example.com", &candidates).expect("pin");
+        assert_eq!(pinned, "8.8.8.8".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn any_blocked_ip_fails_closed() {
+        // 任一候选违规即拒绝整次请求（fail-closed，防多记录部分投毒）
+        let candidates = ips(&["8.8.8.8", "10.0.0.1"]);
+        assert!(pin_decision("mixed.example.com", &candidates).is_err());
+
+        // IPv4-mapped IPv6 云元数据地址同样触发 fail-closed
+        let mapped = ips(&["::ffff:169.254.169.254"]);
+        assert!(pin_decision("rebind.example.com", &mapped).is_err());
+    }
+
+    #[test]
+    fn empty_resolution_fails_closed() {
+        assert!(pin_decision("no-record.example.com", &[]).is_err());
+    }
+
+    #[test]
+    fn host_port_extracts_defaults() {
+        let (host, port) = host_port_of("https://example.com/x").expect("https");
+        assert_eq!((host.as_str(), port), ("example.com", 443));
+        let (host, port) = host_port_of("http://example.com:8080/x").expect("http port");
+        assert_eq!((host.as_str(), port), ("example.com", 8080));
     }
 }
 

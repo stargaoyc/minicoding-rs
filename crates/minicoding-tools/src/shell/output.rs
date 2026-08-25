@@ -160,7 +160,9 @@ mod tests {
             .and_then(|s| s.split(')').next())
             .expect("extract shell_id");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：spawn 的是真实子进程（echo test），完成时刻由 OS 调度
+        // 决定，虚拟时钟无法加速（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // 读取输出

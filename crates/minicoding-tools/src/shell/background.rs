@@ -497,7 +497,9 @@ mod tests {
             .await
             .expect("spawn");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：store.spawn 启动真实子进程（echo hello），完成时刻由
+        // OS 调度决定，虚拟时钟无法加速（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let status = store.output(shell_id).await.expect("output");
@@ -545,6 +547,7 @@ mod tests {
             )
             .await
             .expect("spawn");
+        // 真实等待：确认 `sleep 30` 子进程仍在运行（OS 进程，虚拟时钟不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         assert!(
             !store.output(shell_id.clone()).await.expect("output").exited,
@@ -558,6 +561,7 @@ mod tests {
             if store.output(shell_id.clone()).await.expect("output").exited {
                 return;
             }
+            // 真实等待：轮询 killpg(SIGKILL) 在 OS 侧的生效（start_paused 不适用）
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         panic!("进程在 kill 后 3s 内仍未退出");
@@ -582,6 +586,7 @@ mod tests {
             )
             .await
             .expect("spawn");
+        // 真实等待：管道子进程写 20KB 后退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let status = store.output(shell_id).await.expect("output");
         assert!(status.stdout.contains("[output truncated"), "应有截断标记");
@@ -607,7 +612,8 @@ mod tests {
             .await
             .expect("spawn");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：`true` 子进程退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // kill 已退出的 shell 应成功（幂等）
@@ -634,6 +640,7 @@ mod tests {
             .await
             .expect("spawn");
 
+        // 真实等待：stderr 写入与进程退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let status = store.output(shell_id).await.expect("output");
@@ -717,6 +724,7 @@ mod tests {
             {
                 return;
             }
+            // 真实等待：轮询 wait task 对真实子进程的退出码记录（start_paused 不适用）
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         panic!("最新条目在 3s 内未完成");

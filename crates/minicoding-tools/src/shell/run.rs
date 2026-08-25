@@ -303,11 +303,18 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: &mut R, cap: usize) -> 
     buf
 }
 
-/// S19/C-04：shell 输出中的常见凭证赋值形态脱敏（替换为 `***`）。
+/// S19/C-04：shell 输出中的常见凭证形态脱敏（PTM-14：值边界精确替换）。
 ///
-/// 匹配 `KEY=value` 形式且 KEY 含敏感关键词（`PASSWORD`/`SECRET`/`TOKEN`/`API_KEY`/`PRIVATE_KEY`）。
-/// 或 value 以知名 key 前缀开头（sk-/ghp_/AKIA）。保守策略：
-/// 仅处理行首赋值或 JSON 字段，不碰普通文本。
+/// 两类命中：
+/// 1. `KEY=value` / `"KEY": value` 形式且 KEY 含敏感关键词
+///    （`PASSWORD`/`SECRET`/`TOKEN`/`API_KEY`/`PRIVATE_KEY`/…）——仅替换
+///    **值片段**为 `***`，行内其余内容（日志上下文、其他字段）保留；
+/// 2. 行内出现知名 key 前缀（sk-/ghp_/AKIA/xoxb-/github_pat_）——仅替换
+///    前缀起始的**连续 token**（到空白/引号/行尾为止）为 `***`。
+///
+/// 此前整行吞 `[REDACTED]`：混有正常日志的行有效信息一并丢失，LLM 排障
+/// 能力受损（PTM-14）。保守性说明：值边界按空白/引号截断，含空格的奇异
+/// 凭证可能残留尾部——安全方向残余风险低于误杀面，可接受。
 fn redact_secrets(text: &str) -> String {
     const SENSITIVE_KEYS: &[&str] = &[
         "password",
@@ -322,27 +329,106 @@ fn redact_secrets(text: &str) -> String {
 
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        let lower = trimmed.to_ascii_lowercase();
-        let is_sensitive_assignment = SENSITIVE_KEYS.iter().any(|k| {
-            (lower.starts_with(k)
-                || lower.contains(&format!("\"{k}\""))
-                || lower.contains(&format!("'{k}'")))
-                && (trimmed.contains('=') || trimmed.contains(':'))
-        });
-        let has_known_prefix = KEY_PREFIXES.iter().any(|prefix| trimmed.contains(prefix));
-
-        if is_sensitive_assignment || has_known_prefix {
-            out.push_str("[REDACTED]");
-        } else {
-            out.push_str(line);
-        }
+        out.push_str(&redact_line_precise(line, SENSITIVE_KEYS, KEY_PREFIXES));
         out.push('\n');
     }
     // 原文无尾部换行则不补
     if !text.ends_with('\n') {
         out.pop();
     }
+    out
+}
+
+/// 单行值边界精确脱敏（PTM-14）：扫描赋值对与前缀 token，逐段拼接。
+fn redact_line_precise(line: &str, sensitive_keys: &[&str], key_prefixes: &[&str]) -> String {
+    let bytes = line.as_bytes();
+    let lower = line.to_ascii_lowercase();
+    let mut edits: Vec<(usize, usize)> = Vec::new(); // [start, end) 待替换区段
+
+    let byte_len = |s: &str| s.len();
+    for key in sensitive_keys {
+        // 匹配 key 出现位置（大小写不敏感），随后要求 `=` 或 `:` 分隔符
+        let mut search_from = 0usize;
+        while let Some(rel) = lower[search_from..].find(key) {
+            let k_start = search_from + rel;
+            let k_end = k_start + byte_len(key);
+            // 分隔符：跳过 key 后的空白与闭引号（JSON `"key":` 形态），找 '=' 或 ':'
+            let mut cursor = k_end;
+            while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t' | b'"' | b'\'') {
+                cursor += 1;
+            }
+            // 值起点：分隔符后的第一个非空白字符（可能带引号）
+            if cursor < bytes.len() && (bytes[cursor] == b'=' || bytes[cursor] == b':') {
+                let mut v_start = cursor + 1;
+                while v_start < bytes.len() && (bytes[v_start] == b' ' || bytes[v_start] == b'\t') {
+                    v_start += 1;
+                }
+                // 值终点：行尾或下一个空白（引号包裹则到闭引号）；无值时回退 k_end
+                let v_end = if v_start < bytes.len() {
+                    match bytes[v_start] {
+                        q @ (b'"' | b'\'') => {
+                            let close = line[v_start + 1..]
+                                .find(q as char)
+                                .map_or(line.len(), |rel| v_start + 1 + rel + 1);
+                            close.min(line.len())
+                        }
+                        _ => line[v_start..]
+                            .find(char::is_whitespace)
+                            .map_or(line.len(), |rel| v_start + rel),
+                    }
+                } else {
+                    v_start
+                };
+                if v_end > v_start {
+                    edits.push((v_start, v_end));
+                }
+                search_from = v_end.max(k_end);
+            } else {
+                search_from = k_end;
+            }
+        }
+    }
+
+    // 知名前缀 token：从前缀起至空白/引号/行尾
+    for prefix in key_prefixes {
+        let mut search_from = 0usize;
+        while let Some(rel) = lower[search_from..].find(&prefix.to_ascii_lowercase()) {
+            let p_start = search_from + rel;
+            // 前缀须处于 token 起点（前一字符为空白/行首/引号），避免误伤 URL 中段
+            let at_token_start = p_start == 0
+                || (bytes[p_start - 1] as char).is_whitespace()
+                || bytes[p_start - 1] == b'"'
+                || bytes[p_start - 1] == b'\'';
+            if at_token_start {
+                let p_end = line[p_start..]
+                    .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                    .map_or(line.len(), |rel| p_start + rel);
+                if p_end > p_start {
+                    edits.push((p_start, p_end));
+                }
+                search_from = p_end.max(p_start + byte_len(prefix));
+            } else {
+                search_from = p_start + byte_len(prefix);
+            }
+        }
+    }
+
+    if edits.is_empty() {
+        return line.to_string();
+    }
+    edits.sort_unstable();
+    edits.dedup_by(|a, b| a.0 <= b.1 && b.0 <= a.1); // 合并重叠区段（保守取并集）
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in edits {
+        if start < cursor {
+            continue; // 与已合并区段重叠
+        }
+        out.push_str(&line[cursor..start]);
+        out.push_str("***");
+        cursor = end;
+    }
+    out.push_str(&line[cursor..]);
     out
 }
 
@@ -474,7 +560,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Timeout(_)));
-        // killpg 后短暂等待，确认无 `sleep 60` 残留
+        // killpg 后短暂等待，确认无 `sleep 60` 残留。
+        // 真实等待：断言对象是 OS 进程表（killpg 异步生效），虚拟时钟无法
+        // 加速真实子进程退出（start_paused 不适用）
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let out = std::process::Command::new("sh")
             .arg("-c")
@@ -631,7 +719,46 @@ mod tests {
             .await
             .expect("run ok");
         let text = text_of(&result);
-        assert!(text.contains("[REDACTED]"), "API key 应被脱敏: {text}");
+        assert!(text.contains("***"), "API key 应被脱敏: {text}");
         assert!(!text.contains("sk-test-key-12345"), "原始 key 不应出现");
+    }
+
+    // ===== PTM-14：值边界精确替换（不再整行吞） =====
+
+    #[test]
+    fn redact_preserves_line_context_around_value() {
+        use super::redact_secrets;
+        let input = "2026-08-25 INFO request id=42 API_KEY=sk-secret-value-xyz done in 3ms";
+        let out = redact_secrets(input);
+        assert!(out.contains("id=42"), "行内其他字段应保留: {out}");
+        assert!(out.contains("done in 3ms"), "日志尾应保留: {out}");
+        assert!(!out.contains("sk-secret-value"), "值应替换: {out}");
+        assert!(out.contains("API_KEY=***"), "键名与分隔符应保留: {out}");
+    }
+
+    #[test]
+    fn redact_json_field_and_quoted_value() {
+        use super::redact_secrets;
+        let out = redact_secrets("{\"api_key\": \"supersecret123\", \"level\": \"info\"}");
+        assert!(!out.contains("supersecret123"), "{out}");
+        assert!(
+            out.contains("\"level\": \"info\""),
+            "无关 JSON 字段应保留: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_prefix_token_only_not_whole_line() {
+        use super::redact_secrets;
+        let out = redact_secrets("token ghp_abcdef123 served 200 OK");
+        assert!(out.contains("served 200 OK"), "上下文应保留: {out}");
+        assert!(!out.contains("ghp_abcdef"), "{out}");
+    }
+
+    #[test]
+    fn redact_non_sensitive_lines_untouched() {
+        use super::redact_secrets;
+        let input = "plain log line\ntokens=42 count\nno secrets here";
+        assert_eq!(redact_secrets(input), input, "普通行不应改动");
     }
 }

@@ -7,7 +7,9 @@
 //!
 //! 所有 URL 经 [`ssrf::validate_url`] 校验：拒绝非 http/https scheme、拒绝
 //! loopback/private/link-local/unspecified IP（含 DNS 解析后检查，防止域名绕过）。
-//! 见 `security.md` §3.2。
+//! A2：web.fetch 每一跳还经 [`ssrf::validate_ip`]/[`ssrf::resolve_and_validate_host`]
+//! 解析并钉住连接 IP（`Client::resolve`），关闭"校验后连接前"的 DNS rebinding
+//! 窗口。见 `security.md` §3.2。
 
 #![cfg(feature = "web")]
 
