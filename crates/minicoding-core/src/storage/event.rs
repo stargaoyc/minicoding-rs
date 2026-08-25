@@ -40,11 +40,14 @@ use time::OffsetDateTime;
 /// - v1：`EventRecord` 显式包装 `PersistedEvent`（无 step 边界事件）；
 /// - v2：新增 `StepStarted`/`StepEnded`（M-06，step 边界定位，仅 log 不进
 ///   transcript）。`replay_session_state` 对 v1 事件流跳过 Step 处理（Step 事件
-///   不影响消息重建，向后兼容）。
+///   不影响消息重建，向后兼容）；
+/// - v3：`SessionState` 新增会话安全上下文字段 `permission_mode`/`sandbox_preset`
+///   （FE-7，快照持久化权限模式与沙箱 preset）。字段均 `#[serde(default)]`，
+///   旧快照缺字段兼容读 `None`；事件变体不变，v1/v2 事件流照常重放。
 ///
 /// 未来变更（如新增事件变体、字段语义变更）递增此版本号，并在
 /// `replay_session_state` 中按版本分支处理。
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// 持久化事件种类（`Event` 子集，仅状态变更类 + step 定位类）。
 ///
@@ -346,9 +349,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_bumped_to_2() {
-        // M-06：v2 引入 StepStarted/StepEnded 变体
-        assert_eq!(SCHEMA_VERSION, 2);
+    fn schema_version_bumped_to_3() {
+        // M-06：v2 引入 StepStarted/StepEnded 变体；
+        // FE-7：v3 引入 SessionState 安全上下文字段（permission_mode/sandbox_preset）
+        assert_eq!(SCHEMA_VERSION, 3);
     }
 
     #[test]

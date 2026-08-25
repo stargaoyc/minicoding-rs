@@ -56,6 +56,18 @@ pub struct SessionState {
     pub config_hash: u64,
     /// 消息列表（snapshot 时刻的完整快照）。
     pub messages: Vec<Message>,
+    /// 会话安全上下文：快照时刻的 `PermissionMode`（serde `snake_case` 字符串，
+    /// 如 `"plan"`/`"default"`）。FE-7（2026-08-25 R2 审查遗留）：此前不随快照
+    /// 持久化，重启恢复后回落默认值，权限语义与中断前不一致。旧快照缺此字段
+    /// 兼容读 `None`（serde default），调用方回落启动默认并告警。
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// 会话安全上下文：快照时刻的沙箱 preset 标识（`SandboxPolicy::preset_tag`，
+    /// 如 `"workspace-write"`）。仅记录 preset 类别不含参数（workdir/writable 属
+    /// 机器本地路径，跨机恢复无意义）；preset 变更是进程级启动决策，恢复侧只
+    /// 对比告警不做热切换。旧快照兼容读 `None`。
+    #[serde(default)]
+    pub sandbox_preset: Option<String>,
 }
 
 impl SessionSnapshot {
@@ -143,6 +155,8 @@ mod tests {
                 Message::user_text("hello"),
                 Message::assistant_text("world"),
             ],
+            permission_mode: Some("plan".to_string()),
+            sandbox_preset: Some("workspace-write".to_string()),
         };
         let snap = SessionSnapshot::new(42, state);
         let json = serde_json::to_string(&snap).unwrap();
@@ -151,6 +165,62 @@ mod tests {
         assert_eq!(back.session_id, "01TEST");
         assert_eq!(back.state.messages.len(), 2);
         assert_eq!(back.schema_version, crate::storage::event::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn snapshot_security_context_roundtrip() {
+        // FE-7：安全上下文字段双向序列化保真
+        let state = SessionState {
+            id: "01SEC".to_string(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            workdir: "/tmp".to_string(),
+            config_hash: 0,
+            messages: Vec::new(),
+            permission_mode: Some("accept_edits".to_string()),
+            sandbox_preset: Some("danger-full-access".to_string()),
+        };
+        let snap = SessionSnapshot::new(7, state);
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"permission_mode\":\"accept_edits\""));
+        assert!(json.contains("\"sandbox_preset\":\"danger-full-access\""));
+        let back: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.state.permission_mode.as_deref(), Some("accept_edits"));
+        assert_eq!(
+            back.state.sandbox_preset.as_deref(),
+            Some("danger-full-access")
+        );
+    }
+
+    #[test]
+    fn old_snapshot_without_security_fields_deserializes_none() {
+        // 旧版（v3 前）快照 JSON 无 permission_mode/sandbox_preset 字段：
+        // serde default 兼容读 None（向后兼容，恢复侧回落启动默认）
+        let legacy_state = r#"{
+            "id": "01LEGACY",
+            "created_at": "1970-01-01T00:00:00Z",
+            "workdir": "/tmp/proj",
+            "config_hash": 0,
+            "messages": []
+        }"#;
+        let state: SessionState = serde_json::from_str(legacy_state).unwrap();
+        assert!(state.permission_mode.is_none());
+        assert!(state.sandbox_preset.is_none());
+
+        // 整个 snapshot 层同样兼容
+        let legacy_snap = format!(
+            r#"{{
+                "session_id": "01LEGACY",
+                "seq": 3,
+                "taken_at": "1970-01-01T00:00:00Z",
+                "schema_version": {legacy_version},
+                "state": {legacy_state}
+            }}"#,
+            legacy_version = 2
+        );
+        let snap: SessionSnapshot = serde_json::from_str(&legacy_snap).unwrap();
+        assert_eq!(snap.seq, 3);
+        assert!(snap.state.permission_mode.is_none());
+        assert!(snap.state.sandbox_preset.is_none());
     }
 
     #[tokio::test]
@@ -169,6 +239,8 @@ mod tests {
             workdir: "/tmp".to_string(),
             config_hash: 0,
             messages: Vec::new(),
+            permission_mode: None,
+            sandbox_preset: None,
         };
         let snap = SessionSnapshot::new(1, state);
         store.save(snap).await.unwrap();

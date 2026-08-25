@@ -171,14 +171,26 @@ impl Runtime {
     /// 从 `ContextManager::snapshot` 获取当前消息列表，构造 `SessionState` +
     /// `SessionSnapshot`，调 `SnapshotStore::save` 原子落盘（先 `.tmp` 再 `rename`）。
     /// snapshot 失败仅记 `warn` 日志，不中断主流程（best-effort）。
+    ///
+    /// FE-7（2026-08-25 R2 审查遗留）：同时持久化会话安全上下文——
+    /// `plan_state.mode`（serde `snake_case` 字符串）与 `sandbox_policy.preset_tag()`，
+    /// 供重启恢复时还原权限语义（见 server `restore_session`/CLI `--resume`）。
     async fn create_snapshot(&self, seq: u64) {
         let ctx_snap = self.ctx.snapshot().await;
+        // 安全上下文：mode 用 serde 规范序列化（rename_all = "snake_case"），
+        // 与恢复侧 `from_value` 互逆；preset 只存类别标识不含路径参数
+        let mode = self.plan_state.read().await.mode;
+        let permission_mode = serde_json::to_value(mode)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string));
         let state = SessionState {
             id: self.session.id.clone(),
             created_at: self.session.created_at,
             workdir: self.session.workdir.to_string(),
             config_hash: self.session.config_hash,
             messages: ctx_snap.messages,
+            permission_mode,
+            sandbox_preset: Some(self.sandbox_policy.preset_tag().to_string()),
         };
         let snapshot = SessionSnapshot::new(seq, state);
         if let Err(e) = self.snapshot_store.save(snapshot).await {

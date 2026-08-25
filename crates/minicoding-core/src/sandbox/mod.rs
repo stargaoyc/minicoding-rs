@@ -8,7 +8,8 @@ mod breaker;
 mod r#trait;
 
 pub use breaker::{
-    BreakerState, DenialMatch, DenialSignature, NoopDenialDetector, NoopDenialTracker,
-    SandboxDenialDetector, SandboxDenialTracker, hard_trip_summary, soft_trip_reminder,
+    BreakerState, DENIED_ERRNO_MARKER_PREFIX, DENIED_ERRNO_MARKER_SUFFIX, DenialMatch,
+    DenialSignature, NoopDenialDetector, NoopDenialTracker, SandboxDenialDetector,
+    SandboxDenialTracker, hard_trip_summary, soft_trip_reminder,
 };
 pub use r#trait::{NoopDriver, SandboxDenyKind, SandboxDriver, SandboxError, SandboxPolicy};

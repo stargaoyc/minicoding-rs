@@ -1564,8 +1564,8 @@ pub enum Event {
 
 ### 11.2 事件总线
 
-- `broadcast::Sender<Event>`，多订阅者。
-- 订阅者消费慢时：token 事件可丢弃（合并连续空白），控制事件（`Permission*`/`TurnEnd`/`Error`）不可丢——通过有界 channel + 优先级丢弃策略实现。
+- `broadcast::Sender<Event>`，多订阅者，默认容量 1024（`EventBus::DEFAULT_CAPACITY`）。
+- 订阅者消费慢时：tokio broadcast **无优先级丢弃能力**——通道满后新事件挤掉最旧事件，控制事件与 token 事件在同一通道内一视同仁，不存在"控制事件不可丢"的通道级保证；慢消费者收到 `Lagged(n)` 即中间事件已不可达。恢复兜底是 durable 重放（server SSE cursor / `EventStore::load_after`），Runtime 内直连订阅者应保持轻量（消费快于产能，或对 `Lagged` 容忍续跑）。
 - Frontend 订阅做渲染；Storage 订阅做审计落盘；tracing 订阅做结构化日志；OpenTelemetry 订阅做 span 事件（见 §14）。
 - **权限回复不走总线**：`PermissionRequested` 仅是通知，真正的决策由 Runtime 调 `prompter.prompt()` 同步获得，再发 `PermissionResolved`。这保证了即使没有任何订阅者，权限流程也能正常推进。
 

@@ -72,20 +72,31 @@ pub enum Event {
     StepEnded { iter: u32 },
 }
 
+/// 事件总线默认容量（`EventBus::new` 用，依据见类型级文档）。
+pub const DEFAULT_CAPACITY: usize = 1024;
+
 /// 事件总线（broadcast channel）。
 ///
-/// 容量 256：token 事件高频，过小会丢消息；过大浪费内存。
-/// 订阅者消费慢时丢弃最旧事件（对 token 流可接受）。
+/// 默认容量 1024（C1，2026-08-25 审查）：`Token` 与 `MessageAppended` 等事件
+/// 混流于同一通道，容量过小时慢消费者频繁 `Lagged`，控制事件（`Permission*`/
+/// `TurnEnd`/`StepStarted` 等）与 token 一同被挤掉——tokio broadcast **无优先级
+/// 丢弃能力**，不存在"控制事件不可丢"的通道级保证。1024 在典型 turn 的 token
+/// 增量峰值下给直连订阅者留出调度余量；更大收益递减且浪费内存。慢消费者
+/// `Lagged(n)` 后的恢复兜底是 durable 重放（server SSE cursor /
+/// `EventStore::load_after`），订阅者应保持轻量并对 `Lagged` 容忍续跑。
+///
+/// 不做双通道拆分：会破坏 `Token` 与 `MessageAppended` 的跨通道顺序不变量，
+/// SSE/TUI 流式渲染依赖该顺序。
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
 }
 
 impl EventBus {
-    /// 创建事件总线。
+    /// 创建事件总线（默认容量，见类型级文档）。
     #[must_use]
     pub fn new() -> Self {
-        Self::with_capacity(256)
+        Self::with_capacity(DEFAULT_CAPACITY)
     }
 
     /// 指定容量创建。
@@ -144,6 +155,23 @@ mod tests {
         let bus = EventBus::with_capacity(1);
         let _rx = bus.subscribe();
         // 能成功订阅即说明 channel 创建成功
+    }
+
+    #[tokio::test]
+    async fn default_capacity_holds_1024_events_without_lag() {
+        // C1 回归锁：默认容量 1024——先订阅再连发 1024 条事件，消费端应全部
+        // Ok 收到、无 Lagged（容量若回退到旧值 256，第 257 条起会挤掉最旧事件）。
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        for i in 0..DEFAULT_CAPACITY {
+            bus.emit(Event::Token(i.to_string()));
+        }
+        for i in 0..DEFAULT_CAPACITY {
+            match rx.recv().await.expect("容量内事件不应 Lagged") {
+                Event::Token(t) => assert_eq!(t, i.to_string()),
+                other => panic!("expected Token, got {other:?}"),
+            }
+        }
     }
 
     #[test]

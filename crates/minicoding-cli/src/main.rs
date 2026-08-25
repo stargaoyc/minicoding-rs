@@ -39,6 +39,7 @@ use minicoding_cli::commands::{
 };
 use minicoding_cli::{commands, otel_init, session};
 use minicoding_core::model::{TurnOutcome, UserInput};
+use minicoding_core::policy::PermissionMode;
 use minicoding_core::runtime::Event;
 
 /// 顶层子命令（除默认运行模式外的独立操作）。
@@ -183,6 +184,78 @@ fn resolve_session_mode(cli: &Cli) -> Result<SessionLoadMode> {
     Ok(SessionLoadMode::None)
 }
 
+/// FE-7：`--resume` 时从快照还原持久化的 `permission_mode`（安全上下文跨重启）。
+///
+/// 仅 Resume 模式还原：Replay 保持 C-06 默认禁副作用语义、Fork 是新会话，均不
+/// 还原。必须在 `init_event_stream` 之后调用——`set_mode` 触发的
+/// `PermissionModeChanged` 会追加到事件流，seq 计数器需已初始化。
+/// `sandbox_preset` 仅记录诊断日志：CLI 侧 preset 由 builder 进程级决策，
+/// 不做热切换（C-22）。无快照（旧会话无事件流/新会话）时静默保持启动默认。
+async fn apply_restored_security_context(
+    rt: &minicoding_core::runtime::Runtime,
+    mode: &SessionLoadMode,
+) {
+    let SessionLoadMode::Resume(session_id) = mode else {
+        return;
+    };
+    let Ok(dir) = minicoding_core::paths::sessions_dir() else {
+        return;
+    };
+    let store = minicoding_storage::JsonlSnapshotStore::new(dir);
+    let Ok(Some(snapshot)) = store.load_sync(session_id) else {
+        return;
+    };
+    if let Some(raw) = snapshot.state.permission_mode.as_deref() {
+        // 与写入侧同规范：serde `snake_case` 字符串 ↔ `PermissionMode`
+        if let Ok(restored) =
+            serde_json::from_value::<PermissionMode>(serde_json::Value::String(raw.to_string()))
+        {
+            rt.plan_controller().set_mode(restored).await;
+            tracing::info!(
+                session = %session_id,
+                mode = ?restored,
+                "permission_mode restored from snapshot (--resume)"
+            );
+        } else {
+            tracing::warn!(
+                session = %session_id,
+                raw,
+                "unknown permission_mode in snapshot; keeping startup default"
+            );
+        }
+    }
+    if let Some(preset) = snapshot.state.sandbox_preset.as_deref() {
+        tracing::info!(
+            session = %session_id,
+            snapshot_preset = preset,
+            "sandbox preset recorded in snapshot (process-level decision, not hot-switched)"
+        );
+    }
+}
+
+/// Event Sourcing 初始化 + 恢复会话历史（交互/单次两分支共用的前置步骤）。
+///
+/// 返回 `false` 表示初始化失败（已输出 stderr，调用方返回退出码 1）。
+async fn init_event_stream_and_history(
+    rt: &minicoding_core::runtime::Runtime,
+    has_preloaded_session: bool,
+) -> bool {
+    // Event Sourcing：初始化事件流（新会话持久化 SessionCreated，
+    // 恢复会话加载 seq 计数器 + snapshot，见 `design.md` §25.1）。
+    // 必须在 `restore_history` 之前调用（`init_event_stream` 设置
+    // `durable_seq`/`event_seq`，`restore_history` 不依赖这些字段，
+    // 但语义上事件流应先于 turn 初始化）。
+    if let Err(e) = rt.init_event_stream().await {
+        eprintln!("初始化事件流失败: {e}");
+        return false;
+    }
+    if has_preloaded_session && let Err(e) = rt.restore_history().await {
+        eprintln!("恢复会话历史失败: {e}");
+        return false;
+    }
+    true
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -275,32 +348,22 @@ fn main() -> Result<()> {
                     eprintln!("MCP 工具注册失败: {e}");
                 }
             }
-            // Event Sourcing：初始化事件流（新会话持久化 SessionCreated，
-            // 恢复会话加载 seq 计数器 + snapshot，见 `design.md` §25.1）。
-            // 必须在 `restore_history` 之前调用（`init_event_stream` 设置
-            // `durable_seq`/`event_seq`，`restore_history` 不依赖这些字段，
-            // 但语义上事件流应先于 turn 初始化）。
-            if let Err(e) = rt.init_event_stream().await {
-                eprintln!("初始化事件流失败: {e}");
+            // Event Sourcing：初始化事件流 + 恢复会话历史（共用前置步骤，
+            // 见 `init_event_stream_and_history`；`--resume` 的安全上下文还原
+            // 依赖已初始化的 seq 计数器，故置于其后）。
+            if !init_event_stream_and_history(&rt, has_preloaded_session).await {
                 return 1;
             }
-            if has_preloaded_session && let Err(e) = rt.restore_history().await {
-                eprintln!("恢复会话历史失败: {e}");
-                return 1;
-            }
+            apply_restored_security_context(&rt, &mode).await;
             session::run_interactive_session(&rt).await
         })
     } else {
         let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
         runtime.block_on(async {
-            if let Err(e) = rt.init_event_stream().await {
-                eprintln!("初始化事件流失败: {e}");
+            if !init_event_stream_and_history(&rt, has_preloaded_session).await {
                 return 1;
             }
-            if has_preloaded_session && let Err(e) = rt.restore_history().await {
-                eprintln!("恢复会话历史失败: {e}");
-                return 1;
-            }
+            apply_restored_security_context(&rt, &mode).await;
             run_single_turn(&rt, prompt).await
         })
     };

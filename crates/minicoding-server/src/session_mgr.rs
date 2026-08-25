@@ -18,7 +18,7 @@ use minicoding_core::metrics;
 use minicoding_core::model::{
     Message, Session, SessionId, SessionMeta, Task, TurnOutcome, UserInput,
 };
-use minicoding_core::policy::Decision;
+use minicoding_core::policy::{Decision, PermissionMode};
 use minicoding_core::runtime::{Event, Runtime};
 use minicoding_core::storage::Storage;
 use minicoding_protocol::cursor::EventCursor;
@@ -83,7 +83,8 @@ impl ServerSession {
     /// 创建新会话状态。
     fn new(runtime: Arc<Runtime>, pending: PendingPermissions) -> Self {
         // 容量与 ring buffer 对齐（1024）：订阅端消费慢时 Lagged → RehydrateRequired，
-        // 与 EventBus(256) 相比降低慢客户端误触发重同步的概率
+        // 与 EventBus 默认容量（1024，见 core::runtime::event）同量级，降低慢客户端
+        // 误触发重同步的概率
         let (sequenced_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             runtime,
@@ -215,6 +216,24 @@ struct DiskSessionStore {
     storage: JsonlStorage,
     event_store: JsonlEventStore,
     snapshot_store: JsonlSnapshotStore,
+}
+
+/// 从快照恢复的会话安全上下文（FE-7，v3 snapshot schema）。
+///
+/// `permission_mode` 为 `None` 表示旧快照（无字段）或值不可解析——恢复侧回落
+/// server 启动默认并告警。`sandbox_preset` 仅用于对比告警（preset 变更是进程级
+/// 启动决策，不热切换，C-22）。
+struct RestoredSecurityContext {
+    permission_mode: Option<PermissionMode>,
+    sandbox_preset: Option<String>,
+}
+
+/// 快照中的 `permission_mode` 字符串 → `PermissionMode`。
+///
+/// 写入侧用 serde 规范序列化（`rename_all = "snake_case"`，如 `"plan"`），此处
+/// 走同一规范反序列化，未知字符串返回 `None` 由调用方告警回落。
+fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string())).ok()
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -529,11 +548,11 @@ impl SessionManager {
     /// 恢复后 `Runtime` 的 `workdir` 为会话原工作目录（事件流/Snapshot 中的值），
     /// 使文件工具/sandbox/journal 与创建时一致。
     ///
-    /// FE-7（2026-08-25 R2 审查，已知取舍如实记录）：会话原 `permission_mode`
-    /// 与 sandbox preset **不随会话持久化**（Session/Snapshot 数据模型未含该
-    /// 字段），重启恢复后回落 server 启动默认值。若原会话以 plan/full-access
-    /// 运行，恢复后的权限语义与中断前不同——显式 warn 提醒；持久化安全上下文
-    /// 需扩展 snapshot schema（roadmap"2026-08-25 R2 审查遗留"）。
+    /// FE-7（2026-08-25 R2 审查遗留，已实现持久化）：快照带 `permission_mode`
+    /// 时经 `plan_controller().set_mode` 还原原权限模式（plan/full-access 等语义
+    /// 跨重启保持）；旧快照（v3 前）无该字段则回落 server 启动默认并显式 warn。
+    /// `sandbox_preset` 仅对比告警——preset 变更是进程级启动决策（C-22 需显式
+    /// 选定 + 二次确认），不做热切换。
     ///
     /// # Errors
     /// 会话不存在时返回 `NotFound`；磁盘加载或 Runtime 构造失败时返回
@@ -546,7 +565,7 @@ impl SessionManager {
             return Err(SessionManagerError::NotFound(session_id.to_string()));
         };
         // 1. 从磁盘加载会话（事件流重放优先，消息日志回退）
-        let session = self.load_session_from_disk(disk, session_id).await?;
+        let (session, security) = self.load_session_from_disk(disk, session_id).await?;
         // 2. 构造 Runtime（预加载会话；workdir 覆盖为会话原工作目录）
         let mut params = self.default_params.clone();
         params.workdir = session.workdir.clone();
@@ -564,16 +583,43 @@ impl SessionManager {
             .map_err(|e| SessionManagerError::BuildFailed(e.to_string()))?;
         // 4. 注册（insert_session 内部查重，并发恢复安全）
         let session = self.insert_session(runtime, pending);
-        // 5. FE-1（2026-08-25 R2 审查）：按持久化进度播种 SSE cursor——
+        // 5. FE-7：还原快照持久化的安全上下文。在 insert 之后应用——并发竞争时
+        //    `insert_session` 可能返回已注册实例，对注册实例操作才有效；在
+        //    seed_cursor 之前应用——set_mode 触发的 `PermissionModeChanged` 已
+        //    持久化并计入 seq，cursor 播种保持连续。经 sequencer task 分配 seq，
+        //    SSE 订阅端可见模式恢复事件。
+        if let Some(sec) = &security {
+            if let Some(mode) = sec.permission_mode {
+                session.runtime.plan_controller().set_mode(mode).await;
+                tracing::info!(
+                    session = %session_id,
+                    mode = ?mode,
+                    "permission_mode restored from snapshot"
+                );
+            } else {
+                tracing::warn!(
+                    session = %session_id,
+                    "snapshot has no persisted permission_mode (pre-v3 snapshot); \
+                     falling back to server default"
+                );
+            }
+            if let Some(preset) = &sec.sandbox_preset {
+                let current = params.sandbox_policy.preset_tag();
+                if preset != current {
+                    tracing::warn!(
+                        session = %session_id,
+                        snapshot_preset = %preset,
+                        current_preset = current,
+                        "sandbox preset differs from snapshot; keeping process-level preset \
+                         (preset changes require process restart, no hot switch)"
+                    );
+                }
+            }
+        }
+        // 6. FE-1（2026-08-25 R2 审查）：按持久化进度播种 SSE cursor——
         //    此后新事件 seq 与重启前连续，Last-Event-ID 重连可走 durable
         //    recovery 而非误判不可恢复。
         session.seed_cursor_from_runtime().await;
-        // FE-7：安全上下文回落显式提醒（取舍说明见方法 doc）
-        tracing::warn!(
-            session = %session_id,
-            "restored session falls back to server-default permission_mode/sandbox preset \
-             (security context is not persisted across restarts)"
-        );
         Ok(session)
     }
 
@@ -583,6 +629,9 @@ impl SessionManager {
     /// （见 `docs/design.md` §25.4）；事件重放失败（schema 不兼容等）时回退
     /// 消息日志路径，保证旧会话始终可恢复。
     ///
+    /// 同时返回快照持久化的会话安全上下文（FE-7）：仅事件流/snapshot 路径有值，
+    /// 消息日志回退路径为 `None`（旧格式无该信息）。
+    ///
     /// # Errors
     /// 会话不存在（无事件流且无消息）时返回 `NotFound`；读取失败时返回
     /// `BuildFailed`。
@@ -590,19 +639,34 @@ impl SessionManager {
         &self,
         disk: &DiskSessionStore,
         session_id: &str,
-    ) -> Result<Session, SessionManagerError> {
+    ) -> Result<(Session, Option<RestoredSecurityContext>), SessionManagerError> {
         // 1. Event Sourcing 路径：snapshot + 事件流重放
         let snapshot = disk
             .snapshot_store
             .load_sync(&session_id.to_string())
             .map_err(|e| SessionManagerError::BuildFailed(format!("snapshot 加载失败: {e}")))?;
+        // FE-7：replay 消费 snapshot 前先捕获安全上下文（旧快照字段缺省 → None）
+        let security = snapshot.as_ref().map(|s| RestoredSecurityContext {
+            permission_mode: s.state.permission_mode.as_deref().and_then(|raw| {
+                let parsed = parse_permission_mode(raw);
+                if parsed.is_none() {
+                    tracing::warn!(
+                        session = %session_id,
+                        raw,
+                        "unknown permission_mode in snapshot; ignoring"
+                    );
+                }
+                parsed
+            }),
+            sandbox_preset: s.state.sandbox_preset.clone(),
+        });
         let events = disk
             .event_store
             .load_events_sync(&session_id.to_string())
             .map_err(|e| SessionManagerError::BuildFailed(format!("事件流加载失败: {e}")))?;
         if !events.is_empty() || snapshot.is_some() {
             match replay_session_state(snapshot.as_ref(), events) {
-                Ok(replayed) => return Ok(replayed.session),
+                Ok(replayed) => return Ok((replayed.session, security)),
                 Err(e) => {
                     tracing::warn!(
                         session = %session_id,
@@ -625,13 +689,16 @@ impl SessionManager {
             .first()
             .map_or_else(OffsetDateTime::now_utc, |m| m.created_at);
         // 消息日志无 workdir 信息，用 server 默认工作目录（与 CLI 回退路径一致）
-        Ok(Session {
-            id: session_id.to_string(),
-            created_at,
-            workdir: self.default_params.workdir.clone(),
-            config_hash: 0,
-            messages,
-        })
+        Ok((
+            Session {
+                id: session_id.to_string(),
+                created_at,
+                workdir: self.default_params.workdir.clone(),
+                config_hash: 0,
+                messages,
+            },
+            None,
+        ))
     }
 
     /// 删除会话（同步——仅从 `HashMap` 移除）。
@@ -902,6 +969,49 @@ mod tests {
             .find(|m| m.id == disk_id)
             .expect("恢复后仍应列出");
         assert_eq!(meta.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn get_or_load_restores_permission_mode_from_snapshot() {
+        // FE-7：快照持久化的 permission_mode 在懒恢复后还原（plan 模式跨重启保持）
+        use minicoding_core::storage::{SessionSnapshot, SessionState};
+
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        let disk_id = "01SNAPMODE".to_string();
+        let sessions_dir = Utf8PathBuf::from(&dir_str).join("sessions");
+        seed_disk_session(&sessions_dir, &disk_id, &["快照前消息"]).await;
+        // 预写带安全上下文的快照（模拟重启前 plan 模式会话）
+        let state = SessionState {
+            id: disk_id.clone(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            workdir: ".".to_string(),
+            config_hash: 0,
+            messages: vec![Message::user_text("快照内消息")],
+            permission_mode: Some("plan".to_string()),
+            sandbox_preset: Some("workspace-write".to_string()),
+        };
+        JsonlSnapshotStore::new(sessions_dir.clone())
+            .save_sync(&SessionSnapshot::new(1, state))
+            .expect("预写快照应成功");
+
+        // server 默认参数为 Default 模式；恢复后应回到快照记录的 Plan
+        assert_eq!(test_params().permission_mode, PermissionMode::Default);
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        let session = mgr.get_or_load(&disk_id).await.expect("应恢复成功");
+        let restored = session.runtime.plan_controller().snapshot().await;
+        assert_eq!(
+            restored.mode,
+            PermissionMode::Plan,
+            "恢复后权限模式应来自快照而非 server 默认"
+        );
     }
 
     #[tokio::test]

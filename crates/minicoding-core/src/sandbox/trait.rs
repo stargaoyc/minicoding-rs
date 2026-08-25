@@ -29,6 +29,24 @@ impl Default for SandboxPolicy {
     }
 }
 
+impl SandboxPolicy {
+    /// 返回策略 preset 标识（会话快照安全上下文持久化用，FE-7）。
+    ///
+    /// 只标识 preset 类别（`readonly`/`workspace-write`/`external-sandbox`/
+    /// `danger-full-access`），不含参数——`WorkspaceWrite` 的 workdir/writable
+    /// 属机器本地路径，不入快照（跨机恢复无意义且泄露目录结构）。恢复侧仅做
+    /// 对比告警，preset 变更是进程级启动决策，不做热切换（C-22）。
+    #[must_use]
+    pub fn preset_tag(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "readonly",
+            Self::WorkspaceWrite { .. } => "workspace-write",
+            Self::ExternalSandbox => "external-sandbox",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
 /// 沙箱驱动 trait（同步、`dyn` 兼容）。
 ///
 /// `apply` 在子进程 `exec` 前同步调用，应用内核级限制。
@@ -178,6 +196,28 @@ mod tests {
         let p = SandboxPolicy::DangerFullAccess;
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("\"kind\":\"danger_full_access\""));
+    }
+
+    #[test]
+    fn sandbox_policy_preset_tag_covers_all_variants() {
+        // FE-7：preset 标识与快照持久化约定一致（不含参数）
+        assert_eq!(SandboxPolicy::ReadOnly.preset_tag(), "readonly");
+        assert_eq!(
+            SandboxPolicy::WorkspaceWrite {
+                workdir: camino::Utf8PathBuf::from("."),
+                writable: Vec::new(),
+            }
+            .preset_tag(),
+            "workspace-write"
+        );
+        assert_eq!(
+            SandboxPolicy::ExternalSandbox.preset_tag(),
+            "external-sandbox"
+        );
+        assert_eq!(
+            SandboxPolicy::DangerFullAccess.preset_tag(),
+            "danger-full-access"
+        );
     }
 
     #[test]
