@@ -19,9 +19,10 @@ github-attestations = false
 # PR 上运行 plan 模式（不实际构建，仅检查配置）
 pr-run-mode = "plan"
 # ENG-2（2026-08-25 R2 审查）：release.yml 已手工加固（concurrency 组 +
-# timeout-minutes），与 dist 生成模板存在预期漂移——开启 allow-dirty 跳过
-# "CI 文件过期"检查，保留手工加固项。
-allow-dirty = true
+# timeout-minutes），与 dist 生成模板存在预期漂移——allow-dirty 声明 CI
+# 产物可脏，跳过"CI 文件过期"检查，保留手工加固项。
+# 注意：该字段为**序列类型**（首次误写 boolean 导致 dist 解析失败）。
+allow-dirty = ["ci"]
 
 # 自定义构建运行器（按平台分配 GitHub Actions runner）
 [dist.github-custom-runners]

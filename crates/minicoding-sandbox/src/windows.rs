@@ -108,11 +108,12 @@ fn job_active_processes(job: &JobHandle) -> Result<u32, io::Error> {
     };
     let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: handle 有效，info 为栈上 POD 结构体，尺寸匹配查询类别。
+    // 注意 lpJobObjectInformation 为 `*mut c_void`（输出参数），需可变转换。
     let ret = unsafe {
         QueryInformationJobObject(
             job.0,
             JobObjectBasicAccountingInformation,
-            &mut info as *const _ as *const _,
+            &mut info as *mut _ as *mut _,
             std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
             std::ptr::null_mut(),
         )

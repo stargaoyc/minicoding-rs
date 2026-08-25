@@ -269,8 +269,7 @@ fn save_provider_config(
 fn get_config_revision() -> Result<u64, String> {
     // CORE-14（2026-08-25 R2 审查）：load_config 错误类型已收敛为
     // `RuntimeError`，此处显式 to_string 适配 Tauri command 的 String 错误约定。
-    let c = minicoding_core::config::load_config()
-        .map_err(|e| e.to_string())?;
+    let c = minicoding_core::config::load_config().map_err(|e| e.to_string())?;
     Ok(c.revision)
 }
 
