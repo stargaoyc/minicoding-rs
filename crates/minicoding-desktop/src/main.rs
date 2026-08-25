@@ -267,7 +267,10 @@ fn save_provider_config(
 /// `get_config_revision`：读取当前配置修订号（前端保存前锁定基准，M-10 防陈旧写）。
 #[tauri::command]
 fn get_config_revision() -> Result<u64, String> {
-    let c = minicoding_core::config::load_config()?;
+    // CORE-14（2026-08-25 R2 审查）：load_config 错误类型已收敛为
+    // `RuntimeError`，此处显式 to_string 适配 Tauri command 的 String 错误约定。
+    let c = minicoding_core::config::load_config()
+        .map_err(|e| e.to_string())?;
     Ok(c.revision)
 }
 
