@@ -39,3 +39,7 @@ time = { workspace = true }
 # TUI 渲染（见 modules.md §13.3）
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

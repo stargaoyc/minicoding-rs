@@ -54,3 +54,7 @@ ts = ["dep:ts-rs"]
 # `dev-dependencies + features = ["test-util"]` 引入，在自己的集成测试中
 # 对具体后端（JSONL/未来 SQLite）运行与 core 内存后端相同的契约断言。
 test-util = []
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

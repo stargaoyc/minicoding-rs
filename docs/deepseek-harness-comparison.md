@@ -16,7 +16,7 @@
 | 运行时约束 | 轻（评测场景为主） | L0/L1/L2 三层约束 C-01..C-35，**实现层强制**（权限/黑名单/路径沙箱/审计） |
 | 扩展机制 | Cordis 插件（Everything is a Plugin，可热重载） | `minicoding-extension-sdk`（Extension trait，编译期注册）+ Hook 子进程协议 |
 | 会话模型 | 内存 append-only `SessionEvent` 日志 + 持久化 seam（JSONL-zstd / SQLite） | 磁盘 JSONL 会话存储 + snapshot + 事件流重放懒恢复 |
-| 沙箱 | `native/landlock-run`（C11 直调内核 UAPI，npm 平台包）+ bwrap/Seatbelt/Windows ACL 探测链 + E2B 远程 | `sandbox-run` + `landlock` + `libseccomp`（Linux），Seatbelt（macOS），Job Object（Windows） |
+| 沙箱 | `native/landlock-run`（C11 直调内核 UAPI，npm 平台包）+ bwrap/Seatbelt/Windows ACL 探测链 + E2B 远程 | 自研 landlock 驱动（Linux，无 seccomp），Seatbelt（macOS），Job Object（Windows） |
 | 前端 | 双 build face（host/client）同源架构，浏览器独立 Cordis 树 | Web（React 19 + Vite）+ Tauri Desktop sidecar + 终端多前端 |
 
 **定位差异**：dsh 以"会话即事件日志"为第一性原理，服务于评测回放、深度追踪与产品化统一；minicoding-rs 以"约束强制 + 工程化"为第一性原理，服务于可信编程助手。以下对比聚焦架构决策，非功能一一对应。
@@ -86,7 +86,7 @@
 ### 2.7 沙箱链：self-restrict-then-exec vs sandbox-run 驱动
 
 - **dsh**：`native/landlock-run` 约 300 行 C11 直调内核 UAPI（musl 静态链接），**纯 argv 前缀 launcher**：`spawn([launcher, --ro path, --rw path, --, bash, -c, cmd])`——launcher 给自己装 Landlock ruleset 后 `execvp`，规则集跨 `execve` 继承，宿主不受影响；exit 125 = launcher 失败；**fail-closed**（内核不 enforce 就不执行）；probe 输出 `landlock: fully/partially enforced`；发布为 npm 平台可选依赖（entry + -linux-x64/-arm64）。`sandbox-local` 按 **bwrap → Landlock → Seatbelt → Windows ACL** 探测并缓存 runner 选择；denial 是结果事实（stderr 签名分类）；沙箱不可用报 `SANDBOX_UNAVAILABLE` **绝不裸跑**。远程：`ctx.fs`/`ctx.subprocess` seam 整体指向 E2B。
-- **minicoding-rs**：`SandboxDriver` trait（core 定义）+ `minicoding-sandbox`（sandbox-run + landlock + libseccomp 驱动，`NoopDriver` 兜底）；策略 `WorkspaceWrite`/`ReadOnly`/`DangerFullAccess`；拒绝语义测试三平台 CI matrix。
+- **minicoding-rs**：`SandboxDriver` trait（core 定义）+ `minicoding-sandbox`（自研 landlock 驱动，`NoopDriver` 兜底；seccomp 待接入）；策略 `WorkspaceWrite`/`ReadOnly`/`DangerFullAccess`；拒绝语义测试三平台 CI matrix。
 
 **评述**：两者都是"内核级强制 + fail-closed"路线，但 dsh 的**探测链 + 缓存 + denial 事实分类**（结构化错误而非仅退出码）与 **npm 平台包分发**值得借鉴；minicoding 的 trait 抽象 + feature gate 平台隔离更贴合 Rust 生态。E2B 远程沙箱对 minicoding 是可选扩展方向（见 R-08，低优先）。
 

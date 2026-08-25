@@ -259,7 +259,7 @@ windows = { version = "...", features = ["..."] }
 
 ### 3.9 事件总线与权限交互
 
-- `EventBus` 仅广播通知（无回复通道）：`Event::Token`/`MessageAppended`/`TurnEnd`/`TaskUpdated`/`HookRun`/`PermissionResolved`/`FileUndone` 等
+- `EventBus` 仅广播通知（无回复通道）：`Event::Token`/`ReasoningDelta`/`MessageAppended`/`TurnEnd`/`ToolCallStarted|Finished`/`PermissionRequested|Resolved`/`StepStarted|Ended` 等（权威清单见 `core/runtime/event.rs`；2026-08-25 R2 审查 DOC-1 清除 HookRun/FileUndone 等幽灵事件名）
 - 权限交互走 `PermissionPrompter` 点对点（`InteractivePrompter`/`TuiPrompter`/`CallbackPrompter`/`NonInteractivePrompter`）
 - 决策（`PermissionPolicy`）与交互（`Prompter`）分离，解决 broadcast 无法承载点对点回复的架构缺陷（见 `docs/design.md` §9.1）
 - 详见 `docs/modules.md` §3.3
@@ -503,7 +503,7 @@ minicoding-web/src/
 ├── api/          # JSON-RPC 客户端 + SSE 订阅 + Zod schema（DTO 自动生成，见 §8.4）
 ├── hooks/        # TanStack Query + Zustand 封装（业务 hook）
 ├── components/   # shadcn/ui 组件 + 业务组件
-├── routes/       # TanStack Router 页面（类型安全路由）
+├── views/        # 单页状态切换的视图组件（无路由库，DOC-8 对齐：TanStack Router 未采用）
 ├── stores/       # Zustand 全局状态（UI 主题、面板开关等）
 └── main.tsx      # 入口
 ```
@@ -515,7 +515,7 @@ minicoding-web/src/
 
 - `minicoding-protocol` 的 Rust DTO 通过 `ts-rs`（已选型）自动生成 TypeScript 类型 + Zod schema，**不手写双份**；
 - 生成产物放 `minicoding-web/src/api/generated/`，**不手动编辑**（文件头标注 `// AUTO-GENERATED, DO NOT EDIT`）；
-- 后端 DTO 变更后，前端 `npm run gen-types` 重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）；
+- 后端 DTO 变更后，前端 `pnpm gen-types` 重新生成（DOC-11 对齐 CI 实际命令），CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）；
 - 运行时校验：JSON-RPC 响应必须经 Zod parse 后才进入业务层，防止后端 schema 漂移导致运行时错误。
 
 ### 8.5 状态管理（职责正交）

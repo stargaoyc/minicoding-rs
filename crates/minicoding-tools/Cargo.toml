@@ -52,3 +52,7 @@ web = ["dep:reqwest", "dep:url"]
 [target.'cfg(unix)'.dependencies]
 # S9/C-07：进程组整树终止（pre_exec setpgid + 超时 killpg）
 libc = "0.2"
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

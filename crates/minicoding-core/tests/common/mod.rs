@@ -60,14 +60,14 @@ impl std::fmt::Debug for ScriptedProvider {
         f.debug_struct("ScriptedProvider")
             .field(
                 "remaining_scripts",
-                &self.scripts.lock().map(|s| s.len()).unwrap_or(0),
+                &self.scripts.lock().map_or(0, |s| s.len()),
             )
             .finish_non_exhaustive()
     }
 }
 
 impl LlmProvider for ScriptedProvider {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "mock"
     }
     fn capabilities(&self) -> Capabilities {
@@ -202,7 +202,7 @@ impl Tool for MockTool {
 /// 内存存储（无需磁盘 IO，便于快速测试）。
 ///
 /// M-13 起按会话分桶（`HashMap<SessionId, Vec<Message>>`），实现完整 `Storage`
-/// 语义（list/delete/update_summary），可运行 `testing::storage_contract` 契约
+/// `语义（list/delete/update_summary），可运行` `testing::storage_contract` 契约
 /// 断言——与 JSONL 后端共享同一套行为保证。
 #[derive(Default)]
 pub struct InMemoryStorage {
@@ -425,7 +425,7 @@ impl ContextManager for TestContext {
     }
     fn message_count(&self) -> usize {
         // 同步读取：try_read 失败时返回 0（仅测试用，不阻塞）
-        self.messages.try_read().map(|g| g.len()).unwrap_or(0)
+        self.messages.try_read().map_or(0, |g| g.len())
     }
 }
 

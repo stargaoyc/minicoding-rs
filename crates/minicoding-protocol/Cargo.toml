@@ -31,3 +31,7 @@ default = []
 # `cargo test --features ts -p minicoding-protocol` 生成 protocol + core 的 TS
 # 类型到 `crates/minicoding-web/src/api/generated/`。
 ts = ["dep:ts-rs", "minicoding-core/ts"]
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

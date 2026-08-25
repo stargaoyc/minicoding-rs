@@ -1518,39 +1518,45 @@ minicoding 启动
 
 `Event` 全部字段必须 `Clone`——事件总线是 `broadcast`，每条事件会被克隆给所有订阅者。因此**事件中绝不携带 `oneshot::Sender` / `mpsc::Sender` 等不可克隆的回复通道**；需要回复的语义（如权限交互）走独立的点对点 trait（`PermissionPrompter`，见 §9），事件总线只承担"通知"职责。
 
+> **权威源（DOC-1，2026-08-25 R2 审查）**：`Event` 枚举以
+> `crates/minicoding-core/src/runtime/event.rs` 为唯一事实源，下表为其当前
+> 完整清单的**摘要**。早期版本曾列出 `Error`/`SubagentStarted`/
+> `SubagentFinished`/`HookRun`/`FileUndone`/`ToolCallStart(Progress|End)` 等
+> 变体——它们从未在代码中存在（`FileUndone` 仅是 `AuditKind`），已全部清除；
+> 引用这些名字的章节以本节为准。
+
 ```rust
 pub enum Event {
-    MessageAppended(Message),
+    /// 流式 token 增量。
     Token(String),
+    /// 思考过程增量（瞬态：不落盘、不进 messages）。
+    ReasoningDelta(String),
+    /// 一条消息已追加（落盘 + 入上下文后）。
+    MessageAppended(Message),
+    /// 流式开始。
     TurnStreamingStarted,
-    ToolCallStart(ToolCall),
-    ToolCallProgress { id: ToolCallId, bytes: usize },
-    ToolCallEnd { id: ToolCallId, ok: bool, elapsed: Duration },
-    /// 通知：权限已询问（仅展示/审计，无回复通道）。
+    /// 一轮结束。
+    TurnEnd { stop_reason: StopReason },
+    /// 工具调用开始 / 完成。
+    ToolCallStarted { call_id: ToolCallId, tool: String },
+    ToolCallFinished { call_id: ToolCallId, result: ToolResult },
+    /// 会话已创建。
+    SessionCreated { id: SessionId },
+    /// 通知：权限已询问（仅展示/审计，无回复通道，见 §9.2）。
     PermissionRequested { id: String, tool: String, summary: String, risk: Risk },
     /// 通知：权限已 resolved。
     PermissionResolved { id: String, decision: Decision },
-    TurnEnd { stop_reason: StopReason },
-    Error(RuntimeError),
-    /// 子 Agent 启动/结束（§7）。
-    SubagentStarted { id: String, role: String },
-    SubagentFinished { id: String, summary: String },
-    /// task.update 工具调用后广播，供 UI 渲染任务进度（§18.4）。
-    TaskUpdated { task: Task },
-    /// Hook 执行结果通知（hooks.md §8 / §20.2）。
-    HookRun { name: String, event: String, decision: HookDecision, elapsed: Duration },
     /// Plan 模式状态切换（§16.2）。
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
-    /// 文件回滚执行结果（§17.4）。
-    FileUndone { report: UndoReport },
-    /// 配置文件变更通知（S-22 热更新）。
-    /// `ConfigWatcher` 监听 `~/.minicoding/config.toml`，500ms debounce 后广播；
-    /// 需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）自行订阅处理。
-    /// **Runtime 侧应用策略（M-12，R-04）**：仅探测/通知，不在此事件内直接热换——
-    /// 白名单字段（`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`）
-    /// 在下次 `run_turn` 开头由 `reload_safe_config` 应用（turn 边界生效，
-    /// 见 `tech-stack.md` §13）；非白名单字段变更仅 warn 提示重启，不做全量热重载。
+    /// task.create/update 后广播（§18.4）。
+    TaskUpdated { task: Task },
+    /// 配置文件变更通知（S-22 热更新；白名单字段在 turn 边界应用，
+    /// 见 tech-stack.md §13）。
     ConfigChanged,
+    /// step 开始/结束（M-06）：一次 LLM 请求 + 其工具调用的边界事件
+    /// （log-only 不进 transcript，C-05；中断点定位依据见 §25）。
+    StepStarted { iter: u32, tool_call_ids: Vec<String> },
+    StepEnded { iter: u32 },
 }
 ```
 

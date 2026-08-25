@@ -421,7 +421,7 @@ AI 助手的编码边界由 [`AGENTS.md`](../AGENTS.md) §7.3"不绕过约束"�
 
 ### 5.3 CI/CD 流水线建设
 
-CI 流水线在 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) 定义，共 9 道门禁：
+CI 流水线在 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) 定义，共 10 道门禁（含 M9 web 门禁；DOC-10 对齐）：
 
 1. **fmt**：`cargo fmt --all -- --check`
 2. **clippy**：`cargo clippy --workspace --exclude minicoding-desktop --all-targets --all-features -- -D warnings`（排除 desktop，需 Tauri 系统库）
@@ -586,7 +586,7 @@ pre-commit 配置在 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml)，�
 4. **不自研能用库的**：沙箱用 `sandbox-run`、MCP 用 `rmcp`、HTTP 用 `reqwest`、glob 用 `globset`、正则用 `regex`、路径用 `camino`、LSP 用 `tower-lsp`——全部用主流库，避免了重复造轮子与维护负担。
 5. **文档与代码同步**：[`AGENTS.md`](../AGENTS.md) §4 强制改代码必改文档，docs/ 下 15 份文档与代码同步演进，审查报告核验"文档与实现整体一致"。
 6. **可观测性内建**：OTel 从 M0 接入，全链路 span（session/turn/llm_call/tool_call/permission/hook.run/mcp.call）从第一天就位，调试 Agent 循环黑盒有据可查。
-7. **CI 九门禁**：fmt/clippy/test/coverage/audit/deny/typos/cross-platform/desktop 九道门禁从 M0 建立并随里程碑增强，三平台原生沙箱 CI matrix 保证跨平台拒绝语义可验证。
+7. **CI 十门禁**：fmt/clippy/test/coverage/audit/deny/typos/cross-platform/web/desktop 十道门禁从 M0 建立并随里程碑增强，三平台原生沙箱 CI matrix 保证跨平台拒绝语义可验证。
 
 ### 8.2 可改进的地方
 

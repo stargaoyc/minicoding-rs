@@ -25,3 +25,7 @@ url = { workspace = true }
 minicoding-core = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

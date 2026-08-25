@@ -38,7 +38,7 @@ fn build_runtime_with_config(
         .expect("runtime build")
 }
 
-/// 构造测试用 Runtime（可指定 prompter，供 switch_workdir 权限路径测试）。
+/// 构造测试用 Runtime（可指定 prompter，供 `switch_workdir` 权限路径测试）。
 fn build_runtime_with_prompter(
     provider: ScriptedProvider,
     tools: ToolRegistry,
@@ -90,7 +90,7 @@ impl minicoding_core::policy::PermissionPrompter for DenyPrompter {
     }
 }
 
-/// 恒允许的 prompter（供 switch_workdir Allow 路径测试）。
+/// 恒允许的 prompter（供 `switch_workdir` Allow 路径测试）。
 #[derive(Default)]
 struct AllowPrompter;
 
@@ -202,13 +202,13 @@ async fn multiple_readonly_tools_executed() {
                 index: 0,
                 id: Some("c1".into()),
                 name: Some("a".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             minicoding_core::provider::Delta::ToolCall(minicoding_core::provider::ToolCallDelta {
                 index: 1,
                 id: Some("c2".into()),
                 name: Some("b".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             minicoding_core::provider::Delta::Stop(StopReason::ToolUse),
         ],
@@ -304,7 +304,7 @@ async fn cancel_then_next_turn_still_works() {
     /// 挂起工具：execute 阻塞直到超时（cancel 时 future 被 drop，无副作用）。
     struct HangingTool;
     impl Tool for HangingTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "hang"
         }
         fn schema(&self) -> &ToolSchema {
@@ -368,7 +368,7 @@ async fn cancel_then_next_turn_still_works() {
         TurnOutcome::Interrupted(_) => {
             panic!("第二次 turn 不应被取消（cancel token 应已重建）")
         }
-        other => panic!("unexpected outcome: {other:?}"),
+        other @ TurnOutcome::Failed(_) => panic!("unexpected outcome: {other:?}"),
     }
 }
 
@@ -403,7 +403,10 @@ async fn repeat_3_times_injects_soft_reminder() {
     assert!(
         has_reminder,
         "第 3 轮应注入 system 软提醒: {:?}",
-        snap.messages.iter().map(|m| m.text()).collect::<Vec<_>>()
+        snap.messages
+            .iter()
+            .map(minicoding_core::model::Message::text)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -491,14 +494,14 @@ async fn thresholds_empty_disables_soft_only() {
     assert!(!has_reminder, "空阈值数组应关闭软提醒");
 }
 
-/// S4 测试基建：把输入改写为指定 JSON 的 PreToolUse Hook。
+/// S4 测试基建：把输入改写为指定 JSON 的 `PreToolUse` Hook。
 struct ModifyInputHook {
     matcher: minicoding_core::hooks::HookMatcher,
     new_input: serde_json::Value,
 }
 
 impl minicoding_core::hooks::Hook for ModifyInputHook {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "modify-input-hook"
     }
     fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
@@ -681,7 +684,7 @@ async fn hook_modify_input_denied_by_recheck() {
     assert!(denied, "应有 permission denied 的 tool_result");
 }
 
-/// S4：原始 Allow 的输入被 Hook 改写为需 Ask 的内容 → 升级 Ask → DenyPrompter 拒绝。
+/// S4：原始 Allow 的输入被 Hook 改写为需 Ask 的内容 → 升级 Ask → `DenyPrompter` 拒绝。
 #[tokio::test]
 async fn hook_modify_input_escalates_to_ask() {
     use minicoding_core::hooks::{HookEvent, HookMatcher};
@@ -758,13 +761,13 @@ async fn hook_without_modify_input_keeps_allow_path() {
     assert_eq!(shell_for_assert.take_calls().len(), 1, "Allow 路径正常执行");
 }
 
-/// 不干预的 PreToolUse Hook。
+/// 不干预的 `PreToolUse` Hook。
 struct NoopModifyHook {
     matcher: minicoding_core::hooks::HookMatcher,
 }
 
 impl minicoding_core::hooks::Hook for NoopModifyHook {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "noop-hook"
     }
     fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
@@ -868,7 +871,7 @@ async fn sandbox_denial_structured_metadata() {
 /// M-06：step 边界事件持久化（StepStarted/StepEnded 一一配对）。
 ///
 /// 两次 LLM 迭代：iter0 带工具调用（有 step 对），iter1 纯文本（无 step 事件）。
-/// 验证事件流按 seq 记录 StepStarted（携带 tool_call_ids）→ StepEnded。
+/// 验证事件流按 seq 记录 StepStarted（携带 `tool_call_ids`）→ `StepEnded`。
 #[tokio::test]
 async fn turn_with_2_steps_persists_step_pairs() {
     use minicoding_core::storage::{EventStore, PersistedEvent};
@@ -942,11 +945,11 @@ async fn turn_with_2_steps_persists_step_pairs() {
     }
 }
 
-/// M-03（D-05）：cancel 中断时悬空 tool_calls 被回填合成错误结果。
+/// M-03（D-05）：cancel 中断时悬空 `tool_calls` 被回填合成错误结果。
 ///
-/// assistant 消息（含 tool_calls）落盘后、tool_result 落盘前 cancel → 每个
-/// tool_call 都应有对应 Tool 消息（合成 is_error=true）。resume 后历史对严格
-/// provider（Anthropic 要求 tool_use 必有 tool_result）合法。
+/// assistant 消息（含 `tool_calls）落盘后、tool_result` 落盘前 cancel → 每个
+/// `tool_call` 都应有对应 Tool 消息（合成 `is_error=true）。resume` 后历史对严格
+/// provider（Anthropic 要求 `tool_use` 必有 `tool_result）合法`。
 #[tokio::test]
 async fn cancel_mid_tool_backfills_synthetic_results() {
     use minicoding_core::model::{ContentBlock, Role, ToolError, ToolResult, ToolSchema};
@@ -954,7 +957,7 @@ async fn cancel_mid_tool_backfills_synthetic_results() {
 
     struct HangingTool;
     impl Tool for HangingTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "hang"
         }
         fn schema(&self) -> &ToolSchema {

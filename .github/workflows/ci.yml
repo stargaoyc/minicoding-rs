@@ -1,6 +1,6 @@
 # CI 门禁（T-M0-3 + T-M0-9，AGENTS.md §6.3）
 #
-# 9 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform / desktop
+# 10 道门禁（DOC-10，2026-08-25 R2 审查对齐）：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform / web / desktop
 # 平台策略（features Q-07）：
 #   - Linux：完整门禁（fmt/clippy/test/coverage/audit/deny/typos）+ Landlock 沙箱拒绝语义测试；
 #   - macOS：编译 + 单测 matrix（Seatbelt 沙箱驱动，sandbox_init FFI）；
@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+# ENG-1（2026-08-25 R2 审查）：同分支重复 push 取消旧 run，release tag 串行化
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -32,6 +37,7 @@ jobs:
   fmt:
     name: cargo fmt --check
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -44,6 +50,7 @@ jobs:
   clippy:
     name: cargo clippy -D warnings
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -59,6 +66,7 @@ jobs:
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -75,6 +83,7 @@ jobs:
   coverage:
     name: cargo llvm-cov (≥80%)
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -108,6 +117,7 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -127,6 +137,7 @@ jobs:
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -143,6 +154,7 @@ jobs:
   typos:
     name: typos
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - name: Install typos
@@ -164,6 +176,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -181,6 +194,7 @@ jobs:
   web:
     name: web (oxlint + tsc + vitest + build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
@@ -221,6 +235,7 @@ jobs:
   desktop:
     name: cargo build desktop feature
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
       # 钉住已验证的 nightly：2026-08-22 后的 nightly（c656540d）在 tokio opaque

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # minicoding-rs pre-push hook
 # 安装：cp scripts/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# ENG-5（2026-08-25 R2 审查）：export MINICODING_PRE_PUSH=1——pre-commit 依赖
+# 该变量在推送阶段启用完整门禁（audit/test/coverage），此前从未设置导致
+# pre-commit 的 pre-push 段是死代码。口径与 .pre-commit-config.yaml 对齐
+# （排除 desktop、--all-features）。
 set -euo pipefail
+export MINICODING_PRE_PUSH=1
 
-echo "[pre-push] cargo test --workspace ..."
-cargo test --workspace
+echo "[pre-push] cargo test --workspace --exclude minicoding-desktop --all-features ..."
+cargo test --workspace --exclude minicoding-desktop --all-features
 
-echo "[pre-push] done."
+echo "[pre-push] done.（audit/coverage 由 pre-commit 的 MINICODING_PRE_PUSH 分支执行）"

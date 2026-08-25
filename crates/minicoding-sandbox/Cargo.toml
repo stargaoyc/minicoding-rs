@@ -42,3 +42,7 @@ tempfile = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # S26：Seatbelt profile 临时文件（随机名 + 0600，生产代码 macos.rs 使用）
 tempfile = { workspace = true }
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

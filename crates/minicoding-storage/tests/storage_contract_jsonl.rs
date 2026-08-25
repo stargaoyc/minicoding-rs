@@ -46,7 +46,7 @@ async fn load_rejects_future_format_version_via_trait() {
     );
 }
 
-/// M-02/M-13：scan 路径（list_sessions）跳过更高版本会话，不索引新版数据。
+/// M-02/M-13：scan `路径（list_sessions）跳过更高版本会话，不索引新版数据`。
 #[tokio::test]
 async fn list_sessions_skips_future_format_version() {
     let (dir, storage) = temp_storage();

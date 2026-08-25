@@ -12,23 +12,23 @@
 
 name: Desktop Release
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read # ENG-7（2026-08-25 R2 审查）：写权限仅 upload job 需要
 
 on:
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g. v0.1.0)'
-        required: true
 
 jobs:
   build-desktop:
     name: build-desktop (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90 # Tauri 三平台构建较慢
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +94,7 @@ jobs:
           node-version: '22'
 
       - name: Install cargo-tauri
-        run: rustup run stable cargo install tauri-cli --version "^2" --locked
+        run: rustup run stable cargo install tauri-cli --version "^2" --locked # 钉主版本防破坏性变更（ENG-7：精确 patch 钉版待上游发布节奏稳定后收紧）
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -161,6 +161,7 @@ jobs:
     name: upload-to-release
     needs: build-desktop
     runs-on: ubuntu-22.04
+    timeout-minutes: 90 # Tauri 三平台构建较慢
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write

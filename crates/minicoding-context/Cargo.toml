@@ -31,3 +31,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [[bench]]
 name = "compress"
 harness = false
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

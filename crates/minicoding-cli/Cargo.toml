@@ -87,3 +87,7 @@ full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "serve", "web", "lsp",
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

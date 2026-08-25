@@ -305,7 +305,7 @@
   - 权限确认弹窗（`Event::PermissionRequested` → shadcn/ui Dialog → JSON-RPC `permission.resolve`）；
   - 任务面板（`Event::TaskUpdated` 同步显示任务进度）；
   - 上下文压缩/熔断可视化（对应 `Event` 变体尚未提供，规划中；权威事件清单见 `design.md` §11）；
-  - Hook 执行日志面板（`Event::HookRun`）；
+  - Hook 执行日志面板（依赖 Hook 执行事件的持久化广播，当前 `Event` 无该变体）；
   - 暗色/亮色主题切换（Tailwind v4 + shadcn/ui theme provider）；
   - 响应式布局（移动端友好，Tauri 2.x mobile 复用同一前端）。
 - `minicoding-server` 增强：
@@ -428,3 +428,20 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 | auto memory 注入接线 | `inject_auto_memory` 生产链路零调用（仅单测覆盖），Auto memory 写入后不回流上下文 |
 | BM25 @memory 语义检索接线 | memory 检索索引已建但 `@memory` 引用语法未接查询链路 |
 | loader 全局层/@import 扩展 | AGENTS.md loader 仅项目层，全局层发现与 `@import` 组合语义待扩展 |
+
+### 2026-08-25 R2 审查补充登记（ENG-4，第二轮审查后新增）
+
+以下事项在第二轮复审（`docs/project-review-20260825-r2.md`）中确认，属"需立项而非修补"或依赖前置条件：
+
+| 事项 | 一句话理由 |
+|------|-----------|
+| InProcessSubagentRunner 立项（含 PTM-3 接线） | 子 Agent 进程内 Runtime 组装缺失：`task.spawn` 生产路径恒 Noop（NotConfigured），`with_can_spawn_subagent(false)` 深度防御随之落地 |
+| 会话安全上下文持久化（FE-7） | permission_mode/sandbox preset 不随 snapshot 持久化，重启回落 server 默认；需扩展 snapshot schema 并做兼容迁移 |
+| denial echo 触发加固 | denial detector 纯文本子串匹配，LLM 可 echo 伪造拒绝文本触发熔断（首轮 S-6 遗留） |
+| journal 内存上限 | journal 条目纯内存无上限，长会话内存增长（首轮 Low 遗留） |
+| SDK semver host API 校验 | ExtensionManifest version 字段无 host API 版本核对（首轮遗留） |
+| extension manifest permissions 接线核实 | 静态校验声明未见生产调用点核实（首轮遗留） |
+| MSRV stable 可达性 | rust-version=1.99 声明当前仅 nightly-2026-08-18 可编译（stable 1.98 因上游 ICE 不可用），需上游修复后补 CI 校验 job（ENG-11） |
+| 测试时钟改造（31 处真实 sleep） | tokio time pause/pause_auto 改造批量进行，避免 CI 时钟脆弱性（首轮 E-3 遗留） |
+| redact 整行替换误杀收窄 | sk- 行内任意位置整行吞的误杀面大，需按值边界精确替换（PTM-14） |
+| Windows cmd 动词表持续维护 | SEC-6 已补 del/rd/move 等，PowerShell 场景（Remove-Item 等）词表待扩 |

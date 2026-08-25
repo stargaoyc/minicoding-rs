@@ -24,7 +24,7 @@
 | §3.1 单一职责 / core 零实现 | ✅ `minicoding-core` 仅含数据模型、trait、Runtime 编排、事件总线、配置、OTel、`NoopDriver`，无领域算法 |
 | §3.2 依赖方向单向不循环 | ✅ core 不依赖领域 crate；领域 crate 依赖 core；tools 为唯一组合层 |
 | §3.3 trait 定义集中在 core | ✅ `Tool`/`LlmProvider`/`ContextManager`/`PermissionPolicy`/`SandboxDriver`/`Hook`/`Storage`/`Journal`/`McpClient`/`ProjectDocLoader`/`MemoryStore` 均在 core 定义 |
-| §3.5 平台/网络隔离 | ✅ `reqwest`/`landlock`/`libseccomp`/`rmcp`/`ratatui`/`windows` 仅在对应实现 crate 引入 |
+| §3.5 平台/网络隔离 | ✅ `reqwest`/`landlock`/`rmcp`/`ratatui`/`windows` 仅在对应实现 crate 引入（libseccomp 未引入——seccomp 待接入） |
 | §3.6 不自研能用库的 | ✅ 沙箱用 `sandbox-run`、MCP 用 `rmcp`、HTTP 用 `reqwest`、glob 用 `globset`、正则用 `regex`、路径用 `camino` |
 | §2.1 edition/MSRV | ✅ `edition = "2024"`、`rust-version = "1.99"`、`async fn in trait` 直接用 |
 | §2.3 错误处理 | ✅ 库 crate 用 `thiserror`，边界 crate 用 `anyhow`，非测试代码无 `unwrap`/`expect` |

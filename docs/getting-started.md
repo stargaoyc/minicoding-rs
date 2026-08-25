@@ -49,7 +49,10 @@ cargo --version
 - `rmcp` 2.2 是纯 Rust；
 - `sandbox-run` 跨平台 Rust 实现。
 
-**唯一需要系统包的是 Linux 下的 `libseccomp`**（用于系统调用过滤，见 `tech-stack.md` §11）：
+**当前无需任何系统包**（2026-08-25 R2 审查 DOC-2 修正）：Linux 沙箱仅依赖
+内核 Landlock LSM（5.13+ 内核原生支持），`libseccomp` **尚未接入**
+（`seccomp 待接入`，见 `tech-stack.md` §13），安装指引中的系统包为历史残留，
+照做只会装无用软件包：
 
 | 平台 | 系统依赖 | 安装命令 |
 |------|---------|---------|
@@ -179,7 +182,7 @@ minicoding "..."
 
 `landlock` crate 依赖 Linux 5.13+ 的 Landlock LSM。`minicoding-sandbox::detect_driver()` 在运行时调用 `sandbox_run::landlock_available()` 探测内核支持（见 `tech-stack.md` §11、`modules.md` §7.4）：
 
-- 内核 5.13+：启用 Landlock + libseccomp，`is_hardened()` 返回 `true`；
+- 内核 5.13+：启用 Landlock（文件隔离；网络 TCP 拒绝需 6.7+），`is_hardened()` 返回 `true`；
 - 内核 < 5.13：降级为 `NoopDriver`（来自 `minicoding-core`），打 `warn` 日志，仅应用层权限（`sandbox_path` + `PermissionPolicy`）生效；
 - 检查命令：`uname -r` 与 `minicoding doctor --security`（M4 交付）。
 
@@ -193,7 +196,7 @@ Windows 缺乏 macOS Seatbelt / Linux Landlock 这样成熟的内核级 MAC 框�
 - M4+ 补齐受限令牌 + Job Object + DACL（`windows` crate）；
 - `doctor --security` 如实报告 `is_hardened() = false` 并建议 WSL2。
 
-Windows 上 `cargo build -p minicoding-sandbox` 仍可通过（`landlock`/`libseccomp` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译，见 `AGENTS.md` §3.5、`modules.md` §7.4）。
+Windows 上 `cargo build -p minicoding-sandbox` 仍可通过（`landlock` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译，见 `AGENTS.md` §3.5、`modules.md` §7.4）。
 
 #### macOS：Seatbelt 由 sandbox-run 封装
 
@@ -205,7 +208,7 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 
 | 阶段 | 平台支持 |
 |------|---------|
-| M0-M4（Linux 先行） | 沙箱仅 Linux（`sandbox-run` + `landlock` + `libseccomp`），CI matrix 只跑 Linux。macOS/Windows 编译可用但沙箱降级为 `NoopDriver` + 应用层权限 + 用户提示 |
+| M0-M4（Linux 先行） | 沙箱自研 pre_exec 胶水 + `landlock`（无 seccomp），CI matrix 只跑 Linux。macOS/Windows 编译可用但沙箱降级为 `NoopDriver` + 应用层权限 + 用户提示 |
 | M5+（macOS 补齐） | 补齐 macOS `sandbox-run`（Seatbelt）实现与 CI matrix |
 | M6+（Windows 补齐） | 补齐 Windows 受限令牌 + Job Object 实现 |
 
@@ -215,7 +218,6 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `cargo build` 报 `libseccomp` 链接错误 | Linux 未装 `libseccomp-dev` | `sudo apt install libseccomp-dev` |
 | `cargo audit` 报漏洞 | 依赖含已知 RUSTSEC 条目 | `cargo update` 升级补丁版本；CI 阻塞合并（见 `AGENTS.md` §6.3） |
 | `clippy -D warnings` 失败 | 代码违反 `clippy::all` + `clippy::pedantic`（`AGENTS.md` §2.9） | 按提示修复，不全局 `#![allow(...)]` |
 | 首次运行权限报错 | 未设置 `OPENAI_API_KEY` 或 keyring 不可用 | 设环境变量或 `minicoding auth login` |
@@ -233,7 +235,7 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 |------|--------------|-------------|-----------|-------|
 | 实现语言 | Rust（edition 2024，MSRV 1.99+） | TypeScript/Node | Rust | Python |
 | 内存安全 | 编译期保证，无 GC 暂停 | 运行时 GC | 编译期保证 | 运行时 GC |
-| 沙箱机制 | OS 级一等公民：`sandbox-run` + Landlock + libseccomp + Seatbelt + Windows 受限令牌，两道防线（应用层 + 内核级） | 应用层为主 | Landlock + libseccomp（参考对象） | 无内核级沙箱 |
+| 沙箱机制 | OS 级一等公民：Landlock（自研胶水）+ Seatbelt + Windows Job Object，两道防线（应用层 + 内核级）；seccomp 待接入 | 应用层为主 | Landlock + seccomp（参考对象） | 无内核级沙箱 |
 | 沙箱默认状态 | Opt-out（`WorkspaceWrite` 默认启用内核隔离） | Opt-in | Opt-out | N/A |
 | MCP 支持 | `rmcp` 2.2 官方 SDK，stdio + HTTP + OAuth，project 作用域首次批准（C-24） | 支持 | 支持 | 不支持 |
 | Hooks 系统 | 10 类事件 + ScriptHook + asyncRewake，L0 不可覆盖 | 27 类事件，依赖自觉 | 无 | 无 |

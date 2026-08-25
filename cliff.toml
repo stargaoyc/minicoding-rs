@@ -60,6 +60,9 @@ commit_parsers = [
     { message = "\\[skip", skip = true },
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
+    # ENG-6（2026-08-25 R2 审查）：Security 解析器须在 catch-all `.*` 之前——
+    # 此前位于其之后永不可达。
+    { body = ".*security", group = "Security" },
     { message = "^doc", group = "Documentation" },
     { message = "^perf", group = "Performance" },
     { message = "^refactor", group = "Refactoring" },
@@ -69,7 +72,6 @@ commit_parsers = [
     { message = "^chore\\(version\\):", skip = true },
     { message = "^chore", group = "Miscellaneous Chores" },
     { message = ".*", group = "Other" },
-    { body = ".*security", group = "Security" },
 ]
 protect_breaking_commits = false
 filter_commits = false

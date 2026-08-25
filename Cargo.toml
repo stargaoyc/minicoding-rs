@@ -21,6 +21,14 @@ members = [
     "crates/minicoding-desktop",
 ]
 
+# ENG-8（2026-08-25 R2 审查）：lint 规则收敛到 workspace 级——18 个 crate 的
+# lib.rs 此前逐个重复 `#![deny(clippy::all, clippy::pedantic)]`，规则变更需改
+# 18 处。各 crate 经 `[lints] workspace = true` 继承（存量 crate 内属性保留
+# 兼容，新 crate 只需声明 `[lints] workspace = true`）。
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
 # Workspace 全局元数据
 [workspace.package]
 edition = "2024"

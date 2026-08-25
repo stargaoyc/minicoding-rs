@@ -1018,7 +1018,7 @@ chmod +x .git/hooks/pre-commit
 
 ### 12.1 CI 门禁（`.github/workflows/ci.yml`）
 
-CI 共 9 道门禁，全部通过方可合并 PR（见 `AGENTS.md` §6.3）：
+CI 共 10 道门禁，全部通过方可合并 PR（见 `AGENTS.md` §6.3；DOC-10 对齐）：
 
 | Job | 名称 | 平台 | 说明 |
 |-----|------|------|------|

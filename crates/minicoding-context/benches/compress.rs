@@ -79,7 +79,7 @@ fn bench_compress(c: &mut Criterion) {
     let mut group = c.benchmark_group("compress_pipeline");
     for n in [100, 500, 1000] {
         let messages = make_messages(n);
-        group.bench_with_input(format!("{}_msgs", n).as_str(), &n, |b, _| {
+        group.bench_with_input(format!("{n}_msgs").as_str(), &n, |b, _| {
             b.iter_batched(
                 || messages.clone(),
                 |mut msgs| {
@@ -98,7 +98,7 @@ fn bench_compress(c: &mut Criterion) {
                     });
                 },
                 BatchSize::SmallInput,
-            )
+            );
         });
     }
     group.finish();

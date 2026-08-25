@@ -50,7 +50,7 @@
 - **上下文管理**：基于 token 预算的 4 级压缩管道（裁剪→摘要→滚动→硬截断）；长期记忆双文件（md + index.json）+ mtime 缓存；预测性压缩与 Post-compact 上下文恢复。
 - **项目记忆（AGENTS.md）**：分层加载的静态指令层（参考 Codex/CC），随仓库版本化，Agent 不可自主编辑；兼容 `CLAUDE.md`/`.cursorrules` fallback。
 - **权限模型**：`PermissionPolicy`/`PermissionPrompter` 双抽象（决策与交互分离）；per-tool allow/ask/deny + Codex 风格审批模式（Untrusted/OnFailure/OnRequest/Never）与预设（read-only/auto/external-sandbox/full-access）。
-- **OS 级沙箱（一等公民）**：基于 `sandbox-run` + `landlock` + `libseccomp` 主流库（不自研胶水），macOS/Linux/Windows 内核级隔离作为应用层权限之外的第二道防线。
+- **OS 级沙箱（一等公民）**：自研 pre_exec 胶水 + `landlock`（Linux）/Seatbelt（macOS）/Job Object（Windows）；原 sandbox-run 选型因 EUPL-1.2 弃用（tech-stack.md §13）。seccomp 待接入。
 - **Hooks 系统**：10 类生命周期事件，外部脚本 + JSON over stdio 协议，可拦截/改写/注入；含 asyncRewake 异步唤醒；L0 硬约束不可被 Hook 覆盖。
 - **MCP 集成**：作为 MCP client 连接外部 server（GitHub/Slack/数据库），`mcp__<server>__<tool>` 命名，project 作用域首次批准防恶意仓库植入；亦可作为 MCP server 被其他 Agent 调用。
 - **Plan 模式**：双重只读强制（硬门 + 软引导），`plan.exit` 提交计划并预批准。
@@ -76,7 +76,7 @@
 |------|--------------|-------------|-----------|-------|
 | 实现语言 | Rust（edition 2024，MSRV 1.99+） | TypeScript/Node | Rust | Python |
 | 内存安全 | 编译期保证，无 GC 暂停 | 运行时 GC | 编译期保证 | 运行时 GC |
-| 沙箱机制 | OS 级一等公民：`sandbox-run` + Landlock + libseccomp + Seatbelt + Windows 受限令牌，两道防线 | 应用层为主 | Landlock + libseccomp（参考对象） | 无内核级沙箱 |
+| 沙箱机制 | OS 级一等公民：Landlock（自研胶水）+ Seatbelt + Windows Job Object，两道防线；seccomp 待接入 | 应用层为主 | Landlock + seccomp（参考对象） | 无内核级沙箱 |
 | 沙箱默认状态 | Opt-out（`WorkspaceWrite` 默认启用内核隔离） | Opt-in | Opt-out | N/A |
 | MCP 支持 | `rmcp` 2.2 官方 SDK，stdio + HTTP + OAuth，project 作用域首次批准 | 支持 | 支持 | 不支持 |
 | Hooks 系统 | 10 类事件 + ScriptHook + asyncRewake，L0 不可覆盖 | 27 类事件，依赖自觉 | 无 | 无 |

@@ -50,3 +50,7 @@ ulid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
+[lints]
+workspace = true

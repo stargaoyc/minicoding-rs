@@ -67,6 +67,7 @@
 | 行编辑 | `rustyline` | `reedline` | 成熟、依赖少；后续 TUI 阶段评估 `reedline` |
 | TUI（后续） | `ratatui` + `crossterm` | - | 现代化 TUI 框架，跨平台 |
 | LSP server（M8） | `tower-lsp` | 自研 JSON-RPC stdio 薄封装 | 主流 Rust LSP 框架（基于 tower），MIT/Apache-2.0；LSP 协议方法集庞大，自研易出错且落后标准；`tower-lsp` 提供类型安全的 trait 派发与生命周期管理。依赖隔离在 `minicoding-server`（feature gate `lsp`） |
+| HTTP server（M9） | `axum` 0.8 | 自研 HTTP 路由 | tower 生态标准 web 框架，MIT/Apache-2.0；SSE/JSON-RPC over HTTP/静态托管（tower-http fs）开箱即用；自研路由+流式响应易出错。依赖隔离在 `minicoding-server`（DOC-7，2026-08-25 R2 审查补条目——design.md 此前引用本表无 axum 行） |
 
 ### 4.1 前端与桌面应用（M9，低优先级）
 
@@ -78,7 +79,7 @@
 | 编译器 | React Compiler | latest（RC） | 编译期自动 memoization，减少 `useMemo`/`useCallback` 样板；与 React 19 深度集成 |
 | 语言 | TypeScript | 7.0 | 类型安全；7.x 持续改进类型推导与性能 |
 | 构建 | Vite (Rolldown) | 8.1 | Rolldown 后端（Rust 实现）替代 Rollup，构建速度显著提升；HMR 体验佳 |
-| 路由 | TanStack Router | 1.170 | 类型安全路由（路由参数完全类型推导），无路由配置文件，比 React Router 更适合 SPA |
+| 路由 | TanStack Router | 1.170（**未采用**） | 单页状态切换无需路由库；引入前需修订本表与 AGENTS §8.2（2026-08-23 审查决策，DOC-8 对齐） |
 | 数据获取 | TanStack Query | 5.101 | 服务端状态管理（缓存/重试/失效），与 JSON-RPC 后端契合，流式 SSE 用 `useQuery` + 增量更新 |
 | 客户端状态 | Zustand | 5.0 | 轻量级全局状态（UI 主题、面板开关等），避免 Redux 样板；与 TanStack Query 职责正交 |
 | Schema 校验 | Zod | 4.4 | 运行时类型校验，与 TypeScript 7 类型双向推导；用于 JSON-RPC 请求/响应 schema 校验，对接 `minicoding-protocol` 的 DTO |

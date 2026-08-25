@@ -189,7 +189,7 @@ Frontend ──ask(prompt)──▶ Runtime
 1. `LlmProvider.chat_stream` 返回 `Stream<Item = LlmDelta>`。
 2. `AgentLoop` 聚合 delta：
    - `Delta::Text(s)` → 转发 `Event::Token(s)`。
-   - `Delta::ToolCallStart/Chunk/End` → 累积成完整 `ToolCall`。
+   - `Delta::ToolCall(ToolCallDelta)` 分片 → 累积成完整 `ToolCall`（DOC-1 修正：Delta 无 ToolCallStart/Chunk/End 变体）。
 3. 流结束后若存在 `ToolCall`，进入工具执行阶段；否则结束本轮。
 
 ### 5.3 工具流

@@ -22,14 +22,14 @@ use minicoding_core::tool::{Tool, ToolContext, ToolRegistry};
 
 use common::{InMemoryStorage, ScriptedProvider, TestContext, text_deltas};
 
-/// 对沙箱策略敏感的 mock 工具：`WorkspaceWrite` 下模拟 post_spawn 失败，
+/// 对沙箱策略敏感的 mock 工具：`WorkspaceWrite` 下模拟 `post_spawn` 失败，
 /// `DangerFullAccess`（沙箱外重试）下成功。
 struct SandboxSensitiveTool {
     calls: Mutex<usize>,
 }
 
 impl Tool for SandboxSensitiveTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "sandbox_sensitive"
     }
     fn schema(&self) -> &ToolSchema {
@@ -72,7 +72,7 @@ struct PlainFailingTool {
 }
 
 impl Tool for PlainFailingTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "plain_failing"
     }
     fn schema(&self) -> &ToolSchema {
@@ -136,7 +136,7 @@ fn tool_then_text(script2: Vec<Delta>) -> ScriptedProvider {
                 index: 0,
                 id: Some("c1".into()),
                 name: Some("sandbox_sensitive".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             Delta::Stop(StopReason::ToolUse),
         ],
@@ -230,7 +230,7 @@ async fn non_sandbox_error_does_not_prompt() {
                 index: 0,
                 id: Some("c1".into()),
                 name: Some("plain_failing".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             Delta::Stop(StopReason::ToolUse),
         ],
