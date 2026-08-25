@@ -128,7 +128,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // F1：start_paused——select! 的 10ms 等待仅为了让 prompt_fut 完成首次
+    // poll（请求入 channel），虚拟时钟下即时推进，语义不变。
+    #[tokio::test(start_paused = true)]
     async fn prompt_returns_decision_from_server_loop() {
         let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
         let prompter = LspPrompter::new(tx, Duration::from_secs(5));

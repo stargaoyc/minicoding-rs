@@ -21,6 +21,14 @@ members = [
     "crates/minicoding-desktop",
 ]
 
+# lint 规则收敛到 workspace 级——18 个 crate 的
+# lib.rs 此前逐个重复 `#![deny(clippy::all, clippy::pedantic)]`，规则变更需改
+# 18 处。各 crate 经 `[lints] workspace = true` 继承（存量 crate 内属性保留
+# 兼容，新 crate 只需声明 `[lints] workspace = true`）。
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
 # Workspace 全局元数据
 [workspace.package]
 edition = "2024"
@@ -28,7 +36,7 @@ rust-version = "1.99"
 license = "AGPL-3.0-only"
 repository = "https://github.com/stargaoyc/minicoding-rs"
 homepage = "https://github.com/stargaoyc/minicoding-rs"
-version = "0.3.3"
+version = "0.3.4"
 authors = ["stargaoyc"]
 
 # 统一依赖版本管理（见 AGENTS.md §2.7、tech-stack.md §12）
@@ -90,6 +98,10 @@ rustyline = "15.0"
 # alternate screen 模式冲突，见 design.md §25 权衡记录）。
 ratatui = "0.30"
 crossterm = "0.29"
+
+# seccomp 系统调用过滤（仅 minicoding-sandbox 引入，feature gate `seccomp`；
+# 链接系统 libseccomp C 库，默认不开避免 CI/发行版需要头文件）
+libseccomp = "0.4"
 
 # 文件与代码处理（见 tech-stack.md §5）
 globset = "0.4"

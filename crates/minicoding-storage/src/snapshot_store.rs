@@ -150,6 +150,8 @@ mod tests {
             workdir: "/tmp/proj".to_string(),
             config_hash: 12345,
             messages: msgs.iter().map(|t| Message::user_text(*t)).collect(),
+            permission_mode: None,
+            sandbox_preset: None,
         };
         SessionSnapshot::new(seq, state)
     }

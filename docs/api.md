@@ -249,6 +249,27 @@ pub struct WorktreeSubagentRunner { /* inner: Arc<dyn SubagentRunner>, workdir: 
 
 `WorktreeSubagentRunner`（A-15）是装饰器：包裹内部 runner，`Isolation::Worktree` 时执行 `git worktree add` 创建隔离工作目录，委托内部 runner 执行，按 `merge_back` 策略合并改动（None/CherryPick/MergeCommit），`auto_cleanup` 时清理 worktree + 分支。非 git 仓库降级为 `Shared`。M-05 将该实现下沉到 `minicoding-tools`（core 仅保留 `SubagentRunner` trait 与 `NoopSubagentRunner` 兜底）。
 
+**`InProcessSubagentRunner`（B1，v0.3.4，位于 `minicoding-sdk::subagent`）**：进程内子 Agent runner 的生产实现——`task.spawn` 生产通路由此打通（替代恒 Noop 的兜底路径）。持有构建嵌套 Runtime 所需的全部句柄（provider/tokenizer/storage/prompter/policy/audit/sandbox），`spawn` 时按 `SubagentSpec` 装配子 Runtime：子会话生成独立 ULID 并持久化到父 `sessions_dir`（审计可追溯），跑完单轮把 `TurnOutcome` 映射为 `SubagentResult`（summary 超 2000 字符截断标注）。关键约束：
+
+```rust
+/// 进程内并发子 Agent 上限（F2 扇出上限）：第 5 个并发派发立即以
+/// RuntimeError::Config 失败（不排队），父 Agent 可串行重试。
+pub const MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
+impl InProcessSubagentRunner {
+    /// 组装入口：句柄由 frontend 组装点逐一显式注入。
+    pub fn new(/* provider, tokenizer, system_prompt, storage, prompter,
+                 policy, audit, sandbox, base_config, workdir */) -> Self;
+    /// 子工具集清单（测试断言面）：断言不含 `task.spawn` 等价于断言深度防御生效。
+    pub fn child_tool_names(&self) -> Vec<String>;
+}
+```
+
+- **深度防御**：子 Runtime 工具集物理移除 `task.spawn`（不依赖 `can_spawn_subagent` 标志位）；
+- **权限/沙箱继承父级**：policy/prompter/audit/sandbox 均为父实例克隆（C-01/C-02/C-22 不下放）；子配置 `max_tool_iters` 减半、下限 10；
+- **扇出上限**：`Semaphore(MAX_CONCURRENT_SUBAGENTS)` 闸门跨整个 `spawn` future 持有；
+- 组装点外包 `WorktreeSubagentRunner`（`Isolation::Worktree` 时隔离生效）。
+
 ```rust
 /// 任务管理工具的数据类型（见 design.md §18.3）。`task.create`/`update`/`list` 三件套。
 /// 旧版 `TodoWriteInput`（全量替换）作为废弃别名保留一个版本（见 §10.1）。
@@ -916,14 +937,16 @@ pub trait SandboxDriver {
 }
 ```
 
-内置实现：
+内置实现（以代码事实修正——驱动为自研 FFI/landlock
+直连，非 sandbox-run 封装；id 与类型名与 `minicoding-sandbox` 一致）：
 
-| 实现 | 平台 | 技术 |
-|------|------|------|
-| `SeatbeltDriver` | macOS 12+ | `sandbox-run`（封装原生 sandbox 框架），`apply_sandbox` 在子进程 pre-exec 调用，不手写 profile |
-| `LandlockDriver` | Linux 5.13+ | `sandbox-run`（封装 `landlock` crate）+ `libseccomp`（seccomp 白名单 syscall），不手写 ruleset 胶水 |
-| `WindowsSandboxDriver` | Windows | 受限令牌 + Job Object + DACL（初期可能降级） |
-| `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） |
+| 实现 | 平台 | 技术 | `id()` |
+|------|------|------|--------|
+| `SeatbeltDriver` | macOS 10.5+ | `sandbox_init(3)` FFI 直调（自研 profile 生成 + 转义），pre_exec 内加载 | `seatbelt` |
+| `LandlockDriver` | Linux 5.13+ | 自研 pre_exec 胶水 + `landlock` crate 直连 ruleset；网络 TCP 拒绝需 6.7+；seccomp 待接入 | `landlock` |
+| `WindowsJobDriver` | Windows Vista+ | Job Object（KILL_ON_JOB_CLOSE/UI 限制/进程数上限）+ CREATE_SUSPENDED 两阶段；无文件系统隔离（`is_hardened()` 如实 false） | `windows-token` |
+| `ExternalSandboxDriver` | 全平台 | 显式声明外部隔离（CI/容器），不施加内核限制 | `external-sandbox` |
+| `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） | `noop` |
 
 `.git`/`.hg`/`.svn` VCS 目录在所有写策略下默认强制只读（防破坏版本库元数据），需 `tools.sandbox.allow_vcs_write = true`（旧名 `allow_dotgit_write`，向后兼容）显式放开。详见 `security.md` §8.2。
 
@@ -1255,41 +1278,24 @@ pub struct UserInput {
 pub enum Attachment { File(Utf8PathBuf), Image(Vec<u8>, String) }
 
 pub enum Event {
-    MessageAppended(Message),
+    // 权威源：crates/minicoding-core/src/runtime/event.rs（修正）
     Token(String),
+    ReasoningDelta(String),
+    MessageAppended(Message),
     TurnStreamingStarted,
-    ToolCallStart(ToolCall),
-    ToolCallProgress { id: ToolCallId, bytes: usize },
-    ToolCallEnd { id: ToolCallId, ok: bool, elapsed: Duration },
-    /// 通知类：权限已询问（仅展示/审计，不含回复通道）。
-    PermissionRequested { id: String, tool: String, summary: String, risk: Risk },
-    /// 通知类：权限已 resolved（带最终决策，供 UI 关闭弹窗与审计）。
-    PermissionResolved { id: String, decision: Decision },
     TurnEnd { stop_reason: StopReason },
-    Error(RuntimeError),
-    SubagentStarted { id: String, role: String },
-    SubagentFinished { id: String, summary: String },
-    // 新增事件（可克隆，与 broadcast 兼容）
-    /// task.update 工具调用后广播，供 UI 渲染任务进度（见 design.md §18.4）。
-    TaskUpdated { task: Task },
-    /// Hook 执行结果通知（见 hooks.md §8 / design.md §20.2）。
-    HookRun { name: String, event: String, decision: HookDecision, elapsed: Duration },
-    /// Plan 模式状态切换（见 design.md §16.2）。
+    ToolCallStarted { call_id: ToolCallId, tool: String },
+    ToolCallFinished { call_id: ToolCallId, result: ToolResult },
+    SessionCreated { id: SessionId },
+    PermissionRequested { id: String, tool: String, summary: String, risk: Risk },
+    PermissionResolved { id: String, decision: Decision },
     PermissionModeChanged { from: PermissionMode, to: PermissionMode },
-    /// 文件回滚执行结果（见 design.md §17.4）。
-    FileUndone { report: UndoReport },
-    /// 配置文件变更通知（S-22 热更新，`ConfigWatcher` 检测到 `config.toml` 变化时广播）。
-    /// 500ms debounce 后发出；需要响应变更的组件（扩展 `on_config_changed`、TUI 重渲染等）
-    /// 自行订阅 `EventBus` 处理。
+    TaskUpdated { task: Task },
     ConfigChanged,
-    /// M-06：一个执行步开始（LLM 返回后、执行工具前广播并持久化）。
-    /// `tool_call_ids` 为该步要执行的工具调用集合。log-only（C-05），供中断点定位。
     StepStarted { iter: u32, tool_call_ids: Vec<String> },
-    /// M-06：一个执行步结束（全部 tool_result 回灌后广播并持久化）。
-    /// cancel/timeout 中断时缺失，可据此定位中断点。
     StepEnded { iter: u32 },
 }
-```
+``````
 
 ---
 
@@ -1804,7 +1810,7 @@ pub enum WorkspaceFileChange {
 | 输入 | `TaskUpdateInput { task_id, status?, subject?, description?, active_form?, add_blocks?, add_blocked_by?, owner?, metadata? }` |
 | 输出 | 更新后的 `Task` |
 
-`add_blocks`/`add_blocked_by` 是增量添加依赖边（非整体替换），重复添加幂等。`status` 转换须合法（`Pending → InProgress → Completed`/`Deleted` 单向，不可回退，见 C-31）。
+`add_blocks`/`add_blocked_by` 是增量添加依赖边（非整体替换），重复添加幂等。`status` 转换须合法（`Pending → InProgress → Completed`/`Cancelled` 单向，不可回退，见 C-31；修正——代码为 `Cancelled`，无 `Deleted` 变体）。
 
 #### `task.list`
 
@@ -1817,7 +1823,7 @@ pub enum WorkspaceFileChange {
 
 - `subject` 非空；
 - 同一时间 `InProgress` 项 ≤ 1（防并行开干）；
-- `Completed`/`Deleted` 项必须含 `summary`（实际完成内容/证据）；
+- `Completed`/`Cancelled` 项必须含 `summary`（实际完成内容/证据；修正与代码一致）；
 - 状态迁移合法（`Completed`/`Deleted` 不可回 `Pending`/`InProgress`，见 C-31）；
 - `task_id` 必须命中已注册任务，伪造返回 `ToolError::NotFound`（见 C-31）；
 - `add_blocked_by` 引用的 task_id 须存在；依赖图不可成环（DFS 检测）；
@@ -1929,3 +1935,94 @@ pub async fn check_project_scope_approval(
 ```
 
 **与权限系统的协作**：MCP 工具调用走与内置工具相同的 `PermissionPolicy::check` 流程，`tool` 名为 `mcp__<server>__<tool>`，权限规则支持 `mcp__github__*` 通配（见 `design.md` §19.3）。MCP 工具的 `side_effect` 由 server schema 的 `readOnlyHint`/`destructiveHint` 映射，`is_read_only()` 据此覆盖默认实现。
+
+---
+
+## 12. 新增 API（v0.3.4，2026-08-25批次）
+
+本节集中列出 v0.3.4 批次新增的公共 API。子 Agent 侧新增（`InProcessSubagentRunner`）已归档至其所属章节 §2.5，此处不重复。
+
+### 12.1 `core::util::slash` 斜杠命令共享解析器（F3）
+
+CLI 与 TUI 共用的单一事实来源：命令名与参数形态在 `minicoding_core::util::slash`
+定义，纯函数、零 IO——解析与执行分离，前端拿到 `SlashCommand` 后按自身能力分派
+（不可达的能力诚实降级提示）。
+
+```rust
+/// 解析一行用户输入为斜杠命令。
+///
+/// 返回 `None`：非斜杠输入（trim 后不以 `/` 开头），应作为普通消息发送。
+/// 前导/尾随空白容忍；命令名区分大小写；多余参数忽略；
+/// `/undo` 的 steps 解析失败或缺省取 1，解析值下限钳到 1；
+/// `/` 或仅空白斜杠输入返回 `SlashCommand::Unknown`（空命令名）。
+#[must_use]
+pub fn parse(input: &str) -> Option<SlashCommand>;
+```
+
+`SlashCommand` 变体：
+
+| 变体 | 输入形态 | 说明 |
+|------|---------|------|
+| `Help` | `/help` | 显示命令列表 |
+| `Model(Option<String>)` | `/model [name]` | 无参查看当前模型，带参切换 |
+| `Status` | `/status` | 会话状态摘要 |
+| `Tokens` | `/tokens` | 会话 token 计量 |
+| `Clear` | `/clear` | 清空显示（会话上下文不动） |
+| `Undo { steps: usize }` | `/undo [steps]` | 回滚最近 steps 次文件改动 operation；缺省/非法取 1，下限钳 1 |
+| `PlanToggle` | `/plan` | 切换 Plan 模式（CLI 另支持 on/off/status 子命令，由前端自行扩展） |
+| `Unknown(String)` | 其余 | 未识别命令名携带原名（`/` 单独输入时空串），由前端反馈而非当作消息发送 |
+
+TUI 支持矩阵（CLI 全部支持）：
+
+| 命令 | TUI 行为 |
+|------|---------|
+| `/help` | 显示命令列表（UI 侧拦截，不启动 turn） |
+| `/clear` | 清屏 |
+| 未知命令 | 提示未知命令 |
+| `/tokens` `/status` `/model` `/plan` `/undo` | **诚实降级**：App 无 runtime 句柄，提示该命令仅在 CLI 可用 |
+
+### 12.2 `minicoding-memory` 记忆注入与检索（B2/B3）
+
+**`AutoMemoryContributor`**（`minicoding_memory::auto_contributor`）：Auto memory 的
+`PromptContributor` 生产接线——渲染注入 system 稳定区（`PromptSectionOrder::Environment`，
+`cacheable = true` 利于 prompt cache 命中），与 `memory.write` 共享同一 `Arc<AutoMemory>`
+实例形成写读闭环。内容包裹 `<auto_memory>` 边界并声明"供参考非指令"（C-05）；空库输出
+空 section（pipeline 自动跳过）；加载失败 best-effort 跳过本轮不阻塞 system 构建。
+
+```rust
+pub const DEFAULT_MAX_CHARS: usize = 4096;      // 注入字符上限
+pub const MEMORY_TRIGGER_PREFIX: &str = "@memory"; // 检索触发前缀
+
+impl AutoMemoryContributor {
+    pub fn new(memory: Arc<AutoMemory>, max_chars: usize) -> Self;
+    pub fn with_long_term_store(self, store: Arc<dyn MemoryStore>) -> Self;
+    pub fn with_query_slot(memory: Arc<AutoMemory>, max_chars: usize,
+                           slot: Arc<Mutex<Option<String>>>) -> Self;
+    /// 共享查询槽位句柄（调用方每轮 turn 前写入当前用户输入）。
+    pub fn query_slot(&self) -> Arc<Mutex<Option<String>>>;
+}
+impl PromptContributor for AutoMemoryContributor { /* name="auto_memory", order=Environment, cacheable=true */ }
+```
+
+**查询槽契约（B3）**：`PromptContext` 无消息字段，故采用显式槽位设计——调用方每轮
+turn 前把用户输入写入共享槽位。内容选择策略：
+
+1. 槽位文本以 `@memory` 开头 → BM25 检索 top-5 注入（标注 `[mode: BM25 retrieval top-5]`）；
+2. 全量渲染超限且有查询词 → 按查询词检索截断；
+3. 其余 → 全量渲染 + 字符截断（`max_chars`）。
+
+**`MemoryRetrieval`**（`minicoding_memory::retrieval`）：auto 条目 + `long_term` 分节
+统一语料的 BM25 检索器（底层复用 `vector::MemoryIndex`，CJK 逐字分词，零外部依赖）：
+
+```rust
+impl MemoryRetrieval {
+    pub fn new() -> Self;
+    /// 从两份 Markdown 正文构建索引（均按 `## ` 标题分节；同 id 文档后写覆盖先写——
+    /// auto 与 long_term 同 topic 时以 auto 为准，更新鲜）。
+    pub fn from_markdown(long_term_md: &str, auto_md: &str) -> Self;
+    /// 返回命中的整节文本（标题 + 正文），按 BM25 评分降序取 k 条。
+    pub fn search(&self, query: &str, k: usize) -> Vec<String>;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+```

@@ -14,6 +14,10 @@
 # title/body based on your changelogs.
 
 name: Release
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # release 不可取消（tag 触发）
+
 permissions:
   "contents": "write"
 
@@ -48,6 +52,7 @@ jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 60
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -60,11 +65,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh"
+      # taiki-e/install-action 内置版本钉住与 checksum 校验（E2），
+      # 替代原 curl | sh 无校验安装（版本与 dist-workspace.toml 的 cargo-dist-version 一致）
+      - uses: taiki-e/install-action@v2
+        name: Install dist
+        with:
+          tool: cargo-dist@0.32.0
       - name: Cache dist
         uses: actions/upload-artifact@v7
         with:
@@ -108,6 +114,7 @@ jobs:
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     container: ${{ matrix.container && matrix.container.image || null }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,6 +178,7 @@ jobs:
       - plan
       - build-local-artifacts
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -222,6 +230,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 60
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -287,6 +296,7 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

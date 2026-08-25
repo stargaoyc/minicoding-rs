@@ -2,9 +2,11 @@
 
 pub mod circuit_breaker;
 pub mod fs_private;
+pub mod slash;
 
 pub use circuit_breaker::{BreakerState, CircuitBreaker, CircuitBreakerConfig};
 pub use fs_private::write_private;
+pub use slash::{SlashCommand, parse as parse_slash};
 
 /// 生成 API 鉴权 token：ULID 两拼接（160bit 表示，80×2 bit 随机）。
 ///
@@ -74,4 +76,59 @@ pub fn test_now_utc() -> time::OffsetDateTime {
         .unwrap_or_default();
     time::OffsetDateTime::from_unix_timestamp(unix.as_secs().cast_signed())
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+}
+
+/// 相对路径词法规范化：消除 `.`/`..` 段与重复
+/// 分隔符，供权限持久化的目录前缀匹配使用。
+///
+/// 纯词法操作（不触碰文件系统、不解 symlink）：与 [`std::path::Path::components`]
+/// 的语义一致——`..` 弹出上一段，栈空时保留 `..`（相对路径语义不变式）。
+/// 前缀匹配必须基于规范化后的路径，否则 `src/gen/../secret.txt` 会被裸
+/// `starts_with` 误判进已批准的 `src/gen` 目录范围。
+#[must_use]
+pub fn normalize_lexical_rel_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|p| *p != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..");
+                }
+            }
+            _ => parts.push(comp),
+        }
+    }
+    parts.join("/")
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::normalize_lexical_rel_path as norm;
+
+    #[test]
+    fn resolves_dot_and_parent_segments() {
+        // 关键用例：`..` 使路径逃出已批准的 src/gen 目录
+        assert_eq!(norm("src/gen/../secret.txt"), "src/secret.txt");
+        assert_eq!(norm("src/./a.rs"), "src/a.rs");
+        assert_eq!(norm("src//b.rs"), "src/b.rs");
+    }
+
+    #[test]
+    fn leading_parent_segments_are_preserved() {
+        // 栈空的 .. 保留——调用方（workdir 包容校验）会拒绝越界路径，
+        // 此处只保证规范化不改变语义。
+        assert_eq!(norm("../outside/x"), "../outside/x");
+        assert_eq!(norm("src/../../x"), "../x");
+    }
+
+    #[test]
+    fn normal_and_empty_inputs() {
+        assert_eq!(norm("src/gen/a.rs"), "src/gen/a.rs");
+        assert_eq!(norm(""), "");
+        assert_eq!(norm("."), "");
+        assert_eq!(norm("a/.."), "");
+    }
 }

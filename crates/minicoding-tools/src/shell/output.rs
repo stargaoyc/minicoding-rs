@@ -81,9 +81,14 @@ impl Tool for ShellOutput {
                 .ok_or_else(|| ToolError::InvalidInput("shell_id 缺失".into()))?
                 .to_string();
             let status = store.output(shell_id).await?;
+            // 后台输出同样经脱敏——此前仅前台
+            // shell.run 的 combined 输出走 redact，C-04 在 `shell.output` 路径
+            // 整体旁路（后台命令输出凭证原样回灌 LLM/前端）。
+            let stdout = minicoding_policy::redact(&status.stdout);
+            let stderr = minicoding_policy::redact(&status.stderr);
             Ok(ToolResult::ok_json(serde_json::json!({
-                "stdout": status.stdout,
-                "stderr": status.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
                 "exited": status.exited,
                 "exit_code": status.exit_code,
             })))
@@ -155,7 +160,9 @@ mod tests {
             .and_then(|s| s.split(')').next())
             .expect("extract shell_id");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：spawn 的是真实子进程（echo test），完成时刻由 OS 调度
+        // 决定，虚拟时钟无法加速（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // 读取输出

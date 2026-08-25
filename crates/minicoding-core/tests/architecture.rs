@@ -86,9 +86,10 @@ fn core_has_no_domain_crate_optional_deps() {
         if let Some(list) = values.as_array() {
             for v in list {
                 let v = v.as_str().unwrap_or_default();
-                if v.starts_with("dep:minicoding-") {
-                    panic!("feature `{feature}` 引用了领域 crate 依赖 `{v}`（架构守卫，禁止）");
-                }
+                assert!(
+                    !v.starts_with("dep:minicoding-"),
+                    "feature `{feature}` 引用了领域 crate 依赖 `{v}`（架构守卫，禁止）"
+                );
             }
         }
     }

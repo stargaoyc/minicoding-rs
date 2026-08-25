@@ -231,8 +231,55 @@ fn is_blacklisted(tool: &str, input: &Value) -> bool {
 /// - 重定向（`>`/`>>`）或 `tee` 目标为约束文件；
 /// - 任一 token 路径组件命中 VCS 元数据目录且伴随写意图（重定向/tee/`.git/hooks`）。
 fn shell_hits_blacklist(input: &Value) -> bool {
-    // 写意图动词：`sed` 需搭配 `-i` 才是写；`tee` 本身即写
-    const WRITE_VERBS: &[&str] = &["rm", "mv", "truncate", "dd", "unlink", "sed", "tee"];
+    // 写意图动词：`sed` 需搭配 `-i` 才是写；`tee` 本身即写。
+    // Windows 侧 `shell.run` 经 `cmd /C` 执行，
+    // `del`/`erase`/`rd`/`rmdir`/`move`/`copy`/`robocopy` 是等价的破坏性/覆写
+    // 动词——缺失会使 C-02 的 shell 旁路防护在 Windows 主机对约束文件基本
+    // 失效。POSIX 上这些词不存在同名命令，跨平台并入无害。
+    // 追加小写 PowerShell 动词与别名——未来 pwsh
+    // 执行路径落地后同一黑名单即生效（前瞻性收口）；PS 别名与 cmd 动词并存
+    // 的原因同上：这些小写词在 POSIX 上无同名命令（或同名命令非写语义的
+    // 冲突面已被"动词+约束文件目标"组合判定覆盖），跨 shell 并入无害。
+    const WRITE_VERBS: &[&str] = &[
+        "rm",
+        "mv",
+        "truncate",
+        "dd",
+        "unlink",
+        "sed",
+        "tee",
+        "del",
+        "erase",
+        "rd",
+        "rmdir",
+        "move",
+        "copy",
+        "xcopy",
+        "robocopy",
+        // PowerShell cmdlet 与别名
+        "remove-item",
+        "ri",
+        "set-content",
+        "sc",
+        "out-file",
+        "clear-content",
+        "cli",
+        "add-content",
+        "ac",
+        "new-item",
+        "ni",
+        "move-item",
+        "mi",
+        "copy-item",
+        "cpi",
+    ];
+    // 复合语句切段后段首可能是控制关键字而非动词
+    // （`for f in $(ls); do rm AGENTS.md; done` 切出的段首 token 是 `do`）——
+    // 判定动词时跳过它们，取其后第一个实义词。
+    const CONTROL_WORDS: &[&str] = &[
+        "do", "done", "then", "else", "elif", "fi", "if", "for", "while", "until", "case", "esac",
+        "in", "!", "{", "}", "(", ")", ";;",
+    ];
     const REDIRECTS: &[&str] = &[">", ">>", "&>", ">|"];
     let Some(cmd) = extract_command_text(input) else {
         return false;
@@ -250,9 +297,16 @@ fn shell_hits_blacklist(input: &Value) -> bool {
             if tokens.is_empty() {
                 return false;
             }
-            // 段首词即动词（shell 语法保证）；`sed -i` 特判写模式
-            let verb_writes = WRITE_VERBS.contains(&tokens[0].as_str())
-                && (tokens[0] != "sed" || tokens.iter().any(|t| t == "-i"));
+            // 段首词即动词（先剥控制关键字）；`sed -i` 特判写模式
+            let verb = tokens
+                .iter()
+                .find(|t| !CONTROL_WORDS.contains(&t.as_str()))
+                .map(String::as_str);
+            let verb_writes = match verb {
+                Some("sed") => tokens.iter().any(|t| t == "-i"),
+                Some(v) => WRITE_VERBS.contains(&v),
+                None => false,
+            };
             tokens.iter().enumerate().any(|(i, tok)| {
                 if !(targets_project_doc(tok) || in_vcs_metadata(tok)) {
                     return false;
@@ -1147,6 +1201,99 @@ mod tests {
         ] {
             let input = serde_json::json!({ "command": cmd });
             assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+    }
+
+    // ===== ：Windows cmd 动词与复合语句控制关键字剥离 =====
+
+    #[test]
+    fn shell_windows_cmd_verbs_denied() {
+        // Windows 经 cmd /C 执行，del/rd/move 等是等价破坏性动词
+        for cmd in [
+            "del AGENTS.md",
+            "erase CLAUDE.md /q",
+            "rd /s /q .git",
+            "rmdir .git",
+            "move AGENTS.md \\tmp",
+            "copy evil.md AGENTS.md",
+            "robocopy evil AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (cmd 动词) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_powershell_verbs_denied() {
+        // PowerShell cmdlet 动词与别名（remove-item/set-content/new-item 等）
+        // 对约束文件的写入/删除应命中黑名单（未来 pwsh 执行路径前瞻收口）
+        for cmd in [
+            "remove-item AGENTS.md",
+            "ri AGENTS.md",
+            "set-content -Path AGENTS.md -Value x",
+            "clear-content CLAUDE.md",
+            "add-content AGENTS.md injected",
+            "ac AGENTS.md injected",
+            "new-item AGENTS.md",
+            "move-item CLAUDE.md \\tmp",
+            "copy-item evil.md AGENTS.md",
+            "cpi evil AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (PowerShell 动词) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_powershell_out_file_pipe_denied() {
+        // out-file 不是重定向符，走动词判定路径——管道后段段首动词为
+        // out-file 时目标约束文件须命中
+        for cmd in [
+            "echo x | out-file CLAUDE.md",
+            "get-date | out-file AGENTS.md",
+            "echo x | out-file ./CLAUDE.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (out-file 写入) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_control_keyword_segments_denied() {
+        // 复合语句切段后段首是 do/then 等控制关键字时，
+        // 须跳过取实义动词——此前 `do rm AGENTS.md` 段首动词判定失效
+        for cmd in [
+            "for f in $(ls); do rm AGENTS.md; done",
+            "if true; then mv CLAUDE.md /tmp/x; fi",
+            "while read l; do del AGENTS.md; done",
+            "for f in *; do echo x > AGENTS.md; done",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.run", &input),
+                "{cmd} (控制关键字段) 应命中黑名单"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_read_after_control_keywords_still_allowed() {
+        // 控制关键字剥离不扩大打击面：读操作仍放行
+        for cmd in [
+            "if true; then cat AGENTS.md; fi",
+            "for f in *; do grep foo AGENTS.md; done",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(!is_blacklisted("shell.run", &input), "{cmd} 读操作不应拦截");
         }
     }
 

@@ -7,9 +7,9 @@
 //! 支持 last-known-good 回退（解析失败时用上次成功的配置，见 `design.md` §12）。
 
 use crate::hooks::OnHookError;
+use crate::model::RuntimeError;
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub mod watcher;
 pub use watcher::ConfigWatcher;
@@ -116,6 +116,22 @@ pub struct ContextConfig {
     pub post_compact_token_budget: usize,
     /// C-09：post-compact 单文件最大 token 数（默认 `5000`）。
     pub post_compact_max_tokens_per_file: usize,
+    /// 压缩熔断"中止本轮"阈值（默认 3）。
+    pub compress_breaker_fail_threshold: usize,
+    /// 压缩熔断"强制 TurnEnd"阈值（默认 5）。
+    pub compress_breaker_force_end_threshold: usize,
+    /// 压缩 Thrash 判定阈值（默认 2）。
+    pub compress_breaker_thrash_threshold: usize,
+    /// 熔断后半开冷却窗口秒数（默认 60；0 = 永不放行）。
+    pub compress_breaker_cooldown_sec: u64,
+    /// L2 摘要选取比例（默认 0.5）。
+    pub summarize_ratio: f64,
+    /// 单次摘要最大 token 数（默认 200）。
+    pub summarize_max_tokens: usize,
+    /// L2 摘要 LLM 调用超时秒数（默认 30）。
+    ///
+    /// 此前该值在 context crate 内硬编码，端到端不可配。
+    pub summarize_timeout_secs: u64,
 }
 
 impl Default for ContextConfig {
@@ -131,6 +147,13 @@ impl Default for ContextConfig {
             post_compact_max_files: 5,
             post_compact_token_budget: 50_000,
             post_compact_max_tokens_per_file: 5_000,
+            compress_breaker_fail_threshold: 3,
+            compress_breaker_force_end_threshold: 5,
+            compress_breaker_thrash_threshold: 2,
+            compress_breaker_cooldown_sec: 60,
+            summarize_ratio: 0.5,
+            summarize_max_tokens: 200,
+            summarize_timeout_secs: 30,
         }
     }
 }
@@ -338,11 +361,14 @@ pub fn resolve_env_vars(config: &mut RuntimeConfig) {
 ///
 /// # Errors
 /// 仅当配置文件存在但解析失败 **且** last-known-good 也不可用时返回错误。
-pub fn load_config() -> Result<RuntimeConfig, String> {
-    let config_path = paths::config_path().map_err(|e| e.to_string())?;
+pub fn load_config() -> Result<RuntimeConfig, RuntimeError> {
+    // 错误类型收敛为 `RuntimeError::Config`——
+    // 库 crate 边界不再返回裸 `String`（AGENTS §2.3 thiserror 约定）。
+    let config_path = paths::config_path().map_err(|e| RuntimeError::Config(e.to_string()))?;
 
     if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let raw = std::fs::read_to_string(&config_path)
+            .map_err(|e| RuntimeError::Config(e.to_string()))?;
         match toml::from_str::<RuntimeConfig>(&raw) {
             Ok(mut cfg) => {
                 // 解析前快照写 LKG（保留 env: 引用、剥离明文 key、0600）
@@ -369,7 +395,9 @@ pub fn load_config() -> Result<RuntimeConfig, String> {
                     resolve_env_vars(&mut lkg_cfg);
                     return Ok(lkg_cfg);
                 }
-                return Err(format!("config.toml 解析失败且无 last-known-good: {e}"));
+                return Err(RuntimeError::Config(format!(
+                    "config.toml 解析失败且无 last-known-good: {e}"
+                )));
             }
         }
     }
@@ -428,16 +456,10 @@ pub fn provider_from_env() -> ProviderConfig {
     p
 }
 
-/// 占位：环境变量映射（用于 Hook/MCP 子进程环境）。
-#[must_use]
-// 返回 HashMap 需固定 hasher 以保证子进程 env 收集语义确定
-#[allow(clippy::implicit_hasher)]
-pub fn sanitize_env(env: &HashMap<String, String>) -> HashMap<String, String> {
-    env.iter()
-        .filter(|(k, _)| !k.contains("API_KEY") && !k.contains("TOKEN") && !k.contains("SECRET"))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
+// 原 `sanitize_env` 占位（黑名单式三词匹配，
+// api_key/password/authorization 全漏）已删除——零调用且作为 pub API 留存即
+// 一旦接线的 C-04 缺口。子进程 env 白名单的唯一事实源在 `tool::sanitized_env`
+// （tool/trait.rs），Hook/MCP 子进程环境一律经该白名单构造。
 
 #[cfg(test)]
 mod tests {

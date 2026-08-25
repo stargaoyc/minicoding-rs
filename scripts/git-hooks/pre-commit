@@ -67,7 +67,7 @@ while IFS= read -r f; do
 done < <(git diff --cached --name-only --diff-filter=AM)
 
 # 敏感文件检查（AGENTS.md §6.4）
-if git diff --cached --name-only | grep -Eq '\.env$|\.env\.local$|credentials\.json$|\.pem$|\.key$'; then
+if git diff --cached --name-only | grep -Eq '\.env(\..+)?$|\.env$|credentials\.json$|\.pem$|\.key$'; then
   echo "ERROR: 敏感文件被暂存（见 AGENTS.md §6.4）"
   git diff --cached --name-only | grep -E '\.env$|\.env\.local$|credentials\.json$|\.pem$|\.key$'
   rc=1

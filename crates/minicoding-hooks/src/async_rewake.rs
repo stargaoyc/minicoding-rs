@@ -264,10 +264,13 @@ impl std::fmt::Debug for AsyncRewakeManager {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]
+    // F1（测试时钟改造）：AsyncRewakeManager 为纯 tokio 后台任务
+    // （tokio::spawn + time::timeout），涉及等待的测试统一
+    // `start_paused = true`——真实耗时归零，语义不变。
     use super::*;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn spawn_success_collects_result() {
         let mgr = AsyncRewakeManager::default_concurrent();
         let spec = AsyncRewakeSpec {
@@ -292,7 +295,7 @@ mod tests {
         assert_eq!(mgr.inflight_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn spawn_error_collects_error() {
         let mgr = AsyncRewakeManager::default_concurrent();
         let spec = AsyncRewakeSpec {
@@ -312,7 +315,7 @@ mod tests {
         assert!(results[0].context.contains("subprocess crashed"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn spawn_timeout_produces_timeout_result() {
         let mgr = AsyncRewakeManager::default_concurrent();
         let spec = AsyncRewakeSpec {
@@ -364,7 +367,7 @@ mod tests {
         assert_eq!(mgr.inflight_count(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn poll_drains_queue() {
         let mgr = AsyncRewakeManager::default_concurrent();
         let spec = AsyncRewakeSpec {
@@ -386,7 +389,7 @@ mod tests {
         assert!(second_poll.is_empty(), "expected empty: second_poll");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn inflight_count_decrements_after_completion() {
         let mgr = AsyncRewakeManager::default_concurrent();
         let spec = AsyncRewakeSpec {
@@ -401,7 +404,7 @@ mod tests {
         assert_eq!(mgr.inflight_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn active_tasks_tracks_inflight() {
         let mgr = AsyncRewakeManager::new(5);
         let spec = AsyncRewakeSpec {

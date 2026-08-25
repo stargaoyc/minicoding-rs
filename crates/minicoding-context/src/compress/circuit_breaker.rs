@@ -198,6 +198,8 @@ mod tests {
             cb.record_failure();
         }
         assert!(cb.should_trip(), "冷却窗口内应保持熔断");
+        // 真实等待：CircuitBreaker 基于 std::time::Instant 判定冷却窗口，
+        // start_paused 虚拟时钟不适用（改造需注入时钟，超出测试侧范围）
         std::thread::sleep(std::time::Duration::from_millis(40));
         // 半开放行一次：判定翻转，允许压缩重试
         assert!(!cb.should_trip());
@@ -218,6 +220,7 @@ mod tests {
         cb.record_oversize();
         cb.record_oversize();
         assert!(cb.is_thrashing());
+        // 真实等待：同上，Instant 冷却窗口判定（start_paused 不适用）
         std::thread::sleep(std::time::Duration::from_millis(40));
         assert!(!cb.is_thrashing(), "冷却后应放行探测");
     }

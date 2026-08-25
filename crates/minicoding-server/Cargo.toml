@@ -76,4 +76,10 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+# F1（测试时钟改造）：`start_paused = true` 虚拟时钟需要 test-util
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
+
+# 继承 workspace lints（clippy::all + pedantic deny）
+[lints]
+workspace = true

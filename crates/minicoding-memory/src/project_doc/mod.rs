@@ -11,6 +11,6 @@ pub mod fallback;
 pub mod inject;
 pub mod loader;
 
-pub use fallback::{find_project_doc, find_repo_root};
+pub use fallback::{find_project_doc, find_repo_root, global_agents_path};
 pub use inject::{PROJECT_DOC_BOUNDARY, inject_project_doc, inject_project_doc_sync};
-pub use loader::ProjectDocLoaderImpl;
+pub use loader::{ProjectDocLoaderImpl, expand_imports_sync};

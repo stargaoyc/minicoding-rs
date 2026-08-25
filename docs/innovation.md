@@ -1109,7 +1109,7 @@ Tauri 与本项目「Rust 一等公民」理念一致。Electron 内置 Chromium
 
 #### 10.3.1 创新点
 
-`AGENTS.md` §8.4：`minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 自动生成 TypeScript 类型 + Zod schema，**不手写双份**。生成产物放 `minicoding-web/src/api/generated/`，不手动编辑（文件头标注 `// AUTO-GENERATED, DO NOT EDIT`）。后端 DTO 变更后，前端 `npm run gen-types` 重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）。运行时校验：JSON-RPC 响应必须经 Zod parse 后才进入业务层。
+`AGENTS.md` §8.4：`minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 自动生成 TypeScript 类型 + Zod schema，**不手写双份**。生成产物放 `minicoding-web/src/api/generated/`，不手动编辑（文件头标注 `// AUTO-GENERATED, DO NOT EDIT`）。后端 DTO 变更后，前端 `pnpm gen-types` 重新生成，CI 校验生成产物与 Rust 源一致（`git diff --exit-code`）。运行时校验：JSON-RPC 响应必须经 Zod parse 后才进入业务层。
 
 #### 10.3.2 为什么创新
 

@@ -65,7 +65,7 @@ async fn restore_history_injects_messages_into_context() {
     );
 }
 
-/// `restore_history` 后 `run_turn` 将历史消息包含在 ChatRequest 中发给 LLM。
+/// `restore_history` 后 `run_turn` 将历史消息包含在 `ChatRequest` 中发给 LLM。
 ///
 /// 注意：`restore_history` 只回填上下文管理器，**不重复落盘**历史消息——
 /// 历史消息已在磁盘（真实 `--resume` 路径从 storage 加载）。storage 仅追加

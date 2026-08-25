@@ -23,6 +23,7 @@ pub fn render_chat(
     area: Rect,
     lines: &[ChatLine],
     streaming: &str,
+    reasoning: &str,
     scroll_offset: usize,
 ) {
     // 可见区渲染：仅解析并渲染 scroll 窗口内的
@@ -85,6 +86,19 @@ pub fn render_chat(
         }
     }
     // 流式 token（未固化为消息）：同样走 Markdown 解析
+    // reasoning 增量以暗色渲染在正文之前——此前
+    // TUI 丢弃该事件，思考过程仅 Web/SDK 可见。
+    if !reasoning.is_empty() {
+        for raw in reasoning.lines() {
+            render_lines.push(Line::from(vec![
+                Span::styled("Thinking: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    raw.to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ]));
+        }
+    }
     if !streaming.is_empty() {
         let md_lines = parse_markdown(streaming);
         let mut iter = md_lines.into_iter();

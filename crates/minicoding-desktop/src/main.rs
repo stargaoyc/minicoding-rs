@@ -169,8 +169,10 @@ fn main() {
         }
     };
     app.run(|handle, event| {
-        // 应用退出（托盘"退出"、`restart_app` 重启）时清理 sidecar 进程。
-        // 窗口关闭只是隐藏到托盘（prevent_close），不触发 Exit，sidecar 保持运行。
+        // 应用退出（托盘"退出"、关窗、`restart_app` 重启）时清理 sidecar 进程。
+        // 注释与上方 setup 段自相矛盾——关窗即
+        // 退出（无 prevent_close）会触发 Exit，sidecar 一并终止；原"窗口关闭
+        // 只是隐藏到托盘"为陈旧描述，已删除。
         if let tauri::RunEvent::Exit = event {
             sidecar::kill_sidecar(handle);
         }
@@ -265,7 +267,9 @@ fn save_provider_config(
 /// `get_config_revision`：读取当前配置修订号（前端保存前锁定基准， 防陈旧写）。
 #[tauri::command]
 fn get_config_revision() -> Result<u64, String> {
-    let c = minicoding_core::config::load_config()?;
+    // load_config 错误类型已收敛为
+    // `RuntimeError`，此处显式 to_string 适配 Tauri command 的 String 错误约定。
+    let c = minicoding_core::config::load_config().map_err(|e| e.to_string())?;
     Ok(c.revision)
 }
 

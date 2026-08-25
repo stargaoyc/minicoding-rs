@@ -159,7 +159,9 @@ mod tests {
         drop(watcher);
     }
 
-    #[tokio::test]
+    // F1：start_paused——50ms 等待仅是让后台 watcher 线程"稳定"的宽限，
+    // 无事件断言依赖真实时间，虚拟时钟下即时推进。
+    #[tokio::test(start_paused = true)]
     async fn start_with_existing_dir_does_not_panic() {
         // 临时目录存在，监听应成功注册（不验证实际事件触发，由集成测试覆盖）
         let tmp = tempfile::tempdir().expect("tempdir");

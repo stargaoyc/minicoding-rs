@@ -38,7 +38,7 @@ fn build_runtime_with_config(
         .expect("runtime build")
 }
 
-/// 构造测试用 Runtime（可指定 prompter，供 switch_workdir 权限路径测试）。
+/// 构造测试用 Runtime（可指定 prompter，供 `switch_workdir` 权限路径测试）。
 fn build_runtime_with_prompter(
     provider: ScriptedProvider,
     tools: ToolRegistry,
@@ -90,7 +90,7 @@ impl minicoding_core::policy::PermissionPrompter for DenyPrompter {
     }
 }
 
-/// 恒允许的 prompter（供 switch_workdir Allow 路径测试）。
+/// 恒允许的 prompter（供 `switch_workdir` Allow 路径测试）。
 #[derive(Default)]
 struct AllowPrompter;
 
@@ -202,13 +202,13 @@ async fn multiple_readonly_tools_executed() {
                 index: 0,
                 id: Some("c1".into()),
                 name: Some("a".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             minicoding_core::provider::Delta::ToolCall(minicoding_core::provider::ToolCallDelta {
                 index: 1,
                 id: Some("c2".into()),
                 name: Some("b".into()),
-                args_chunk: Some(r#"{}"#.into()),
+                args_chunk: Some(r"{}".into()),
             }),
             minicoding_core::provider::Delta::Stop(StopReason::ToolUse),
         ],
@@ -295,7 +295,10 @@ async fn switch_workdir_allowed_updates_workdir() {
 /// 历史 bug：`CancellationToken` 一旦 cancel 永久 cancelled，一次手动终止后
 /// 后续所有 turn 全部秒取消（Interrupted），用户无法再与 AI 对话。修复：
 /// 每轮 `run_turn` 结束（含取消）重建 token。
-#[tokio::test]
+///
+/// F1：`start_paused` 虚拟时钟——挂起工具的 300s sleep 与主任务的等待
+/// 均即时推进（ScriptedProvider/InMemoryStorage 零真实 IO，无外部时钟依赖）。
+#[tokio::test(start_paused = true)]
 async fn cancel_then_next_turn_still_works() {
     use minicoding_core::model::{ContentBlock, Role};
     use minicoding_core::model::{ToolError, ToolResult, ToolSchema};
@@ -304,7 +307,7 @@ async fn cancel_then_next_turn_still_works() {
     /// 挂起工具：execute 阻塞直到超时（cancel 时 future 被 drop，无副作用）。
     struct HangingTool;
     impl Tool for HangingTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "hang"
         }
         fn schema(&self) -> &ToolSchema {
@@ -368,7 +371,7 @@ async fn cancel_then_next_turn_still_works() {
         TurnOutcome::Interrupted(_) => {
             panic!("第二次 turn 不应被取消（cancel token 应已重建）")
         }
-        other => panic!("unexpected outcome: {other:?}"),
+        other @ TurnOutcome::Failed(_) => panic!("unexpected outcome: {other:?}"),
     }
 }
 
@@ -403,7 +406,10 @@ async fn repeat_3_times_injects_soft_reminder() {
     assert!(
         has_reminder,
         "第 3 轮应注入 system 软提醒: {:?}",
-        snap.messages.iter().map(|m| m.text()).collect::<Vec<_>>()
+        snap.messages
+            .iter()
+            .map(minicoding_core::model::Message::text)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -491,14 +497,14 @@ async fn thresholds_empty_disables_soft_only() {
     assert!(!has_reminder, "空阈值数组应关闭软提醒");
 }
 
-/// 测试基建：把输入改写为指定 JSON 的 PreToolUse Hook。
+/// 测试基建：把输入改写为指定 JSON 的 `PreToolUse` Hook。
 struct ModifyInputHook {
     matcher: minicoding_core::hooks::HookMatcher,
     new_input: serde_json::Value,
 }
 
 impl minicoding_core::hooks::Hook for ModifyInputHook {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "modify-input-hook"
     }
     fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
@@ -681,7 +687,7 @@ async fn hook_modify_input_denied_by_recheck() {
     assert!(denied, "应有 permission denied 的 tool_result");
 }
 
-/// 原始 Allow 的输入被 Hook 改写为需 Ask 的内容 → 升级 Ask → DenyPrompter 拒绝。
+/// 原始 Allow 的输入被 Hook 改写为需 Ask 的内容 → 升级 Ask → `DenyPrompter` 拒绝。
 #[tokio::test]
 async fn hook_modify_input_escalates_to_ask() {
     use minicoding_core::hooks::{HookEvent, HookMatcher};
@@ -758,13 +764,13 @@ async fn hook_without_modify_input_keeps_allow_path() {
     assert_eq!(shell_for_assert.take_calls().len(), 1, "Allow 路径正常执行");
 }
 
-/// 不干预的 PreToolUse Hook。
+/// 不干预的 `PreToolUse` Hook。
 struct NoopModifyHook {
     matcher: minicoding_core::hooks::HookMatcher,
 }
 
 impl minicoding_core::hooks::Hook for NoopModifyHook {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "noop-hook"
     }
     fn matcher(&self) -> &minicoding_core::hooks::HookMatcher {
@@ -782,13 +788,19 @@ impl minicoding_core::hooks::Hook for NoopModifyHook {
 }
 
 /// 沙箱拒绝结构化透传（denial → `ToolResultMeta.sandbox_denied`）。
+///
+///  语义更新：`MockTool::failing` 产出 `ToolError::Exec`（无结构化 errno）
+/// → 纯文本命中为 **advisory**（不计熔断），但仍返回带 `sandbox_denied`
+/// 元数据的提示性结果。
 #[tokio::test]
 async fn sandbox_denial_structured_metadata() {
     use minicoding_core::sandbox::{
         DenialMatch, DenialSignature, SandboxDenialDetector, SandboxDenyKind,
     };
 
-    /// 测试用拒绝检测器：命中 "Operation not permitted" → `SyscallBlocked`。
+    /// 测试用拒绝检测器：命中 "Operation not permitted" → `SyscallBlocked`；
+    /// 检测文本含 Runtime 合成标记时置 authoritative（模拟
+    /// `minicoding-sandbox::DenialDetector` 的语义）。
     #[derive(Debug, Clone, Copy)]
     struct EpermDetector;
     impl SandboxDenialDetector for EpermDetector {
@@ -812,12 +824,16 @@ async fn sandbox_denial_structured_metadata() {
                             .take(120)
                             .collect(),
                     },
+                    authoritative: error_text
+                        .contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX),
                 })
         }
     }
 
     let m = EpermDetector.detect("bad", "execution: Operation not permitted");
     assert!(m.is_some(), "detector 应命中");
+    assert!(!m.unwrap().authoritative, "纯文本命中应为 advisory");
+
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(MockTool::failing(
         "bad",
@@ -840,35 +856,149 @@ async fn sandbox_denial_structured_metadata() {
     let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
     assert!(matches!(outcome, TurnOutcome::Finished(_)));
 
-    // 持久化消息的 tool_result 块携带 metadata.sandbox_denied（结构化透传）
+    // 持久化消息的 tool_result 块携带 metadata.sandbox_denied（结构化透传；
+    // advisory 路径同样透传，仅不计熔断）
     let messages = rt.storage().load(&rt.session().id).await.unwrap();
     let denied = messages
         .iter()
         .find_map(|m| {
             m.content.iter().find_map(|b| match b {
-                minicoding_core::model::ContentBlock::ToolResult { metadata, .. } => {
-                    metadata.sandbox_denied.as_ref()
+                minicoding_core::model::ContentBlock::ToolResult {
+                    content, metadata, ..
+                } => {
+                    let info = metadata.sandbox_denied.as_ref()?;
+                    Some((
+                        match content {
+                            minicoding_core::model::ToolContent::Text(t) => t.clone(),
+                            other => format!("{other:?}"),
+                        },
+                        info,
+                    ))
                 }
                 _ => None,
             })
         })
         .expect("应有一条带 sandbox_denied 元数据的 tool_result 消息");
     assert_eq!(
-        denied.kind,
+        denied.1.kind,
         minicoding_core::sandbox::SandboxDenyKind::SyscallBlocked {
             syscall: "execution: Operation not permitted".into()
         }
     );
     assert!(
-        denied.detail.contains("Operation not permitted"),
+        denied.1.detail.contains("Operation not permitted"),
         "detail 应含原始错误文本"
+    );
+    assert!(
+        denied.0.contains("[advisory]"),
+        "Exec 文本错误应走 advisory 提示路径，实际: {}",
+        denied.0
+    );
+}
+
+///  `Io(EPERM)` 错误携带结构化 errno → Runtime 合成标记 → 权威判定
+/// → 熔断计数递增（advisory 不计数的对照语义见上一测试与单元测试）。
+#[tokio::test]
+async fn sandbox_denial_authoritative_eperm_records_breaker() {
+    use minicoding_core::model::{SideEffect, ToolError, ToolSchema};
+    use minicoding_core::provider::BoxFuture;
+    use minicoding_core::sandbox::{
+        DenialMatch, DenialSignature, NoopDenialTracker, SandboxDenialDetector,
+        SandboxDenialTracker, SandboxDenyKind,
+    };
+    use minicoding_core::tool::ToolContext;
+
+    /// 平台正确的 EPERM 编码（Windows raw_os_error 体系不同：1=ERROR_INVALID_FUNCTION，
+    /// 权限拒绝是 5——与 core denial.rs 的 ERRNO_EPERM 平台取值保持一致）
+    #[cfg(windows)]
+    const TEST_EPERM: i32 = 5;
+    #[cfg(not(windows))]
+    const TEST_EPERM: i32 = 1;
+
+    /// 以 `ToolError::Io(raw_errno)` 失败的 mock 工具（结构化 errno 通道）。
+    struct IoFailTool;
+    impl minicoding_core::tool::Tool for IoFailTool {
+        fn name(&self) -> &'static str {
+            "bad-io"
+        }
+        fn schema(&self) -> &ToolSchema {
+            static SCHEMA: std::sync::OnceLock<ToolSchema> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| ToolSchema {
+                name: String::new(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+            })
+        }
+        fn side_effect(&self) -> SideEffect {
+            SideEffect::None
+        }
+        fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> BoxFuture<'_, Result<minicoding_core::model::ToolResult, ToolError>> {
+            Box::pin(
+                async move { Err(ToolError::Io(std::io::Error::from_raw_os_error(TEST_EPERM))) },
+            )
+        }
+    }
+
+    /// 与 `minicoding-sandbox::DenialDetector` 相同的判定语义。
+    struct MarkerDetector;
+    impl SandboxDenialDetector for MarkerDetector {
+        fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
+            // 匹配 Runtime 合成的内部标记（平台无关）；OS 文案跨平台不可靠
+            if !error_text.contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX) {
+                return None;
+            }
+            Some(DenialMatch {
+                signature: DenialSignature {
+                    platform: "any",
+                    pattern: "Operation not permitted",
+                    reason: "EPERM",
+                    kind_label: "syscall_blocked",
+                },
+                tool: tool.to_string(),
+                kind: SandboxDenyKind::SyscallBlocked {
+                    syscall: "EPERM".into(),
+                },
+                authoritative: error_text
+                    .contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX),
+            })
+        }
+    }
+
+    let breaker = Arc::new(NoopDenialTracker::default_thresholds());
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(IoFailTool));
+    let script = vec![tool_call_deltas("c1", "bad-io", "{}"), text_deltas("done")];
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(Arc::new(ScriptedProvider::new(script)))
+            .context(Arc::new(TestContext::new("test system prompt")))
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .prompter(Arc::new(DenyPrompter))
+            .sandbox_denial_detector(Arc::new(MarkerDetector))
+            .sandbox_denial_breaker(Arc::clone(&breaker) as Arc<dyn SandboxDenialTracker>)
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
+
+    let outcome = rt.run_turn(UserInput::from_text("go")).await.unwrap();
+    assert!(matches!(outcome, TurnOutcome::Finished(_)));
+    assert_eq!(
+        breaker.count(),
+        1,
+        "Io(EPERM) 为权威沙箱拒绝，熔断计数应递增"
     );
 }
 
 /// step 边界事件持久化（StepStarted/StepEnded 一一配对）。
 ///
 /// 两次 LLM 迭代：iter0 带工具调用（有 step 对），iter1 纯文本（无 step 事件）。
-/// 验证事件流按 seq 记录 StepStarted（携带 tool_call_ids）→ StepEnded。
+/// 验证事件流按 seq 记录 StepStarted（携带 `tool_call_ids`）→ `StepEnded`。
 #[tokio::test]
 async fn turn_with_2_steps_persists_step_pairs() {
     use minicoding_core::storage::{EventStore, PersistedEvent};
@@ -942,19 +1072,24 @@ async fn turn_with_2_steps_persists_step_pairs() {
     }
 }
 
-/// cancel 中断时悬空 tool_calls 被回填合成错误结果。
+/// cancel 中断时悬空 `tool_calls` 被回填合成错误结果。
 ///
-/// assistant 消息（含 tool_calls）落盘后、tool_result 落盘前 cancel → 每个
-/// tool_call 都应有对应 Tool 消息（合成 is_error=true）。resume 后历史对严格
-/// provider（Anthropic 要求 tool_use 必有 tool_result）合法。
-#[tokio::test]
+/// assistant 消息（含 `tool_calls）落盘后、tool_result` 落盘前 cancel → 每个
+/// `tool_call` 都应有对应 Tool 消息（合成 `is_error=true）。resume` 后历史对
+/// provider（Anthropic 要求 `tool_use` 必有 `tool_result）合法`。
+///
+/// F1：`start_paused` 虚拟时钟。时序安全性：ScriptedProvider/InMemoryStorage
+/// 全程零定时器等待——turn 任务首次 park 即挂起工具的 300s sleep，此时
+/// assistant 已落盘；主任务 300ms 等待在虚拟时钟上先于 300s 到期，cancel
+/// 不会早于落盘。
+#[tokio::test(start_paused = true)]
 async fn cancel_mid_tool_backfills_synthetic_results() {
     use minicoding_core::model::{ContentBlock, Role, ToolError, ToolResult, ToolSchema};
     use minicoding_core::tool::{Tool, ToolContext};
 
     struct HangingTool;
     impl Tool for HangingTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "hang"
         }
         fn schema(&self) -> &ToolSchema {

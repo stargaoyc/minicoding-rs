@@ -324,8 +324,12 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
 /// 淘汰最旧条目使 store 不超过 [`MAX_TRACKED_SHELLS`]。
 ///
 /// 优先淘汰最旧的**已完成**条目（`exit_code` 已记录、缓冲不再增长）；若无已完成
-/// 条目则退化为淘汰全局最旧——保证硬上限成立。被淘汰的运行中进程经
-/// `kill_on_drop` 终止；`try_lock` 失败（正被 kill 等临界区持有）按未完成处理。
+/// 条目则退化为淘汰全局最旧——保证硬上限成立。
+///
+/// 淘汰**运行中**条目时必须主动终止进程——此前
+/// 仅 `shells.remove`，而 wait task 持有 `Child` 的 Arc 克隆，`kill_on_drop`
+/// 永不触发，被淘汰条目退化为无人跟踪的孤儿进程（与模块文档承诺相反）。
+/// 终止路径与 `kill` 一致：unix 先 killpg 整树再 `start_kill` 兜底。
 fn evict_oldest(shells: &mut HashMap<String, ShellEntry>) {
     if shells.len() < MAX_TRACKED_SHELLS {
         return;
@@ -338,6 +342,24 @@ fn evict_oldest(shells: &mut HashMap<String, ShellEntry>) {
         })
         .map(|(id, _)| id.clone());
     if let Some(id) = victim {
+        if let Some(entry) = shells.get(&id) {
+            let running = entry.exit_code.try_lock().is_ok_and(|g| g.is_none());
+            if running
+                && let Ok(mut guard) = entry.child.try_lock()
+                && let Some(child) = guard.as_mut()
+            {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    // SAFETY: killpg 向目标进程组发送 SIGKILL；pid 来自 Child::id，
+                    // spawn 前 setpgid 保证 pgid == pid。同步调用非阻塞。
+                    unsafe {
+                        let _ = libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL);
+                    }
+                }
+                let _ = child.start_kill();
+                tracing::warn!(shell_id = %id, "后台 shell 条目达上限且仍在运行：已终止被淘汰的进程");
+            }
+        }
         shells.remove(&id);
         tracing::debug!(shell_id = %id, "后台 shell 条目已达上限，淘汰最旧条目");
     }
@@ -475,7 +497,9 @@ mod tests {
             .await
             .expect("spawn");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：store.spawn 启动真实子进程（echo hello），完成时刻由
+        // OS 调度决定，虚拟时钟无法加速（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let status = store.output(shell_id).await.expect("output");
@@ -523,6 +547,7 @@ mod tests {
             )
             .await
             .expect("spawn");
+        // 真实等待：确认 `sleep 30` 子进程仍在运行（OS 进程，虚拟时钟不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         assert!(
             !store.output(shell_id.clone()).await.expect("output").exited,
@@ -536,6 +561,7 @@ mod tests {
             if store.output(shell_id.clone()).await.expect("output").exited {
                 return;
             }
+            // 真实等待：轮询 killpg(SIGKILL) 在 OS 侧的生效（start_paused 不适用）
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         panic!("进程在 kill 后 3s 内仍未退出");
@@ -560,6 +586,7 @@ mod tests {
             )
             .await
             .expect("spawn");
+        // 真实等待：管道子进程写 20KB 后退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let status = store.output(shell_id).await.expect("output");
         assert!(status.stdout.contains("[output truncated"), "应有截断标记");
@@ -585,7 +612,8 @@ mod tests {
             .await
             .expect("spawn");
 
-        // 等待命令完成
+        // 等待命令完成。
+        // 真实等待：`true` 子进程退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // kill 已退出的 shell 应成功（幂等）
@@ -612,6 +640,7 @@ mod tests {
             .await
             .expect("spawn");
 
+        // 真实等待：stderr 写入与进程退出由 OS 调度决定（start_paused 不适用）
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let status = store.output(shell_id).await.expect("output");
@@ -695,6 +724,7 @@ mod tests {
             {
                 return;
             }
+            // 真实等待：轮询 wait task 对真实子进程的退出码记录（start_paused 不适用）
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         panic!("最新条目在 3s 内未完成");

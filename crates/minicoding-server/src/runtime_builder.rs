@@ -7,7 +7,8 @@
 //! 与 CLI builder 的差异：
 //! - 无 `SessionLoadMode`（server 端每个 session 新建或由客户端指定 id 恢复）；
 //! - 无 `ReplayPolicy`（server 端不处理 `--replay`）；
-//! - 无 Hook/Journal（M8 MVP 不启用，后续可 feature gate）；
+//! - 无 Hook registry（Hook 未接线；Journal 已注入——2026-08-25
+//!   审查修正此前"无 Hook/Journal"的失实文档）；
 //! - prompter 恒为 `ServerPrompter`（外部注入，不由 builder 构造）。
 
 use anyhow::{Context, Result};
@@ -190,16 +191,34 @@ pub fn build_runtime(
 
     // 5. 构造 context manager（ContextManagerImpl + TiktokenTokenizer + 4 级压缩）
     //    L2 摘要 provider 用 small（如有）降本，回退到主 provider（与 CLI 一致）。
+    //    熔断与 L2 摘要配置端到端接线。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
-                let context_window = 128_000;
-                Arc::new(ContextManagerImpl::new(
-                    system_prompt,
-                    Arc::new(tokenizer),
-                    context_window,
-                    Some(summary_provider.clone()),
-                ))
+                let context_window = summary_provider.capabilities().context_window;
+                Arc::new(
+                    ContextManagerImpl::new(
+                        system_prompt,
+                        Arc::new(tokenizer),
+                        context_window,
+                        Some(summary_provider.clone()),
+                    )
+                    .with_circuit_breaker_config(minicoding_context::CircuitBreakerConfig {
+                        fail_threshold: config.context.compress_breaker_fail_threshold,
+                        force_end_threshold: config.context.compress_breaker_force_end_threshold,
+                        thrash_threshold: config.context.compress_breaker_thrash_threshold,
+                        cooldown: std::time::Duration::from_secs(
+                            config.context.compress_breaker_cooldown_sec,
+                        ),
+                    })
+                    .with_summarize_config(
+                        minicoding_context::SummarizeConfig {
+                            ratio: config.context.summarize_ratio,
+                            max_summary_tokens: config.context.summarize_max_tokens,
+                            llm_timeout_secs: config.context.summarize_timeout_secs,
+                        },
+                    ),
+                )
             }
             Err(e) => {
                 tracing::warn!("Tiktoken 构造失败（{e}），降级为 SimpleContextManager（无压缩）");
@@ -298,6 +317,11 @@ pub fn build_runtime(
     rt.register_dynamic_tool(Arc::new(minicoding_tools::PlanExit::new(
         plan_controller.clone(),
     )));
+    // 顶层 Runtime 的 task.spawn 保持 can_spawn=true
+    //（顶层派发合法）。深度防御的 `with_can_spawn_subagent(false)` 属**子 Agent
+    // Runtime 组装点**的义务——当前生产装配不存在进程内嵌套 Runtime
+    // （runner 为 Noop，task.spawn 返回 NotConfigured），该接线随
+    // InProcessSubagentRunner 立项落地（roadmap""）。
     rt.register_dynamic_tool(Arc::new(minicoding_tools::TaskSpawn::new(
         subagent_runner,
         plan_controller,

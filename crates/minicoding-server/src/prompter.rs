@@ -160,7 +160,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // F1：start_paused——select! 的 10ms 等待仅用于让 prompt_fut 完成首次
+    // poll（注册 sender），虚拟时钟下即时推进，语义不变。
+    #[tokio::test(start_paused = true)]
     async fn resolve_permission_returns_decision() {
         let pending: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
         let prompter = ServerPrompter::new(pending.clone(), Duration::from_secs(5));

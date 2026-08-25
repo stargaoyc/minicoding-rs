@@ -10,7 +10,7 @@
 
 ### 0.1 Crate 列表
 
-> **当前 Cargo workspace 含 18 个 crate**（M0–M8 的 17 个 + M9 新增 `minicoding-desktop`）。M9 另含 `minicoding-web`（独立 npm 项目，不入 Cargo workspace，见 §18）。下表列出全部 19 个 crate。
+> **当前 Cargo workspace 含 18 个 Cargo crate**（M0–M8 的 17 个 + M9 新增 `minicoding-desktop`）。M9 另含 `minicoding-web`（独立 npm 项目，不入 Cargo workspace，见 §18）。下表列出全部 18 个 Cargo crate + `minicoding-web` 前端项目（共 19 个目录，其中 web 非 Cargo crate）。
 
 ```
 minicoding-rs (workspace)

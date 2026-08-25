@@ -13,6 +13,7 @@ use crate::model::{RuntimeError, SideEffect, ToolCall, ToolCallId, ToolResult};
 use crate::otel::span_name;
 use crate::policy::{Decision, PermissionContext, Verdict};
 use std::time::Duration;
+use tracing::Instrument;
 
 /// 合并两个 Verdict 取较严者（Deny > Ask > Allow）。
 ///
@@ -123,6 +124,11 @@ impl Runtime {
         // `permission` span（design.md §15.1）：包裹权限决策流程（策略判定 →
         // Hook → prompter 交互 → 审计落盘）。字段不含 input 原文（C-04）。
         // `permission.verdict` 在决策确定后通过 `Span::current().record()` 填充。
+        //
+        // 用 `.instrument()` 而非 `span.enter()`——
+        // `Entered` guard 跨 await 持有会在线程局部 span 上失真（prompter 等待
+        // 用户决策可达数百秒），且使 future 非 `Send`。instrument 把 span 绑定
+        // 到整个 future，语义与线程无关。
         let span = tracing::info_span!(
             "permission",
             session.id = %self.session.id,
@@ -131,7 +137,19 @@ impl Runtime {
             permission.verdict = tracing::field::Empty,
             otel.name = span_name::PERMISSION_CHECK,
         );
-        let _enter = span.enter();
+        self.execute_side_effect_call_inner(call, ctx, side_effect)
+            .instrument(span)
+            .await
+    }
+
+    /// [`Self::execute_side_effect_call`] 的主体（span 经 instrument 注入）。
+    #[allow(clippy::too_many_lines)]
+    async fn execute_side_effect_call_inner(
+        &self,
+        call: &ToolCall,
+        ctx: &crate::tool::ToolContext,
+        side_effect: SideEffect,
+    ) -> Result<(ToolCallId, ToolResult), RuntimeError> {
         tracing::info!(
             tool.name = %call.name,
             call_id = %call.id,
@@ -221,7 +239,7 @@ impl Runtime {
         } else {
             dispatch_cfg
         };
-        let is_builtin_deny = matches!(verdict, Verdict::Deny(_));
+        let is_hard_deny = matches!(verdict, Verdict::Deny(_));
 
         // PreToolUse 直出决策与合并 verdict 冲突时取严（Hook Allow 不能越过重查 Deny）
         let pre_decision = match (&pre_decision, &verdict) {
@@ -245,7 +263,7 @@ impl Runtime {
                 },
                 side_effect,
                 &dispatch_cfg,
-                is_builtin_deny,
+                is_hard_deny,
             )
             .await?
         };
@@ -419,7 +437,13 @@ impl Runtime {
         }
         // asyncRewake 接线（全量）：hook 声明后台继续时，经调度器在
         // 后台重新派发同一 hook 收集最终输出（C-26/C-32 由调度器与脚本层保证）。
-        if let Some(spec) = result.async_rewake.clone() {
+        // 契约门控——`PreToolUse` 按协议不支持
+        // async_rewake（trait_def `supports_async_rewake`）。ScriptHookRegistry
+        // 已过滤，此处再校验是对自定义 `HookRegistry` 实现的纵深防御：防止
+        // 未按契约过滤的实现把 PreToolUse 的 rewake 注入本同步路径。
+        if let Some(spec) = result.async_rewake.clone()
+            && HookEvent::PreToolUse.supports_async_rewake()
+        {
             let hook_input = self
                 .build_hook_input(HookEvent::PreToolUse, call, side_effect, Some(verdict))
                 .await;
@@ -459,13 +483,14 @@ impl Runtime {
     /// 返回 `(Decision, Option<prompt_id>, Option<audit_note>)`：`prompt_id` 为
     /// `Some` 表示经用户交互；`audit_note` 为 `Some` 时覆盖审计 detail（Always
     /// 决策折叠后仍能区分"持久化@目录"/"会话级"来源）。
+    #[allow(clippy::too_many_lines)] // Ask 分支含会话缓存/持久化查表/Hook/交互四段决策路径，拆分反而切断因果链
     async fn resolve_decision(
         &self,
         verdict: &Verdict,
         call: &ToolCall,
         side_effect: SideEffect,
         dispatch_cfg: &DispatchConfig,
-        is_builtin_deny: bool,
+        is_hard_deny: bool,
     ) -> Result<(Decision, Option<String>, Option<String>), RuntimeError> {
         match verdict {
             Verdict::Allow => Ok((Decision::Allow, None, None)),
@@ -498,7 +523,7 @@ impl Runtime {
                     return Err(RuntimeError::Hook(fatal.to_string()));
                 }
                 match result.decision {
-                    HookDecision::Allow if !is_builtin_deny => {
+                    HookDecision::Allow if !is_hard_deny => {
                         // Hook 自动批准，跳过 prompter
                         Ok((Decision::Allow, None, None))
                     }
@@ -510,16 +535,52 @@ impl Runtime {
                     }
                     _ => {
                         // fs.* 类工具取 input.path 相对路径（持久化查表与目录
-                        // 粒度 Always 持久化共用）
-                        let rule_path = call.input.get("path").and_then(|v| v.as_str());
-                        // 持久化规则查表（仅当本 prompt 提供 Always 选项——
-                        // C-23 受保护文件的 restricted ask 不查，防绕过）
-                        if prompt
+                        // 粒度 Always 持久化共用）。：
+                        // 先做词法规范化——原始输入可能含 `..`/`.` 段，未规范化
+                        // 的前缀匹配会把 `src/gen/../secret.txt` 误判进已批准的
+                        // `src/gen` 目录范围。
+                        let rule_path = call
+                            .input
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .map(crate::util::normalize_lexical_rel_path);
+                        // 持久化查表与会话级缓存
+                        // **同门控**——仅当本 prompt 提供 Always 选项时才可命中。
+                        // C-23/C-27 的 restricted ask（options 不含 AllowAlways）
+                        // 若被此前对同工具的 Always 批准静默放行，即击穿"不可
+                        // Always"通道（如指令性 auto.md 写入的记忆投毒路径）。
+                        let always_allowed = prompt
                             .options
-                            .contains(&crate::policy::PromptOption::AllowAlways)
-                            && let Some(decision) = self.lookup_persisted_decision(call, rule_path)
-                        {
-                            return Ok((decision, None, None));
+                            .contains(&crate::policy::PromptOption::AllowAlways);
+                        if always_allowed {
+                            // 无路径工具的 AllowAlways 会话级缓存命中免弹窗
+                            //（会话结束即失效，不跨项目）。：审计注记保留
+                            // "session-scoped cache hit" 来源，与首次批准同源可追溯。
+                            if self
+                                .session_allows
+                                .lock()
+                                .is_ok_and(|s| s.contains(&call.name))
+                            {
+                                tracing::info!(
+                                    tool = %call.name,
+                                    "session-scoped allow hit, skipping prompt"
+                                );
+                                return Ok((
+                                    Decision::Allow,
+                                    None,
+                                    Some(format!(
+                                        "user allowed {tool} always \
+                                         (session-scoped cache hit)",
+                                        tool = call.name
+                                    )),
+                                ));
+                            }
+                            // 持久化规则查表
+                            if let Some(decision) =
+                                self.lookup_persisted_decision(call, rule_path.as_deref())
+                            {
+                                return Ok((decision, None, None));
+                            }
                         }
                         // Hook 未决策 → 走 prompter 交互
                         let prompt_id = prompt.id.clone();
@@ -535,8 +596,8 @@ impl Runtime {
                         // 持久化（`tool@目录`，与 decision_for_path 查询对齐）；
                         // 无路径工具只做会话级放行——杜绝"一次按键=跨会话/跨项目
                         // 全局永久放行"。
-                        let rule_dir = rule_path.and_then(|p| {
-                            camino::Utf8Path::new(p)
+                        let rule_dir = rule_path.as_ref().and_then(|p| {
+                            camino::Utf8Path::new(p.as_str())
                                 .parent()
                                 .filter(|dir| !dir.as_str().is_empty())
                                 .map(std::string::ToString::to_string)

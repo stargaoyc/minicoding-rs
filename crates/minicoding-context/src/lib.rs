@@ -23,8 +23,8 @@ mod weight;
 
 pub use budget::TokenBudget;
 pub use compress::{
-    CircuitBreaker, CircuitBreakerConfig, CompressResult, StateKeep, compress_pipeline,
-    summarize_with_fallback,
+    CircuitBreaker, CircuitBreakerConfig, CompressResult, StateKeep, SummarizeConfig,
+    compress_pipeline, summarize_with_fallback,
 };
 pub use manager::ContextManagerImpl;
 pub use simple::SimpleContextManager;

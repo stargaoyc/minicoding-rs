@@ -89,4 +89,7 @@ pub mod prelude {
     };
     pub use crate::tool::{Tool, ToolContext, ToolGroup, ToolRegistry};
     pub use crate::util::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    // 注：`util::slash::SlashCommand` 不入 prelude——与 `extension::SlashCommand`
+    // （扩展清单按键绑定）同名，双导出会产生歧义；前端显式
+    // `use minicoding_core::util::slash::{self, SlashCommand}` 引入。
 }

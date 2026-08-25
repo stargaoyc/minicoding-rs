@@ -269,6 +269,8 @@ mod tests {
             workdir: "/tmp/proj".to_string(),
             config_hash: 12345,
             messages: vec![Message::user_text("snapshot-msg")],
+            permission_mode: None,
+            sandbox_preset: None,
         };
         let snapshot = SessionSnapshot::new(1, state);
         // snapshot.seq=1，后续事件从 seq=2 开始
@@ -384,6 +386,8 @@ mod tests {
             workdir: "/tmp".to_string(),
             config_hash: 0,
             messages: vec![Message::user_text("snap")],
+            permission_mode: None,
+            sandbox_preset: None,
         };
         let snapshot = SessionSnapshot::new(5, state);
         let result = replay_session_state(Some(&snapshot), Vec::new()).unwrap();

@@ -16,18 +16,23 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 pub mod auto;
+pub mod auto_contributor;
 pub mod inject;
 pub mod long_term;
 pub mod project_doc;
+pub mod retrieval;
 pub mod session_sum;
 pub mod vector;
 
 pub use auto::{AutoCategory, AutoMemory};
+pub use auto_contributor::AutoMemoryContributor;
 pub use inject::{inject_auto_memory, inject_memory};
 pub use long_term::LongTermMemory;
 pub use minicoding_core::memory::{MemoryStore, ProjectDocLoader};
 pub use project_doc::{
-    ProjectDocLoaderImpl, find_repo_root, inject_project_doc, inject_project_doc_sync,
+    ProjectDocLoaderImpl, find_project_doc, find_repo_root, global_agents_path, inject_project_doc,
+    inject_project_doc_sync,
 };
+pub use retrieval::MemoryRetrieval;
 pub use session_sum::SessionSummarizerImpl;
 pub use vector::{MemoryIndex, SearchResult};
