@@ -146,15 +146,26 @@ jobs:
           find "target/${{ matrix.target }}/release/bundle" -type f 2>/dev/null | sort || echo "(bundle 目录不存在)"
 
       # ENG-1（2026-08-26 R3 审查）：生成 SHA256SUMS——桌面产物此前无任何
-      # 完整性校验手段，与安全敏感项目定位不符。
+      # 完整性校验手段。R3 发布教训：macOS bash 3.2 下转义括号 find 偶发零匹配
+      # 产出空文件，gh 上传空文件报 HTTP 400 Bad Content-Length 致整个 upload
+      # job 失败——改为显式多轮 glob 追加 + 空文件守卫（无产物时显式失败而非
+      # 静默上传空 SUMS）。
       - name: Generate checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd "target/${{ matrix.target }}/release/bundle"
-          find . -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" \
-            -o -name "*.AppImage" -o -name "*.deb" \) \
-            -exec sha256sum {} \; > ../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt || true
-          cat "../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt"
+          out="../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt"
+          : > "$out"
+          for pat in *.dmg *.msi *.exe *.AppImage *.deb */*.dmg */*.msi */*.exe                      */*.AppImage */*.deb */*.exe */*.AppImage; do
+            [ -f "$pat" ] || continue
+            sha256sum "$pat" >> "$out"
+          done
+          if [ ! -s "$out" ]; then
+            echo "::error::未找到任何桌面安装包，SHA256SUMS 为空"
+            exit 1
+          fi
+          cat "$out"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
