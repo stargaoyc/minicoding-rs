@@ -4,6 +4,108 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.5] - 2026-08-26
+
+> 本版本为 `docs/project-review-20260826-r3.md` 第三轮全面审查修复版：
+> 八领域深审收口 P0×7/P1×22 及多项 P2/P3，分九阶段落地。核心主题是清除
+> "上一轮修复引入的新洞"与一条幻影安全防线，关键回归测试均经变异验证。
+
+### Security
+
+- **policy：危险命令词法黑名单落地**——security.md §4.2 此前承诺的防线
+  无实现（幻影约束）：fork bomb/mkfs/dd of=/dev/rm 递删根/chmod -R 根/
+  curl|wget 管道执行远程脚本六类现硬 Deny 且不可覆盖（C-02）；sed 原地写
+  变体（`-i.bak`/`--in-place`）与 `dd of=` 参数式写约束文件补拦；预批准
+  复合操作符补齐重定向族（`cargo build > ~/.ssh/authorized_keys` 不再借
+  词边界前缀免弹窗）
+- **core：权限决策入口最后防线**——前端回传的 AllowAlways/DenyAlways 在
+  prompt 未提供 Always 选项时一律折叠为一次性语义且不落缓存/持久化
+  （Web 曾恒渲染"始终允许"按钮，一次误点即目录级永久免审批提升链）；
+  会话级 Allow 缓存早退删除——restricted ask（AGENTS.md/auto.md 写入）
+  不再被同工具此前的 Always 静默放行（RT-1 击穿 C-23/C-27 通道）
+- **server：BypassPermissions 直通口封堵**——创建会话直携
+  `permission_mode: bypass_permissions` 与运行时 `/permission-mode` 切换
+  现均要求 `confirm_danger: true`（C-22），权限模式变更落审计
+- **tools：git.diff ref 安全校验**——拒绝选项形态与 ref 非法字符，封堵
+  `--output=<file>` 沙箱外任意写与 `--no-index` 跨边界读注入面（该工具为
+  只读桶免审批 + 不接 OS 沙箱，三层防线曾全部旁路）；worktree 子代理 git
+  子进程环境白名单化（凭证泄入仓库钩子通道关闭，C-04）；ui.ask 决策落
+  audit.log（PTM-12）
+- **core：auto.md 指令性内容检测重写**——剥离 Markdown 修饰前缀后词级匹配，
+  列表/加粗/多级标题旁路封堵（`- Never commit secrets` 此前免审批写入全局
+  auto.md 并注入所有未来会话）；降级 Ask 改用不含 AllowAlways 的选项集；
+  中文单字 `应` 收紧为双字组合消除高频误报（CTX-1/SEC-4）
+- **sandbox/seccomp**：x86_64 补 X86/X32 兼容架构段（堵 `int 0x80` 旁路
+  deny-list）；沙箱拒绝（authoritative/advisory + 熔断计数）落 audit.log；
+  Windows EACCES(13)=ERROR_INVALID_DATA 平台化修正（不再误计入 C-30 熔断）；
+  macOS denial 签名修正为 sandbox_init 真实失败文案；SSRF 补拦 0.0.0.0/8、
+  240.0.0.0/4、192.0.0.0/24、local-use NAT64
+
+### Fixed
+
+- **core：软重复提醒破坏 provider 配对（P0）**——System 提醒此前直插
+  `assistant(tool_calls)` 与 tool_result 之间，OpenAI/Anthropic 自触发点起
+  对本会话持续 400 且压缩管道永不清理、resume 后仍在；改走 hook_context 同款
+  缓冲并入下一请求 system 头部（新增配对不变式回归测试）
+- **providers：Anthropic 三处账务/循环缺陷**——流式 Usage 被 message_delta
+  整包替换致 input/cache 计量全为零（改合并语义）；近似 tokenizer 漏计
+  tool_calls JSON 致压缩滞后真实超窗（改用 full_text）；extended thinking +
+  工具调用组合显式报错（thinking 块未回传时第二跳必 400，神秘失败转明确
+  提示）；Ollama 并行工具调用合成稳定 id（原空串碰撞）；OpenAI 下发
+  prompt_cache_key、Anthropic messages 侧第三缓存断点；Anthropic max_tokens
+  clamp 8192→32768；401/403 与上下文超长结构化为 AuthInvalid/ContextLength；
+  web.search 禁用自动重定向对齐 fetch 的 SSRF 防线
+- **core/runtime：热更新覆盖保护重构**——基线比对方向搞反使 CLI 覆盖被
+  config.toml 回退、`/model` 选择只存活一轮（改为显式覆盖集合：
+  builder 登记 CLI/env 覆盖，set_model 登记运行期切换）；repeat_guard 硬停止
+  口径统一为末级阈值（默认 [3,5,8] 下 8 轮）、streak 改按轮次语义；副作用
+  串行路径 span 改 instrument（跨 await enter 失真）；resume 无 snapshot 时
+  durable_seq 以持久化进度为基线；热更新单次解析去双倍开销
+- **server/web：SSE 断线恢复三连修**——durable recovery 三态分类（原
+  `Some(vec![])` 二态使 EventStore 重放成为死代码，重启后断线事件静默丢失）；
+  RehydrateRequired SSE id 填实际 seq（固定 id:0 曾引发全量重放/无限重连
+  风暴/僵尸权限弹窗）；NDJSON Undo 落地与 HTTP 对齐（同进程行为分裂消除）、
+  NDJSON/ACP Lagged 发送 re-sync 提示（E-14）；ServerPrompter 孤儿条目清理
+  （幽灵权限弹窗）；会话空闲 6h 机会式驱逐（长驻 server 内存无界增长）；
+  workspace_read 精确读取上限+1 字节（数 GB 文件不再整读进内存）
+- **desktop/tui/cli**：keyring 失败降级 credentials 文件 fallback（headless
+  Linux 对齐 CLI 行为）；sidecar 进程退出检测 + 前端通知 + 机读端口行
+  （解析不再依赖日志文本启发式）；TUI 移除回看双重偏移；serve stdio 三分支
+  接入 `--preset`；CLI REPL 退出前生成会话摘要（特性建成未通车收口）
+- **context/memory：预算口径修正**——压缩阈值判定计入 system prompt 与
+  tool schemas 固定开销（project_doc 可达 8K token 此前漏计）；context_window
+  取主对话 provider（原误取 small model 反向虚高）；calibrate 零值护栏；
+  Json 工具结果超长裁剪（500KB JSON 不再直接推进 L3/L4 丢历史）；@memory
+  BM25 检索槽位端到端接线（生产零写入致检索永不触发的"建成未通车"收口）；
+  记忆文件 0600 私有写；long_term 写入 Ask 附内容预览并去除 AllowAlways
+- **metrics：gauge 分表覆盖语义**——set_active_sessions 曾累加且渲染为
+  counter（双语义错误）；record_mcp_tool_call 进注册表（/metrics 曾永远
+  看不到 MCP 计数）；server 日志轮转 max_log_files(7)（磁盘无界增长）；
+  TUI 入口安装 tracing subscriber（观测性四入口缺一）
+
+### Changed
+
+- 架构守卫扩容：manifest 扫描含 target-specific/build-dependencies 全部依赖
+  表（ARCH-2 盲区封堵）；cli/tui/server/sdk/desktop 五个组合层 crate 补守卫
+  （执法 12→17 crate）；KEYRING_SERVICE/ACCOUNT 常量下沉 core 单一事实来源
+  （四处复制消除）；web 组件直调 api 层改经 hooks 封装（§8.3 分层令）；删除
+  server 零使用的 hyper 直接依赖
+- CI/供应链：dist 开启 github-attestations、桌面产物生成 SHA256SUMS；
+  dependabot 配置（cargo/actions/npm weekly 分组合并）；dtolnay/rust-toolchain
+  @master 改 SHA 钉版；windows-target-check 扩到除 desktop 外全 workspace；
+  generated-guard 钩子阻止 cargo test 的 ts-rs 副作用产物误提交（已两次事故）；
+  pre-commit 双轨对齐（脚本轨补 typos/generated-guard）
+- Tauri CSP/connect-src 维持既有收紧策略；NDJSON 协议新增 UndoReported 响应
+  变体（向后兼容）
+
+### Docs
+
+- 幻影约束清零：security.md §4.2 标注已实现、rules.md C-02 四类覆盖面对齐、
+  audit.log 示例按 AuditRecord 六字段重写、auth login→cred store、README
+  `--tui`→独立二进制、AsyncRewakeSpec 三份文档对齐代码、design §8.6 override/
+  fallback 配置键标注未实现、mcp_choices 结构对齐指纹分桶；10 份历史过程文档
+  归档 docs/history/（结论以本文档对应审查报告为准）
+
 ## [0.3.4] - 2026-08-25
 
 > 本版本为 `docs/project-review-20260825-r2.md` 第二轮全面审查修复版：

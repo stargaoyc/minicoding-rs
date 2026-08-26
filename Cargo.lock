@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-context"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "criterion",
@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "futures",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-desktop"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -3320,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-extension-sdk"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3334,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-hooks"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-journal"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3365,7 +3365,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-mcp"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64 0.22.1",
  "camino",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-memory"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "futures",
@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-policy"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-protocol"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "minicoding-core",
  "serde",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-providers"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "futures",
  "minicoding-core",
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sandbox"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "landlock",
@@ -3469,7 +3469,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sdk"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "camino",
@@ -3501,7 +3501,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-server"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-storage"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "fs2",
@@ -3559,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tools"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "camino",
  "futures",
@@ -3587,7 +3587,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tui"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "camino",
