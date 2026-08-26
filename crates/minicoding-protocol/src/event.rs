@@ -102,6 +102,13 @@ pub enum NdjsonCommandKind {
         session_id: String,
         messages: Vec<Message>,
     },
+    /// `Undo` 命令响应（FE-4，2026-08-26 R3 审查：NDJSON 与 HTTP `/undo`
+    /// 行为对齐——journal 已在 server 端注入，不再硬编码"不支持"）。
+    UndoReported {
+        undone_entries: usize,
+        restored_files: Vec<String>,
+        failed_files: Vec<serde_json::Value>,
+    },
     /// 命令错误响应：JSON 解析失败、会话不存在、命令不支持等（`seq` 为 0）。
     CommandError { message: String },
 }

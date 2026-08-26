@@ -445,13 +445,13 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
 /// 协议：stdin 每行一个 `Command` JSON；stdout 每行一个 `EventDto` JSON。
 /// 详见 `minicoding_server::ndjson` 模块文档。
 async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
-    use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP 模式一致）
     let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（CreateSession 命令未指定覆盖时用此默认）
+    let (preset_mode, preset_policy) = resolve_stdio_preset(cmd)?;
     let params = ServerRuntimeParams {
         provider_kind: resolved.provider_kind,
         provider_name: resolved.provider_name,
@@ -460,11 +460,13 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
         model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
-        permission_mode: PermissionMode::Default,
-        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
-            workdir: Utf8PathBuf::from(&cmd.workdir),
-            writable: Vec::new(),
-        },
+        // FE-11（2026-08-26 R3 审查）：stdio 三分支此前硬编码 Default +
+        // WorkspaceWrite，完全忽略 `--preset`（IDE 无法选 read-only）。复用
+        // HTTP 模式同款 build_preset_policy 解析（full-access 属高危预设，
+        // stdio 场景同样要求显式 --preset full-access 传入即视为选定，警告
+        // 经日志展示）。
+        permission_mode: preset_mode,
+        sandbox_policy: preset_policy,
         timeout_sec: resolved.timeout_sec,
         max_retries: resolved.max_retries,
         small_model: resolved.small_model,
@@ -496,13 +498,13 @@ async fn run_as_ndjson_server(cmd: &ServeCommand) -> Result<()> {
 /// `cancel`/`shutdown`/`resolvePermission` + `session/update` 通知。
 /// 详见 `minicoding_server::acp` 模块文档。
 async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
-    use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON 模式一致）
     let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（newConversation 未指定覆盖时用此默认）
+    let (preset_mode, preset_policy) = resolve_stdio_preset(cmd)?;
     let params = ServerRuntimeParams {
         provider_kind: resolved.provider_kind,
         provider_name: resolved.provider_name,
@@ -511,11 +513,13 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
         model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
-        permission_mode: PermissionMode::Default,
-        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
-            workdir: Utf8PathBuf::from(&cmd.workdir),
-            writable: Vec::new(),
-        },
+        // FE-11（2026-08-26 R3 审查）：stdio 三分支此前硬编码 Default +
+        // WorkspaceWrite，完全忽略 `--preset`（IDE 无法选 read-only）。复用
+        // HTTP 模式同款 build_preset_policy 解析（full-access 属高危预设，
+        // stdio 场景同样要求显式 --preset full-access 传入即视为选定，警告
+        // 经日志展示）。
+        permission_mode: preset_mode,
+        sandbox_policy: preset_policy,
         timeout_sec: resolved.timeout_sec,
         max_retries: resolved.max_retries,
         small_model: resolved.small_model,
@@ -548,13 +552,13 @@ async fn run_as_acp_server(cmd: &ServeCommand) -> Result<()> {
 /// 详见 `minicoding_server::lsp` 模块文档。
 #[cfg(feature = "lsp")]
 async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
-    use minicoding_core::policy::PermissionMode;
     use minicoding_server::ServerRuntimeParams;
 
     // 1. 解析 provider 配置（CLI > env > config.toml > 默认，与 HTTP/NDJSON/ACP 模式一致）
     let resolved = resolve_provider_config(cmd);
 
     // 2. 构造默认 ServerRuntimeParams（executeCommand 创建会话时用）
+    let (preset_mode, preset_policy) = resolve_stdio_preset(cmd)?;
     let params = ServerRuntimeParams {
         provider_kind: resolved.provider_kind,
         provider_name: resolved.provider_name,
@@ -563,11 +567,13 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
         model: resolved.model,
         workdir: Utf8PathBuf::from(&cmd.workdir),
         system: cmd.system.clone(),
-        permission_mode: PermissionMode::Default,
-        sandbox_policy: minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite {
-            workdir: Utf8PathBuf::from(&cmd.workdir),
-            writable: Vec::new(),
-        },
+        // FE-11（2026-08-26 R3 审查）：stdio 三分支此前硬编码 Default +
+        // WorkspaceWrite，完全忽略 `--preset`（IDE 无法选 read-only）。复用
+        // HTTP 模式同款 build_preset_policy 解析（full-access 属高危预设，
+        // stdio 场景同样要求显式 --preset full-access 传入即视为选定，警告
+        // 经日志展示）。
+        permission_mode: preset_mode,
+        sandbox_policy: preset_policy,
         timeout_sec: resolved.timeout_sec,
         max_retries: resolved.max_retries,
         small_model: resolved.small_model,
@@ -586,4 +592,24 @@ async fn run_as_lsp_server(cmd: &ServeCommand) -> Result<()> {
     minicoding_server::serve_lsp(mgr, permission_timeout)
         .await
         .map_err(|e| anyhow::anyhow!("LSP server 运行失败: {e}"))
+}
+
+/// FE-11（2026-08-26 R3 审查）：stdio 三分支的 `--preset` 解析。
+///
+/// 复用 server `build_preset_policy`（与 HTTP 模式同一映射表，消除双事实源）；
+/// full-access 警告经 tracing 展示。未知预设返回配置错误。
+fn resolve_stdio_preset(
+    cmd: &ServeCommand,
+) -> anyhow::Result<(
+    minicoding_core::policy::PermissionMode,
+    minicoding_core::sandbox::SandboxPolicy,
+)> {
+    let workdir = Utf8PathBuf::from(&cmd.workdir);
+    let preset = cmd.preset.as_str();
+    let (mode, policy, warning) = minicoding_server::http::build_preset_policy(preset, &workdir)
+        .map_err(|e| anyhow::anyhow!("{} (status {})", e.message, e.status))?;
+    if let Some(w) = warning {
+        tracing::warn!("{w}");
+    }
+    Ok((mode, policy))
 }

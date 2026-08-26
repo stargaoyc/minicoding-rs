@@ -83,20 +83,46 @@ pub fn save_provider_config(
 
 /// 从 OS keyring 加载 API key（与 CLI `cred.rs` 共享 entry）。
 ///
-/// 返回 `Ok(None)` 表示 keyring 可用但无对应 entry；
-/// 返回 `Err` 表示 keyring 不可用（如 Linux 无 secret-service 守护）。
+/// FE-5（2026-08-26 R3 审查）：keyring 不可用时降级到
+/// `~/.minicoding/credentials` 文件 fallback（0600，与 CLI/sdk 同路径同格式）
+/// ——headless Linux（无 secret-service 守护）用户此前直接进入错误屏，
+/// 而 CLI 可用；两形态行为对齐。
+///
+/// 返回 `Ok(None)` 表示 keyring 与文件均无 key；
+/// 返回 `Err` 仅当文件存在但读取失败。
 ///
 /// # Errors
-/// keyring 不可用或读取失败时返回错误。
+/// 文件 fallback 存在但读取失败时返回错误。
 #[cfg(feature = "desktop")]
 pub fn load_api_key() -> Result<Option<String>> {
+    // 1. 尝试 OS keyring
     let entry =
         keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).context("创建 keyring entry 失败")?;
     match entry.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("keyring get 失败: {e}")),
+        Ok(key) => return Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => {
+            log::info!("OS keyring 中无 minicoding 凭证，尝试文件 fallback");
+        }
+        Err(e) => {
+            log::warn!("OS keyring 不可用（{e}），降级到文件 fallback（C-04）");
+        }
     }
+
+    // 2. 文件 fallback：`~/.minicoding/credentials`（与 sdk/cred.rs 同一路径约定；
+    //    ARCH-4 常量集中化后可改经共享实现）
+    let home = minicoding_core::paths::minicoding_home().context("定位 MINICODING_HOME 失败")?;
+    let path = home.join("credentials");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取 credentials 文件失败: {path}"))?;
+    let key = raw.trim().to_string();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    log::info!("api key 从文件 fallback 加载");
+    Ok(Some(key))
 }
 
 /// 写入 API key 到 OS keyring。

@@ -15,7 +15,7 @@
 //! | `GetSession` | `SessionRetrieved`（`seq=0`） |
 //! | `SetPermissionMode` | `PermissionModeChanged`（由 Runtime 自动发） |
 //! | `ResolvePermission` | `PermissionResolved`（由 Runtime 自动发） |
-//! | `Undo` | `CommandError`（M8 未实现，需 `file-undo` feature） |
+//! | `Undo` | `UndoReported`（FE-4：与 HTTP `/undo` 对齐；journal 未注入时报错） |
 //!
 //! ## seq 语义
 //!
@@ -250,6 +250,7 @@ async fn handle_turn_command(
 
 /// 分派 `Command` 到对应的 handler。`SendUserMessage` 需要 `cmd_rx`：turn 期间
 /// 继续消费命令（`ResolvePermission`/`Cancel`），避免权限交互死锁。
+#[allow(clippy::too_many_lines)] // 命令分派线性展开（Undo 完整错误映射），拆分支反而切断上下文
 async fn dispatch_command(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
@@ -335,18 +336,103 @@ async fn dispatch_command(
             Ok(())
         }
         Command::Undo { session_id, steps } => {
-            // Undo 需要 `file-undo` feature 与 Journal 注入，M8 server 端未启用。
-            // 返回 CommandError 让客户端知道命令不支持。
-            let _ = (session_id, steps);
-            write_command(
-                stdout,
-                0,
-                &NdjsonCommandKind::CommandError {
-                    message: "undo not supported in NDJSON mode (requires file-undo feature)"
-                        .to_string(),
-                },
-            )
-            .await
+            // FE-4（2026-08-26 R3 审查）：journal 已在 server 端注入
+            // （runtime_builder §11b），与 HTTP `/undo` 行为对齐——原实现硬编码
+            // "不支持"造成同一进程内 HTTP 可用、NDJSON 被拒的分裂。
+            let Ok(session) = mgr.get_or_load(&session_id).await else {
+                // 会话不存在：写错误响应后提前退出（let-else，clippy 手册推荐形态）
+                write_command(
+                    stdout,
+                    0,
+                    &NdjsonCommandKind::CommandError {
+                        message: format!("session {session_id} not found"),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            let Some(journal) = session.runtime.journal() else {
+                write_command(
+                    stdout,
+                    0,
+                    &NdjsonCommandKind::CommandError {
+                        message: "journal 未启用".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            // 回滚与进行中的 turn 互斥（C-28/C-31，60s 上限对齐 HTTP 端点）。
+            let undo =
+                tokio::time::timeout(std::time::Duration::from_secs(60), session.turn_lock.lock())
+                    .await;
+            #[allow(clippy::single_match_else)] // 同上：错误分支写响应后提前退出
+            let report = match undo {
+                Ok(_guard) => journal.undo(steps.max(1)).await,
+                Err(_) => {
+                    write_command(
+                        stdout,
+                        0,
+                        &NdjsonCommandKind::CommandError {
+                            message: "会话忙：上一轮消息仍在处理中，请稍后再试".to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            match report {
+                Ok(report) => {
+                    // C-28：/undo 反向恢复落审计
+                    let rec = minicoding_core::storage::AuditRecord {
+                        ts: time::OffsetDateTime::now_utc(),
+                        session: session.runtime.session().id.clone(),
+                        kind: minicoding_core::storage::AuditKind::ToolCall,
+                        tool: Some("undo".to_string()),
+                        decision: None,
+                        detail: format!(
+                            "ndjson undo: steps={} undone_entries={} restored={} conflicts={}",
+                            steps.max(1),
+                            report.undone_entries,
+                            report.restored_files.len(),
+                            report.failed_files.len(),
+                        ),
+                    };
+                    if let Err(e) = session.runtime.audit().record(rec).await {
+                        tracing::warn!(error = %e, "ndjson undo audit failed");
+                    }
+                    write_command(
+                        stdout,
+                        0,
+                        &NdjsonCommandKind::UndoReported {
+                            undone_entries: report.undone_entries,
+                            restored_files: report
+                                .restored_files
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect(),
+                            failed_files: report
+                                .failed_files
+                                .iter()
+                                .map(|(p, reason)| {
+                                    serde_json::json!({"path": p.to_string(), "reason": reason})
+                                })
+                                .collect(),
+                        },
+                    )
+                    .await
+                }
+                Err(e) => {
+                    write_command(
+                        stdout,
+                        0,
+                        &NdjsonCommandKind::CommandError {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await
+                }
+            }
         }
     }
 }
@@ -435,8 +521,21 @@ async fn handle_send_user_message(
                         write_event(stdout, seq, &EventKind::from(&event)).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // 消费慢导致丢事件——发 RehydrateRequired 让客户端重拉 snapshot
+                        // 消费慢导致丢事件——E-14（2026-08-26 R3 审查落地）：
+                        // 向客户端发 lag 通知，指示重拉 snapshot（GetSession）。
+                        // 借 CommandError 通道（seq=0 advisory），NDJSON 无专用
+                        // rehydrate 变体，协议扩展留待需要时。
                         tracing::warn!(session_id = %session_id, "NDJSON event consumer lagged");
+                        let _ = write_command(
+                            stdout,
+                            0,
+                            &NdjsonCommandKind::CommandError {
+                                message: "event stream lagged: some events were dropped; \
+                                          resend GetSession to re-sync snapshot"
+                                    .to_string(),
+                            },
+                        )
+                        .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }

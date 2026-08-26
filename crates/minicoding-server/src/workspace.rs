@@ -19,6 +19,7 @@ use minicoding_protocol::workspace::{
 use minicoding_tools::resolve_path;
 use serde::Deserialize;
 use time::OffsetDateTime;
+use tokio::io::AsyncReadExt;
 
 /// 前端忽略目录（大目录/构建产物，避免文件树拉取无意义内容，C-07 资源约束）。
 const IGNORE_DIRS: &[&str] = &[
@@ -171,12 +172,30 @@ pub async fn workspace_read(
             message: format!("is a directory: {}", path.as_str()),
         });
     }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| io_err(&path, &e))?;
-    let size = bytes.len();
-    let truncated = size > MAX_READ_BYTES;
-    let content = String::from_utf8_lossy(&bytes[..size.min(MAX_READ_BYTES)]).to_string();
+    // FE-9（2026-08-26 R3 审查）：精确读取 `MAX_READ_BYTES + 1` 字节而非整
+    // 文件读入后截断——数 GB 日志/数据文件此前会全量进内存（OOM 面，C-07
+    // 上限承诺失效）。多读 1 字节用于 truncated 判定。
+    let size = metadata.len();
+    let mut file = tokio::io::BufReader::new(
+        tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| io_err(&path, &e))?,
+    );
+    let read_cap = MAX_READ_BYTES.saturating_add(1);
+    let mut buf = vec![0u8; read_cap.min(usize::try_from(size).unwrap_or(read_cap))];
+    let mut read_total = 0usize;
+    while read_total < buf.len() {
+        let n = file
+            .read(&mut buf[read_total..])
+            .await
+            .map_err(|e| io_err(&path, &e))?;
+        if n == 0 {
+            break;
+        }
+        read_total += n;
+    }
+    let truncated = size > MAX_READ_BYTES as u64;
+    let content = String::from_utf8_lossy(&buf[..read_total.min(MAX_READ_BYTES)]).to_string();
 
     record_audit(&session.runtime, "workspace.read", path.as_ref()).await;
     Ok(Json(WorkspaceReadResponse {

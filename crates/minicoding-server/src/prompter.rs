@@ -72,8 +72,13 @@ impl ServerPrompter {
 /// 是瞬态事件，重连重放不可用（见 `sse.rs`）。
 #[must_use]
 pub async fn list_pending_permissions(pending: &PendingPermissions) -> Vec<PermissionPrompt> {
-    let guard = pending.lock().await;
-    let mut out: Vec<PermissionPrompt> = guard
+    let mut guard = pending.lock().await;
+    // FE-7（2026-08-26 R3 审查）：清理孤儿条目——prompt future 在等待期间被
+    // drop（turn cancel）时 `tx` 随之关闭但 entry 残留，前端 5s 轮询会不断
+    // 复活无法 resolve 的幽灵弹窗。sender 已断开（receiver drop）的条目视为
+    // 死请求，顺带移除。
+    guard.retain(|_, e| !e.tx.is_closed());
+    let out: Vec<PermissionPrompt> = guard
         .iter()
         .map(|(id, e)| PermissionPrompt {
             id: id.clone(),
@@ -83,8 +88,10 @@ pub async fn list_pending_permissions(pending: &PendingPermissions) -> Vec<Permi
             options: Vec::new(),
         })
         .collect();
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    drop(guard);
+    let mut sorted = out;
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    sorted
 }
 
 impl std::fmt::Debug for ServerPrompter {

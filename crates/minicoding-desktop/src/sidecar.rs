@@ -115,7 +115,9 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
 
 /// 从 sidecar 输出行解析监听端口。
 ///
-/// 支持格式：
+/// FE-13（2026-08-26 R3 审查）：优先匹配 server 启动时输出的**机读行**
+/// `MINICODING_LISTENING_PORT=<port>`（不受 ANSI 色码/日志格式漂移影响）；
+/// 未命中时回退启发式：
 /// - `listening on 127.0.0.1:12345`
 /// - `minicoding-server 启动`（tracing 日志含 addr 字段）
 /// - `addr=127.0.0.1:12345`
@@ -123,6 +125,16 @@ pub async fn spawn_sidecar_standalone() -> Result<SessionInfo> {
 #[must_use]
 fn parse_port(line: &str) -> Option<u16> {
     let line = line.trim();
+    // 1. 机读行（首选）
+    if let Some(rest) = line.strip_prefix("MINICODING_LISTENING_PORT=") {
+        let port_str: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(p) = port_str.parse::<u16>()
+            && (1024..=65535).contains(&p)
+        {
+            return Some(p);
+        }
+    }
+    // 2. 旧启发式回退
     let idx = line.rfind(':')?;
     let rest = line[idx + 1..].trim_start();
     let port_str: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -304,7 +316,11 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
     .await
     .context("sidecar 启动超时")??;
 
-    // 端口解析后继续捕获 sidecar 日志（后台 task，避免服务器错误不可见）
+    // 端口解析后继续捕获 sidecar 日志（后台 task，避免服务器错误不可见）。
+    // FE-12（2026-08-26 R3 审查）：通道关闭 = sidecar 进程退出/崩溃——此前
+    // 静默结束，前端无感知。Tauri 形态向前端发 `sidecar-exited` 事件（前端
+    // 可提示重启），standalone 形态记 error 日志。
+    let app_handle = app.clone();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -318,6 +334,10 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
                 _ => {}
             }
         }
+        // FE-12：rx 耗尽 = sidecar 进程已退出
+        log::error!("minicoding-server sidecar 进程已退出（崩溃或被终止）");
+        use tauri::Emitter;
+        let _ = app_handle.emit("sidecar-exited", ());
     });
 
     log::info!("Tauri sidecar 已启动: port={port}, pid={pid}");

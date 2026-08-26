@@ -36,8 +36,9 @@ const PROMPT: &str = "minicoding> ";
 
 /// 渲染任务等待 `TurnEnd` 的超时。
 ///
-/// `run_turn` 在 `Finished`/`Interrupted`/超时路径均 emit `TurnEnd`，但 `Failed`
-/// 路径不 emit；用超时兜底防止渲染任务挂死。
+/// `run_turn` 在 `Finished`/`Interrupted`/`Failed`/超时路径均 emit `TurnEnd`
+/// （CORE-6 已补发 Failed/Err 路径）；保留 500ms 超时兜底防御未来回归
+/// 与事件订阅 Lagged 场景（FE-2 注记，2026-08-26 R3 审查核实）。
 const RENDER_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// 工具结果预览的最大字符数。

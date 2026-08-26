@@ -417,12 +417,14 @@ fn prompt_option_label(opt: PromptOption) -> String {
 
 /// 用户选择的 action title → `Decision`。
 ///
-/// `Allow Once`/`Allow Always` → `Decision::Allow`（"always" 语义由 `PermissionPolicy`
-/// 缓存层处理，`Decision` enum 只有 Allow/Deny）；
-/// 其他 → `Decision::Deny`。
+/// FE-6（2026-08-26 R3 审查）：按 `options` **透传真实决策**——此前
+/// "Allow Always" 被静默折叠为一次性 `Allow`（依据已过时的注释），与
+/// CLI/Web 的 Always 持久化语义漂移。core 决策入口（SEC-3）会校验
+/// options 是否提供过 `AllowAlways` 并对越权回传做折叠，此处透传安全。
 fn map_action_to_decision(title: &str, _options: &[PromptOption]) -> Decision {
     match title {
-        "Allow Once" | "Allow Always" => Decision::Allow,
+        "Allow Once" => Decision::Allow,
+        "Allow Always" => Decision::AllowAlways,
         other => Decision::Deny(format!("user denied: {other}")),
     }
 }
@@ -469,24 +471,27 @@ fn event_to_progress(kind: &EventKind, token: NumberOrString) -> Option<Progress
     let progress = match kind {
         EventKind::TurnStreamingStarted => WorkDoneProgress::Begin(WorkDoneProgressBegin {
             title: "minicoding".to_string(),
-            cancellable: Some(true),
+            // FE-6：`$/cancelRequest` 处理器未实现（tower-lsp 需注册自定义
+            // notification），宣告 cancellable=true 是对编辑器的虚假承诺——
+            // 实现为 false 直至 cancel 通路落地。
+            cancellable: Some(false),
             message: None,
             percentage: None,
         }),
         EventKind::Token { text } => WorkDoneProgress::Report(WorkDoneProgressReport {
-            cancellable: Some(true),
+            cancellable: Some(false),
             message: Some(text.clone()),
             percentage: None,
         }),
         EventKind::ToolCallStarted { tool, .. } => {
             WorkDoneProgress::Report(WorkDoneProgressReport {
-                cancellable: Some(true),
+                cancellable: Some(false),
                 message: Some(format!("tool: {tool}")),
                 percentage: None,
             })
         }
         EventKind::ToolCallFinished { .. } => WorkDoneProgress::Report(WorkDoneProgressReport {
-            cancellable: Some(true),
+            cancellable: Some(false),
             message: Some("tool done".to_string()),
             percentage: None,
         }),

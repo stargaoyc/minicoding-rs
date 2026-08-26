@@ -6,6 +6,24 @@
 
 use std::collections::VecDeque;
 
+/// FE-1（2026-08-26 R3 审查）：重放请求的三态结果。
+///
+/// 旧 API 用 `Option<Vec>` 二态表达三语义——"evict 但 ≤ `durable_seq`"返回
+/// `Some(vec![])`，调用方提前返回空重放，`EventStore::load_after` 成为死代码，
+/// server 重启后断线期间持久化事件静默丢失。分类枚举让 durable recovery
+/// 路径真正可达。
+#[derive(Debug)]
+pub enum ReplayOutcome<'a> {
+    /// ring buffer 命中：可直接重放的事件列表（可能为空 = 无新事件）。
+    Buffer(Vec<(u64, &'a serde_json::Value)>),
+    /// `after_seq` 已 evict 但 ≤ `durable_seq`——调用方应从 `EventStore`
+    /// 重放持久化事件。
+    NeedsDurable,
+    /// `after_seq` > `durable_seq`（或无持久化）——不可恢复，应发
+    /// `RehydrateRequired`。
+    Unrecoverable,
+}
+
 /// 事件 cursor 管理器（每会话一个，内存 ring buffer）。
 ///
 /// 容量有限：超过 `capacity` 后丢弃最旧事件。`durable_seq` 标记已持久化的最大
@@ -86,6 +104,17 @@ impl EventCursor {
     /// 返回 `None` 表示 `after_seq` 已 evict 且不可恢复（需发 `RehydrateRequired`）。
     #[must_use]
     pub fn replay_after_with_seq(&self, after_seq: u64) -> Option<Vec<(u64, &serde_json::Value)>> {
+        match self.classify_replay(after_seq) {
+            ReplayOutcome::Buffer(v) => Some(v),
+            // 兼容旧二态 API：durable 可恢复场景返回空列表
+            ReplayOutcome::NeedsDurable => Some(vec![]),
+            ReplayOutcome::Unrecoverable => None,
+        }
+    }
+
+    /// FE-1：三态重放分类（供 server 区分 buffer/durable/unrecoverable）。
+    #[must_use]
+    pub fn classify_replay(&self, after_seq: u64) -> ReplayOutcome<'_> {
         // after_seq = 0 表示从头重放；否则先检查 after_seq 是否已 evict
         if after_seq > 0
             && let Some((oldest, _)) = self.buffer.front()
@@ -93,18 +122,18 @@ impl EventCursor {
         {
             // 已 evict，检查是否可从 durable 恢复
             if after_seq <= self.durable_seq {
-                return Some(vec![]);
+                return ReplayOutcome::NeedsDurable;
             }
-            return None;
+            return ReplayOutcome::Unrecoverable;
         }
         let start = after_seq + 1;
-        let mut result = Vec::new();
-        for (seq, event) in &self.buffer {
-            if *seq >= start {
-                result.push((*seq, event));
-            }
-        }
-        Some(result)
+        let result: Vec<(u64, &serde_json::Value)> = self
+            .buffer
+            .iter()
+            .filter(|(seq, _)| *seq >= start)
+            .map(|(seq, event)| (*seq, event))
+            .collect();
+        ReplayOutcome::Buffer(result)
     }
 
     /// 当前最大 seq。
@@ -183,5 +212,38 @@ mod tests {
         cursor.push(serde_json::json!({"n": 3})); // evicts seq=1
         // after_seq=1 已 evict，无 durable → None
         assert!(cursor.replay_after(1).is_none());
+    }
+
+    #[test]
+    fn fe1_classify_replay_distinguishes_durable_from_unrecoverable() {
+        // 场景 A：evict 且 ≤ durable → NeedsDurable（旧 API 返回 Some(vec![])，
+        // 调用方提前返回空重放致 EventStore 恢复死代码）
+        let mut cursor = EventCursor::new(2);
+        cursor.push(serde_json::json!({"n": 1}));
+        cursor.push(serde_json::json!({"n": 2}));
+        cursor.push(serde_json::json!({"n": 3})); // evicts seq=1
+        cursor.set_durable(2);
+        assert!(matches!(
+            cursor.classify_replay(1),
+            ReplayOutcome::NeedsDurable
+        ));
+        // buffer 命中（含"无新事件"的空列表）
+        assert!(matches!(
+            cursor.classify_replay(0),
+            ReplayOutcome::Buffer(_)
+        ));
+        assert!(matches!(
+            cursor.classify_replay(3),
+            ReplayOutcome::Buffer(_)
+        ));
+        // 场景 B：evict 且 > durable（此处 durable=0）→ Unrecoverable
+        let mut cursor2 = EventCursor::new(2);
+        cursor2.push(serde_json::json!({"n": 1}));
+        cursor2.push(serde_json::json!({"n": 2}));
+        cursor2.push(serde_json::json!({"n": 3})); // evicts seq=1
+        assert!(matches!(
+            cursor2.classify_replay(1),
+            ReplayOutcome::Unrecoverable
+        ));
     }
 }

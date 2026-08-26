@@ -26,16 +26,11 @@ pub fn render_chat(
     reasoning: &str,
     scroll_offset: usize,
 ) {
-    // 可见区渲染（2026-08-23 审查遗留#4 性能）：仅解析并渲染 scroll 窗口内的
-    // ChatLine——此前每帧全量 Markdown 重建 O(总行数)，长会话必然卡顿。
-    let start = scroll_offset.min(lines.len());
-    let visible: &[ChatLine] = if scroll_offset == 0 {
-        lines
-    } else {
-        &lines[start..]
-    };
+    // FE-10（2026-08-26 R3 审查）：移除顶部切片——此前 `&lines[start..]` 与
+    // 下方 `.scroll((scroll,0))` 的 `- scroll_offset` **双重作用**，回看定位
+    // 错乱（内容被砍掉后又整体上滚）。统一由 `.scroll()` 承担全部偏移。
     let mut render_lines: Vec<Line> = Vec::new();
-    for line in visible {
+    for line in lines {
         match line {
             ChatLine::User(text) => {
                 render_lines.push(Line::from(vec![

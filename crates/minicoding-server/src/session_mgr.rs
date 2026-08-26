@@ -156,11 +156,16 @@ impl ServerSession {
     /// `EventStore::load_after` 返回 `EventRecord`（含 `PersistedEvent`），需转为
     /// `EventKind` JSON 以与内存路径一致（SSE `data:` payload 格式统一）。
     pub async fn replay_after(&self, after_seq: u64) -> Option<Vec<(u64, serde_json::Value)>> {
-        // 1. 内存 ring buffer 命中
+        // 1. 内存 ring buffer 命中（FE-1：三态分类，durable 路径可达）
         {
             let cursor = self.cursor.lock().await;
-            if let Some(replay) = cursor.replay_after_with_seq(after_seq) {
-                return Some(replay.into_iter().map(|(s, v)| (s, v.clone())).collect());
+            match cursor.classify_replay(after_seq) {
+                minicoding_protocol::cursor::ReplayOutcome::Buffer(replay) => {
+                    return Some(replay.into_iter().map(|(s, v)| (s, v.clone())).collect());
+                }
+                // evict 但 ≤ durable_seq：落入下方 EventStore 重放
+                minicoding_protocol::cursor::ReplayOutcome::NeedsDurable => {}
+                minicoding_protocol::cursor::ReplayOutcome::Unrecoverable => return None,
             }
         }
 
@@ -198,6 +203,8 @@ pub struct SessionManager {
     /// 按 tokio 官方建议用阻塞锁——避免 `async fn(&self, &str)` 的 future 借用
     /// `&self` 与 axum Handler HRTB 冲突。
     sessions: std::sync::Mutex<HashMap<SessionId, Arc<ServerSession>>>,
+    /// 每会话最近活跃时刻（FE-8 空闲驱逐用）。访问/发消息时刷新。
+    last_activity: std::sync::Mutex<HashMap<SessionId, std::time::Instant>>,
     /// 默认 Runtime 构造参数（从 CLI/env 读取，CreateSession 时使用）。
     default_params: ServerRuntimeParams,
     /// 权限交互超时（默认 300s）。
@@ -261,10 +268,73 @@ impl SessionManager {
             });
         Self {
             sessions: std::sync::Mutex::new(HashMap::new()),
+            last_activity: std::sync::Mutex::new(HashMap::new()),
             default_params,
             permission_timeout,
             disk,
         }
+    }
+
+    /// FE-8（2026-08-26 R3 审查）：机会式空闲会话驱逐。
+    ///
+    /// 长驻 server 的 sessions 表此前只增不减——每会话常驻 task/broadcast/ring
+    /// buffer，内存单调上涨。磁盘侧已有懒恢复能力（`get_or_load`），逐出后仍
+    /// 可按需恢复。在 `create_session`/`list_sessions` 入口顺带清扫（避免后台
+    /// 任务生命周期管理）。跳过 turn 进行中的会话（`turn_lock` 被持有即覆盖
+    /// "挂起权限等待中"场景——等待权限的 turn 同样持有该锁）。
+    fn evict_idle_sessions(&self) {
+        const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(21_600);
+        let candidates: Vec<SessionId> = {
+            let guard = self
+                .last_activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .iter()
+                .filter(|(_, t)| t.elapsed() > MAX_IDLE)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let mut evicted = 0usize;
+        for id in &candidates {
+            let busy = {
+                let sessions = self
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                sessions
+                    .get(id)
+                    .is_some_and(|s| s.turn_lock.try_lock().is_err())
+            };
+            if busy {
+                continue;
+            }
+            if self.delete(id) {
+                evicted += 1;
+            }
+            self.last_activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
+        }
+        if evicted > 0 {
+            tracing::info!(
+                evicted,
+                max_idle_secs = 6 * 60 * 60,
+                "idle sessions evicted"
+            );
+        }
+    }
+
+    /// 刷新会话活跃时刻（FE-8）。
+    fn touch_activity(&self, session_id: &str) {
+        self.last_activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_string(), std::time::Instant::now());
     }
 
     /// 返回默认 Runtime 构造参数的引用（HTTP `CreateSession` handler 用）。
@@ -289,6 +359,8 @@ impl SessionManager {
         &self,
         params_override: Option<ServerRuntimeParams>,
     ) -> Result<Arc<ServerSession>, SessionManagerError> {
+        // FE-8：入口机会式清扫空闲会话
+        self.evict_idle_sessions();
         let params = params_override.unwrap_or_else(|| self.default_params.clone());
         let pending: PendingPermissions = Arc::new(TokioMutex::new(HashMap::new()));
         let prompter: Arc<dyn minicoding_core::policy::PermissionPrompter> = Arc::new(
@@ -471,6 +543,8 @@ impl SessionManager {
     /// # Panics
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn list_sessions(&self) -> Vec<SessionMeta> {
+        // FE-8：入口机会式清扫空闲会话
+        self.evict_idle_sessions();
         // 磁盘历史会话 meta（count/summary 实时，`append` 时更新 index）
         let disk_metas = self
             .disk
@@ -535,9 +609,12 @@ impl SessionManager {
         session_id: &str,
     ) -> Result<Arc<ServerSession>, SessionManagerError> {
         if let Some(session) = self.get(session_id) {
+            self.touch_activity(session_id);
             return Ok(session);
         }
-        self.restore_session(session_id).await
+        self.restore_session(session_id).await.inspect(|_| {
+            self.touch_activity(session_id);
+        })
     }
 
     /// 从磁盘恢复历史会话（懒加载，见 `design.md` §25 事件流重放）。

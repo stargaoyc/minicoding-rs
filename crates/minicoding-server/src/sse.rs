@@ -60,10 +60,15 @@ fn format_sse_event(seq: u64, kind_json: &serde_json::Value) -> String {
 }
 
 /// 构造 `RehydrateRequired` SSE 事件块。
-fn format_rehydrate(session_id: &str, last_known_seq: u64) -> String {
+///
+/// FE-3（2026-08-26 R3 审查）：SSE `id:` 必须携带**当前实际 seq** 而非 0——
+/// 固定 `id: 0` 会让浏览器 `EventSource` 自动重连时回传 `Last-Event-ID: 0`，
+/// 服务端从 ring buffer 全量重放历史（已决权限弹窗错位复活），cursor 为空
+/// 时更形成 Rehydrate→重连→Rehydrate 的无限循环。
+fn format_rehydrate(session_id: &str, last_known_seq: u64, current_seq: u64) -> String {
     let rehydrate = RehydrateRequired::new(session_id, last_known_seq);
     let payload = serde_json::to_string(&rehydrate).unwrap_or_default();
-    format!("id: 0\ndata: {payload}\n\n")
+    format!("id: {current_seq}\ndata: {payload}\n\n")
 }
 
 /// 构造 SSE 流。
@@ -92,8 +97,14 @@ pub fn sse_stream(
         match replay {
             None => {
                 // last_seq 已 evict，发 RehydrateRequired 后关闭
+                // （FE-3：id 用 cursor 当前 seq，防 EventSource 重连风暴）
+                let current = session.cursor.lock().await.current_seq();
                 let _ = tx
-                    .send(Ok(format_rehydrate(session.session_id(), last_seq)))
+                    .send(Ok(format_rehydrate(
+                        session.session_id(),
+                        last_seq,
+                        current,
+                    )))
                     .await;
             }
             Some(events) => {
@@ -161,8 +172,11 @@ async fn forward_live_events(
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                // broadcast 溢出——发 RehydrateRequired
-                let _ = tx.send(Ok(format_rehydrate(session.session_id(), 0))).await;
+                // broadcast 溢出——发 RehydrateRequired（FE-3：id 填实际 seq）
+                let current = session.cursor.lock().await.current_seq();
+                let _ = tx
+                    .send(Ok(format_rehydrate(session.session_id(), 0, current)))
+                    .await;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }

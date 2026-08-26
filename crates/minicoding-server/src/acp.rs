@@ -576,7 +576,21 @@ async fn handle_prompt(
                         forward_event_as_update(stdout, &conv_id, seq, &kind).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // E-14（2026-08-26 R3 审查落地）：经 session/update 发送
+                        // lag 提示通知，客户端可据此重新 loadConversation 同步。
                         tracing::warn!(conversation_id = %conv_id, "ACP event consumer lagged");
+                        let notif = Notification {
+                            jsonrpc: Version,
+                            method: "session/update".to_string(),
+                            params: Some(serde_json::json!({
+                                "conversation_id": conv_id,
+                                "update": {
+                                    "type": "agent_message",
+                                    "text": "event stream lagged: some events were dropped; reload the conversation to re-sync",
+                                },
+                            })),
+                        };
+                        let _ = write_jsonrpc(stdout, &notif).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
