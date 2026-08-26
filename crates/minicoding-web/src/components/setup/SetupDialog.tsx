@@ -11,7 +11,7 @@ import {
   isTauri,
   restartApp,
 } from "../../api/tauri";
-import { getServerConfig } from "../../api/client";
+import { useServerConfig } from "../../hooks/useTurnControl";
 import { loadWebSettings } from "../../stores/webSettings";
 import { cn } from "../../lib/utils";
 // Q5 拆分：常量与子组件外置
@@ -43,6 +43,7 @@ import { SectionTitle } from "./SectionTitle";
 
 
 export function SetupDialog() {
+  const fetchServerConfig = useServerConfig();
   const phase = useDesktopStore((s) => s.phase);
   const saveConfig = useDesktopStore((s) => s.saveConfig);
   const restartRequired = useDesktopStore((s) => s.restartRequired);
@@ -107,7 +108,7 @@ export function SetupDialog() {
       setTurnTimeoutSec(settings.turn_timeout_sec ?? PARAM_DEFAULTS.turn_timeout_sec);
       setCompress(settings.compress ?? PARAM_DEFAULTS.compress);
       // server 兜底：localStorage 缺失时读取 server 真实默认值
-      getServerConfig()
+      fetchServerConfig()
         .then((cfg) => {
           setTimeoutSec((prev) => (settings.timeout_sec ? prev : cfg.timeout_sec));
           setMaxRetries((prev) => (settings.max_retries ? prev : cfg.max_retries));

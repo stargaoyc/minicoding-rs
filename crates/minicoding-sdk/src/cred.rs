@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_core::paths;
+// ARCH-4（2026-08-26 R3 审查）：keyring service/account 常量下沉 core
+// （`minicoding_core::util`）——四处私有复制曾靠注释维持一致性，一处改名即
+// 静默 split-brain。KEYRING_SERVICE/KEYRING_ACCOUNT 经下方 use 引入。
+use minicoding_core::util::{KEYRING_ACCOUNT, KEYRING_SERVICE};
 use std::fs;
-/// keyring service 名（与 CLI `cred` 共享，OS keychain namespace）。
-const KEYRING_SERVICE: &str = "minicoding";
-/// keyring account（当前仅 `OpenAI` 兼容入口）。
-const KEYRING_ACCOUNT: &str = "openai_api_key";
 
 /// 从 keyring 或文件 fallback 加载 API key。
 ///

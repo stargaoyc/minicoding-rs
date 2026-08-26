@@ -398,9 +398,11 @@ fn build_small_provider(
 ///
 /// 返回 `Ok(None)` 表示 keyring 可用但无 entry；`Err` 表示 keyring 不可用。
 fn load_api_key_from_keyring() -> Result<Option<String>, anyhow::Error> {
-    const KEYRING_SERVICE: &str = "minicoding";
-    const KEYRING_ACCOUNT: &str = "openai_api_key";
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
+    // ARCH-4：service/account 常量经 core 单一事实来源引入（文件顶部 use）
+    let entry = keyring::Entry::new(
+        minicoding_core::util::KEYRING_SERVICE,
+        minicoding_core::util::KEYRING_ACCOUNT,
+    )?;
     match entry.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),

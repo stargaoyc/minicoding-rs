@@ -144,6 +144,14 @@ pub fn test_now_utc() -> time::OffsetDateTime {
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
 }
 
+/// OS keyring 服务名（ARCH-4，2026-08-26 R3 审查：单一事实来源——此前
+/// cli/sdk/server/desktop 四处各自私有复制，一处改名即静默 split-brain，
+/// CLI 存的 key server 读不到且编译器无法捕获）。C-04 三端共享凭证语义。
+pub const KEYRING_SERVICE: &str = "minicoding";
+
+/// OS keyring 账户名（OpenAI API key 条目；见 [`KEYRING_SERVICE`]）。
+pub const KEYRING_ACCOUNT: &str = "openai_api_key";
+
 /// 相对路径词法规范化（SEC-3，2026-08-25 R2 审查）：消除 `.`/`..` 段与重复
 /// 分隔符，供权限持久化的目录前缀匹配使用。
 ///

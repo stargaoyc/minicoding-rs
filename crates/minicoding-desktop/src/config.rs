@@ -13,13 +13,10 @@ use anyhow::{Context, Result};
 use minicoding_core::config::{ProviderConfig, load_config};
 use minicoding_core::paths;
 
-/// keyring service/account（与 CLI `cred.rs` 共享，确保两边读写同一 entry）。
-///
-/// 仅在 `desktop` feature 启用时使用（keyring 操作函数均 `#[cfg(feature = "desktop")]`）。
+// ARCH-4（2026-08-26 R3 审查）：keyring service/account 常量下沉 core 单一
+// 事实来源（desktop/CLI/server/sdk 四端读写同一 entry）。
 #[cfg(feature = "desktop")]
-const KEYRING_SERVICE: &str = "minicoding";
-#[cfg(feature = "desktop")]
-const KEYRING_ACCOUNT: &str = "openai_api_key";
+use minicoding_core::util::{KEYRING_ACCOUNT, KEYRING_SERVICE};
 
 /// 读取 provider 配置（从 `~/.minicoding/config.toml`）。
 ///

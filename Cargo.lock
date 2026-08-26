@@ -3508,7 +3508,6 @@ dependencies = [
  "camino",
  "clap",
  "futures",
- "hyper",
  "keyring",
  "minicoding-context",
  "minicoding-core",

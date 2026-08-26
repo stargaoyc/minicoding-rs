@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Undo2 } from "lucide-react";
-import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
 import { MessageList } from "./components/chat/MessageList";
@@ -16,7 +16,11 @@ import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
 import { useSessions } from "./hooks/useSessions";
-import { cancelTurn, setApiBase, undoSession } from "./api/client";
+import {
+  useCancelTurn,
+  useSetApiBase,
+  useUndoSession,
+} from "./hooks/useTurnControl";
 import type { Task } from "./api/generated";
 
 const queryClient = new QueryClient({
@@ -47,6 +51,9 @@ export default function App() {
  * AnimatePresence 根据 phase 控制可见性（保证退出动画播放）。
  */
 function DesktopGate() {
+  // ARCH-5：连接级副作用经 hook 封装
+  const setApiBaseClient = useSetApiBase();
+
   const phase = useDesktopStore((s) => s.phase);
   const apiBase = useDesktopStore((s) => s.apiBase);
   const error = useDesktopStore((s) => s.error);
@@ -59,7 +66,7 @@ function DesktopGate() {
 
   // apiBase 变化时同步到 HTTP/SSE 客户端（sidecar 启动后注入端口）
   useEffect(() => {
-    setApiBase(apiBase);
+    setApiBaseClient(apiBase);
   }, [apiBase]);
 
   if (phase === "loading") {
@@ -111,7 +118,6 @@ function AppInner() {
   const { activeSessionId, taskPanelOpen, toggleTaskPanel, setSettingsOpen } = useUIStore();
   const permissions = usePermissions();
   const { data: sessions } = useSessions();
-  const qc = useQueryClient();
 
   // 从 session list 提取当前会话的任务列表
   const activeSession = sessions?.find((s) => s.id === activeSessionId);
@@ -136,6 +142,9 @@ function AppInner() {
     },
   });
   const sendMessage = useSendMessage(activeSessionId);
+  // ARCH-5：api 层调用统一经 hooks 封装（AGENTS.md §8.3 分层令）
+  const cancelTurnById = useCancelTurn();
+  const undoSessionById = useUndoSession();
 
   const handleSend = useCallback(
     (text: string) => {
@@ -147,21 +156,15 @@ function AppInner() {
 
   // 停止当前 turn（POST cancel；sendMessage 的 POST 阻塞至 turn 结束，取消后返回）
   const handleCancel = useCallback(() => {
-    if (activeSessionId) {
-      cancelTurn(activeSessionId).catch(() => {
-        console.warn("cancel failed");
-      });
-    }
-  }, [activeSessionId]);
+    cancelTurnById(activeSessionId);
+  }, [cancelTurnById, activeSessionId]);
 
   // FE-6（2026-08-25 R2 审查）：回滚最近一步文件改动——服务端路由此前已就绪
   // 但 Web 前端零消费（四形态能力矩阵漂移）。失败文件以 toast 式 alert 兜底展示。
   const handleUndo = useCallback(() => {
     if (!activeSessionId) return;
-    undoSession(activeSessionId)
+    undoSessionById(activeSessionId)
       .then((r) => {
-        qc.invalidateQueries({ queryKey: ["messages", activeSessionId] });
-        qc.invalidateQueries({ queryKey: ["workspace", "diff", activeSessionId] });
         if (r.failed_files.length > 0) {
           console.warn("[undo] 冲突未回滚:", r.failed_files);
           window.alert(
@@ -172,7 +175,7 @@ function AppInner() {
       .catch(() => {
         console.warn("undo failed");
       });
-  }, [activeSessionId, qc]);
+  }, [activeSessionId, undoSessionById]);
 
   const turnBusy = sendMessage.isPending || isStreaming;
 

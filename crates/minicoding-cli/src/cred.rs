@@ -27,11 +27,9 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// keyring service 名（OS keychain 中的 namespace）。
-const KEYRING_SERVICE: &str = "minicoding";
-
-/// keyring account 名（区分多 provider，未来扩展如 `openai`/`anthropic`）。
-const KEYRING_ACCOUNT: &str = "openai_api_key";
+// ARCH-4（2026-08-26 R3 审查）：常量下沉 core 单一事实来源（四处私有复制
+// 曾靠注释维持一致，改名即静默 split-brain）。
+use minicoding_core::util::{KEYRING_ACCOUNT, KEYRING_SERVICE};
 
 /// 文件 fallback 路径：`~/.minicoding/credentials`（0600 权限）。
 fn credentials_file_path() -> Result<Utf8PathBuf> {
