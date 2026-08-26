@@ -101,9 +101,25 @@ pub(crate) fn prepare_deny_filter() -> Result<PreparedFilter, SandboxError> {
 
     let mut ctx = ScmpFilterContext::new(ScmpAction::Allow)
         .map_err(|e| SandboxError::Sandbox(format!("seccomp filter 创建失败: {e}")))?;
-    // Native 架构：子进程与父进程同架构（pre_exec fork 语义保证），无需多架构
+    // SEC-8（2026-08-26 R3 审查）：多架构覆盖——此前仅 Native arch，x86_64 上
+    // 32-bit 兼容 syscall（`int 0x80`，i386 syscall 号体系）不在过滤器内，
+    // 默认 action=Allow 使 deny-list 全部旁路（Docker default profile 同款
+    // 处理是显式 add_arch(x86)+add_arch(x32)）。add_arch 失败（如内核未启用
+    // IA32 emulation）按 warn 跳过而非 fail-closed：该平台上兼容 syscall
+    // 本就不可达。
     ctx.add_arch(ScmpArch::Native)
         .map_err(|e| SandboxError::Sandbox(format!("seccomp add_arch 失败: {e}")))?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        for arch in [ScmpArch::X86, ScmpArch::X32] {
+            if let Err(e) = ctx.add_arch(arch) {
+                tracing::warn!(
+                    error = %e,
+                    "seccomp: 32-bit 兼容架构添加失败（内核可能未启用 IA32 emulation），跳过"
+                );
+            }
+        }
+    }
 
     let mut applied: Vec<&str> = Vec::with_capacity(DENIED_SYSCALLS.len());
     for name in DENIED_SYSCALLS {

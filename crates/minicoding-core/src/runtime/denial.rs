@@ -151,13 +151,45 @@ impl Runtime {
         tool: &str,
         error: &crate::model::ToolError,
     ) -> Option<(ToolCallId, ToolResult)> {
-        Self::build_denial_result(
+        let result = Self::build_denial_result(
             self.denial_detector.as_ref(),
             self.sandbox_breaker.as_ref(),
             tool,
             error,
         )
-        .map(|r| (call_id.clone(), r))
+        .map(|r| (call_id.clone(), r));
+        // SEC-11（2026-08-26 R3 审查）：沙箱拒绝落 audit.log——authoritative
+        // 熔断是最值得取证的事件，此前仅 tracing（非 append-only、无 0600
+        // 保证），与 §5.5 审计标准不对齐。best-effort：审计失败不影响拒绝语义。
+        if let Some((_, r)) = &result
+            && let Some(info) = &r.metadata.sandbox_denied
+        {
+            // 权威性代理：结构化 errno 存在 ⇒ 标记合成路径 ⇒ authoritative
+            let authoritative = structured_denial_errno(error).is_some();
+            let rec = crate::storage::AuditRecord {
+                ts: time::OffsetDateTime::now_utc(),
+                session: self.session.id.clone(),
+                kind: crate::storage::AuditKind::ToolResult,
+                tool: Some(tool.to_string()),
+                decision: Some("sandbox_denied".to_string()),
+                detail: format!(
+                    "authoritative={authoritative} kind={kind:?} breaker={breaker} detail={detail}",
+                    kind = info.kind,
+                    breaker = self.sandbox_breaker.count(),
+                    detail = info.detail
+                ),
+            };
+            let audit = self.audit.clone();
+            return result.map(|(id, r)| {
+                tokio::spawn(async move {
+                    if let Err(e) = audit.record(rec).await {
+                        tracing::warn!(error = %e, "sandbox denial audit failed (best-effort)");
+                    }
+                });
+                (id, r)
+            });
+        }
+        result
     }
 
     /// 沙箱拒绝检测（M-09 起为静态辅助：只读并行桶与副作用串行路径共用）。

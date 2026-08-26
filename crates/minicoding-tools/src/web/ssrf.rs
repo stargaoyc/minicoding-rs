@@ -111,10 +111,16 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
     }
     match ip {
         IpAddr::V4(v4) => {
+            // SEC-19（2026-08-26 R3 审查）：补 `0.0.0.0/8` 整段（"本网络"
+            // 段，Linux 上连接 0.x 常被解释为本机）、`240.0.0.0/4`（保留段，
+            // 含 255.255.255.255 广播）、`192.0.0.0/24`（IETF 协议分配段）
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
+                || v4.octets()[0] == 0
+                || (v4.octets()[0] & 0xf0) == 0xf0
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || is_cgnat(*v4)
@@ -128,8 +134,14 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || is_ipv4_mapped(v6)
                 || is_nat64(v6)
                 || is_6to4(v6)
+                || is_local_use_nat64(v6)
         }
     }
+}
+
+/// SEC-19：local-use NAT64 前缀（`64:ff9b:1::/96`，RFC 8215）检测。
+fn is_local_use_nat64(v6: &std::net::Ipv6Addr) -> bool {
+    v6.segments()[..4] == [0x0064, 0xff9b, 0x0001, 0x0000]
 }
 
 /// IPv4-mapped IPv6（`::ffff:0:0/96`）检测。

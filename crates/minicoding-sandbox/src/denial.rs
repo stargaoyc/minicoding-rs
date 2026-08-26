@@ -53,18 +53,19 @@ pub const PLATFORM_SIGNATURES: &[DenialSignature] = &[
         kind_label: "syscall_blocked",
     },
     // macOS Seatbelt
+    // SEC-16（2026-08-26 R3 审查）：本项目经 `sandbox_init(3)`（非弃用的
+    // sandbox-exec CLI）注入 profile，子进程 stderr 不会包含 "sandbox-exec"
+    // 或 "Sandbox violation" 文案——原两条平台签名实际不可达，检测一致性
+    // 实际由通用文本签名（advisory 级）+ 结构化 errno 标记（authoritative）
+    // 支撑。改为 sandbox_init 失败的真实 Runtime 侧错误前缀。
     DenialSignature {
         platform: "macos",
-        pattern: "sandbox-exec",
-        reason: "seatbelt_denied",
-        kind_label: "external",
+        pattern: "sandbox_init failed",
+        reason: "seatbelt_init_failed",
+        kind_label: "setup_failure",
     },
-    DenialSignature {
-        platform: "macos",
-        pattern: "Sandbox violation",
-        reason: "seatbelt_violation",
-        kind_label: "write_forbidden",
-    },
+    // Seatbelt 拒绝在 darwin 上典型表现为 Operation not permitted（EPERM），
+    // 由下方 "any" 平台通用签名兜底（advisory），结构化 errno 路径覆盖权威判定。
     // Windows
     DenialSignature {
         platform: "windows",
@@ -272,9 +273,13 @@ mod tests {
     }
 
     #[test]
-    fn detect_seatbelt() {
+    fn detect_seatbelt_init_failure() {
+        // SEC-16：sandbox_init(3) 失败文案签名（原 sandbox-exec/"Sandbox
+        // violation" 两签名在本项目用法下不可达）
         let d = DenialDetector::new();
-        let m = d.detect("shell.run", "sandbox-exec: deny").unwrap();
+        let m = d
+            .detect("shell.run", "sandbox_init failed: profile parse error")
+            .unwrap();
         assert_eq!(m.signature.platform, "macos");
     }
 
@@ -306,7 +311,9 @@ mod tests {
                 path: String::new()
             }
         );
-        let m = d.detect("shell.run", "sandbox-exec: fatal error").unwrap();
+        let m = d
+            .detect("shell.run", "sandbox_init failed: out of memory")
+            .unwrap();
         assert_eq!(m.kind, SandboxDenyKind::External);
     }
 

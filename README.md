@@ -1,21 +1,15 @@
 # minicoding-rs
 
-> 一个使用 Rust 实现的轻量级 AI Coding 助手（类 Claude Code / Aider 的终端智能体），支持 CLI / TUI / Web / 桌面四形态
+> 一个使用 Rust 实现的轻量级 AI Coding 助手，支持 CLI / TUI / Web / 桌面四形态
 
 `minicoding-rs` 是一个以 Rust 编写的 AI 编程助手。它通过大语言模型（LLM）与一组本地工具（文件读写、Shell 执行、代码检索等）的组合，完成"理解需求 → 读取代码 → 修改代码 → 验证结果"的闭环，目标是提供一个**高性能、可嵌入、可扩展、安全可控**的智能体运行时。
 
 ---
 
-> **定位**：与 Claude Code / Codex CLI / dsh 同类的终端 AI Coding 助手，差异化在——
-> OS 级沙箱一等公民（Landlock/Seatbelt/Job Object 三平台原生）、事件溯源存储
-> （JSONL + snapshot + 契约测试）、多前端同核（CLI/TUI/Web/Desktop 共享一个
-> Runtime）、全链路可审计（权限决策/压缩/回滚均落 audit.log）。
-
 ## 1. 项目目标
 
 | 维度 | 目标 |
 |------|------|
-| 性能 | 目标值（暂无公开基准报告）：冷启动 < 50ms，单轮工具调用 < 10ms 调度开销，流式首 token 延迟与上游一致 |
 | 可扩展 | 工具、LLM Provider、上下文压缩策略、权限策略均可通过 trait + 注册表扩展 |
 | 安全 | 所有副作用操作（写文件、执行命令、网络）必须经过权限策略审核并留痕 |
 | 可嵌入 | 核心运行时以 library crate 形式提供，CLI/TUI/Web/桌面都是 frontend |
@@ -27,12 +21,12 @@
 - **工具系统**：基于 `Tool` trait 的注册式工具，内置文件操作（read/write/edit/multiedit/delete/glob/grep）、Shell（run/background/output/kill）、Web 抓取、Git、TaskCreate/TaskUpdate/TaskList（增量任务管理）、Plan、MCP 远程工具等。
 - **Agent 循环**：支持单轮、多轮；无副作用工具并行、有副作用工具严格串行；支持类型化子 Agent（Explore/Plan/General/Custom）隔离上下文。
 - **上下文管理**：基于 token 预算的 4 级压缩管道（裁剪→摘要→滚动→硬截断）；长期记忆双文件（md + index.json）+ mtime 缓存。
-- **项目记忆（AGENTS.md）**：分层加载的静态指令层（参考 Codex/CC），随仓库版本化，Agent 不可自主编辑；兼容 `CLAUDE.md`/`.cursorrules` fallback。
-- **权限模型**：`PermissionPolicy`/`PermissionPrompter` 双抽象（决策与交互分离）；per-tool allow/ask/deny + Codex 风格审批模式（Untrusted/OnFailure/OnRequest/Never）与预设（read-only/auto/external-sandbox/full-access）。
-- **OS 级沙箱（一等公民）**：基于 Linux `landlock`（内核 LSM，fork 后 exec 前 `pre_exec` 应用）+ macOS Seatbelt（`sandbox_init` FFI）+ Windows Job Object 的自研轻量驱动（`sandbox-run` 因 EUPL-1.2 许可证不合规弃用，权衡见 `docs/tech-stack.md` §13）；macOS/Linux/Windows 内核级隔离作为应用层权限之外的第二道防线；支持 `external-sandbox`（CI/容器）与 `danger-full-access`（显式确认）。
-- **Hooks 系统（参考 Claude Code）**：10 类生命周期事件（PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/PermissionRequest/...），外部脚本 + JSON over stdio 协议，可拦截/改写/注入；含 asyncRewake 异步唤醒；L0 硬约束不可被 Hook 覆盖。
+- **项目记忆（AGENTS.md）**：分层加载的静态指令层，随仓库版本化，Agent 不可自主编辑；兼容 `CLAUDE.md`/`.cursorrules` fallback。
+- **权限模型**：`PermissionPolicy`/`PermissionPrompter` 双抽象（决策与交互分离）；per-tool allow/ask/deny + 审批模式（Untrusted/OnFailure/OnRequest/Never）与预设（read-only/auto/external-sandbox/full-access）。
+- **OS 级沙箱（一等公民）**：基于 Linux `landlock`（内核 LSM，fork 后 exec 前 `pre_exec` 应用）+ macOS Seatbelt（`sandbox_init` FFI）+ Windows Job Object 的自研轻量驱动；macOS/Linux/Windows 内核级隔离作为应用层权限之外的第二道防线；支持 `external-sandbox`（CI/容器）与 `danger-full-access`（显式确认）。
+- **Hooks 系统**：10 类生命周期事件（PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/PermissionRequest/...），外部脚本 + JSON over stdio 协议，可拦截/改写/注入；含 asyncRewake 异步唤醒；L0 硬约束不可被 Hook 覆盖。
 - **MCP 集成**：作为 MCP client 连接外部 server（GitHub/Slack/数据库），`mcp__<server>__<tool>` 命名，project 作用域首次批准防恶意仓库植入；亦可作为 MCP server 被其他 Agent 调用。
-- **Plan 模式**：双重只读强制（硬门 + 软引导），`plan.exit` 提交计划并预批准，参考 Claude Code。
+- **Plan 模式**：双重只读强制（硬门 + 软引导），`plan.exit` 提交计划并预批准。
 - **文件改动回滚**：`/undo` 会话内 operation 级撤销（`FileChangeJournal`，特性门控；默认关闭、纯内存——不落盘，仅会话内有效）。
 - **Event Sourcing**：会话状态建模为不可变事件流，支持快照回放、SSE 游标恢复、跨会话 fork。
 - **流式输出**：SSE / chunked 流式解析，支持工具调用增量解析。
@@ -86,7 +80,7 @@ minicoding serve --as-mcp-server
 ```
 minicoding-rs/
 ├── Cargo.toml
-├── cargo-dist.toml              # 跨平台二进制构建配置（Q-08/Q-09）
+├── cargo-dist.toml              # 跨平台二进制构建配置
 ├── README.md
 ├── AGENTS.md                    # AI 助手开发约束
 ├── docs/                        # 设计文档
@@ -99,8 +93,8 @@ minicoding-rs/
 │   ├── tech-stack.md            # 技术选型
 │   ├── roadmap.md               # 开发路线图
 │   ├── dev-plan.md              # 详细开发计划
-│   ├── features.md              # 功能清单（204 项）
-│   ├── rules.md                 # 运行时大模型约束（C-01..C-35）
+│   ├── features.md              # 功能清单
+│   ├── rules.md                 # 运行时大模型约束
 │   ├── m9-design.md             # M9 Web/桌面设计
 │   └── getting-started.md       # 上手指南
 ├── crates/
@@ -119,10 +113,10 @@ minicoding-rs/
 │   ├── minicoding-server/       # HTTP/SSE server + ACP/LSP 适配器 + --web 静态托管
 │   ├── minicoding-extension-sdk/# 扩展作者稳定 API（Extension trait + Registrar）
 │   ├── minicoding-cli/          # CLI frontend
-│   ├── minicoding-tui/          # TUI frontend（M7）
-│   ├── minicoding-sdk/          # 对外嵌入 SDK（M8）
-│   ├── minicoding-desktop/      # Tauri 2.x 桌面壳（M9，feature gate `desktop`）
-│   └── minicoding-web/          # Web 前端（React 19 + Vite + Tailwind v4，M9，独立 npm 项目）
+│   ├── minicoding-tui/          # TUI frontend
+│   ├── minicoding-sdk/          # 对外嵌入 SDK
+│   ├── minicoding-desktop/      # Tauri 2.x 桌面壳（feature gate `desktop`）
+│   └── minicoding-web/          # Web 前端（React 19 + Vite + Tailwind v4，独立 npm 项目）
 └── tests/                       # 集成测试
 ```
 
@@ -145,10 +139,10 @@ minicoding-rs/
 
 | 文档 | 内容 |
 |------|------|
-| [开发路线图](docs/roadmap.md) | 里程碑与交付计划（M0–M10） |
+| [开发路线图](docs/roadmap.md) | 里程碑与交付计划 |
 | [开发计划](docs/dev-plan.md) | 任务级开发计划（含验收标准与依赖） |
-| [功能清单](docs/features.md) | 全功能总账（按领域分组，204 项） |
-| [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束（C-01..C-35） |
+| [功能清单](docs/features.md) | 全功能总账（按领域分组） |
+| [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束 |
 | [开发过程文档](docs/development-process.md) | 项目开发全过程记录、关键设计决策、里程碑演进 |
 | [AI 编码约束](AGENTS.md) | AI 助手开发本项目时的编码/架构/文档/安全/前端规范 |
 
@@ -158,17 +152,8 @@ minicoding-rs/
 |------|------|
 | [产品手册](docs/product-manual.md) | 面向最终用户的详细使用手册（安装/配置/四形态/工具/权限/FAQ） |
 | [上手指南](docs/getting-started.md) | 从零到运行 + 从 Claude Code / Codex 迁移指南 |
-| [项目学习文档](docs/learning-guide.md) | 面向新开发者的学习路径、代码导读、核心概念、术语表 |
 | [构建指南](docs/build-guide.md) | 详细的构建说明（环境/依赖/跨平台/发布/CI/排查） |
 | [问题排查](docs/troubleshooting.md) | 常见问题与解决方案（构建/CI/运行时/测试/权限/前端） |
-
-### 专题文档
-
-| 文档 | 内容 |
-|------|------|
-| [M9 设计](docs/m9-design.md) | Web 前端 + Tauri 桌面壳详细设计 |
-| [创新文档](docs/innovation.md) | 技术创新点分析、与同类产品对比、设计亮点 |
-| [审查报告](docs/review-report.md) | 项目审查记录与改进建议 |
 
 ## 6. 四形态前端
 
