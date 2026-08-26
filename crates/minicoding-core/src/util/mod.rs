@@ -45,7 +45,15 @@ pub fn generate_auth_token() -> String {
 #[must_use]
 pub fn contains_directive(content: &str) -> bool {
     for raw in content.lines() {
-        let stripped = strip_markdown_prefixes(raw);
+        // R4（RT4-6）：先做行级归一化——零宽字符（U+200B 等）插入单词内部
+        // 会切断 `word_end` 判定（`Ne\u{200b}ver force push` 此前只取到
+        // `ne` 漏检，零宽字符是指令注入对抗过滤的经典手法）；连续空白折叠
+        // 使 `Do  not` 变体可匹配；整行 HTML 注释是隐藏指令的常见形态。
+        let normalized = normalize_directive_line(raw);
+        if normalized.is_empty() {
+            continue;
+        }
+        let stripped = strip_markdown_prefixes(&normalized);
         if stripped.is_empty() {
             continue;
         }
@@ -78,6 +86,39 @@ pub fn contains_directive(content: &str) -> bool {
         }
     }
     false
+}
+
+/// 指令行归一化（R4 RT4-6）：剥离零宽/格式字符、折叠连续空白、剔除整行
+/// HTML 注释。返回 `""` 表示该行为纯注释/空内容，跳过。
+fn normalize_directive_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
+        return String::new();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    let mut prev_space = false;
+    for c in trimmed.chars() {
+        // 零宽/格式控制字符（Unicode `Cf` 类：ZWNJ/ZWJ/BOM/软连字符等）
+        if c.is_control() && !c.is_whitespace() {
+            continue;
+        }
+        if matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
+        ) {
+            continue;
+        }
+        if c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 /// 迭代剥离行首 Markdown 修饰：无序列表符（`-`/`*`/`+`）、引用（`>`）、

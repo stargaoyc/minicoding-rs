@@ -250,12 +250,23 @@ mod proptests {
 /// 1. **剔除孤儿 `ToolResult`**：`call_id` 不在任何 `assistant.tool_calls` 中的
 ///    result block 被移除（所在消息因此变空的整条移除）；
 /// 2. **回填悬空 `tool_calls`**：委托 [`repair_dangling_tool_calls`] 补合成
-///    `is_error` 结果。
+///    `is_error` 结果；
+/// 3. **剥离夹层 `System` 消息**（R4 RT4-3）：旧版软重复提醒曾以 `System` 消息
+///    插入 `assistant(tool_calls)` 与 `tool_result` 之间并随 snapshot 落盘——
+///    `OpenAI` 要求 tool 消息紧跟 `assistant(tool_calls)`、`Anthropic` 要求
+///    `tool_result` 紧随 `tool_use` 所在 user 消息，夹层 `System` 持续 400 且压缩
+///    管道永不丢弃 System，污染不可自愈。本项目的 system 指令走 `ChatRequest`
+///    独立字段，消息数组内任何 `System` 均为历史污染（或明确非法的内联形态），
+///    统一剥离使最后防线对存量数据幂等生效。
 ///
 /// 幂等、纯函数、无 IO。注意：修复仅作用于本次请求的消息副本，不回写
 /// storage/ctx（会话事实源保持不变）。
 #[must_use]
 pub fn repair_request_messages(msgs: Vec<Message>) -> Vec<Message> {
+    let msgs = msgs
+        .into_iter()
+        .filter(|m| m.role != Role::System)
+        .collect::<Vec<_>>();
     let declared: HashSet<String> = msgs
         .iter()
         .flat_map(|m| m.tool_calls.iter().map(|tc| tc.id.clone()))
@@ -355,5 +366,42 @@ mod request_tests {
             assert_eq!(a.role, b.role);
             assert_eq!(a.tool_calls.len(), b.tool_calls.len());
         }
+    }
+
+    #[test]
+    fn interleaved_system_message_stripped() {
+        // R4（RT4-3）：旧版软提醒以 System 消息插入 assistant(tool_calls) 与
+        // tool_result 之间并随 snapshot 落盘——resume 后严格 provider 持续 400。
+        // 剥离后配对完整性照常修复（悬空回填）。
+        let mut asst = Message::assistant_text("calling");
+        asst.tool_calls = vec![ToolCall {
+            id: "live-1".into(),
+            name: "fs.read".into(),
+            input: serde_json::json!({"path": "a.rs"}),
+        }];
+        let mid_system = Message::system_text("[系统提醒] 上一轮已重复多次");
+        let msgs = vec![
+            Message::user_text("hi"),
+            asst,
+            mid_system,
+            tool_result_msg("live-1", "ok"),
+        ];
+        let out = repair_request_messages(msgs);
+        assert!(
+            out.iter().all(|m| m.role != Role::System),
+            "夹层 System 消息应被剥离"
+        );
+        assert!(
+            out.iter().any(|m| {
+                m.role == Role::Tool
+                    && m.content.iter().any(|b| {
+                        matches!(b, ContentBlock::ToolResult { call_id, .. } if call_id == "live-1")
+                    })
+            }),
+            "剥离 System 后配对结果仍保留"
+        );
+        // 幂等：二次修复同样无 System
+        let out2 = repair_request_messages(out.clone());
+        assert!(out2.iter().all(|m| m.role != Role::System));
     }
 }

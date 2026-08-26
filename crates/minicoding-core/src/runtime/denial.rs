@@ -164,32 +164,65 @@ impl Runtime {
         if let Some((_, r)) = &result
             && let Some(info) = &r.metadata.sandbox_denied
         {
-            // 权威性代理：结构化 errno 存在 ⇒ 标记合成路径 ⇒ authoritative
-            let authoritative = structured_denial_errno(error).is_some();
-            let rec = crate::storage::AuditRecord {
-                ts: time::OffsetDateTime::now_utc(),
-                session: self.session.id.clone(),
-                kind: crate::storage::AuditKind::ToolResult,
-                tool: Some(tool.to_string()),
-                decision: Some("sandbox_denied".to_string()),
-                detail: format!(
-                    "authoritative={authoritative} kind={kind:?} breaker={breaker} detail={detail}",
-                    kind = info.kind,
-                    breaker = self.sandbox_breaker.count(),
-                    detail = info.detail
-                ),
-            };
+            let rec = Self::sandbox_denial_audit_record(
+                &self.session.id,
+                self.sandbox_breaker.count(),
+                tool,
+                error,
+                info,
+            );
             let audit = self.audit.clone();
             return result.map(|(id, r)| {
-                tokio::spawn(async move {
-                    if let Err(e) = audit.record(rec).await {
-                        tracing::warn!(error = %e, "sandbox denial audit failed (best-effort)");
-                    }
-                });
+                Self::record_sandbox_denial_audit(audit, rec);
                 (id, r)
             });
         }
         result
+    }
+
+    /// 构造沙箱拒绝的审计记录（SEC-11）。
+    ///
+    /// 副作用串行路径（[`Self::handle_sandbox_denial`]）与只读并行桶
+    /// （rt.rs，R4 RT4-2 补口——熔断计数共用但此前审计只覆盖副作用路径）
+    /// 共用本构造，保证两条路径的取证格式一致。
+    pub(crate) fn sandbox_denial_audit_record(
+        session_id: &str,
+        breaker_count: usize,
+        tool: &str,
+        error: &crate::model::ToolError,
+        info: &crate::model::SandboxDenyInfo,
+    ) -> crate::storage::AuditRecord {
+        // 权威性代理：结构化 errno 存在 ⇒ 标记合成路径 ⇒ authoritative
+        let authoritative = structured_denial_errno(error).is_some();
+        crate::storage::AuditRecord {
+            ts: time::OffsetDateTime::now_utc(),
+            session: session_id.to_string(),
+            kind: crate::storage::AuditKind::ToolResult,
+            tool: Some(tool.to_string()),
+            decision: Some("sandbox_denied".to_string()),
+            detail: format!(
+                "authoritative={authoritative} kind={kind:?} breaker={breaker} detail={detail}",
+                kind = info.kind,
+                breaker = breaker_count,
+                detail = info.detail
+            ),
+        }
+    }
+
+    /// 沙箱拒绝审计落盘（SEC-11，best-effort）。
+    ///
+    /// 异步落盘不阻断拒绝语义；`spawn` 要求调用方处于 tokio 运行时上下文
+    /// （两条调用路径均满足）。R4（RT4-2）：从 `handle_sandbox_denial` 与
+    /// 只读桶各复制一份内联逻辑收敛到本函数，消除重复与行数膨胀。
+    pub(crate) fn record_sandbox_denial_audit(
+        audit: std::sync::Arc<dyn crate::storage::AuditSink>,
+        rec: crate::storage::AuditRecord,
+    ) {
+        tokio::spawn(async move {
+            if let Err(e) = audit.record(rec).await {
+                tracing::warn!(error = %e, "sandbox denial audit failed (best-effort)");
+            }
+        });
     }
 
     /// 沙箱拒绝检测（M-09 起为静态辅助：只读并行桶与副作用串行路径共用）。

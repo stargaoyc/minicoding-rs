@@ -85,31 +85,33 @@ impl Default for InteractivePrompter {
 impl PermissionPrompter for InteractivePrompter {
     fn prompt(&self, req: PermissionPrompt) -> BoxFuture<'_, Decision> {
         Box::pin(async move {
-            // 遗留#3：prompt 提供 Always 选项时开放 `a` 键（始终允许/拒绝）
-            let has_always = req.options.iter().any(|o| {
-                matches!(
-                    o,
-                    minicoding_core::policy::PromptOption::AllowAlways
-                        | minicoding_core::policy::PromptOption::DenyAlways
-                )
-            });
+            // 遗留#3：prompt 提供 Always 选项时开放 `a` 键（始终允许/拒绝）。
+            // R4（RT4-9）：Allow/Deny 选项独立判定——此前 `has_always` 把
+            // DenyAlways 也当总开关，仅提供 DenyAlways 的受限 prompt（C-23
+            // 类）仍显示 `[a]始终允许`，菜单承诺与 options 集不符；core 的
+            // SEC-3 折叠兜底使其无实害，但每次误按都多一次无谓审计告警。
+            let allow_always_offered = req
+                .options
+                .contains(&minicoding_core::policy::PromptOption::AllowAlways);
             let deny_always_offered = req
                 .options
                 .contains(&minicoding_core::policy::PromptOption::DenyAlways);
-            if has_always {
-                eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
-                if deny_always_offered {
-                    eprintln!("[permission] [y]允许 / [a]始终允许 / [n]拒绝 / [N]始终拒绝");
-                } else {
-                    eprintln!("[permission] [y]允许 / [a]始终允许 / [n/N]拒绝");
+            eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
+            if allow_always_offered && deny_always_offered {
+                eprintln!("[permission] [y]允许 / [a]始终允许 / [n]拒绝 / [N]始终拒绝");
+                match tokio::task::spawn_blocking(move || read_ynad(true)).await {
+                    Ok(Some(
+                        d @ (Decision::Allow | Decision::AllowAlways | Decision::DenyAlways(_)),
+                    )) => d,
+                    _ => Decision::Deny("denied by user".to_string()),
                 }
-                match tokio::task::spawn_blocking(move || read_ynad(deny_always_offered)).await {
-                    Ok(Some(Decision::Allow)) => Decision::Allow,
-                    Ok(Some(d @ (Decision::AllowAlways | Decision::DenyAlways(_)))) => d,
+            } else if allow_always_offered {
+                eprintln!("[permission] [y]允许 / [a]始终允许 / [n/N]拒绝");
+                match tokio::task::spawn_blocking(move || read_ynad(false)).await {
+                    Ok(Some(d @ (Decision::Allow | Decision::AllowAlways))) => d,
                     _ => Decision::Deny("denied by user".to_string()),
                 }
             } else {
-                eprintln!("[permission] {} (risk: {:?})", req.summary, req.risk);
                 eprintln!("[permission] allow? [y/N] ");
                 match tokio::task::spawn_blocking(read_yes_no).await {
                     Ok(true) => Decision::Allow,

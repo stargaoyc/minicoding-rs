@@ -146,8 +146,13 @@ impl PolicyPersist {
     /// # Errors
     /// 同 [`Self::set_allow`]。
     pub fn set_allow_path(&self, tool: &str, prefix: &str) -> Result<(), PolicyPersistError> {
-        self.mutate(|f| {
-            f.allow.insert(format!("{tool}@{prefix}"), true);
+        let key = format!("{tool}@{prefix}");
+        self.mutate(move |f| {
+            // R4（RT4-4）：与工具级 setter 的互斥清理对齐——路径级此前只 insert
+            // 不清理对方表，查询时同长度冲突 deny 恒胜（`d < a` 等长 false），
+            // 用户先 DenyAlways 后改主意 AllowAlways 被静默忽略。
+            f.allow.insert(key.clone(), true);
+            f.deny.remove(&key);
         })
     }
 
@@ -162,8 +167,11 @@ impl PolicyPersist {
         reason: &str,
     ) -> Result<(), PolicyPersistError> {
         let reason = reason.to_string();
+        let key = format!("{tool}@{prefix}");
         self.mutate(move |f| {
-            f.deny.insert(format!("{tool}@{prefix}"), reason);
+            // R4（RT4-4）：同上，写入 deny 同时清理 allow 同键。
+            f.deny.insert(key.clone(), reason);
+            f.allow.remove(&key);
         })
     }
 

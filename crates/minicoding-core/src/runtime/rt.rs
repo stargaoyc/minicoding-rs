@@ -895,6 +895,14 @@ impl Runtime {
                 .cancel_token
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = CancellationToken::new();
+            // R4（RT4-7）：清空本轮未消费的 Hook 注入缓冲——软重复提醒/
+            // inject_context 在第 N 轮迭代末尾入缓冲，若随后硬停止/超时/取消，
+            // 缓冲残留到下一个用户轮次的首个请求 system 头部（用户看到针对
+            // 上一轮已终结问题的陈旧提醒）。
+            self.pending_hook_contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
             result
         }
         .instrument(span)
@@ -1271,6 +1279,11 @@ impl Runtime {
         let tools = self.tools.clone();
         let denial_detector = self.denial_detector.clone();
         let sandbox_breaker = self.sandbox_breaker.clone();
+        // R4（RT4-2）：SEC-11 审计补口——熔断计数两条路径共用，审计此前
+        // 只覆盖副作用串行路径，只读工具（含 MCP SideEffect::None）的权威
+        // 拒绝不落 audit.log，最值得取证的事件无痕。
+        let audit = self.audit.clone();
+        let session_id = self.session.id.clone();
         let ro_futs: Vec<ToolFuture> = readonly
             .iter()
             .map(|call| {
@@ -1281,6 +1294,8 @@ impl Runtime {
                 let tools = tools.clone();
                 let denial_detector = denial_detector.clone();
                 let sandbox_breaker = sandbox_breaker.clone();
+                let audit = audit.clone();
+                let session_id = session_id.clone();
                 // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
                 // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
                 let call: ToolCall = (**call).clone();
@@ -1319,6 +1334,17 @@ impl Runtime {
                                 &tool_name,
                                 &e,
                             ) {
+                                // R4（RT4-2）：SEC-11 审计与副作用路径同格式落盘
+                                if let Some(info) = &r.metadata.sandbox_denied {
+                                    let rec = Self::sandbox_denial_audit_record(
+                                        &session_id,
+                                        sandbox_breaker.count(),
+                                        &tool_name,
+                                        &e,
+                                        info,
+                                    );
+                                    Self::record_sandbox_denial_audit(audit.clone(), rec);
+                                }
                                 r
                             } else {
                                 // design.md §4.5：工具错误以 is_error=true 回灌 LLM
@@ -1327,27 +1353,8 @@ impl Runtime {
                             }
                         }
                     };
-                    events.emit(Event::ToolCallFinished {
-                        call_id: call_id.clone(),
-                        result: result.clone(),
-                    });
-                    tracing::info!(
-                        tool.name = %tool_name,
-                        call_id = %call_id,
-                        tool.elapsed_ms = u64::try_from(tool_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        tool.is_error = result.is_error,
-                        tool.output_bytes = result.metadata.bytes,
-                        phase = "finish",
-                        "tool_call finished"
-                    );
-                    // Metrics: 记录工具调用
-                    let result_str = if result.is_error { "err" } else { "ok" };
-                    metrics::record_tool_call(&tool_name, "none", result_str);
-                    metrics::record_elapsed(
-                        "tool_call_duration_ms",
-                        "tool",
-                        &tool_name,
-                        tool_timer,
+                    Self::emit_readonly_finished(
+                        &events, &tool_name, &call_id, &result, tool_timer,
                     );
                     Ok::<_, RuntimeError>((call.id.clone(), result))
                 };
@@ -1379,7 +1386,33 @@ impl Runtime {
         Ok(results)
     }
 
-    /// 构造 `tool_result` 消息。
+    /// 只读桶调用收尾：Finished 事件 + 耗时日志 + metrics（R4 自闭包提取，
+    /// 收敛 `run_readonly_bucket` 行数）。
+    fn emit_readonly_finished(
+        events: &EventBus,
+        tool_name: &str,
+        call_id: &ToolCallId,
+        result: &ToolResult,
+        tool_timer: std::time::Instant,
+    ) {
+        events.emit(Event::ToolCallFinished {
+            call_id: call_id.clone(),
+            result: result.clone(),
+        });
+        tracing::info!(
+            tool.name = %tool_name,
+            call_id = %call_id,
+            tool.elapsed_ms = u64::try_from(tool_timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+            tool.is_error = result.is_error,
+            tool.output_bytes = result.metadata.bytes,
+            phase = "finish",
+            "tool_call finished"
+        );
+        // Metrics: 记录工具调用
+        let result_str = if result.is_error { "err" } else { "ok" };
+        metrics::record_tool_call(tool_name, "none", result_str);
+        metrics::record_elapsed("tool_call_duration_ms", "tool", tool_name, tool_timer);
+    }
     fn tool_result_message(call_id: ToolCallId, result: ToolResult) -> Message {
         use crate::model::{ContentBlock, MessageMeta, MessageSource};
         let content = vec![ContentBlock::ToolResult {

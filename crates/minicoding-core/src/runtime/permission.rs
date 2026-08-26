@@ -520,14 +520,24 @@ impl Runtime {
                 }
                 match result.decision {
                     HookDecision::Allow if !is_hard_deny => {
-                        // Hook 自动批准，跳过 prompter
-                        Ok((Decision::Allow, None, None))
+                        // R4（RT4-8）：Hook 自动批准归因——此前记为
+                        // "policy allowed"，事后取证无法区分"策略放行"
+                        // 与"Hook 自动批准"。
+                        Ok((
+                            Decision::Allow,
+                            None,
+                            Some(format!("hook auto-approved {tool}", tool = call.name)),
+                        ))
                     }
                     HookDecision::Deny => {
                         let reason = result
                             .reason
                             .unwrap_or_else(|| "blocked by hook".to_string());
-                        Ok((Decision::Deny(reason), None, None))
+                        Ok((
+                            Decision::Deny(reason),
+                            None,
+                            Some(format!("hook denied {tool}", tool = call.name)),
+                        ))
                     }
                     _ => {
                         // fs.* 类工具取 input.path 相对路径（持久化查表与目录
@@ -572,10 +582,25 @@ impl Runtime {
                                 ));
                             }
                             // 遗留#3：持久化规则查表
+                            // R4（RT4-8）：命中来源归因——此前与策略直出同记
+                            // "policy allowed"，无法区分"用户曾 Always@目录 的
+                            // 持久化授权"与内置策略直出；取证时"谁批的、按什么
+                            // 粒度"是关键信息。
                             if let Some(decision) =
                                 self.lookup_persisted_decision(call, rule_path.as_deref())
                             {
-                                return Ok((decision, None, None));
+                                let note = match &decision {
+                                    Decision::Allow => Some(format!(
+                                        "persisted rule hit: user allowed {tool} (path-scoped)",
+                                        tool = call.name
+                                    )),
+                                    Decision::Deny(_) => Some(format!(
+                                        "persisted rule hit: user denied {tool} (path-scoped)",
+                                        tool = call.name
+                                    )),
+                                    _ => None,
+                                };
+                                return Ok((decision, None, note));
                             }
                         }
                         // Hook 未决策 → 走 prompter 交互
@@ -594,38 +619,61 @@ impl Runtime {
                         // 但 Web 等前端曾恒渲染"始终允许"按钮（协议 DTO 未携带
                         // options）——约束必须在 core 决策入口强制，而非依赖
                         // 各前端自觉。DenyAlways 折叠为 Deny 方向 fail-closed。
-                        let always_offered = prompt
+                        // R4（RT4-5）：Allow/Deny 对称校验——此前只检查
+                        // AllowAlways 是否提供过，若 prompt 只提供 AllowAlways
+                        // 而未提供 DenyAlways，失控前端回传 DenyAlways 仍会把
+                        // 跨会话全局 deny 落盘（方向 fail-closed 非安全洞，但
+                        // 违背"约束在 core 强制"的自定原则）。
+                        let allow_always_offered = prompt
                             .options
                             .contains(&crate::policy::PromptOption::AllowAlways);
-                        if !always_offered {
-                            let collapsed = match d {
-                                Decision::AllowAlways => Some(Decision::Allow),
-                                Decision::DenyAlways(ref r) => Some(Decision::Deny(r.clone())),
-                                _ => None,
+                        let deny_always_offered = prompt
+                            .options
+                            .contains(&crate::policy::PromptOption::DenyAlways);
+                        if !allow_always_offered && let Decision::AllowAlways = &d {
+                            tracing::warn!(
+                                tool = %call.name,
+                                "AllowAlways received but not offered; collapsed to one-shot"
+                            );
+                            d = Decision::Allow;
+                            // 直接进入事件广播与返回（跳过持久化分支）
+                            let event = Event::PermissionResolved {
+                                id: prompt_id.clone(),
+                                decision: d.clone(),
                             };
-                            if let Some(folded) = collapsed {
-                                tracing::warn!(
-                                    tool = %call.name,
-                                    "always decision received but AllowAlways not offered; collapsed to one-shot"
-                                );
-                                d = folded;
-                                // 直接进入事件广播与返回（跳过持久化分支）
-                                let event = Event::PermissionResolved {
-                                    id: prompt_id.clone(),
-                                    decision: d.clone(),
-                                };
-                                self.persist_event(&event).await;
-                                self.events.emit(event);
-                                return Ok((
-                                    d,
-                                    Some(prompt_id),
-                                    Some(format!(
-                                        "{tool}: always not offered by policy; \
-                                         frontend always decision collapsed to one-shot",
-                                        tool = call.name
-                                    )),
-                                ));
-                            }
+                            self.persist_event(&event).await;
+                            self.events.emit(event);
+                            return Ok((
+                                d,
+                                Some(prompt_id),
+                                Some(format!(
+                                    "{tool}: always not offered by policy; \
+                                     frontend always decision collapsed to one-shot",
+                                    tool = call.name
+                                )),
+                            ));
+                        }
+                        if !deny_always_offered && let Decision::DenyAlways(reason) = &d {
+                            tracing::warn!(
+                                tool = %call.name,
+                                "DenyAlways received but not offered; collapsed to one-shot"
+                            );
+                            d = Decision::Deny(reason.clone());
+                            let event = Event::PermissionResolved {
+                                id: prompt_id.clone(),
+                                decision: d.clone(),
+                            };
+                            self.persist_event(&event).await;
+                            self.events.emit(event);
+                            return Ok((
+                                d,
+                                Some(prompt_id),
+                                Some(format!(
+                                    "{tool}: always not offered by policy; \
+                                     frontend always decision collapsed to one-shot",
+                                    tool = call.name
+                                )),
+                            ));
                         }
                         // 遗留#3：Always 决策持久化后折叠为一次性语义执行。
                         // S-1 粒度收敛（2026-08-25 审查）：带路径工具按**父目录**
@@ -766,10 +814,18 @@ impl Runtime {
             Err(e) => {
                 // 沙箱拒绝检测（T-M4-5）：识别 EPERM/EACCES/landlock 等
                 // 内核级硬反馈，更新熔断器（C-30 不可被 LLM 绕过）。
-                if let Some(denial_result) =
+                if let Some((_, denial_result)) =
                     self.handle_sandbox_denial(&original_call.id, &original_call.name, &e)
                 {
-                    return Ok(denial_result);
+                    // R4（RT4-1）：拒绝路径必须补发 Finished——此前提前 return
+                    // 跳过函数尾部成对事件，SSE/TUI/Web 工具卡片永久悬挂在
+                    // running 态。denial 既非成功也非执行失败（工具未运行），
+                    // 跳过 PostToolUse/PostToolUseFailure Hook，仅补生命周期。
+                    self.events.emit(Event::ToolCallFinished {
+                        call_id: original_call.id.clone(),
+                        result: denial_result.clone(),
+                    });
+                    return Ok((original_call.id.clone(), denial_result));
                 }
                 // 沙箱初始化失败（apply/post_spawn，如 Windows Job Object 恢复线程
                 // 竞态）：询问用户是否在沙箱外重试一次（C-22 用户显式选定）。
