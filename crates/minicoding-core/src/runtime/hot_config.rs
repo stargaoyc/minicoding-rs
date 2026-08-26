@@ -5,40 +5,13 @@
 //! [`Runtime::reload_safe_config`] 在每次 `run_turn` 开头执行：
 //! - **不做全量热重载**（C-29 压缩熔断状态机与 provider 依赖构造时配置）；
 //! - 白名单字段仅当文件中显式存在该 key 时应用；
-//! - 显式覆盖保护（2026-08-23 审查 §3-P1）：运行期值偏离热更新基线说明调用方
-//!   经 CLI flag/env 显式覆盖过，文件值不得回退覆盖。
+//! - 显式覆盖保护（R3 RT-5 重构）：此前用"基线比对"（运行期值 == 基线才应用），
+//!   但基线捕获自组装完成的最终配置——CLI 覆盖后两者恒等，守卫失效；且
+//!   `/model` 同步基线的方向恰好相反。现改为**显式覆盖集合**：CLI flag/env
+//!   覆盖与 `/model` 运行期切换时登记字段名，登记字段永不被文件回退。
 
 use super::rt::Runtime;
 use crate::config::RuntimeConfig;
-
-/// 热更新基线（白名单字段的"最近一次非覆盖来源"值）。
-///
-/// 构造时快照 `RuntimeConfig` 的白名单字段；`reload_safe_config` 仅当运行期值 ==
-/// 基线时才应用文件值——若调用方经 CLI flag/env 显式覆盖过（运行期值偏离基线），
-/// 文件值不得回退覆盖，维持"CLI 参数 > 环境变量 > config.toml > 默认"的文档优先级。
-/// 每次成功应用文件值后基线随之**滚动前移**（否则首次应用即永久阻断后续更新）。
-/// Mutex 仅为内部可变性：临界区无 await。
-#[derive(Debug)]
-pub(crate) struct HotReloadBaseline {
-    model: String,
-    turn_timeout_sec: u64,
-    parallel_reads: u32,
-}
-
-impl HotReloadBaseline {
-    /// 运行期切换模型时同步基线（`/model <name>`），防止 turn 边界文件值回退。
-    pub(crate) fn set_model(&mut self, model: &str) {
-        self.model = model.to_string();
-    }
-
-    pub(crate) fn capture(config: &RuntimeConfig) -> std::sync::Mutex<Self> {
-        std::sync::Mutex::new(Self {
-            model: config.provider.model.clone(),
-            turn_timeout_sec: config.context.turn_timeout_sec,
-            parallel_reads: config.tools.parallel_reads,
-        })
-    }
-}
 
 impl Runtime {
     /// M-12（R-04）：turn 边界白名单配置热更新。
@@ -61,20 +34,8 @@ impl Runtime {
         let Ok(raw) = tokio::fs::read_to_string(path).await else {
             return; // 无配置文件：CLI 未配置时的正常路径，静默跳过
         };
-        let fresh: RuntimeConfig = match toml::from_str(&raw) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    path = %path,
-                    error = %e,
-                    "config reload: parse failed, keeping current config"
-                );
-                return;
-            }
-        };
-        let file_val: toml::Value = match toml::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => return, // 与上方同源解析，理论不可达
+        let Some((file_val, fresh)) = Self::parse_config_file(&raw, path) else {
+            return;
         };
 
         // 非白名单签名（白名单字段 + revision 剥除后）：
@@ -89,57 +50,37 @@ impl Runtime {
         let sig_fresh = Self::config_non_whitelist_sig(&fresh);
 
         // 应用白名单字段（写锁临界区仅字段赋值，无 await）。
-        // 每个字段先比对热更新基线：运行期值偏离基线说明调用方经 CLI flag/env
-        // 显式覆盖过，文件值不得回退覆盖（优先级 CLI > env > file）。
-        let (base_model, base_turn_timeout, base_parallel) = {
-            let baseline = self
-                .hot_reload_baseline
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                baseline.model.clone(),
-                baseline.turn_timeout_sec,
-                baseline.parallel_reads,
-            )
-        };
+        // R3 RT-5：显式覆盖集合保护——CLI flag/env 覆盖或 `/model` 运行期切换
+        // 登记过的字段永不被文件值回退（优先级 CLI > env > file）。
+        let overridden = self
+            .explicit_overrides
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut cfg = self
             .config
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut applied: Vec<&'static str> = Vec::new();
-        if Self::toml_has(&file_val, &["provider", "model"]) && cfg.provider.model == base_model {
+        if Self::toml_has(&file_val, &["provider", "model"])
+            && !overridden.contains("provider.model")
+        {
             cfg.provider.model.clone_from(&fresh.provider.model);
             applied.push("provider.model");
         }
         if Self::toml_has(&file_val, &["context", "turn_timeout_sec"])
-            && cfg.context.turn_timeout_sec == base_turn_timeout
+            && !overridden.contains("context.turn_timeout_sec")
         {
             cfg.context.turn_timeout_sec = fresh.context.turn_timeout_sec;
             applied.push("context.turn_timeout_sec");
         }
         if Self::toml_has(&file_val, &["tools", "parallel_reads"])
-            && cfg.tools.parallel_reads == base_parallel
+            && !overridden.contains("tools.parallel_reads")
         {
             cfg.tools.parallel_reads = fresh.tools.parallel_reads;
             applied.push("tools.parallel_reads");
         }
         drop(cfg);
-        // 基线滚动前移：成功应用的字段以文件值为新基线（否则首次应用即永久阻断）。
-        if !applied.is_empty() {
-            let mut baseline = self
-                .hot_reload_baseline
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if applied.contains(&"provider.model") {
-                baseline.model.clone_from(&fresh.provider.model);
-            }
-            if applied.contains(&"context.turn_timeout_sec") {
-                baseline.turn_timeout_sec = fresh.context.turn_timeout_sec;
-            }
-            if applied.contains(&"tools.parallel_reads") {
-                baseline.parallel_reads = fresh.tools.parallel_reads;
-            }
-        }
 
         if !applied.is_empty() {
             tracing::info!(
@@ -161,6 +102,37 @@ impl Runtime {
                 path = %path,
                 "config reload: detected non-whitelist changes (restart required to take effect); whitelist fields applied"
             );
+        }
+    }
+
+    /// RT-9（2026-08-26 R3 审查）：单次解析——先解析 `toml::Value` 供白名单
+    /// 字段存在性检查，再转换为目标配置（此前同一字符串解析两遍，turn 边界
+    /// 热路径双倍开销）。
+    fn parse_config_file(
+        raw: &str,
+        path: &camino::Utf8PathBuf,
+    ) -> Option<(toml::Value, RuntimeConfig)> {
+        let file_val: toml::Value = match toml::from_str(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "config reload: parse failed, keeping current config"
+                );
+                return None;
+            }
+        };
+        match file_val.clone().try_into() {
+            Ok(c) => Some((file_val, c)),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "config reload: typed parse failed, keeping current config"
+                );
+                None
+            }
         }
     }
 

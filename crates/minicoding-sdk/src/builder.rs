@@ -554,6 +554,15 @@ pub fn build_runtime(
         .context(ctx)
         .storage(storage.clone())
         .tools(tools)
+        // R3 RT-5：CLI flag/env 覆盖过模型时登记显式覆盖——turn 边界热更新
+        // 不再回退 config.toml 的 model 值（AGENTS.md §3.8 优先级）。
+        .with_explicit_overrides(
+            if model.is_some() || std::env::var_os("OPENAI_MODEL").is_some() {
+                &["provider.model"][..]
+            } else {
+                &[][..]
+            },
+        )
         .config(config)
         .workdir(workdir_path.clone())
         .policy(policy)

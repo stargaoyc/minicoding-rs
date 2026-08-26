@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use minicoding_core::config::RuntimeConfig;
-use minicoding_core::model::{StopReason, TurnOutcome, UserInput};
+use minicoding_core::model::{Message, StopReason, TurnOutcome, UserInput};
 use minicoding_core::runtime::{Event, Runtime, RuntimeBuilder};
 use minicoding_core::tool::ToolRegistry;
 
@@ -375,10 +375,12 @@ async fn cancel_then_next_turn_still_works() {
     }
 }
 
-/// M-08（R-03）：重复工具调用软提醒 + 硬停止。
+/// M-08（R-03）+ RT-2（2026-08-26 R3 审查）：重复工具调用软提醒 + 硬停止。
 ///
-/// 默认阈值 [3,5,8]：单工具指纹连续 3 轮注入 system 提醒（不终止），连续 8 轮整轮
-/// 签名相同才硬停止；不同 input 重置连续计数；空阈值数组关闭软提醒仅保留硬停止。
+/// 默认阈值 [3,5,8]：单工具指纹连续 3 轮在**下一请求 system 头部**注入
+/// `<repeat_warning>`（不进消息历史——直接 append 会插入 `assistant(tool_calls)`
+/// 与 `tool_result` 之间破坏 provider 配对）；连续 8 轮整轮签名相同才硬停止；
+/// 不同 input 重置连续计数；空阈值数组关闭软提醒仅保留硬停止（回退 3 轮）。
 #[tokio::test]
 async fn repeat_3_times_injects_soft_reminder() {
     let mut tools = ToolRegistry::new();
@@ -390,7 +392,20 @@ async fn repeat_3_times_injects_soft_reminder() {
         tool_call_deltas("c3", "greet", "{}"),
     ];
     script.push(text_deltas("done"));
-    let rt = Arc::new(build_runtime(ScriptedProvider::new(script), tools));
+    let ctx = Arc::new(TestContext::new("test system prompt"));
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let rt = Arc::new(
+        RuntimeBuilder::new()
+            .provider(provider.clone())
+            .context(ctx.clone())
+            .storage(Arc::new(InMemoryStorage::new()))
+            .tools(tools)
+            .prompter(Arc::new(DenyPrompter))
+            .config(RuntimeConfig::default())
+            .workdir(Utf8PathBuf::from("."))
+            .build()
+            .expect("runtime build"),
+    );
 
     let outcome = rt.run_turn(UserInput::from_text("loop")).await.unwrap();
     assert!(
@@ -398,19 +413,53 @@ async fn repeat_3_times_injects_soft_reminder() {
         "3 轮相同工具不应硬停止（阈值 8）"
     );
 
+    // RT-2 断言 1：提醒不出现在消息历史（不得破坏配对）
     let snap = rt.context().snapshot().await;
-    let has_reminder = snap
-        .messages
-        .iter()
-        .any(|m| m.text().contains("[系统提醒]"));
     assert!(
-        has_reminder,
-        "第 3 轮应注入 system 软提醒: {:?}",
-        snap.messages
+        !snap
+            .messages
             .iter()
-            .map(minicoding_core::model::Message::text)
-            .collect::<Vec<_>>()
+            .any(|m| m.text().contains("[系统提醒]")),
+        "软提醒不得作为 System 消息进入历史: {:?}",
+        snap.messages.iter().map(Message::text).collect::<Vec<_>>()
     );
+    // RT-2 断言 2：提醒并入 provider 实际收到的下一请求 system 头部
+    let received = provider.take_received();
+    assert_eq!(received.len(), 4, "应发起 4 次 LLM 请求");
+    assert!(
+        received[3].system.contains("[系统提醒] 检测到重复工具调用"),
+        "第 4 次请求 system 应含软提醒: {:?}",
+        received[3].system
+    );
+    // RT-2 断言 3：每次请求消息中 assistant(tool_calls) 与 tool 结果间无夹层
+    for req in &received {
+        assert_no_interleaved_system(&req.messages);
+    }
+}
+
+/// RT-2：断言消息序列中不存在 System/User 消息插在 `assistant(tool_calls)`
+/// 与其对应 tool 结果之间（严格 provider 配对不变式）。
+fn assert_no_interleaved_system(messages: &[Message]) {
+    let mut expecting_results = false;
+    for m in messages {
+        match m.role {
+            minicoding_core::model::Role::Assistant if !m.tool_calls.is_empty() => {
+                expecting_results = true;
+            }
+            minicoding_core::model::Role::Tool => {}
+            _ if expecting_results => {
+                panic!(
+                    "assistant(tool_calls) 与 tool 结果之间出现 {:?} 消息，破坏配对: {}",
+                    m.role,
+                    m.text()
+                );
+            }
+            _ => {}
+        }
+        if m.role == minicoding_core::model::Role::Tool {
+            expecting_results = false;
+        }
+    }
 }
 
 #[tokio::test]
@@ -453,18 +502,20 @@ async fn different_args_resets_streak() {
     assert!(matches!(outcome, TurnOutcome::Finished(_)));
 
     let snap = rt.context().snapshot().await;
-    let has_reminder = snap
-        .messages
-        .iter()
-        .any(|m| m.text().contains("[系统提醒]"));
-    assert!(!has_reminder, "不同 input 不应触发软提醒");
+    assert!(
+        !snap
+            .messages
+            .iter()
+            .any(|m| m.text().contains("[系统提醒]")),
+        "不同 input 不应触发软提醒"
+    );
 }
 
 #[tokio::test]
 async fn thresholds_empty_disables_soft_only() {
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(MockTool::read_only("greet", "hi")));
-    // 空阈值数组：无软提醒；3 轮相同集合 → 硬停止（默认 3）
+    // 空阈值数组：无软提醒；3 轮相同集合 → 硬停止（回退 3）
     let mut config = RuntimeConfig::default();
     config.tools.repeat_guard_thresholds = Vec::new();
     let script = vec![
@@ -490,11 +541,13 @@ async fn thresholds_empty_disables_soft_only() {
         other => panic!("应返回 Finished(Stopped 消息)，实际 {other:?}"),
     }
     let snap = rt.context().snapshot().await;
-    let has_reminder = snap
-        .messages
-        .iter()
-        .any(|m| m.text().contains("[系统提醒]"));
-    assert!(!has_reminder, "空阈值数组应关闭软提醒");
+    assert!(
+        !snap
+            .messages
+            .iter()
+            .any(|m| m.text().contains("[系统提醒]")),
+        "空阈值数组应关闭软提醒"
+    );
 }
 
 /// S4 测试基建：把输入改写为指定 JSON 的 `PreToolUse` Hook。

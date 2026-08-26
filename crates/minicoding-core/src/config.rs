@@ -167,8 +167,10 @@ pub struct ToolsConfig {
     pub shell_timeout_sec: u64,
     pub shell_max_output_bytes: usize,
     /// 重复工具调用升级阈值（M-08，R-03 对齐 dsh）：单工具指纹连续命中
-    /// `thresholds[i]` 轮时注入一级 system 提醒（软提醒，不替换输出、不终止）。
-    /// 空数组 = 关闭软提醒，仅保留硬停止（整轮签名连续重复 ≥ 3 轮 → `Stopped`）。
+    /// `thresholds[i]` 轮时注入一级 system 提醒（软提醒，不替换输出、不终止；
+    /// 提醒经缓冲并入下一请求 system 头部，不进消息历史——R3 RT-2）。
+    /// 硬停止阈值 = 本数组**末级**（默认 `[3,5,8]` 下为 8 轮；RT-6 口径修正）。
+    /// 空数组 = 关闭软提醒，仅保留硬停止（回退 3 轮 → `Stopped`）。
     #[serde(default = "default_repeat_thresholds")]
     pub repeat_guard_thresholds: Vec<u32>,
     /// 只读工具并行度（M-12）：`0` = 串行顺序执行，`>0` = 至多 N 个并发。

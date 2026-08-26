@@ -42,6 +42,8 @@ impl Tokenizer for CharTokenizer {
 pub struct ScriptedProvider {
     scripts: Mutex<VecDeque<Vec<Delta>>>,
     tokenizer: Arc<CharTokenizer>,
+    /// 记录实际收到的请求（RT-2 回归：断言提醒并入 system 用）。
+    received: Mutex<Vec<ChatRequest>>,
 }
 
 impl ScriptedProvider {
@@ -51,7 +53,14 @@ impl ScriptedProvider {
         Self {
             scripts: Mutex::new(scripts.into()),
             tokenizer: Arc::new(CharTokenizer),
+            received: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 取出实际收到（含 Runtime 注入后的 system）的请求快照。
+    #[allow(dead_code)]
+    pub fn take_received(&self) -> Vec<ChatRequest> {
+        std::mem::take(&mut *self.received.lock().expect("received poisoned"))
     }
 }
 
@@ -85,8 +94,11 @@ impl LlmProvider for ScriptedProvider {
     }
     fn chat_stream(
         &self,
-        _req: ChatRequest,
+        req: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>> {
+        if let Ok(mut r) = self.received.lock() {
+            r.push(req.clone());
+        }
         let mut guard = self.scripts.lock().expect("scripts poisoned");
         let script = guard
             .pop_front()
@@ -374,6 +386,9 @@ impl EventStore for InMemoryEventStore {
 pub struct TestContext {
     messages: tokio::sync::RwLock<Vec<Message>>,
     system: String,
+    /// 记录每次 `build_chat_request` 的请求快照（RT-2 回归：断言提醒注入
+    /// 位置/内容用）。
+    requests: tokio::sync::Mutex<Vec<minicoding_core::provider::ChatRequest>>,
 }
 
 impl TestContext {
@@ -382,7 +397,14 @@ impl TestContext {
         Self {
             messages: tokio::sync::RwLock::new(Vec::new()),
             system: system.into(),
+            requests: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// 取出全部已构建的请求快照。
+    #[allow(dead_code)]
+    pub async fn take_requests(&self) -> Vec<minicoding_core::provider::ChatRequest> {
+        std::mem::take(&mut *self.requests.lock().await)
     }
 }
 
@@ -402,7 +424,7 @@ impl ContextManager for TestContext {
         let system = self.system.clone();
         Box::pin(async move {
             let messages = self.messages.read().await.clone();
-            Ok(ChatRequest {
+            let req = ChatRequest {
                 system,
                 messages,
                 tools: tool_schemas,
@@ -415,7 +437,9 @@ impl ContextManager for TestContext {
                     seed: None,
                     thinking_budget_tokens: None,
                 },
-            })
+            };
+            self.requests.lock().await.push(req.clone());
+            Ok(req)
         })
     }
     fn snapshot(&self) -> BoxFuture<'_, ContextSnapshot> {

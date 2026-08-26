@@ -20,7 +20,6 @@ use crate::policy::{
 use crate::provider::LlmProvider;
 use crate::runtime::EventBus;
 use crate::runtime::Runtime;
-use crate::runtime::hot_config::HotReloadBaseline;
 use crate::sandbox::{NoopDriver, SandboxDriver, SandboxPolicy};
 use crate::storage::{
     AuditSink, EventStore, NoopAudit, NoopEventStore, NoopSnapshotStore, SnapshotStore, Storage,
@@ -85,6 +84,8 @@ pub struct RuntimeBuilder {
     /// （`provider.model`/`context.turn_timeout_sec`/`tools.parallel_reads`），
     /// 非白名单变更仅告警提示重启（不做全量热重载，见 `tech-stack.md` §13）。
     config_path: Option<Utf8PathBuf>,
+    /// 显式覆盖的白名单字段（R3 RT-5，见 `with_explicit_overrides`）。
+    explicit_overrides: std::collections::HashSet<&'static str>,
     /// 事件存储（Event Sourcing，默认 `NoopEventStore`）。
     ///
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
@@ -135,6 +136,7 @@ impl RuntimeBuilder {
             extension_host: None,
             config_watcher: None,
             config_path: None,
+            explicit_overrides: std::collections::HashSet::new(),
             event_store: None,
             snapshot_store: None,
             policy_persist: None,
@@ -373,6 +375,15 @@ impl RuntimeBuilder {
         self
     }
 
+    /// R3 RT-5：登记**显式覆盖**的白名单字段（CLI flag/env 覆盖时由 frontend
+    /// builder 调用）。登记字段在 turn 边界热更新中永不被 config.toml 回退，
+    /// 维持"CLI 参数 > 环境变量 > config.toml > 默认"优先级（AGENTS.md §3.8）。
+    #[must_use]
+    pub fn with_explicit_overrides(mut self, fields: &[&'static str]) -> Self {
+        self.explicit_overrides.extend(fields.iter().copied());
+        self
+    }
+
     /// 注入 AllowAlways/DenyAlways 持久化存储（2026-08-23 审查遗留#3；
     /// sdk 默认注入 `~/.minicoding/policy.toml`）。
     #[must_use]
@@ -457,11 +468,6 @@ impl RuntimeBuilder {
                 writable: Vec::new(),
             });
 
-        // 热更新基线：以组装完成的最终配置为快照（须在 self.config move 前捕获）——
-        // CLI flag/env 的显式覆盖已在此前叠加完毕，基线即"未被覆盖时的文件/默认链
-        // 值"（2026-08-23 审查 §3-P1 配套）。
-        let hot_reload_baseline = HotReloadBaseline::capture(&self.config);
-
         Ok(Runtime {
             provider,
             ctx,
@@ -471,7 +477,7 @@ impl RuntimeBuilder {
             config: std::sync::RwLock::new(self.config),
             config_path: self.config_path,
             last_non_whitelist_sig: std::sync::Mutex::new(None),
-            hot_reload_baseline,
+            explicit_overrides: std::sync::Mutex::new(self.explicit_overrides),
             policy_persist: self.policy_persist,
             session_allows: std::sync::Mutex::new(std::collections::HashSet::new()),
             rewake: self

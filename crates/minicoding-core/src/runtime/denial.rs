@@ -24,7 +24,11 @@ use crate::tool::ToolContext;
 fn structured_denial_errno(error: &crate::model::ToolError) -> Option<i32> {
     match error {
         crate::model::ToolError::Io(e) => match e.raw_os_error() {
+            // RT-3：EACCES 权威信号仅限 unix（Windows code 13 语义不同）
+            #[cfg(not(target_os = "windows"))]
             Some(code @ (ERRNO_EPERM | ERRNO_EACCES)) => Some(code),
+            #[cfg(target_os = "windows")]
+            Some(code @ ERRNO_EPERM) => Some(code),
             _ => None,
         },
         _ => None,
@@ -43,6 +47,13 @@ const ERRNO_EPERM: i32 = 1;
 const ERRNO_EPERM: i32 = 5;
 
 /// `EACCES`（unix errno 13，权限不足）。
+///
+/// RT-3（2026-08-26 R3 审查）：Windows 的 raw code 13 是
+/// `ERROR_INVALID_DATA`（数据错误），与权限无关——若不平台化，普通业务 IO
+/// 失败携带 code 13 会被误判为权威沙箱拒绝并计入 C-30 熔断（累计 5 次硬熔断
+/// 误杀正常负载）。Windows 权限拒绝统一为 code 5（上方 `ERRNO_EPERM`），
+/// 故 Windows 下不设 EACCES 权威信号。
+#[cfg(not(target_os = "windows"))]
 const ERRNO_EACCES: i32 = 13;
 
 impl Runtime {
@@ -332,12 +343,27 @@ mod tests {
             structured_denial_errno(&eperm_io_error()),
             Some(ERRNO_EPERM)
         );
-        assert_eq!(
-            structured_denial_errno(&crate::model::ToolError::Io(
-                std::io::Error::from_raw_os_error(ERRNO_EACCES)
-            )),
-            Some(ERRNO_EACCES)
-        );
+        // RT-3：EACCES 权威信号仅 unix 存在；Windows 下 code 13 是
+        // ERROR_INVALID_DATA，不得命中（平台条件断言）
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                structured_denial_errno(&crate::model::ToolError::Io(
+                    std::io::Error::from_raw_os_error(ERRNO_EACCES)
+                )),
+                Some(ERRNO_EACCES)
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                structured_denial_errno(&crate::model::ToolError::Io(
+                    std::io::Error::from_raw_os_error(13)
+                )),
+                None,
+                "Windows code 13 = ERROR_INVALID_DATA，不是权限拒绝"
+            );
+        }
         // 非 deny-list errno 不构成权威信号
         assert_eq!(
             structured_denial_errno(&crate::model::ToolError::Io(

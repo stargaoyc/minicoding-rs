@@ -81,6 +81,13 @@ impl Runtime {
             );
         } else {
             *self.event_seq.lock().await = next_seq;
+            // RT-8（2026-08-26 R3 审查）：无 snapshot 的恢复会话此前 durable_seq
+            // 保持 0——事件实际已持久化到 `next_seq-1`，SSE durable 恢复判断
+            // `last_seq <= durable_seq` 永假，断线重连退化为全量 RehydrateRequired。
+            // 以已持久化最大 seq 为基线。
+            if snapshot.is_none() && next_seq > 1 {
+                *self.durable_seq.lock().await = next_seq - 1;
+            }
             tracing::info!(
                 session = %self.session.id,
                 next_seq,

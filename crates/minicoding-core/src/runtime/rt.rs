@@ -12,7 +12,6 @@
 //!
 //! 详见 `design.md` §2、§9、§16、§20。
 
-use super::hot_config::HotReloadBaseline;
 use super::plan_handle::PlanControllerHandle;
 use super::repeat_guard;
 use crate::config::{ConfigWatcher, RuntimeConfig};
@@ -81,8 +80,13 @@ pub struct Runtime {
     /// 上次文件版本的非白名单签名（`reload_safe_config` 用：首次加载不告警，
     /// 检测到后续非白名单变更时 warn 提示重启）。
     pub(crate) last_non_whitelist_sig: std::sync::Mutex<Option<u64>>,
-    /// 热更新基线（构造时白名单字段值，见 [`HotReloadBaseline`]）。
-    pub(crate) hot_reload_baseline: std::sync::Mutex<HotReloadBaseline>,
+    /// 显式覆盖字段集合（R3 RT-5：替代原"热更新基线"）。
+    ///
+    /// CLI flag/env 覆盖（builder 登记）与 `/model` 运行期切换（`set_model`
+    /// 登记）的字段名在此集合内——turn 边界热更新永不回退这些字段，
+    /// 维持"CLI 参数 > 环境变量 > config.toml > 默认"优先级。std Mutex：
+    /// 临界区仅集合读写、不跨 await。
+    pub(crate) explicit_overrides: std::sync::Mutex<HashSet<&'static str>>,
     pub(crate) session: Session,
     pub(crate) events: EventBus,
     /// 当前工作目录（W-11 工作区切换：`switch_workdir` 在 `&self` 下更新，需内部可变）。
@@ -230,15 +234,17 @@ impl Runtime {
     /// `req.params.model`）。会话级生效，不回写 config.toml；同时刷新热更新
     /// 基线，避免 turn 边界被文件值回退覆盖。
     pub fn set_model(&self, model: &str) {
-        {
-            let mut cfg = self
-                .config
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cfg.provider.model.clone_from(&model.to_string());
-        }
-        if let Ok(mut b) = self.hot_reload_baseline.lock() {
-            b.set_model(model);
+        // R3 RT-5：改运行期配置并登记显式覆盖——此后 turn 边界热更新不再用
+        // config.toml 回退模型（原实现同步"基线"方向恰好相反，同步后守卫
+        // 放行文件值回退，`/model` 选择只存活到当前 turn 结束）。
+        let mut cfg = self
+            .config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cfg.provider.model.clone_from(&model.to_string());
+        drop(cfg);
+        if let Ok(mut o) = self.explicit_overrides.lock() {
+            o.insert("provider.model");
         }
         tracing::info!(model, "runtime model switched");
     }
@@ -460,7 +466,8 @@ impl Runtime {
     ///
     /// 三道终止防御（C-13 单轮调用上限的补充）：
     /// - `max_tool_iters`：迭代轮次硬上限（默认 50）
-    /// - 重复检测：连续 ≥3 轮相同工具调用集合 → 判定死循环提前终止
+    /// - 重复检测：整轮签名连续 ≥ 末级阈值轮（默认配置 [3,5,8] 下为 8 轮；
+    ///   空阈值数组回退 3 轮）相同 → 判定死循环提前终止（R3 RT-6 口径修正）
     /// - `turn_timeout`：整个 turn 超时（默认 600s）→ `Stopped`
     /// - Ctrl-C cancel：`cancel()` 触发 → `Interrupted`（已落盘消息不丢失）
     /// - 沙箱拒绝熔断（C-30）：单 turn 内 ≥3 次拒绝注入提醒，≥5 次强制 `TurnEnd`
@@ -641,26 +648,29 @@ impl Runtime {
                     }
 
                     // 5.1 重复检测（M-08，R-03）：先软提醒，后硬停止。
-                    //     硬停止阈值 = 配置末级（非空）或默认 3（空数组 = 关闭软提醒）。
+                    //     硬停止阈值 = thresholds 末级（默认配置 [3,5,8] 下为
+                    //     **8**；空数组时回退 3——RT-6 口径修正，与 config 注释
+                    //     一致）。中间各级仅软提醒。
                     let thresholds = &config_snapshot.tools.repeat_guard_thresholds;
                     let hard_stop_count = thresholds.last().copied().unwrap_or(3);
                     let sig = repeat_guard::tool_calls_signature(&assistant_msg.tool_calls);
 
-                    // 5.1a 单工具指纹软提醒：对每轮出现的指纹计数递增，未出现的清零
-                    //     （"连续"语义：中间隔一轮未调用即视为中断）。命中中间级阈值
-                    //     且未提醒过该级时，向上下文注入 system 级提醒（不替换工具输出、
-                    //     不 return——模型可见历史不失真）。
+                    // 5.1a 单工具指纹软提醒：**每轮**出现的指纹计数 +1（一轮内
+                    //     多个相同调用只算一轮，RT-6 轮次语义），未出现的清零
+                    //     （"连续"语义：中间隔一轮未调用即视为中断）。命中中间级
+                    //     阈值且未提醒过该级时，缓冲提醒并入下一请求 system
+                    //     头部（不替换工具输出、不 return——模型可见历史不失真）。
                     let mut current_fingerprints: HashSet<String> = HashSet::new();
                     for c in &assistant_msg.tool_calls {
-                        let fp = repeat_guard::tool_fingerprint(c);
-                        current_fingerprints.insert(fp.clone());
-                        let streak = fingerprint_streaks.entry(fp).or_insert(0);
-                        *streak += 1;
+                        current_fingerprints.insert(repeat_guard::tool_fingerprint(c));
                     }
-                    for fp in fingerprint_streaks.keys().cloned().collect::<Vec<_>>() {
-                        if !current_fingerprints.contains(&fp) {
-                            fingerprint_streaks.remove(&fp);
+                    {
+                        for fp in &current_fingerprints {
+                            *fingerprint_streaks.entry(fp.clone()).or_insert(0) += 1;
                         }
+                        // 清理本轮未出现的指纹
+                        fingerprint_streaks
+                            .retain(|fp, _| current_fingerprints.contains(fp));
                     }
                     if !thresholds.is_empty() {
                         let mut reminder_ctx = None;
@@ -678,16 +688,27 @@ impl Runtime {
                             }
                         }
                         if let Some((fp, lvl)) = reminder_ctx {
-                            let reminder = Message::system_text(format!(
-                                "[系统提醒] 检测到重复工具调用 {fp} 已达 {lvl} 次。若陷入死循环，请改变策略或调用 'stop' 结束本轮。"
-                            ));
-                            // CORE-10（2026-08-25 R2 审查）：与 hook_context 同策略
-                            // ——只进 ctx 不落盘不广播（run-time 提示非 transcript
-                            // 事实）。已知取舍：resume 重建的历史不含本提醒，模型
-                            // 可见历史在 resume 前后存在差异；若未来要求一致，需
-                            // 连同 storage.append + persist_event 三处同步。
-                            self.ctx.append(reminder).await;
-                            tracing::warn!(fingerprint = %fp, lvl, "injected soft repeat reminder");
+                            // RT-2（2026-08-26 R3 审查）：此前以 System 消息直接
+                            // `ctx.append`——插入 `assistant(tool_calls)` 与
+                            // `tool_result` **之间**，破坏严格 provider 配对：
+                            // OpenAI 要求 role=tool 紧跟 tool_calls；Anthropic
+                            // 要求 tool_result 位于紧随 tool_use 的 user 消息内
+                            // ——两家均持续 400。且压缩管道永不丢弃 System 消息
+                            // （rolling/hard_truncate/summarize 均跳过），污染
+                            // 不可自愈、resume 后仍在。改走 `pending_hook_contexts`
+                            // 同款缓冲（与上方注释的 hook_context 机制一致）：
+                            // 下一请求构建时包裹边界并入 system 头部，不进消息
+                            // 历史。
+                            self.pending_hook_contexts
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(format!(
+                                    "<repeat_warning level=\"{lvl}\">\n\
+                                     [系统提醒] 检测到重复工具调用 {fp} 已达 {lvl} 次。\
+                                     若陷入死循环，请改变策略或调用 'stop' 结束本轮。\n\
+                                     </repeat_warning>"
+                                ));
+                            tracing::warn!(fingerprint = %fp, lvl, "buffered soft repeat reminder");
                         }
                     }
 
@@ -1170,6 +1191,9 @@ impl Runtime {
             for call in &side_effect {
                 let call_side_effect = self.tool_side_effect(&call.name);
                 // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
+                // RT-7（2026-08-26 R3 审查）：用 `.instrument` 而非跨 await 持有
+                // `enter()` guard——多线程 runtime 下 future 会被 worker 迁移，
+                // 线程局部 span 上下文在迁移后失真（与并行路径 CORE-4 同理）。
                 let span = tracing::debug_span!(
                     "tool_call",
                     session.id = %ctx.session_id,
@@ -1179,8 +1203,11 @@ impl Runtime {
                     call_id = %call.id,
                     otel.name = span_name::TOOL_CALL,
                 );
-                let _enter = span.enter();
-                results.push(self.execute_side_effect_call(call, &ctx).await?);
+                results.push(
+                    self.execute_side_effect_call(call, &ctx)
+                        .instrument(span)
+                        .await?,
+                );
             }
         } else {
             tracing::debug!(
@@ -1203,8 +1230,11 @@ impl Runtime {
                         call_id = %call.id,
                         otel.name = span_name::TOOL_CALL,
                     );
-                    let _enter = span.enter();
-                    results.push(self.execute_side_effect_call(call, &ctx).await?);
+                    results.push(
+                        self.execute_side_effect_call(call, &ctx)
+                            .instrument(span)
+                            .await?,
+                    );
                 }
             }
         }
