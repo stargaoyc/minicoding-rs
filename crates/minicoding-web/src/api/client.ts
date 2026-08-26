@@ -257,6 +257,8 @@ export interface PendingPermissionDto {
   tool: string;
   summary: string;
   risk: "low" | "medium" | "high";
+  /** ：prompt 提供的决策选项（`allow_once`/`deny_once`/`allow_always`/`deny_always`）。 */
+  options: string[];
 }
 
 // ─── Workspace API（项目工作区，见 design.md §26.9）────────────────────

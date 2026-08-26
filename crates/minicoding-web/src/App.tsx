@@ -137,7 +137,14 @@ function AppInner() {
   } = useSSEStream(activeSessionId, {
     onPermissionRequested: (e) => {
       if (activeSessionId) {
-        permissions.requestPermission({ sessionId: activeSessionId, ...e });
+        permissions.requestPermission({
+          sessionId: activeSessionId,
+          id: e.id,
+          tool: e.tool,
+          summary: e.summary,
+          risk: e.risk,
+          options: e.options,
+        });
       }
     },
   });
