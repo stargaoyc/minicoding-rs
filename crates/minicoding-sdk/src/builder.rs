@@ -102,10 +102,13 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 ///
 /// # Errors
 /// API key 缺失、provider 构造失败、存储目录不可用、会话不存在或加载失败时返回错误。
+/// CTX-5：`@memory` BM25 检索查询槽位（每轮 turn 前写入当前用户输入）。
+pub type MemoryQuerySlot = Arc<std::sync::Mutex<Option<String>>>;
+
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_lines)] // 组装流程线性展开，拆分反而降低可读性
 #[allow(clippy::too_many_arguments)] // CLI 组装入口，参数由调用方 CLI flag 决定，聚合为 struct 反而增删不便
-pub fn build_runtime(
+fn inner_build_runtime(
     provider_override: Option<&str>,
     provider_name_override: Option<&str>,
     api_base: Option<&str>,
@@ -117,7 +120,7 @@ pub fn build_runtime(
     sandbox_override: Option<SandboxPolicy>,
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
-) -> Result<Runtime> {
+) -> Result<(Runtime, Option<MemoryQuerySlot>)> {
     // 1. 加载配置（config.toml > last-known-good > 内置默认），env/CLI flag 在其上
     //    叠加。与 serve/server 对齐的优先级：CLI 参数 > 环境变量 > config.toml >
     //    内置默认（README §6、getting-started.md）。此前交互主链路从 default 起步，
@@ -269,6 +272,17 @@ pub fn build_runtime(
     //     （AutoMemory 内部 mtime 缓存保证零重复 IO）。
     let auto_memory: Arc<AutoMemory> = Arc::new(AutoMemory::default());
 
+    // CTX-5（2026-08-26 R3 审查）：@memory 检索查询槽位——contributor 构造时
+    // 注入共享句柄；CLI REPL 在每轮 turn 前经 `memory_query_slot` 写入用户
+    // 输入，BM25 top-5 检索注入生效（此前契约生产端零写入，检索永不触发，
+    // 超 4096 字符尾部条目静默截断）。extensions 未启用时无消费方（无害）。
+    #[cfg(feature = "extensions")]
+    let memory_query_slot: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // CTX-5：检索语料扩展为 auto + long_term 分节（与 6b 的 memory.write 共享实例）
+    #[cfg(feature = "extensions")]
+    let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
+
     // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
     //     9 个内置 contributor 由 `minicoding-extension-sdk::builtin_contributors` 提供，
     //     CLI 注入 user_rules（long_term.md）+ project_rules（AGENTS.md）+ git_info。
@@ -302,10 +316,14 @@ pub fn build_runtime(
         let mut contributors = minicoding_extension_sdk::builtin_contributors(&identity);
         // B2/B3：auto memory 注入 stable 区（order=Environment，cacheable=true，
         // 排在 environment 段之前——同 order 内按 contributor_name 稳定排序）。
-        contributors.push(Arc::new(AutoMemoryContributor::new(
-            auto_memory.clone(),
-            minicoding_memory::auto_contributor::DEFAULT_MAX_CHARS,
-        )));
+        contributors.push(Arc::new(
+            AutoMemoryContributor::with_query_slot(
+                auto_memory.clone(),
+                minicoding_memory::auto_contributor::DEFAULT_MAX_CHARS,
+                memory_query_slot.clone(),
+            )
+            .with_long_term_store(long_term_store.clone()),
+        ));
         let pipeline = Arc::new(minicoding_core::prompt::PromptPipeline::with_contributors(
             contributors,
         ));
@@ -342,7 +360,11 @@ pub fn build_runtime(
             // 上下文窗口取 provider 声明的 capability（Claude 200K 等；
             // 2026-08-23 审查 §8-P1：此前硬编码 128K，Claude 白白浪费 35%
             // 预算提前压缩，小窗口模型则预算虚高直接超限）
-            let context_window = summary_provider.capabilities().context_window;
+            // CTX-2（2026-08-26 R3 审查）：必须取**主对话 provider** 的窗口
+            // ——此前误取 summary_provider（small model）的 capability，用户给
+            // `[provider.small]` 配大窗口便宜模型而主模型窗口小时，预算按小
+            // 模型反向虚高 → 真实请求直接超主模型窗口。
+            let context_window = main_provider.capabilities().context_window;
             let mut mgr = ContextManagerImpl::new(
                 system_prompt.clone(),
                 tokenizer,
@@ -416,8 +438,6 @@ pub fn build_runtime(
     //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
     //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
     //     LongTermMemory::default / AutoMemory::default 在 home 不可解析时退化为相对路径。
-    let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
-    // 与 4b-0 的 prompt contributor 共享同一 AutoMemory 实例（B2 接线闭环）。
     let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter {
         inner: auto_memory.clone(),
     });
@@ -664,7 +684,84 @@ pub fn build_runtime(
         plan_controller,
     )));
 
-    Ok(rt)
+    Ok((rt, Some(memory_query_slot)))
+}
+
+/// CTX-5（2026-08-26 R3 审查）：[`build_runtime`] 的扩展版——同时返回
+/// `@memory` 检索查询槽位句柄（extensions 未启用时为恒空槽位，无害）。
+/// 调用方在每轮 turn 前把用户输入写入槽位，`AutoMemoryContributor` 即以
+/// BM25 检索 top 条目注入而非全量渲染。
+///
+/// # Errors
+/// 同 [`build_runtime`]。
+#[allow(clippy::type_complexity)] // 槽位类型即契约本体
+#[allow(clippy::too_many_arguments)] // 透传 inner_build_runtime 参数
+pub fn build_runtime_with_memory_slot(
+    provider_override: Option<&str>,
+    provider_name_override: Option<&str>,
+    api_base: Option<&str>,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    workdir: &str,
+    system: Option<&str>,
+    mode: &SessionLoadMode,
+    sandbox_override: Option<SandboxPolicy>,
+    start_in_plan_mode: bool,
+    prompter_override: Option<Arc<dyn PermissionPrompter>>,
+) -> anyhow::Result<(Runtime, Arc<std::sync::Mutex<Option<String>>>)> {
+    inner_build_runtime(
+        provider_override,
+        provider_name_override,
+        api_base,
+        api_key,
+        model,
+        workdir,
+        system,
+        mode,
+        sandbox_override,
+        start_in_plan_mode,
+        prompter_override,
+    )
+    .map(|(rt, slot)| {
+        (
+            rt,
+            slot.unwrap_or_else(|| Arc::new(std::sync::Mutex::new(None))),
+        )
+    })
+}
+
+/// 兼容入口：不关心记忆检索槽位的调用方使用。
+///
+/// # Errors
+/// 同 [`inner_build_runtime`]。
+#[allow(clippy::too_many_arguments)] // 透传 inner_build_runtime 参数
+pub fn build_runtime(
+    provider_override: Option<&str>,
+    provider_name_override: Option<&str>,
+    api_base: Option<&str>,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    workdir: &str,
+    system: Option<&str>,
+    mode: &SessionLoadMode,
+    sandbox_override: Option<SandboxPolicy>,
+    start_in_plan_mode: bool,
+    prompter_override: Option<Arc<dyn PermissionPrompter>>,
+) -> Result<Runtime> {
+    inner_build_runtime(
+        provider_override,
+        provider_name_override,
+        api_base,
+        api_key,
+        model,
+        workdir,
+        system,
+        mode,
+        sandbox_override,
+        start_in_plan_mode,
+        prompter_override,
+    )
+    .map(|(rt, _)| rt)
 }
 
 /// 从 `HooksConfig` 构造 `HookRegistryImpl`（T-M5-8）。

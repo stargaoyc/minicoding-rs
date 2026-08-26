@@ -246,13 +246,13 @@ impl AutoMemory {
         let index_bytes = serde_json::to_vec_pretty(entries)
             .map_err(|e| MemoryError::Serialize(format!("auto index serialize: {e}")))?;
         let idx_tmp = Utf8PathBuf::from(format!("{}{TMP_SUFFIX}", self.index_path.as_str()));
-        fs::write(&idx_tmp, &index_bytes).await?;
+        write_private_async(idx_tmp.as_std_path(), &index_bytes).await?;
         fs::rename(&idx_tmp, &self.index_path).await?;
 
         // 写渲染后的正文。
         let rendered = self.render(entries);
         let md_tmp = Utf8PathBuf::from(format!("{}{TMP_SUFFIX}", self.path.as_str()));
-        fs::write(&md_tmp, rendered.as_bytes()).await?;
+        write_private_async(md_tmp.as_std_path(), rendered.as_bytes()).await?;
         fs::rename(&md_tmp, &self.path).await?;
 
         // 刷新缓存。
@@ -273,6 +273,18 @@ impl AutoMemory {
             Err(err) => Err(err.into()),
         }
     }
+}
+
+/// CTX-10（2026-08-26 R3 审查）：0600 私有写（与 `long_term` 同语义）。
+async fn write_private_async(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    // tokio::fs::OpenOptions 在 unix 提供 inherent `.mode()`（无需 trait 导入）
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts.open(path).await?;
+    f.write_all(bytes).await
 }
 
 impl Default for AutoMemory {

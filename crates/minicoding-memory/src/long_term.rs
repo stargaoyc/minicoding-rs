@@ -51,6 +51,19 @@ pub struct LongTermMemory {
     save_lock: tokio::sync::Mutex<()>,
 }
 
+/// CTX-10（2026-08-26 R3 审查）：0600 私有写（对齐 audit/persist 的
+/// `fs_private::write_private` 语义；tokio 异步版）。
+async fn write_private_async(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    // tokio::fs::OpenOptions 在 unix 提供 inherent `.mode()`（无需 trait 导入）
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts.open(path).await?;
+    f.write_all(bytes).await
+}
+
 impl LongTermMemory {
     /// 从默认 `MINICODING_HOME/memory/` 目录构造（路径由 `core::paths::memory_dir` 解析）。
     ///
@@ -173,7 +186,8 @@ impl MemoryStore for LongTermMemory {
 
             // 原子写入正文：写 .tmp → rename。
             let tmp_path = Utf8PathBuf::from(format!("{}{TMP_SUFFIX}", self.path.as_str()));
-            fs::write(&tmp_path, &content).await?;
+            // CTX-10：正文 0600 落盘（手写记忆可能含项目私有信息）
+            write_private_async(tmp_path.as_std_path(), content.as_bytes()).await?;
             fs::rename(&tmp_path, &self.path).await?;
 
             // 读取刚写入文件的 mtime 作为权威值（覆盖写后 mtime）。
@@ -191,7 +205,7 @@ impl MemoryStore for LongTermMemory {
 
             // 原子写入索引。
             let idx_tmp = Utf8PathBuf::from(format!("{}{TMP_SUFFIX}", self.index_path.as_str()));
-            fs::write(&idx_tmp, &index_bytes).await?;
+            write_private_async(idx_tmp.as_std_path(), &index_bytes).await?;
             fs::rename(&idx_tmp, &self.index_path).await?;
 
             // 刷新缓存。

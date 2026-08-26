@@ -182,12 +182,22 @@ fn check_memory_write(tool: &str, input: &Value) -> Verdict {
     let target = input.get("target").and_then(|v| v.as_str());
     let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
     match target {
-        Some("long_term") => Verdict::Ask(make_prompt(
-            tool,
-            "写入长期记忆（全量覆盖 long_term.md）".to_string(),
-            Risk::Medium,
-            full_options(),
-        )),
+        Some("long_term") => {
+            // CTX-11（2026-08-26 R3 审查）：Ask 附带内容长度 + 前 120 字符预览
+            // （此前"盲批"——用户看不到写什么）；选项去掉 AllowAlways——全量
+            // 覆盖语义下一次误批即清空手写记忆，且 LLM 可先以无害内容骗取
+            // Always 后写入任意内容（与项目约束文件同级对待）。
+            let preview: String = content.chars().take(120).collect();
+            Verdict::Ask(make_prompt(
+                tool,
+                format!(
+                    "写入长期记忆（**全量覆盖** long_term.md，{} 字节）：{preview}",
+                    content.len()
+                ),
+                Risk::Medium,
+                project_doc_options(),
+            ))
+        }
         Some("auto") => {
             if minicoding_core::util::contains_directive(content) {
                 // CTX-1/SEC-4（2026-08-26 R3 审查）：降级 Ask 采用与项目约束

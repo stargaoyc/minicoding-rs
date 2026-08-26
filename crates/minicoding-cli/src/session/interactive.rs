@@ -57,7 +57,22 @@ const YELLOW: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))
 ///
 /// 返回退出码：0 正常退出，1 初始化 / IO 致命错误。
 #[allow(clippy::too_many_lines)] // 斜杠命令分派表线性展开，拆分降低可读性
+/// CTX-5：`@memory` 检索查询槽位（`None` 时检索不生效，全量渲染——与旧行为一致）。
+pub type MemoryQuerySlot = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+pub async fn run_interactive_session_with_memory_slot(
+    rt: &Runtime,
+    memory_slot: Option<MemoryQuerySlot>,
+) -> i32 {
+    run_interactive_inner(rt, memory_slot).await
+}
+
+/// 兼容入口：不带记忆槽位。
 pub async fn run_interactive_session(rt: &Runtime) -> i32 {
+    run_interactive_inner(rt, None).await
+}
+
+async fn run_interactive_inner(rt: &Runtime, memory_slot: Option<MemoryQuerySlot>) -> i32 {
     let mut rl = match Editor::<AtFileHelper, DefaultHistory>::new() {
         Ok(mut rl) => {
             rl.set_helper(Some(AtFileHelper::default()));
@@ -159,9 +174,22 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
         // @文件引用注入（遗留：对标 CC @file）：正文保留原 token 供模型理解
         // 指代，文件内容以 <file_ref> 边界附于消息尾部
         let expanded = expand_at_refs(&line, &rt.workdir().await);
+        // CTX-5：turn 前写入 @memory 检索查询词
+        if let Some(slot) = &memory_slot
+            && let Ok(mut q) = slot.lock()
+        {
+            *q = Some(line.clone());
+        }
         let used = run_one_turn(rt, expanded).await;
         session_tokens += used;
         turn_count += 1;
+    }
+
+    // CTX-4（2026-08-26 R3 审查）：会话退出前生成摘要——`SessionSummarizer`
+    // 在 Runtime 构造时已注入，但此前无任何调用方，index.json.summary 恒为
+    // None（特性"建成未通车"）。best-effort：失败不影响正常退出。
+    if let Err(e) = rt.summarize_session().await {
+        tracing::warn!(error = %e, "session summary generation failed (best-effort)");
     }
 
     anstream::eprintln!("{DIM}再见{DIM:#}");

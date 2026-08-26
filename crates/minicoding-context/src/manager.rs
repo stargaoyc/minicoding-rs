@@ -447,7 +447,17 @@ impl ContextManager for ContextManagerImpl {
 
     /// 校准：`actual` 反映刚发送请求的真实 prompt 规模，直接覆盖缓存
     /// （比增量估算可信）；指数平滑系数 0.5 抑制单次异常。
+    ///
+    /// CTX-3（2026-08-26 R3 审查）护栏：`actual == 0` 直接跳过——部分
+    /// provider/解析缺失路径会产出零值 Usage，midpoint(current, 0) 会把
+    /// 缓存直接砍半（低估 → 该压缩时不压缩 → 真实超窗）。另注意口径差：
+    /// `actual` 含 system+tools 固定开销而缓存仅 messages，混入 midpoint 会
+    /// 系统性高估基数（方向保守、浪费预算但安全），此处保留并文档化。
     fn calibrate(&self, actual_input_tokens: usize) {
+        if actual_input_tokens == 0 {
+            tracing::debug!("calibrate skipped: zero actual (provider usage missing)");
+            return;
+        }
         let current = self.token_cache.load(Ordering::SeqCst);
         let blended = usize::midpoint(current, actual_input_tokens);
         self.token_cache.store(blended, Ordering::SeqCst);
@@ -497,8 +507,26 @@ impl ContextManager for ContextManagerImpl {
             // Metrics：请求阶段 token 分布
             metrics::record_context_tokens("request", current_tokens as u64);
 
+            // CTX-2（2026-08-26 R3 审查）：阈值判定计入 **system prompt 与
+            // tool schemas** 固定开销——project_doc 可达 32KiB（≈8K token）、
+            // 多工具 schemas 数千 token，此前只统计 messages，小窗口模型即使
+            // 压到"阈值下"实际请求仍超窗。system 构建提前到触发判定之前。
+            let base_system = self.build_base_system_prompt(&tool_schemas).await?;
+            let tools_fixed = tool_schemas
+                .iter()
+                .map(|t| {
+                    self.tokenizer.count(&t.name)
+                        + self.tokenizer.count(&t.description)
+                        + serde_json::to_string(&t.input_schema)
+                            .map(|j| self.tokenizer.count(&j))
+                            .unwrap_or_default()
+                })
+                .sum::<usize>();
+            let fixed_overhead = self.tokenizer.count(&base_system) + tools_fixed;
+            let effective_tokens = current_tokens + fixed_overhead;
+
             // C-08：预测性压缩——当前未超阈值但预测下一 turn 会超时提前压缩
-            let need_predictive = predictive_enabled && current_tokens <= threshold && {
+            let need_predictive = predictive_enabled && effective_tokens <= threshold && {
                 let tracker = self.predictive_tracker.lock().await;
                 should_predict_compact(current_tokens, threshold, &tracker, predictive_baseline)
             };
@@ -511,7 +539,8 @@ impl ContextManager for ContextManagerImpl {
             // 此后在压缩后的历史里提取，恰在 L3/L4 丢弃 fs.read 消息、最需要
             // 恢复的场景提取恒空（design §3.10 要求的独立环形缓冲仍列为后续项，
             // 本修复保证"压缩当次"注入有效）。
-            let will_compress = compress_enabled && (current_tokens > threshold || need_predictive);
+            let will_compress =
+                compress_enabled && (effective_tokens > threshold || need_predictive);
             let pre_compress_read_files = if will_compress {
                 let guard = self.messages.read().await;
                 let files = extract_read_files(&guard, post_compact_cfg.max_files);
@@ -544,9 +573,8 @@ impl ContextManager for ContextManagerImpl {
                 false
             };
 
-            // 构建基础 system prompt：pipeline 启用时动态构建，否则用静态字段。
-            // post-compact 注入在 base 之上叠加（无论 pipeline/static 都适用）。
-            let base_system = self.build_base_system_prompt(&tool_schemas).await?;
+            // 基础 system prompt 已在上方（CTX-2）提前构建——post-compact 注入
+            // 在 base 之上叠加（无论 pipeline/static 都适用）。
 
             // C-09：post-compact 上下文恢复——压缩后重新注入最近读过的文件
             //（路径已在压缩前提取，见上方 CT-5 残留修复）

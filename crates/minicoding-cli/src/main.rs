@@ -309,7 +309,7 @@ fn main() -> Result<()> {
 
     // 构建 Runtime（默认沙箱策略 WorkspaceWrite，由 builder 内部注入）
     #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
-    let mut rt = builder::build_runtime(
+    let (mut rt, memory_slot) = builder::build_runtime_with_memory_slot(
         cli.provider.as_deref(),
         cli.provider_name.as_deref(),
         cli.api_base.as_deref(),
@@ -355,7 +355,7 @@ fn main() -> Result<()> {
                 return 1;
             }
             apply_restored_security_context(&rt, &mode).await;
-            session::run_interactive_session(&rt).await
+            session::run_interactive_session_with_memory_slot(&rt, Some(memory_slot)).await
         })
     } else {
         let prompt = cli.prompt.expect("单次模式 prompt 必为 Some");
