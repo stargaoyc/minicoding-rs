@@ -16,7 +16,7 @@
 #[cfg(feature = "otel")]
 use minicoding_core::otel::Sampler;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_appender::rolling::Rotation;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -63,17 +63,33 @@ fn init_fmt_only(verbose: bool) -> TracingGuard {
     let (file_layer, file_guard) = match minicoding_core::paths::minicoding_home() {
         Ok(home) if std::fs::create_dir_all(home.join("logs")).is_ok() => {
             let log_dir = home.join("logs");
-            let appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "server.log");
-            let (writer, guard) = tracing_appender::non_blocking(appender);
-            (
-                Some(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(false)
-                        .with_ansi(false)
-                        .with_writer(writer),
-                ),
-                Some(guard),
-            )
+            // ENG-6（2026-08-26 R3 审查）：builder 版带 max_log_files(7) 保留策略——
+            // `RollingFileAppender::new` 不做清理，磁盘无界增长（注释承诺的
+            // "保留 7 份"此前只是纸面数字）
+            match tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(Rotation::DAILY)
+                .filename_prefix("server.log")
+                .max_log_files(7)
+                .build(log_dir)
+            {
+                Ok(appender) => {
+                    let (writer, guard) = tracing_appender::non_blocking(appender);
+                    (
+                        Some(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(false)
+                                .with_ansi(false)
+                                .with_writer(writer),
+                        ),
+                        Some(guard),
+                    )
+                }
+                Err(e) => {
+                    // ENG-6：构建失败降级为仅 stderr（不 panic、不吞错）
+                    eprintln!("warn: 日志轮转初始化失败({e})，跳过文件日志");
+                    (None, None)
+                }
+            }
         }
         _ => {
             eprintln!("warn: 无法创建日志目录，跳过文件日志（仅 stderr）");
@@ -183,17 +199,32 @@ fn init_with_otlp(
     let (file_layer, file_guard) = match minicoding_core::paths::minicoding_home() {
         Ok(home) if std::fs::create_dir_all(home.join("logs")).is_ok() => {
             let log_dir = home.join("logs");
-            let appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "server.log");
-            let (writer, guard) = tracing_appender::non_blocking(appender);
-            (
-                Some(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(false)
-                        .with_ansi(false)
-                        .with_writer(writer),
-                ),
-                Some(guard),
-            )
+            // ENG-6（2026-08-26 R3 审查）：builder 版带 max_log_files(7) 保留策略——
+            // `RollingFileAppender::new` 不做清理，磁盘无界增长（注释承诺的
+            // "保留 7 份"此前只是纸面数字）
+            match tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(Rotation::DAILY)
+                .filename_prefix("server.log")
+                .max_log_files(7)
+                .build(log_dir)
+            {
+                Ok(appender) => {
+                    let (writer, guard) = tracing_appender::non_blocking(appender);
+                    (
+                        Some(
+                            tracing_subscriber::fmt::layer()
+                                .with_target(false)
+                                .with_ansi(false)
+                                .with_writer(writer),
+                        ),
+                        Some(guard),
+                    )
+                }
+                Err(e) => {
+                    eprintln!("warn: 日志轮转初始化失败({e})，跳过文件日志");
+                    (None, None)
+                }
+            }
         }
         _ => {
             eprintln!("warn: 无法创建日志目录，跳过文件日志（仅 stderr）");

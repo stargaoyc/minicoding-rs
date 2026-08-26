@@ -9,6 +9,7 @@ use minicoding_core::paths;
 // ARCH-4（2026-08-26 R3 审查）：keyring service/account 常量下沉 core
 // （`minicoding_core::util`）——四处私有复制曾靠注释维持一致性，一处改名即
 // 静默 split-brain。KEYRING_SERVICE/KEYRING_ACCOUNT 经下方 use 引入。
+#[cfg(feature = "cred-keyring")]
 use minicoding_core::util::{KEYRING_ACCOUNT, KEYRING_SERVICE};
 use std::fs;
 

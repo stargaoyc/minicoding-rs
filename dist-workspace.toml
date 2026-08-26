@@ -15,7 +15,7 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 publish-jobs = []
 # GitHub Release 配置
 create-release = true
-github-attestations = false
+github-attestations = true
 # PR 上运行 plan 模式（不实际构建，仅检查配置）
 pr-run-mode = "plan"
 # ENG-2（2026-08-25 R2 审查）：release.yml 已手工加固（concurrency 组 +

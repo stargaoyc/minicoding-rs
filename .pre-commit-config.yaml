@@ -101,6 +101,14 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      - id: generated-guard
+        name: ts-rs generated 污染防护（ENG-3）
+        description: 阻止 cargo test 的 ts-rs 副作用产物被误提交
+        entry: bash scripts/git-hooks/generated-guard.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: no-secrets-in-staged
         name: check no secrets staged
         description: 检查暂存区无敏感文件（AGENTS.md §6.4）

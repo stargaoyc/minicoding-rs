@@ -1,0 +1,25 @@
+# ENG-7（2026-08-26 R3 审查）：依赖自动更新——此前零机制，reqwest 0.12+0.13
+# 双版本等 13 组重复族靠人工发现。weekly 频率 + 分组合并降低 PR 噪音。
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "npm"
+    directory: "/crates/minicoding-web"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]

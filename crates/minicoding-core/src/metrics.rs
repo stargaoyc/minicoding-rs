@@ -23,6 +23,12 @@ use std::time::Duration;
 static REGISTRY: LazyLock<Mutex<BTreeMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
+/// gauge 注册表（ENG-5，2026-08-26 R3 审查）：与 counter 分表——gauge 语义是
+/// "覆盖当前值"，此前 `set_active_sessions` 复用累加表，连续 set(5)、set(3)
+/// 得到 8 且被渲染成 `# TYPE counter`（语义双错）。
+static GAUGES: LazyLock<Mutex<BTreeMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
 /// 累加一个计数器（内部辅助）。
 fn bump(counter: &str, labels: &str, n: u64) {
     if let Ok(mut reg) = REGISTRY.lock() {
@@ -30,24 +36,33 @@ fn bump(counter: &str, labels: &str, n: u64) {
     }
 }
 
+/// 设置一个 gauge 值（覆盖语义，内部辅助）。
+fn set_gauge(gauge: &str, labels: &str, value: u64) {
+    if let Ok(mut reg) = GAUGES.lock() {
+        reg.insert(format!("{gauge}{labels}"), value);
+    }
+}
+
 /// 渲染 Prometheus text format（0.0.4）快照。
 ///
 /// 计数器名已带标签后缀（`name{label="v"}` 形态由记录方拼好），此处仅补
-/// `# TYPE <base> counter` 行按 base 名去重输出。
+/// `# TYPE <base> <type>` 行按 base 名去重输出（counter 与 gauge 分区渲染）。
 #[must_use]
 pub fn snapshot_prometheus() -> String {
-    let Ok(reg) = REGISTRY.lock() else {
-        return String::new();
-    };
     let mut out = String::new();
-    let mut last_base = String::new();
-    for (key, val) in reg.iter() {
-        let base = key.split('{').next().unwrap_or(key).to_string();
-        if base != last_base {
-            let _ = writeln!(out, "# TYPE {base} counter");
-            last_base = base;
+    for (reg, ty) in [(REGISTRY.lock(), "counter"), (GAUGES.lock(), "gauge")] {
+        let Ok(reg) = reg else {
+            continue;
+        };
+        let mut last_base = String::new();
+        for (key, val) in reg.iter() {
+            let base = key.split('{').next().unwrap_or(key).to_string();
+            if base != last_base {
+                let _ = writeln!(out, "# TYPE {base} {ty}");
+                last_base = base;
+            }
+            let _ = writeln!(out, "{key} {val}");
         }
-        let _ = writeln!(out, "{key} {val}");
     }
     out
 }
@@ -179,6 +194,12 @@ pub fn record_error(category: &str) {
 /// - `tool`：工具名
 /// - `result`：执行结果（`ok`/`err`/`timeout`）
 pub fn record_mcp_tool_call(server: &str, tool: &str, result: &str) {
+    // ENG-5：此前只发 tracing 事件、从不进注册表——/metrics 永远看不到 MCP 计数
+    bump(
+        "minicoding_mcp_tool_calls_total",
+        &format!(r#"{{server="{server}",result="{result}"}}"#),
+        1,
+    );
     tracing::debug!(
         target: "metrics::mcp_tool_calls_total",
         server = server,
@@ -243,7 +264,7 @@ pub fn set_circuit_breaker(breaker_type: &str, state: &str) {
 /// # 参数
 /// - `count`：当前活跃会话数
 pub fn set_active_sessions(count: u64) {
-    bump("minicoding_active_sessions", "", count);
+    set_gauge("minicoding_active_sessions", "", count);
     tracing::debug!(
         target: "metrics::active_sessions",
         count = count,
@@ -257,6 +278,11 @@ pub fn set_active_sessions(count: u64) {
 /// - `server`：MCP server 名
 /// - `count`：当前连接数
 pub fn set_mcp_connections(server: &str, count: u64) {
+    set_gauge(
+        "minicoding_mcp_connections",
+        &format!(r#"{{server="{server}"}}"#),
+        count,
+    );
     tracing::debug!(
         target: "metrics::mcp_connections",
         server = server,
@@ -270,6 +296,7 @@ pub fn set_mcp_connections(server: &str, count: u64) {
 /// # 参数
 /// - `count`：当前后台 shell 数
 pub fn set_background_shells(count: u64) {
+    set_gauge("minicoding_background_shells", "", count);
     tracing::debug!(
         target: "metrics::background_shells",
         count = count,
@@ -358,5 +385,28 @@ mod tests {
         set_circuit_breaker("compress", "normal");
         set_circuit_breaker("compress", "fused");
         set_circuit_breaker("sandbox", "warning");
+    }
+
+    // ENG-5（2026-08-26 R3 审查）：gauge 覆盖语义 + MCP 计数进 /metrics
+    #[test]
+    fn gauges_use_overwrite_semantics_and_render_as_gauge() {
+        set_active_sessions(5);
+        set_active_sessions(3);
+        let snap = snapshot_prometheus();
+        // 取最后一次覆盖值 3，而非累加值 8
+        assert!(
+            snap.contains("minicoding_active_sessions 3\n"),
+            "gauge 应为覆盖语义: {snap}"
+        );
+        assert!(
+            snap.contains("# TYPE minicoding_active_sessions gauge"),
+            "应渲染为 gauge 类型"
+        );
+        record_mcp_tool_call("fs-server", "fs.read", "ok");
+        assert!(snap_prometheus_contains_mcp(), "MCP 计数应进入 /metrics");
+    }
+
+    fn snap_prometheus_contains_mcp() -> bool {
+        snapshot_prometheus().contains("minicoding_mcp_tool_calls_total")
     }
 }

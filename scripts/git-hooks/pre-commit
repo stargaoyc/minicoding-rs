@@ -6,6 +6,18 @@
 set -euo pipefail
 
 # pre-commit 阶段（每次提交，快速门禁）
+
+# ENG-9（2026-08-26 R3 审查）：与 .pre-commit-config.yaml 对齐补齐——typos
+# 拼写检查 + ts-rs generated 污染防护（此前脚本轨缺这两项，同一开发者走不同
+# 安装路径会得到不同门禁）。
+if command -v typos >/dev/null 2>&1; then
+  echo "[pre-commit] typos ..."
+  typos
+fi
+
+echo "[pre-commit] generated guard ..."
+bash "$(dirname "$0")/generated-guard.sh"
+
 echo "[pre-commit] cargo fmt --check ..."
 cargo fmt --all -- --check
 

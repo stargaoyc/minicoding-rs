@@ -65,7 +65,7 @@ jobs:
       #   - tauri-cli 外部工具：runner 预装 stable 即可（不涉及项目 MSRV）。
       # 交叉目标 std 由 targets 参数直接装入 nightly 工具链。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly-2026-08-18
           targets: ${{ matrix.target }}
@@ -145,6 +145,17 @@ jobs:
           echo "=== bundle 目录内容 ==="
           find "target/${{ matrix.target }}/release/bundle" -type f 2>/dev/null | sort || echo "(bundle 目录不存在)"
 
+      # ENG-1（2026-08-26 R3 审查）：生成 SHA256SUMS——桌面产物此前无任何
+      # 完整性校验手段，与安全敏感项目定位不符。
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd "target/${{ matrix.target }}/release/bundle"
+          find . -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" \
+            -o -name "*.AppImage" -o -name "*.deb" \) \
+            -exec sha256sum {} \; > ../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt || true
+          cat "../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -155,6 +166,7 @@ jobs:
             target/${{ matrix.target }}/release/bundle/**/*.exe
             target/${{ matrix.target }}/release/bundle/**/*.AppImage
             target/${{ matrix.target }}/release/bundle/**/*.deb
+            SHA256SUMS-desktop-${{ matrix.os }}.txt
           if-no-files-found: error
 
   upload-to-release:

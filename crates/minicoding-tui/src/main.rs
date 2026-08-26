@@ -39,6 +39,8 @@ fn main() -> Result<()> {
         std::process::exit(2);
     }
 
+    let _tracing_guard = init_tui_tracing();
+
     let workdir = std::env::current_dir()
         .context("无法确定当前目录")?
         .to_string_lossy()
@@ -49,6 +51,37 @@ fn main() -> Result<()> {
     let result = run_loop(&mut terminal, &workdir, &SessionLoadMode::None);
     ratatui::restore();
     result
+}
+
+/// ENG-4（2026-08-26 R3 审查）：安装 tracing subscriber——此前 TUI 入口从未
+/// 初始化任何 subscriber，全部 `tracing::*` 事件静默丢弃（观测性四入口缺一）。
+/// alternate screen 下 stderr 不可见，日志写 `~/.minicoding/logs/tui.log`
+/// （按天轮转，保留 3 份）；home 不可解析时跳过（best-effort，不阻塞启动）。
+fn init_tui_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::prelude::*;
+    let home = minicoding_core::paths::minicoding_home().ok()?;
+    if std::fs::create_dir_all(home.join("logs")).is_err() {
+        return None;
+    }
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("tui.log")
+        .max_log_files(3)
+        .build(home.join("logs"))
+        .ok()?;
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(writer),
+        )
+        .with(filter)
+        .try_init();
+    Some(guard)
 }
 
 /// 外层循环：构建 Runtime → 进入主循环 → 检查会话切换请求 → 必要时重建。
