@@ -436,6 +436,7 @@ impl ContextManager for TestContext {
                     stop: Vec::new(),
                     seed: None,
                     thinking_budget_tokens: None,
+                    cache_key: None,
                 },
             };
             self.requests.lock().await.push(req.clone());

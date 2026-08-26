@@ -18,6 +18,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 tiktoken-rs = { workspace = true }
+ulid = { workspace = true }
 
 [dev-dependencies]
 # A8 架构守卫：复用 core 的 manifest 断言

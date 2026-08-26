@@ -112,7 +112,23 @@ impl AnthropicProvider {
     // 改为关联函数会波及多处测试调用点。
     #[allow(clippy::unused_self)]
     fn build_request_body(&self, req: &ChatRequest) -> Value {
-        let messages: Vec<Value> = req.messages.iter().map(message_to_anthropic).collect();
+        let mut messages: Vec<Value> = req.messages.iter().map(message_to_anthropic).collect();
+        // PTM-9（2026-08-26 R3 审查）：对话历史侧增量缓存断点——每 turn 增长的
+        // messages 是长会话输入费用大头，仅在 system/tools 打断点时历史每轮
+        // 全价重算。在最后一条消息的 content 尾块打第三个断点（上限 4 个内），
+        // 下一轮该前缀命中缓存。注意：最后一条 assistant 消息（含 tool_use）
+        // 的断点对"追加 tool_result"的增量模式同样有效。
+        if let Some(last) = messages.last_mut() {
+            let has_blocks = last
+                .get("content")
+                .is_some_and(|c| c.as_array().is_some_and(|a| !a.is_empty()));
+            if has_blocks
+                && let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut())
+                && let Some(last_block) = arr.last_mut()
+            {
+                last_block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+        }
 
         let mut body = json!({
             "model": req.params.model,
@@ -219,7 +235,8 @@ impl LlmProvider for AnthropicProvider {
             supports_json_mode: false,
             // Claude 3.5 Sonnet 200K 上下文窗口
             context_window: 200_000,
-            max_output: 8_192,
+            // PTM-14：与 MAX_OUTPUT_LIMIT 同步（8192 过时）
+            max_output: 32_768,
         }
     }
 
@@ -232,6 +249,19 @@ impl LlmProvider for AnthropicProvider {
         req: ChatRequest,
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>> {
         Box::pin(async move {
+            // PTM-3（2026-08-26 R3 审查）：extended thinking 与工具调用互斥 gate
+            // ——Anthropic 要求最后一个 assistant turn 的 thinking 块（含
+            // signature）随请求回传，而本通路不持久化 reasoning 块（trait 约定：
+            // 仅流式展示），任何"思考→调工具→回灌结果"的第二跳必然 400。
+            // 显式报错优于神秘 400；解除限制需 Message 持久化 thinking 块。
+            if req.params.thinking_budget_tokens.is_some() && !req.tools.is_empty() {
+                return Err(LlmError::Config(
+                    "Anthropic extended thinking 与工具调用暂不支持组合：\
+                     thinking 块（含 signature）未随会话持久化，第二跳请求必被 API 拒绝。\
+                     请关闭 thinking_budget_tokens 或在无工具会话中使用"
+                        .to_string(),
+                ));
+            }
             let body = self.build_request_body(&req);
             let url = format!("{}/v1/messages", self.api_base.trim_end_matches('/'));
 
@@ -372,7 +402,11 @@ fn tool_content_to_string(content: &ToolContent) -> String {
 fn map_status_error(status: u16, body: String, retry_after_ms: Option<u64>) -> LlmError {
     match status {
         429 => LlmError::RateLimited { retry_after_ms },
+        // PTM-7（2026-08-26 R3 审查）：401/403 结构化为 AuthInvalid；
+        // 400 + `prompt is too long` 识别为上下文超长
+        401 | 403 => LlmError::AuthInvalid(body),
         s if (500..600).contains(&s) => LlmError::Server { status: s, body },
+        s if s == 400 && body.contains("prompt is too long") => LlmError::ContextLength(body),
         s => LlmError::Client { status: s, body },
     }
 }
@@ -506,9 +540,10 @@ fn usize_from_option_opt(v: Option<&Value>) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
-/// Anthropic 能力声明的输出上限（与 [`AnthropicProvider::capabilities`]
-/// 的 `max_output` 一致；超出会被 API 以 400 拒绝）。
-const MAX_OUTPUT_LIMIT: usize = 8_192;
+/// Anthropic 能力声明的输出上限（PTM-14，2026-08-26 R3 审查：8192 → 32768
+/// ——Claude 3.7+/4 系支持 32K-64K 输出，旧 clamp 会静默压低用户配置；
+/// 32K 为跨模型安全上限，超出部分仍会被 API 以 400 拒绝并结构化报错）。
+const MAX_OUTPUT_LIMIT: usize = 32_768;
 
 /// thinking 路径的输出上限（PTM-2，2026-08-25 R2 审查）。
 ///
@@ -602,7 +637,11 @@ impl Tokenizer for ApproxTokenizer {
         msgs.iter()
             .map(|m| {
                 // 每条消息加 4 token overhead（角色标记等），与 tiktoken 习惯对齐
-                4 + Self::count_str(&extract_text(&m.content))
+                // PTM-2（2026-08-26 R3 审查）：用 `full_text()`（含 tool_calls 的
+                // name+args JSON）而非 `extract_text`——agentic 会话中工具调用
+                // JSON 往往是 token 大头，漏计导致压缩触发滞后、真实超窗 400
+                // （tiktoken 侧 §8-P0 同型修复未同步到此处）。
+                4 + Self::count_str(&m.full_text())
             })
             .sum()
     }
@@ -636,6 +675,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         }
     }
@@ -831,6 +871,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -863,6 +904,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: Some(1_500),
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -894,6 +936,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: Some(1_000),
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -911,7 +954,9 @@ mod tests {
         // 未启用 thinking：用户值 / 缺省 4096，不 clamp 旧路径行为
         assert_eq!(compute_max_tokens(None, None), 4_096);
         assert_eq!(compute_max_tokens(Some(512), None), 512);
-        assert_eq!(compute_max_tokens(Some(9_999), None), MAX_OUTPUT_LIMIT);
+        assert_eq!(compute_max_tokens(Some(9_999), None), 9_999);
+        // PTM-14：clamp 上限提升至 32K（Claude 3.7+/4 支持），超限仍被钳制
+        assert_eq!(compute_max_tokens(Some(99_999), None), MAX_OUTPUT_LIMIT);
         // thinking：budget + max(用户配置, 1024)
         assert_eq!(compute_max_tokens(None, Some(1_000)), 5_096);
         // 小配置走最小余量 1024
@@ -956,6 +1001,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -1123,7 +1169,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_stream_401_returns_client_error() {
-        // 场景：HTTP 401 鉴权失败 → LlmError::Client
+        // 场景：HTTP 401 鉴权失败 → LlmError::AuthInvalid（PTM-7 结构化分类）
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1138,11 +1184,10 @@ mod tests {
             panic!("401 应返回错误，但 chat_stream 成功");
         };
         match err {
-            LlmError::Client { status, body } => {
-                assert_eq!(status, 401);
+            LlmError::AuthInvalid(body) => {
                 assert_eq!(body, "unauthorized");
             }
-            other => panic!("期望 Client 错误，得到 {other:?}"),
+            other => panic!("期望 AuthInvalid 错误，得到 {other:?}"),
         }
     }
 
@@ -1301,6 +1346,7 @@ mod tests {
                 stop: vec!["END".to_string()],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -1595,7 +1641,7 @@ mod tests {
     fn map_status_error_categories() {
         assert!(matches!(
             map_status_error(401, "unauth".into(), None),
-            LlmError::Client { status: 401, .. }
+            LlmError::AuthInvalid(_)
         ));
         assert!(matches!(
             map_status_error(429, String::new(), Some(500)),

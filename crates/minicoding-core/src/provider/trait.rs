@@ -48,6 +48,11 @@ pub struct GenerationParams {
     /// 注意：budget 应显著小于 `max_output_tokens`（Anthropic 要求 thinking
     /// 计入输出预算）。
     pub thinking_budget_tokens: Option<u32>,
+    /// PTM-9（2026-08-26 R3 审查）：会话级稳定缓存路由键（OpenAI
+    /// `prompt_cache_key`）。`Some` 时 provider 下发以提升 prompt cache 命中；
+    /// `None` 不发送（Ollama 等无此概念的 provider 忽略）。
+    #[doc(hidden)]
+    pub cache_key: Option<String>,
 }
 
 /// 一次对话请求。
@@ -91,6 +96,27 @@ pub struct Usage {
     pub output_tokens: usize,
     pub cache_read: Option<usize>,
     pub cache_write: Option<usize>,
+}
+
+impl Usage {
+    /// PTM-1（2026-08-26 R3 审查）：流式 Usage 合并语义。
+    ///
+    /// Anthropic `message_start` 携带完整 input/cache 计量，而后续
+    /// `message_delta` 只带 `output_tokens`——若整包替换会把输入侧计量覆盖
+    /// 为 0。合并规则：`output_tokens` 取较大值（增量累计型）；`input_tokens`
+    /// 与 cache 字段取"新值非零/非 None 则替换，否则保留旧值"（快照型）。
+    pub fn merge_incremental(&mut self, newer: &Usage) {
+        self.output_tokens = self.output_tokens.max(newer.output_tokens);
+        if newer.input_tokens > 0 {
+            self.input_tokens = newer.input_tokens;
+        }
+        if newer.cache_read.is_some() {
+            self.cache_read = newer.cache_read;
+        }
+        if newer.cache_write.is_some() {
+            self.cache_write = newer.cache_write;
+        }
+    }
 }
 
 /// LLM provider trait（可替换能力契约，`dyn` 兼容）。

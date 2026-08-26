@@ -118,6 +118,14 @@ impl OllamaProvider {
             "messages": messages,
             "stream": true,
         });
+        // PTM-10（2026-08-26 R3 审查）：模型驻留时间——不设时默认 5 分钟卸载，
+        // 交互间隔稍长即冷启动（数秒级重复加载）。`OLLAMA_KEEP_ALIVE` 可覆盖
+        // （如 `30m`/`-1` 常驻；Go duration 语法由 Ollama 侧解析）。
+        if let Ok(ka) = std::env::var("OLLAMA_KEEP_ALIVE")
+            && !ka.trim().is_empty()
+        {
+            body["keep_alive"] = json!(ka);
+        }
 
         if !req.tools.is_empty() {
             let tools: Vec<Value> = req
@@ -384,10 +392,14 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
                 let args_chunk = function
                     .and_then(|f| f.get("arguments"))
                     .map(ToString::to_string);
-                let id = function
+                // PTM-8（2026-08-26 R3 审查）：Ollama `/api/chat` 不返回
+                // tool_calls[].id——此前兜底为空串，并行工具调用全部 id=""
+                // 相互碰撞，回灌消息换 provider 重放必 400。合成稳定占位 id。
+                let id: Option<String> = function
                     .and_then(|f| f.get("id"))
                     .and_then(Value::as_str)
-                    .map(String::from);
+                    .map(String::from)
+                    .or_else(|| Some(format!("ollama-call-{i}-{}", ulid::Ulid::new())));
                 deltas.push(Delta::ToolCall(ToolCallDelta {
                     index: u32::try_from(i).unwrap_or(0),
                     id,
@@ -465,6 +477,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         }
     }
@@ -903,6 +916,7 @@ mod tests {
                 stop: vec!["END".to_string()],
                 seed: Some(42),
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);

@@ -38,7 +38,13 @@ impl DeltaAccumulator {
             // 思考过程不进消息正文（流式已经 `Event::ReasoningDelta` 广播，见 `rt.rs`）
             Delta::Reasoning(_) => {}
             Delta::ToolCall(tc) => self.push_tool_call(tc),
-            Delta::Usage(u) => self.usage = Some(u),
+            // PTM-1（2026-08-26 R3 审查）：合并语义而非替换——Anthropic 的
+            // `message_delta` 只携带 output_tokens，若整包替换会把
+            // `message_start` 给出的 input_tokens/cache 计量覆盖为 0。
+            Delta::Usage(u) => match &mut self.usage {
+                Some(prev) => prev.merge_incremental(&u),
+                None => self.usage = Some(u),
+            },
             Delta::Stop(reason) => self.stop_reason = Some(reason),
         }
     }

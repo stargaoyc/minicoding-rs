@@ -69,6 +69,17 @@ pub enum LlmError {
     Server { status: u16, body: String },
     #[error("client {status}: {body}")]
     Client { status: u16, body: String },
+    /// PTM-7（2026-08-26 R3 审查）：上下文超长（OpenAI
+    /// `context_length_exceeded` / Anthropic `prompt is too long`）——Runtime
+    /// 可据此结构化识别"该压缩了"，而非落入裸 400。
+    #[error("context length exceeded: {0}")]
+    ContextLength(String),
+    /// PTM-7：API key 无效/无权限（401/403）——上层可区分"换 key 可恢复"。
+    #[error("auth invalid (check API key): {0}")]
+    AuthInvalid(String),
+    /// 请求参数组合不被 provider 支持（如 PTM-3 thinking+tools gate）。
+    #[error("unsupported request configuration: {0}")]
+    Config(String),
     #[error("content filtered: {reason}")]
     Filtered { reason: String },
     #[error("stream parse: {0}")]
@@ -84,8 +95,9 @@ impl LlmError {
     ///
     /// 可重试：`RateLimited`（429）、`Server`（5xx，瞬时故障）、`Network`（连接抖动）、
     /// `Timeout`（请求建立超时）。不可重试：`Client`（4xx，请求本身有问题，重试无意义）、
-    /// `Filtered`（内容审核，重试同样结果）、`Parse`（响应格式错误，重试大概率复现）、
-    /// `NotConfigured`（配置缺失）。
+    /// `ContextLength`（超长，需压缩后重试而非原样重发）、`AuthInvalid`
+    /// （换 key 才可恢复）、`Filtered`（内容审核，重试同样结果）、
+    /// `Parse`（响应格式错误，重试大概率复现）、`NotConfigured`（配置缺失）。
     ///
     /// 设计依据：见 `design.md` §10 错误分类与恢复策略。
     #[must_use]

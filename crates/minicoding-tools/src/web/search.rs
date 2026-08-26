@@ -82,9 +82,11 @@ impl Tool for WebSearch {
                 .map_or(5, |n| n as usize);
 
             // 1. HTTP POST（DDG HTML 端点用 POST 表单）：连接/读取超时 + 整体
-            //    ctx.timeout 兜底
+            //    ctx.timeout 兜底。PTM-5（2026-08-26 R3 审查）：禁用自动重定向
+            // ——与 web.fetch 同款防线：DDG 开放重定向/劫持可把请求带向内网
+            // 元数据地址，自动跟随会绕过 SSRF 校验；3xx 一律报错。
             let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(3))
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(timeout)
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()

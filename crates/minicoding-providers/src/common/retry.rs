@@ -277,6 +277,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         }
     }

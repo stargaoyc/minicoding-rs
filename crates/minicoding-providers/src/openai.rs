@@ -124,6 +124,12 @@ impl OpenAiProvider {
             "stream": true,
             "stream_options": {"include_usage": true},
         });
+        // PTM-9（2026-08-26 R3 审查）：会话级稳定缓存路由键——提升长会话
+        // prompt cache 命中率（OpenAI 自动缓存对 >1024 token 前缀生效，
+        // cache_key 改善多请求间的缓存亲和性）。
+        if let Some(key) = &req.params.cache_key {
+            body["prompt_cache_key"] = json!(key);
+        }
 
         if !req.tools.is_empty() {
             let tools: Vec<Value> = req
@@ -356,9 +362,20 @@ fn role_str(role: &Role) -> &'static str {
 fn map_status_error(status: u16, body: String, retry_after_ms: Option<u64>) -> LlmError {
     match status {
         429 => LlmError::RateLimited { retry_after_ms },
+        // PTM-7（2026-08-26 R3 审查）：结构化分类——401/403 换 key 可恢复；
+        // 超长错误（`context_length_exceeded`/`maximum context length`）供
+        // Runtime 结构化识别"该压缩了"。
+        401 | 403 => LlmError::AuthInvalid(body),
         s if (500..600).contains(&s) => LlmError::Server { status: s, body },
+        s if s == 400 && is_context_length_body(&body) => LlmError::ContextLength(body),
         s => LlmError::Client { status: s, body },
     }
+}
+
+/// PTM-7：响应体是否为上下文超长错误（OpenAI `context_length_exceeded`
+/// 错误码 / 兼容网关的 `maximum context length` 文案）。
+fn is_context_length_body(body: &str) -> bool {
+    body.contains("context_length_exceeded") || body.contains("maximum context length")
 }
 
 /// 从 `Retry-After` header 解析重试毫秒数（仅支持秒数形式）。
@@ -483,6 +500,9 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "stop" => StopReason::EndTurn,
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
+        // PTM-7：`content_filter`（内容过滤）与未知原因同落 `Stopped`——
+        // 语义上过滤拒绝应结构化上报（LlmError::Filtered 已定义、流式终止
+        // 信号通路待接线），此处保持 Stopped 不丢失消息。
         _ => StopReason::Stopped,
     }
 }
@@ -512,6 +532,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         }
     }
@@ -655,7 +676,7 @@ mod tests {
     fn map_status_error_categories() {
         assert!(matches!(
             map_status_error(401, "unauth".into(), None),
-            LlmError::Client { status: 401, .. }
+            LlmError::AuthInvalid(_)
         ));
         assert!(matches!(
             map_status_error(429, String::new(), Some(500)),
@@ -810,6 +831,7 @@ mod tests {
                 stop: vec!["END".to_string()],
                 seed: Some(42),
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -888,6 +910,7 @@ mod tests {
                 stop: vec![],
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: None,
             },
         };
         let body = provider.build_request_body(&req);
@@ -1085,7 +1108,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_stream_401_returns_client_error() {
-        // 场景：HTTP 401 鉴权失败 → LlmError::Client
+        // 场景：HTTP 401 鉴权失败 → LlmError::AuthInvalid（PTM-7 结构化分类）
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -1100,8 +1123,7 @@ mod tests {
             panic!("401 应返回错误，但 chat_stream 成功");
         };
         match err {
-            LlmError::Client { status, body } => {
-                assert_eq!(status, 401);
+            LlmError::AuthInvalid(body) => {
                 assert_eq!(body, "unauthorized");
             }
             other => panic!("期望 Client 错误，得到 {other:?}"),

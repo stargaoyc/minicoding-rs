@@ -133,6 +133,7 @@ async fn call_llm_summary(
             stop: Vec::new(),
             seed: None,
             thinking_budget_tokens: None,
+            cache_key: None,
         },
     };
 

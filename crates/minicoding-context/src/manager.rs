@@ -586,6 +586,8 @@ impl ContextManager for ContextManagerImpl {
 
             let guard = self.messages.read().await;
             // ProviderConfig 暂无 temperature/max_output_tokens 字段，M1 置 None。
+            // PTM-9：会话 id 作为 prompt_cache_key（OpenAI 缓存路由），提升
+            // 长会话 prompt cache 命中率；其他 provider 忽略该字段。
             let params = GenerationParams {
                 model,
                 temperature: None,
@@ -594,6 +596,7 @@ impl ContextManager for ContextManagerImpl {
                 stop: Vec::new(),
                 seed: None,
                 thinking_budget_tokens: None,
+                cache_key: self.session_id.lock().expect("session_id poisoned").clone(),
             };
             Ok(ChatRequest {
                 system,
