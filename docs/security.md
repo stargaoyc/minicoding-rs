@@ -86,10 +86,12 @@ Prompt 注入的危险性来自三要素叠加（"致命三角"）：
 | `fs.read`（越界） | None | Ask | 需确认读取工作目录外 |
 | `fs.list/glob/grep` | None | Allow | |
 | `fs.write` | FileWrite | Ask | 首次询问，可 AllowAlways |
-| `fs.write`（敏感路径） | FileWrite | Deny | `.git/` `.env` `*.secret` |
-| `fs.delete` | FileWrite | Ask | 即使有 allow 规则也建议 Ask |
-| `shell.run` | Command | Ask | 可按前缀 allowlist |
-| `shell.run`（危险前缀） | Command | Deny | `rm -rf` `sudo` `dd` `mkfs` 等 |
+| `fs.write`（VCS 元数据） | FileWrite | Deny | `.git/` `.hg/` `.svn/` 写入硬 Deny（S5） |
+| `fs.write`（约束文件） | FileWrite | Ask | AGENTS.md/CLAUDE.md，不可 AllowAlways（C-23） |
+| `.env`/`*.secret` 写入 | FileWrite | Ask | 读侧自动脱敏（§6.2）；写侧走常规 Ask——R3 修正：原矩阵声称 Deny 无实现 |
+| `fs.delete` | FileWrite | Ask+Deny | 约束文件/VCS 元数据删除硬 Deny，其余 Ask |
+| `shell.run` | Command | Ask | 可按前缀 allowlist（预批准） |
+| `shell.run`（危险命令） | Command | Deny | 见 §4.2 黑名单（rm -rf /、mkfs、dd of=/dev、curl\|sh 等）；`sudo` 本身不在黑名单（容器内常合法），随其命令判定 |
 | `web.fetch` | Network | Ask | 域名 allowlist 可 Allow |
 | `web.fetch`（内网） | Network | Deny | RFC1918 / 169.254.169.254 |
 | `git.apply` | FileWrite | Ask | |
@@ -218,21 +220,27 @@ pub fn resolve_under(workdir: &Utf8Path, input: &str) -> Result<Utf8PathBuf, Too
 
 ### 4.2 危险命令检测
 
-黑名单正则（不可被 allow 覆盖）：
+> **实现状态（R3，2026-08-26）**：本节所述防线已在 `policy::builtin::hits_dangerous_patterns`
+> /`is_remote_script_execution` 落地（词法近似判定，非正则），回归测试
+> `dangerous_commands_denied`/`benign_commands_not_dangerous_denied` 锁定行为。
+>
+> 诚实边界（与 §19.1 一致）：变量展开、base64 变形等不在词法能力内，
+> 由 OS 沙箱与用户审批兜底。
+
+黑名单模式（不可被 allow 覆盖，匹配后直接 `Deny` 不进入 Ask）：
 
 ```
-rm\s+-rf\s+/          # 删根
-rm\s+-rf\s+~          # 删家目录
-:\(\)\s*\{\s*:\|:&\s*\};:   # fork bomb
-mkfs                  # 格式化
-dd\s+.*of=/dev/       # 写设备
->\/dev\/sd[a-z]       # 写设备
-curl.*\|\s*sh         # 管道执行远程脚本
-wget.*\|\s*sh
-chmod\s+-R\s+777\s+/
+:(){ ... };:           # fork bomb 字面量（整串检查）
+mkfs*                  # 格式化（任意 mkfs 前缀变体）
+dd of=/dev/<dev>       # 写设备（含 of==/dev/ 连写形态）
+rm <递归旗标> /|/*     # 递归删除根（-r/-R/--recursive/-rf/-Rf/-fr 等）
+chmod -R <mode> /|/*   # 递归授权 + 根目标
+chown -R <spec> /|/*   # 同上
+curl|wget ... | sh|bash|zsh|dash|ksh|ash   # 管道执行远程脚本（切段前整串判定）
+sudo/doas 前缀剥离后同上判定               # 提权不改变危险性
 ```
 
-匹配后直接 `Deny`，不进入 Ask。
+另见 §4.1 的 shell 旁路保护（约束文件/VCS 元数据写入拦截）。
 
 ### 4.3 资源限制
 
@@ -329,12 +337,24 @@ deny_domains = ["*.internal.corp"]
 
 ### 7.1 审计日志
 
-每次工具调用写一条审计记录到 `~/.minicoding/audit.log`（JSONL）：
+每次**权限决策**与关键工具事件写一条审计记录到 `~/.minicoding/audit.log`（JSONL）——只读工具调用不经权限链故无记录（R3 口径修正）：
 
 ```json
-{"ts":"2026-07-24T10:00:00Z","session":"sess_01H...","turn":3,"tool":"fs.write","input":{"path":"src/main.rs","bytes":1024},"decision":"allow","rule":"allow:fs.write:src/**","ok":true,"elapsed_ms":4}
-{"ts":"2026-07-24T10:00:05Z","session":"sess_01H...","turn":3,"tool":"shell.run","input":{"cmd":"rm -rf target"},"decision":"deny","rule":"builtin:dangerous_command","ok":false,"reason":"dangerous command pattern"}
+{"ts":"2026-08-26T10:00:00Z","session":"sess_01H...","kind":"permission_resolved","tool":"fs.write","decision":"allow","detail":"user allowed fs.write always @ src (persisted)"}
+{"ts":"2026-08-26T10:00:05Z","session":"sess_01H...","kind":"tool_result","tool":"shell.run","decision":"sandbox_denied","detail":"authoritative=true kind=WriteForbidden breaker=3 detail=landlock denied write"}
 ```
+
+字段说明（与 `core::storage::AuditRecord` 一致，R3 修正——原示例的
+`turn/input/rule/ok/elapsed_ms` 字段不存在）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ts` | RFC3339 | 决策时间 |
+| `session` | string | 会话 id |
+| `kind` | enum | `permission_requested`/`permission_resolved`/`tool_call`/`tool_result`/`hook_run`/`file_undone`/`compress` |
+| `tool` | string? | 工具名（模式切换类事件为 null） |
+| `decision` | string? | 决策（allow/deny/…/mode_switch/sandbox_denied） |
+| `detail` | string | 结构化 JSON 文本（来源注记、压缩区间等） |
 
 ### 7.2 审计完整性
 

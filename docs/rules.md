@@ -24,7 +24,12 @@
 任何 `SideEffect != None` 的工具调用，必须经 `PermissionPolicy::check` → `PermissionPrompter` 解析为 `Allow` 后才执行。LLM 无权跳过；即使 LLM 在文本中"声称已获授权"，Runtime 仍独立决策。
 
 ### C-02 内置黑名单不可覆盖
-危险命令（`rm -rf /`、`sudo`、`dd of=/dev/`、fork bomb 等）、SSRF 内网目标、敏感路径（`.git/`、`.env`、`*.secret`）由 `policy::builtin` 硬编码拒绝，**任何用户配置与 LLM 输出都无法覆盖**。
+内置黑名单由 `policy::builtin` 硬编码拒绝，**任何用户配置与 LLM 输出都无法覆盖**。覆盖面（R3，2026-08-26 对齐实现）：
+1. **约束文件破坏**：AGENTS.md/CLAUDE.md 删除（fs.delete Deny）、写入走不可 AllowAlways 的 Ask 通道；
+2. **VCS 元数据写入**：`.git/.hg/.svn` 内写文件硬 Deny；
+3. **shell 旁路**：写删上述目标的命令形态 + 危险命令词法黑名单（fork bomb/mkfs/dd of=/dev/rm 递删根/chmod -R 根/curl\|sh——见 security.md §4.2；词法近似，变形由沙箱兜底）；
+4. **SSRF 内网目标**：`web.fetch` 私网/元数据地址拦截。
+注：R3 前本文承诺的"通用危险命令黑名单"无实现（幻影约束），现已落地并补回归测试。
 
 ### C-03 路径不可越界
 所有文件工具输入经 `sandbox_path` 规范化校验，越界工作目录直接 `PathEscaped` 错误。LLM 输出的 `../../etc/passwd`、符号链接绕过一律拒绝。
@@ -131,7 +136,7 @@ MCP 远程工具的 `is_read_only()` 与 `side_effect()` 据 server schema 的 `
 ### C-32 asyncRewake 协议契约
 `async_rewake` 字段（见 `hooks.md` §11）的协议级约束：
 - **事件白名单**：仅 `PostToolUse`/`PostToolUseFailure`/`Stop` 事件的 `HookOutput.async_rewake` 有效；其他事件返回 `async_rewake = Some` 视为协议错误，Runtime 忽略该字段、记审计（source=hook_protocol_violation）、不创建后台任务。
-- **字段必填**：`AsyncRewakeSpec` 的 `task_id`/`estimated_duration`/`wake_prompt` 均必填且非空；缺字段视为协议错误。
+- **字段必填**（R3 对齐代码）：`AsyncRewakeSpec` 实际字段为 `estimated_duration_sec`(u32) 与 `description`(String)；超时取 `estimated_duration × 2`。原 `task_id`/`wake_prompt` 为设计稿残留字段（不存在）。
 - **超时硬约束**：后台 Hook 超过 `estimated_duration × 2` 自动 kill，注入"async_rewake timeout"提示，不阻塞主流程。
 - **唤醒注入边界**：`wake_prompt` 作为 system reminder 注入，包裹 `<async_rewake>` 边界（与 C-26 呼应），声明非指令。
 

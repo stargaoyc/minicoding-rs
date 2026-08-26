@@ -79,7 +79,7 @@ home = "0.5"
 # 语义化版本（ExtensionManifest 版本字段用，见 design.md §23）
 semver = { version = "1.0", features = ["serde"] }
 
-# HTTP 客户端（仅 providers/mcp 引入，见 tech-stack.md §3）
+# HTTP 客户端（直接依赖：providers；optional：tools[web]/core[ts]/server[otel 传递]；mcp 经 rmcp feature 传递。见 tech-stack.md §3；R3 ARCH-8 注释修正）
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # URL 解析（轻量，无网络 IO；SSRF 校验用，见 policy/ssrf.rs）
@@ -144,7 +144,8 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 # LSP server（仅 minicoding-server 引入，feature gate `lsp`，见 modules.md §16.3）
 tower-lsp = "0.20"
 
-# TypeScript 类型生成（仅 minicoding-protocol 引入，M9 前端 DTO 契约，见 AGENTS.md §8.4）
+# TypeScript 类型生成（protocol + core + server 三处以 optional `ts` feature 引入，
+# gen-types 脚本串起导出链；M9 前端 DTO 契约，见 AGENTS.md §8.4；R3 ARCH-8 修正）
 # `serde-json-impl` 提供 `serde_json::Value` → `any` 的 TS 实现（DTO 含 JSON 字段）
 ts-rs = { version = "10", features = ["no-serde-warnings", "serde-json-impl"] }
 

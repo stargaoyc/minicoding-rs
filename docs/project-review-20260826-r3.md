@@ -305,6 +305,33 @@ features.md 统计表 205 项精确一致；rules.md C-01..35 编号连续；des
 | R3-8 | 工程化 | ENG-1..11 |
 | R3-9 | 文档 | DOC-1..12 + history 归档 |
 
-## 12. 修复执行记录
+## 12. 修复执行记录（R3，2026-08-26 全部完成）
 
-（随批次追加）
+| 阶段 | 提交 | 覆盖问题 |
+|------|------|---------|
+| R3-1 | `029fbe0` 后首个 fix | RT-1/SEC-2/SEC-3/PTM-6/CTX-1/SEC-4/SEC-5/C-27 收紧/PTM-11/PTM-12；回归测试经变异验证 |
+| R3-1b | `d9e3232` | ToolContext.audit 字段全仓初始化补齐 |
+| R3-2 | `8c6c8e9` | RT-2/RT-3/RT-5/RT-6/RT-7/RT-8/RT-9 + 配对不变式测试 |
+| R3-3 | `977b343` | PTM-1/2/3/5/7/8/9/10/14 |
+| R3-4 | `7fdeed8` 等 | FE-1/2(核实为过时注释)/3/4/5/6/7/8/9/10/11/12/13/15 |
+| R3-5 | `ff47d38` | CTX-2/3/4/5/10/11/13 |
+| R3-6 | `1e11c20` 等 | SEC-1 黑名单落地/SEC-8/SEC-10/SEC-11/SEC-16/SEC-19 |
+| R3-7 | `e4a8889` | ARCH-2/3/4/5/6 |
+| R3-8 | `7bd0e07` | ENG-1/3/4/5/6/7/9/11 |
+| R3-9 | 本提交 | DOC-1~12 全量修正 + history 归档 + ARCH-1 文档登记 |
+
+### 12.1 有意未修项（记录为开放项）
+
+| 编号 | 原因 | 去向 |
+|------|------|------|
+| PTM-4 子代理 server/CLI 接线 | 需 InProcessSubagentRunner 在双轨 builder 合并后统一接线（大改造） | roadmap |
+| FE 双轨 builder 合并 | 同上——server 形态能力对齐的单一根因 | roadmap 高优 |
+| SEC-3 协议侧 options 下发 | PermissionRequested DTO 增加 options 字段涉及四端协议版本协调（core 门控已兜底） | roadmap |
+| PTM-3 thinking 块持久化 | 需 Message 模型扩展 reasoning+signature 字段与回放逻辑（已 gate 报错防呆） | roadmap |
+| macOS Seatbelt file-read 白名单收敛 | profile 改动需真机矩阵验证，风险大于收益暂缓 | roadmap |
+| Playwright E2E / server 集成测试 | 测试资产扩展独立排期 | roadmap |
+| ENG-2 MSRV 验证 job | stable 1.99 未发布前无法验证，README 已如实标注 nightly 要求 | 待 stable |
+
+### 12.2 文档同步清单（本阶段）
+
+security.md（§2.2 矩阵/§4.2 实现状态/§7.1 审计格式）、rules.md（C-02 对齐/C-32 对齐）、design.md（§8.6 实现状态框/@import 语法/24.1 编号）、api.md（LlmProvider 签名/GenerationParams/ToolContext）、hooks.md（AsyncRewakeSpec/事件名）、data-model.md（mcp_choices 结构/cred store）、getting-started.md（auth login→cred store/seccomp 状态/parent_uuid 移除）、README.md（--tui→独立二进制/dist-workspace.toml）、features.md（工作量表 M8=9/合计 74/83、≈204→205）、tech-stack.md+roadmap.md+AGENTS.md（seccomp 已接状态扩散）、observability.md/learning-guide.md/troubleshooting.md（交叉引用失效修复）、modules.md（ARCH-1 persist.rs 登记豁免/worktree 下沉注记/prelude 节选声明）、development-process.md（sandbox-run 反转注记保留原决策、review-report 链接指向 history）。

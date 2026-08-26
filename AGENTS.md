@@ -30,7 +30,7 @@
 - 错误：库 crate `thiserror`，边界 crate `anyhow`
 - 路径：`camino::Utf8PathBuf`（UTF-8 保证）
 - HTTP：`reqwest`（rustls-tls，不裸用 hyper）
-- 沙箱：自研驱动（landlock 已接，**seccomp 待接入**）——`sandbox-run` 因 EUPL-1.2 许可证弃用（见 tech-stack.md §13），AGENTS.md 原"不自研"条目随之回收
+- 沙箱：自研驱动（landlock + seccomp 均已接，seccomp 为 opt-in feature `--features seccomp`，默认关）——`sandbox-run` 因 EUPL-1.2 许可证弃用（见 tech-stack.md §13、security.md §8.11），AGENTS.md 原"不自研"条目随之回收
 - MCP：`rmcp` 2.2（官方 Rust MCP SDK，**不自研** stdio/http）
 - 详见 `docs/tech-stack.md`
 
@@ -45,7 +45,7 @@ minicoding-rs (workspace)
     ├── minicoding-memory        # 长期/Auto/会话记忆 + AGENTS.md loader
     ├── minicoding-hooks         # HookRegistry + ScriptHook + asyncRewake
     ├── minicoding-journal       # FileChangeJournal + /undo
-    ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock；seccomp 待接入）
+    ├── minicoding-sandbox       # OS 沙箱驱动（pre_exec 胶水 + landlock + seccomp[opt-in]）
     ├── minicoding-mcp           # MCP client/server（rmcp 2.2）+ 进程池 + 后台预热
     ├── minicoding-storage       # JSONL 存储 + audit.log
     ├── minicoding-providers     # LLM Provider（OpenAI/Anthropic/Ollama）+ 小 LLM
@@ -230,7 +230,7 @@ windows = { version = "...", features = ["..."] }
 
 | 能力 | 选型 | 禁止自研 |
 |------|------|---------|
-| 沙箱统一 API | 自研驱动（landlock 已接，seccomp 待接入）——原选 sandbox-run 因 EUPL-1.2 弃用，见 tech-stack.md §13 |
+| 沙箱统一 API | 自研驱动（landlock 已接，seccomp 已接[opt-in feature]）——原选 sandbox-run 因 EUPL-1.2 弃用，见 tech-stack.md §13 |
 | Linux 文件沙箱 | `landlock`（直接调用，自研 pre_exec 胶水） | 不手写 BPF |
 | Linux syscall 过滤 | `libseccomp` | 不手写 BPF |
 | MCP client/server | `rmcp` 2.2 | 不自实现 stdio/http 薄封装 |

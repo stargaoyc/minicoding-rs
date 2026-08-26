@@ -80,7 +80,7 @@ minicoding serve --as-mcp-server
 ```
 minicoding-rs/
 ├── Cargo.toml
-├── cargo-dist.toml              # 跨平台二进制构建配置
+├── dist-workspace.toml          # 跨平台二进制构建配置（cargo-dist）
 ├── README.md
 ├── AGENTS.md                    # AI 助手开发约束
 ├── docs/                        # 设计文档
@@ -160,7 +160,7 @@ minicoding-rs/
 | 形态 | 入口 | 适用场景 | 配置方式 |
 |------|------|---------|---------|
 | CLI | `minicoding` | 脚本化、批量执行（`minicoding exec`）、CI/容器 | `--api-base`/`--provider-name`/`config.toml`/env/keyring |
-| TUI | `minicoding --tui` | 全屏交互式终端会话 | 同 CLI |
+| TUI | `minicoding-tui`（独立二进制） | 全屏交互式终端会话 | 同 CLI |
 | Web | `minicoding-server --web ./dist` | 浏览器访问，远程会话，多客户端 | `--api-base`/`config.toml`/env/keyring + `POST /sessions` body |
 | 桌面 | `minicoding-desktop`（feature `desktop`） | Tauri 原生应用，系统托盘 + 全局快捷键 | 应用内设置界面（写入 `config.toml` + keyring） |
 

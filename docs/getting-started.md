@@ -51,7 +51,7 @@ cargo --version
 
 **当前无需任何系统包**（2026-08-25 R2 审查 DOC-2 修正）：Linux 沙箱仅依赖
 内核 Landlock LSM（5.13+ 内核原生支持），`libseccomp` **尚未接入**
-（`seccomp 待接入`，见 `tech-stack.md` §13），安装指引中的系统包为历史残留，
+（R3 修正：seccomp 已落地为 opt-in feature——构建时 `--features seccomp` 才需要 libseccomp-dev 系统包），
 照做只会装无用软件包：
 
 | 平台 | 系统依赖 | 安装命令 |
@@ -106,10 +106,10 @@ Windows PowerShell：
 $env:OPENAI_API_KEY = "sk-..."
 ```
 
-交互场景推荐用 OS keyring（M4 交付 `auth login` 子命令，见 `data-model.md` §7）：
+交互场景推荐用 OS keyring（`cred` 子命令族；R3 修正——原文档的 `auth login` 子命令不存在）：
 
 ```bash
-minicoding auth login --provider anthropic
+minicoding cred store --provider anthropic
 # 输入密钥（不回显）→ 写入 OS keyring
 minicoding auth status
 ```
@@ -220,7 +220,7 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 |------|------|------|
 | `cargo audit` 报漏洞 | 依赖含已知 RUSTSEC 条目 | `cargo update` 升级补丁版本；CI 阻塞合并（见 `AGENTS.md` §6.3） |
 | `clippy -D warnings` 失败 | 代码违反 `clippy::all` + `clippy::pedantic`（`AGENTS.md` §2.9） | 按提示修复，不全局 `#![allow(...)]` |
-| 首次运行权限报错 | 未设置 `OPENAI_API_KEY` 或 keyring 不可用 | 设环境变量或 `minicoding auth login` |
+| 首次运行权限报错 | 未设置 `OPENAI_API_KEY` 或 keyring 不可用 | 设环境变量或 `minicoding cred store` |
 | 非 TTY 下副作用工具被拒 | `NonInteractivePrompter` 默认 `deny`（`security.md` §2.1） | 显式 `--allow` 或改 `permission.non_tty_strategy` |
 
 ---
@@ -235,7 +235,7 @@ macOS 12+ 由 `sandbox-run` 生成 profile 并 `apply_sandbox`，无需手写 pr
 |------|--------------|-------------|-----------|-------|
 | 实现语言 | Rust（edition 2024，MSRV 1.99+） | TypeScript/Node | Rust | Python |
 | 内存安全 | 编译期保证，无 GC 暂停 | 运行时 GC | 编译期保证 | 运行时 GC |
-| 沙箱机制 | OS 级一等公民：Landlock（自研胶水）+ Seatbelt + Windows Job Object，两道防线（应用层 + 内核级）；seccomp 待接入 | 应用层为主 | Landlock + seccomp（参考对象） | 无内核级沙箱 |
+| 沙箱机制 | OS 级一等公民：Landlock（自研胶水）+ Seatbelt + Windows Job Object + seccomp（opt-in feature），两道防线（应用层 + 内核级） | 应用层为主 | Landlock + seccomp（参考对象） | 无内核级沙箱 |
 | 沙箱默认状态 | Opt-out（`WorkspaceWrite` 默认启用内核隔离） | Opt-in | Opt-out | N/A |
 | MCP 支持 | `rmcp` 2.2 官方 SDK，stdio + HTTP + OAuth，project 作用域首次批准（C-24） | 支持 | 支持 | 不支持 |
 | Hooks 系统 | 10 类事件 + ScriptHook + asyncRewake，L0 不可覆盖 | 27 类事件，依赖自觉 | 无 | 无 |
@@ -313,7 +313,7 @@ CC 用 JSON，minicoding 用 TOML（`data-model.md` §3.0、`architecture.md` §
 
 | CC `settings.json` 字段 | minicoding `config.toml` 字段 | 说明 |
 |------------------------|------------------------------|------|
-| `apiKeyHelper` | 环境变量 `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` 或 `minicoding auth login` | 凭证不写入配置明文（C-04，`security.md` §6） |
+| `apiKeyHelper` | 环境变量 `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` 或 `minicoding cred store` | 凭证不写入配置明文（C-04，`security.md` §6） |
 | `permissions.allow` | `[[allow]]`（`policy.toml`）或 `--allow` CLI | specificity=2 的 L1 条目（`data-model.md` §5） |
 | `permissions.deny` | `[[deny]]`（`policy.toml`）或 `--deny` CLI | specificity=2 的 L1 条目 |
 | `hooks` | `[hooks]` + `[[hooks.<Event>]]` | 事件数从 27 减到 10（见 3.3） |
@@ -393,7 +393,9 @@ minicoding 按 CC 的事件分类精简为 10 类（`hooks.md` §2、§10），�
 
 ### 3.4 会话历史：JSONL 兼容性
 
-CC 与 minicoding 都用 JSONL 追加写（`data-model.md` §2）。minicoding 的 `message` 行新增可选字段 `parent_uuid`（支持 Fork/压缩边界/Side-chain），**前向兼容**（`data-model.md` §2.4）：
+CC 与 minicoding 都用 JSONL 追加写（`data-model.md` §2.2）。minicoding 消息行为
+header 行 + 记录行结构，压缩边界由 `MessageMeta.compressed_range` 承载——
+**无 `parent_uuid` 字段**（R3 修正：原文为已废弃设计稿）：
 
 - 旧文件（v=1，无 `parent_uuid`）读取时按 `None` 处理，`Storage::load` 线性扫描时按「上一行 `id`」自动回填，等价于纯数组顺序模型；
 - 旧文件零迁移可用；
@@ -471,7 +473,7 @@ glob = "{.git,.env,*.secret}/**"
 | `CLAUDE.md` Agent 编辑 | 允许 | 默认 `Ask`，不可 `AllowAlways`（C-23） | 改用 `long_term.md` 存动态记忆 |
 | 17 类细粒度 Hook 事件 | 有 | 未实现 | 合并到 10 类事件或用 `EventBus` 订阅 |
 | `asyncRewake` 协议 | CC 协议 | minicoding 协议（3 并发上限、超时 kill、事件白名单） | 按 `hooks.md` §11 调整 |
-| 浏览器认证缓存 | 支持 | 不支持，优先 API Key（`security.md` §9.3） | 用 `minicoding auth login` 写 keyring |
+| 浏览器认证缓存 | 支持 | 不支持，优先 API Key（`security.md` §9.3） | 用 `minicoding cred store` 写 keyring |
 | `~/.claude/` 路径 | 专用 | `~/.minicoding/`（`MINICODING_HOME` 可覆盖） | 迁移文件到新路径 |
 | settings.json | JSON | config.toml（TOML） | 手动转换格式 |
 | CC 特有 IDE 集成 | 深度集成 | M8 交付 stdin/stdout NDJSON 协议 | 等待 M8 或用 CLI 模式 |
@@ -515,7 +517,7 @@ cargo install minicoding
 ```bash
 export OPENAI_API_KEY="sk-..."
 # 或
-minicoding auth login --provider openai
+minicoding cred store --provider openai
 ```
 
 ### 4.3 第一次工具调用：读取并解释 Cargo.toml

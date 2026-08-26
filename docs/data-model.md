@@ -364,15 +364,17 @@ source: user | updated: 2026-07-24 | confidence: 1.0
 | `mcp.json` | `<repo_root>/.minicoding/mcp.json` | project 作用域（入版本控制，团队共享） |
 | `mcp_choices.toml` | `$MINICODING_HOME/mcp_choices.toml` | project 作用域 server 的逐人批准记忆 |
 
-`mcp_choices.toml` 结构：
+`mcp_choices.toml` 结构（R3 对齐 `mcp/approval.rs::ChoicesFile`——按项目指纹分桶，
+原扁平 `[[choices]]` 数组为设计稿残留）：
 
 ```toml
-# 记录用户对哪些 project 作用域 MCP server 批准/拒绝
-[[choices]]
-repo_root = "e:/projects/foo"
-server = "github"
-decision = "allow"            # allow | deny
-chosen_at = "2026-07-24T10:00:00Z"
+version = 1
+
+# choices[<项目指纹>][<server>] = { project_path, state, decided_at }
+[choices."fp:a1b2c3...".github]
+project_path = "e:/projects/foo"   # canonical path（审计可读）
+state = "allow"                    # allow | deny（原 decision/chosen_at 字段名已废弃）
+decided_at = "2026-07-24T10:00:00Z"
 ```
 
 首次遇到含 `.minicoding/mcp.json` 的仓库时，逐个 server 弹窗询问，结果写入此文件；`minicoding mcp reset-project-choices` 清空。
@@ -384,13 +386,13 @@ chosen_at = "2026-07-24T10:00:00Z"
 | 来源 | 优先级 | 说明 |
 |------|--------|------|
 | 环境变量（`ANTHROPIC_API_KEY`） | 1 | CI/容器场景首选 |
-| OS keyring（`keyring` crate） | 2 | 交互场景首选，`minicoding auth login` 写入 |
+| OS keyring（`keyring` crate） | 2 | 交互场景首选，`minicoding cred store` 写入 |
 | 配置文件 `api_key` 字段 | 3 | **强烈不推荐**，仅本地调试；启动告警 |
 
 `auth` 子命令：
 
 ```
-minicoding auth login --provider anthropic
+minicoding cred store --provider anthropic
   > 输入密钥（不回显）→ 写入 keyring
 
 minicoding auth status

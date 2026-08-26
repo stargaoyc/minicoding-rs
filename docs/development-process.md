@@ -4,7 +4,7 @@
 >
 > **与其它文档的关系**：本文是**过程性记录**，不替代任何规范性文档。里程碑范围以 [`roadmap.md`](./roadmap.md) 为准、任务粒度以 [`dev-plan.md`](./dev-plan.md) 为准、功能总账以 [`features.md`](./features.md) 为准、开发约束以 [`../AGENTS.md`](../AGENTS.md) 为准、技术选型以 [`tech-stack.md`](./tech-stack.md) 为准、设计机制以 [`design.md`](./design.md) 为准。本文仅做"如何走到今天"的回顾性梳理，引用以上文档时使用相对路径。
 >
-> **记录时点**：M0–M9 已交付（M9 为低优先级可选里程碑，已实现 W-01..W-10）。审查报告 [`review-report.md`](./review-report.md) 结论为"通过"。
+> **记录时点**：M0–M9 已交付（M9 为低优先级可选里程碑，已实现 W-01..W-10）。审查报告 [`review-report.md`](./history/review-report.md) 结论为"通过"。
 
 ---
 
@@ -370,10 +370,10 @@ AI 助手的编码边界由 [`AGENTS.md`](../AGENTS.md) §7.3"不绕过约束"�
 
 ### 4.5 代码审查流程
 
-代码审查流程在 [`dev-plan.md`](./dev-plan.md) §2.3 与 [`review-report.md`](./review-report.md) 中固化：
+代码审查流程在 [`dev-plan.md`](./dev-plan.md) §2.3 与 [`review-report.md`](./history/review-report.md) 中固化：
 
 - **PR checklist**：CI 全绿（fmt/clippy -D warnings/test/audit/deny）、新增逻辑有单测、L0 约束自检、文档同步、安全边界 reviewer approve、性能基准对比、无凭证泄露。
-- **审查报告**：[`review-report.md`](./review-report.md) 记录 2026-08-02 的全量审查——逐 crate 源码阅读 + 约束与实现映射核验 + 文档一致性检查，结论"通过"，发现若干低危问题与文档/实现不一致（D1-D4、C1-C4）。
+- **审查报告**：[`review-report.md`](./history/review-report.md) 记录 2026-08-02 的全量审查——逐 crate 源码阅读 + 约束与实现映射核验 + 文档一致性检查，结论"通过"，发现若干低危问题与文档/实现不一致（D1-D4、C1-C4）。
 - **审查清单**：全部 17 crate 源码阅读、配置文件核验、docs 文档交叉核验、L0 硬约束实现映射核验、功能统计表一致性核验、最终报告输出。
 
 ---
@@ -565,7 +565,7 @@ pre-commit 配置在 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml)，�
 
 ### 7.6 其它挑战（来自审查报告）
 
-[`review-report.md`](./review-report.md) §4 记录的发现与建议：
+[`review-report.md`](./history/review-report.md) §4 记录的发现与建议：
 
 - **D1 文档/实现不一致**：`features.md` X-22 标注"部分实现"但代码已实现统一 dispatch → 更新为"已实现"。
 - **D3 README crate 列表不全**：`README.md` 列 14 crate 但实际 17 → 补充完整。
@@ -580,7 +580,7 @@ pre-commit 配置在 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml)，�
 
 ### 8.1 做得好的地方
 
-1. **架构纪律性强**：[`review-report.md`](./review-report.md) 结论"代码质量高，架构纪律性强，安全约束在实现层落地扎实"。trait 定义集中在 core、领域 crate 单向依赖、重依赖 feature gate 隔离、`unsafe` 仅限 FFI 且带 `// SAFETY:` 注释——这些约束从 M0 贯彻到 M9，未因赶进度而放松。
+1. **架构纪律性强**：[`review-report.md`](./history/review-report.md) 结论"代码质量高，架构纪律性强，安全约束在实现层落地扎实"。trait 定义集中在 core、领域 crate 单向依赖、重依赖 feature gate 隔离、`unsafe` 仅限 FFI 且带 `// SAFETY:` 注释——这些约束从 M0 贯彻到 M9，未因赶进度而放松。
 2. **L0 硬约束实现层强制**：C-01..C-30 全部在 Rust 实现层强制，不依赖 LLM 自觉。内置黑名单不可覆盖、AGENTS.md 不可被 Agent 自主编辑、Auto memory 不可作为越权通道、压缩熔断不可被 LLM 绕过——这些安全底线经审查报告核验全部落地。
 3. **里程碑前置决策**：将沙箱/Hooks/MCP/Plan/Journal 从原 M4/M7 前置到独立里程碑，避免 MVP 形成后再大改权限/工具边界。这一决策在 M4/M5 交付时验证了价值——MCP 远程工具与文件回滚都依赖沙箱作为安全底线，同里程碑交付避免了"有 Hook 无沙箱兜底"的窗口期。
 4. **不自研能用库的**：沙箱用 `sandbox-run`、MCP 用 `rmcp`、HTTP 用 `reqwest`、glob 用 `globset`、正则用 `regex`、路径用 `camino`、LSP 用 `tower-lsp`——全部用主流库，避免了重复造轮子与维护负担。
@@ -590,10 +590,10 @@ pre-commit 配置在 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml)，�
 
 ### 8.2 可改进的地方
 
-1. **文档状态滞后**：[`review-report.md`](./review-report.md) D4 指出 `features.md` 大量标注"规划中"但代码已实现。文档同步规范虽在 [`AGENTS.md`](../AGENTS.md) §4 强制，但功能状态字段的批量更新仍依赖人工，缺少自动化校验。
-2. **大文件未拆分**：[`review-report.md`](./review-report.md) C4 指出 `app.rs`/`main.rs`/`markdown.rs` 等 TUI 文件行数偏大，超过 250 LOC 上限。M7 TUI 快速迭代时未及时拆分，遗留技术债。
-3. **时间字符串格式不统一**：[`review-report.md`](./review-report.md) C2 指出 `storage/index.rs` 用 RFC3339 字符串而非 `time::OffsetDateTime` 序列化，存在格式漂移风险。M3 实现时未严格遵守 [`AGENTS.md`](../AGENTS.md) §2.5"时间用 `time::OffsetDateTime`"约定。
-4. **`README.md` crate 列表不全**：[`review-report.md`](./review-report.md) D3 指出 `README.md` 列 14 crate 但实际 17。M5/M6/M8 补齐 crate 时未同步更新 README。
+1. **文档状态滞后**：[`review-report.md`](./history/review-report.md) D4 指出 `features.md` 大量标注"规划中"但代码已实现。文档同步规范虽在 [`AGENTS.md`](../AGENTS.md) §4 强制，但功能状态字段的批量更新仍依赖人工，缺少自动化校验。
+2. **大文件未拆分**：[`review-report.md`](./history/review-report.md) C4 指出 `app.rs`/`main.rs`/`markdown.rs` 等 TUI 文件行数偏大，超过 250 LOC 上限。M7 TUI 快速迭代时未及时拆分，遗留技术债。
+3. **时间字符串格式不统一**：[`review-report.md`](./history/review-report.md) C2 指出 `storage/index.rs` 用 RFC3339 字符串而非 `time::OffsetDateTime` 序列化，存在格式漂移风险。M3 实现时未严格遵守 [`AGENTS.md`](../AGENTS.md) §2.5"时间用 `time::OffsetDateTime`"约定。
+4. **`README.md` crate 列表不全**：[`review-report.md`](./history/review-report.md) D3 指出 `README.md` 列 14 crate 但实际 17。M5/M6/M8 补齐 crate 时未同步更新 README。
 5. **覆盖率初期偏低**：M1–M2 期间覆盖率约 68%，低于 80% 门禁。虽通过细化门禁（排除前端层）与补测攻坚最终达到 82.9%+，但初期未将前端层排除出门禁的设计导致了短暂的覆盖率卡点。
 6. **里程碑 task 数与统计表不一致**：[`dev-plan.md`](./dev-plan.md) 附录统计 M8 = 6 task，但 §9.3 实际列出 T-M8-1..T-M8-9 共 9 task；[`features.md`](./features.md) 统计表 M8 = 6 task。统计表与实际 task 列表存在偏差，需以实际 task 列表为准并修正统计。
 
@@ -603,7 +603,7 @@ pre-commit 配置在 [`.pre-commit-config.yaml`](../.pre-commit-config.yaml)，�
 2. **AI 助手行为约束需显式文档化**：[`AGENTS.md`](../AGENTS.md) §7 把"先读后改""不臆造 API""不绕过约束""不创建测试除非要求""保持简洁"等约束显式写明，AI 助手才能稳定遵守。口头约定不可靠。
 3. **重依赖 feature gate 隔离是跨平台关键**：Tauri/landlock/libseccomp/rmcp/ratatui/windows 等重依赖通过 feature gate / target cfg 隔离在对应实现 crate，避免污染 core 与其它 crate，是跨平台编译可行的前提。
 4. **Event Sourcing 平滑过渡**：与原 JSONL 消息日志双写并存，新会话写事件流，旧会话回退消息日志，避免了"一刀切迁移"的风险。这一模式可复用于其它架构演进。
-5. **审查报告价值高**：[`review-report.md`](./review-report.md) 全量审查发现的问题（D1-D4 文档不一致、C1-C4 代码建议）是日常 PR 评审难以发现的跨 crate 系统性问题。定期全量审查值得坚持。
+5. **审查报告价值高**：[`review-report.md`](./history/review-report.md) 全量审查发现的问题（D1-D4 文档不一致、C1-C4 代码建议）是日常 PR 评审难以发现的跨 crate 系统性问题。定期全量审查值得坚持。
 6. **平台优先级策略避免并行开发瓶颈**：M4 仅 Linux、M5+ 补 macOS、M6+ 补 Windows 的平台优先级策略，让沙箱实现与 CI matrix 按里程碑递进，避免三平台并行开发拖慢主线。
 
 ---

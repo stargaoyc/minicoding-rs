@@ -376,14 +376,15 @@ pub trait LlmProvider {
         req: ChatRequest,
     ) -> Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>;
 
-    /// 非流式便捷封装（默认基于 stream 聚合）。
-    async fn chat(&self, req: ChatRequest) -> Result<Message, LlmError> { /* default */ }
+    // R3 对齐源码（provider/trait.rs）：trait 无 `chat()` 默认方法——
+    // 流式聚合由 Runtime `stream_llm` 承担；`Delta::Reasoning(String)` 变体
+    // 见 §3.2 事件表。
 
     async fn count_tokens(&self, messages: &[Message]) -> usize;
 }
 
 pub struct ChatRequest {
-    pub system: SystemPrompt,
+    pub system: String,          // R3 修正：原 SystemPrompt 类型不存在
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSchema>,
     pub params: GenerationParams,
@@ -396,6 +397,8 @@ pub struct GenerationParams {
     pub max_output_tokens: Option<usize>,
     pub stop: Vec<String>,
     pub seed: Option<u64>,
+    pub thinking_budget_tokens: Option<u32>, // extended thinking（Anthropic）
+    pub cache_key: Option<String>,           // prompt_cache_key 路由（R3 补）
 }
 
 pub enum Delta {
@@ -516,6 +519,7 @@ pub struct ToolContext {
     pub env: HashMap<String, String>,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    pub max_read_bytes: usize, // R3 补（CORE-2 接线：fs_max_read_bytes 配置消费方）
     /// 可选注入（M4+）：沙箱驱动/策略、journal、点对点 prompter + 事件总线
     /// （`ui.ask` 主动提问用，见 `design.md` §9.1）。
     pub sandbox_driver: Option<Arc<dyn SandboxDriver>>,
@@ -523,6 +527,7 @@ pub struct ToolContext {
     pub journal: Option<Arc<dyn Journal>>,
     pub prompter: Option<Arc<dyn PermissionPrompter>>,
     pub events: Option<EventBus>,
+    pub audit: Option<Arc<dyn AuditSink>>, // R3 补（PTM-12：ui.ask 决策落审计）
 }
 ```
 
@@ -903,9 +908,8 @@ pub struct HookOutput {
 }
 
 pub struct AsyncRewakeSpec {
-    pub task_id: String,
-    pub estimated_duration: Duration,
-    pub wake_prompt: String,
+    pub estimated_duration_sec: u32,  // 预估时长（秒；R3 对齐代码，原 task_id/wake_prompt 字段不存在）
+    pub description: String,          // 可读描述（审计与日志用）
 }
 
 pub enum HookDecision { Allow, Deny, Ask, Continue }

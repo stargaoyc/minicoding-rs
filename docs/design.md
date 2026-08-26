@@ -1061,11 +1061,14 @@ source: agent | updated: 2026-07-24 | confidence: 0.8
 - `long_term.md`：跨项目的用户偏好与决策（动态，Agent 可写）；
 - `AGENTS.md`：当前仓库的工作约定（静态，Agent **不可**自主编辑，参考 Codex 的约束）。
 
+> **实现状态（R3，2026-08-26 对齐 `memory/project_doc/loader.rs`+`fallback.rs`）**：
+> override 层与 `[project]` 可配置 fallback 键为设计稿、未实现；实际每级查找顺序为
+> `AGENTS.md > CLAUDE.md > .cursorrules`（fallback 硬编码），截断上限 32 KiB 硬编码。
 **分层加载算法**（参考 Codex `docs/agents_md.md` 与 CC `CLAUDE.md` 上溯机制）：
 
 ```
 1. 全局层：$MINICODING_HOME/AGENTS.md
-   - 同目录有 AGENTS.override.md 则优先取 override，否则取 AGENTS.md
+   - 同目录有 AGENTS.override.md 则优先取 override，否则取 AGENTS.md ← 设计稿，未实现
    - 仅取首个非空文件
 2. 项目层 walk：从 repo_root 逐级向下走到 cwd
    - 每级查找顺序：AGENTS.override.md → AGENTS.md → fallback 文件名
@@ -1077,27 +1080,28 @@ source: agent | updated: 2026-07-24 | confidence: 0.8
 **fallback 文件名**（跨工具兼容，无需改名即可复用 Claude/Cursor 写的文件）：
 
 ```toml
+# ⚠ 设计稿——当前 config.toml 无 [project] 段（R3 注）
 [project]
 project_doc_fallback_filenames = ["CLAUDE.md", ".cursorrules", "TEAM_GUIDE.md"]
 project_doc_max_bytes = 32768
 ```
 
-**`@import` 语法（参考 CC）**：AGENTS.md 支持 `@<相对路径>` 引用其他文件，避免单文件膨胀。加载时递归展开：
+**`@import` 语法（参考 CC；R3 对齐实现：前缀为 `@import `，非裸 `@`）**：AGENTS.md 支持引用其他文件，避免单文件膨胀。加载时递归展开：
 
 ```markdown
 # AGENTS.md
 
-@docs/coding-style.md
-@docs/testing-conventions.md
+@import docs/coding-style.md
+@import docs/testing-conventions.md
 
 ## 项目特定约定
 - 本项目用 tab 缩进
 ```
 
 - 路径相对当前文件所在目录；
-- 递归深度上限 5 层（防循环引用）；
-- 代码块内的 `@path` 不展开（避免误解析）；
-- 展开后总大小仍受 `project_doc_max_bytes` 限制，超限截断。
+- 递归深度上限 **3** 层（防循环引用，canonicalize 环检测）；
+- 代码块内的 `@import` 不展开（避免误解析）；
+- 展开后总大小受 32 KiB 上限约束，超限截断。
 
 **`MINICODING_PROJECT_DIR` 环境变量（参考 CC `CLAUDE_PROJECT_DIR`）**：Runtime 启动时注入此变量到 MCP server 与 Hook 子进程环境，指向项目根目录（git repo root 或 cwd）。MCP server 可据此解析项目相对路径（如读取 `.minicoding/` 配置）。
 
@@ -2648,7 +2652,7 @@ pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Com
 
 ## 24. 前后端协议与多前端接入
 
-### 24.x 会话并发语义（P7，2026-08 补录）
+### 24.1 会话并发语义（P7，2026-08 补录）
 
 - **同会话并发 `POST /sessions/{id}/messages`**：`Runtime` 以 `turn_active` 原子标记
   + guard（drop 复位）保证单飞行 turn——第二个发送方在 guard 存续期间收到

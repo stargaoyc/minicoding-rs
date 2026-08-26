@@ -2,22 +2,23 @@
 //!
 //! 内置 `Tool` 实现，组合层。
 //!
-//! 实现内置 `Tool` 集合（`fs`/`shell`/`web`/`git`/`task`/`plan`/`mcp` 包装）；作为
-//! "组合层"，可依赖多个领域 crate（context/policy/memory/hooks/journal/sandbox/mcp/
-//! storage）以完成工具执行闭环。
+//! 实现内置 `Tool` 集合（`fs`/`shell`/`web`/`git`/`task`/`plan`）；作为"组合层"，
+//! 依赖 core + policy（架构守卫白名单），沙箱/Journal/MCP 等领域能力由 Runtime 经
+//! core trait **注入 `ToolContext`**——本 crate 不直连领域 crate（ARCH-7，2026-08-26
+//! R3 头注修正：原文描述的直连装配方式已被 trait 注入取代）。
 //!
 //! ## 设计要点
 //!
-//! - **路径沙箱**：`util::resolve_path` 本地规范化校验（C-03）；M1-T7 起委托
+//! - **路径沙箱**：`util::resolve_path` 本地规范化校验（C-03）；委托
 //!   `minicoding-policy::path_sandbox::resolve_under`，不重复实现；
-//! - **shell.run**：执行前调 `SandboxDriver::apply`（来自 `minicoding-sandbox`）应用 `OS` 沙箱；
-//! - **fs.write/edit/delete + `Journal`**：成功后调 `Journal::record`（来自
-//!   `minicoding-journal`），仅 `file-undo=true` 时生效；
+//! - **shell.run**：执行前调 `ctx.sandbox_driver`（Runtime 注入的 `SandboxDriver`）
+//!   应用 OS 沙箱（第二道防线，C-22）；
+//! - **fs.write/edit/delete + Journal**：成功后调 `ctx.journal.record`（Runtime 注入，
+//!   仅 `file-undo` feature 时接线，C-28）；
 //! - **task.create/update/list**：增量模型，状态机 `Pending→InProgress→Completed`
 //!   不可跳跃（C-31）；
 //! - **plan.exit**：退出 Plan 模式 + 缓存预批准，`SideEffect::None` 可穿透 Plan 硬门（C-25）；
-//! - **`mcp::wrapper`**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect`
-//!   据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
+//! - **mcp 工具包装**：见 `minicoding-mcp`（`naming`/wrapper 在该 crate，非此处）。
 //!
 //! 当前阶段：已实现 fs 工具组——只读（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`，见
 //! T-M1-6）与写入（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`，见 T-M2-3）；以及

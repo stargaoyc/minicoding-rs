@@ -47,7 +47,7 @@
 - `PostToolUseFailure`：与 `PostToolUse` 互补——前者处理失败，后者处理成功。失败诊断 Hook 可分析错误模式（如沙箱拒绝、权限拒绝、超时），自动建议修正或降级。
 - `PostCompact`：压缩后触发，允许 Hook 验证压缩是否丢失关键信息（如对比压缩前后 todo 列表完整性），并补充注入。与 `PreCompact` 的"备份"互补，`PostCompact` 是"验证与修复"。
 
-> 与 `design.md` §11 `Event` 的关系：`EventBus` 的 `ToolCallStart`/`ToolCallEnd`/`PermissionRequested` 等是**通知**（只读广播）；Hook 是**参与**（可阻断/改写/注入）。Hook 内部可订阅 EventBus 做日志，但 Hook 的控制语义走独立通道（见 §4）。
+> 与 `design.md` §11 `Event` 的关系：`EventBus` 的 `ToolCallStarted`/`ToolCallFinished`/`PermissionRequested` 等是**通知**（R3 修正旧名——DOC-1 已裁定 ToolCallStart/End 从未存在于代码）（只读广播）；Hook 是**参与**（可阻断/改写/注入）。Hook 内部可订阅 EventBus 做日志，但 Hook 的控制语义走独立通道（见 §4）。
 
 ---
 
@@ -320,9 +320,11 @@ pub struct HookOutput {
 }
 
 pub struct AsyncRewakeSpec {
-    pub task_id: String,              // 唤醒任务 ID
-    pub estimated_duration: Duration, // 预估时长（超时后 Agent 可放弃等待）
-    pub wake_prompt: String,          // 唤醒时注入的 prompt（如"安全扫描完成，结果：..."）
+    pub estimated_duration_sec: u32,  // 预估时长（秒；超时为 ×2，C-32）
+                                      // R3 对齐代码：原 task_id/estimated_duration(Duration)/
+                                      // wake_prompt 三字段为设计稿残留，实现无此三字段——
+                                      // 唤醒注入内容固定走 <async_rewake> 边界（rt.rs）。
+    pub description: String,          // 后台任务可读描述（审计与日志用）
 }
 ```
 

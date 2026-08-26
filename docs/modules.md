@@ -171,6 +171,11 @@ minicoding-core/src/
 │   └── context.rs         # ToolContext / SideEffect
 ├── policy/
 │   ├── trait.rs           # PermissionPolicy + PermissionPrompter + Verdict + Decision + PlanModeController（见 api.md §3.6）
+│   ├── persist.rs         # PolicyPersist：AllowAlways 持久化存储（policy.toml 0600 原子写）
+│                          #   ⚠ ARCH-1 登记豁免（2026-08-26 R3）：属"Runtime 编排基础设施"——
+│                          #   与 NoopDriver 同类的用户级配置持久化原语（无网络/无平台依赖），
+│                          #   迁至 minicoding-policy 需 policy→storage 反向边，故留 core；
+│                          #   架构守卫白名单已含 toml/camino 等其所需轻量依赖。
 │   └── mod.rs             # PermissionMode 枚举（Default/AcceptEdits/Plan/Auto/BypassPermissions）
 ├── sandbox/
 │   ├── trait.rs           # SandboxDriver trait + SandboxPolicy 枚举 + NoopDriver 兜底（见 api.md §3.9）
@@ -217,6 +222,10 @@ minicoding-core/src/
 > **已实现（M5 范围）**：`prompt/`（Prompt 管道 9 个 contributor，P-30/P-31）与 `extension/`（ExtensionHost/Extension/Registrar，X-20..X-22）已实现。trait 定义在 `minicoding-core`，9 个内置 contributor 与 `BundledExtensionHost`/`BundleRegistrar` 实现在 `minicoding-extension-sdk`。详见 `api.md` §3.12/§3.13 与 `design.md` §22/§23。
 
 ### 1.3 公共 API（prelude）
+
+> **R3 注**：以下为节选示意（实际导出项以 `crates/minicoding-core/src/lib.rs`
+> 的 `pub mod prelude` 为准——含 `ExtensionCarrier`/`MemoryBlock`/`hard_trip_summary`
+> 等数十项，此处不逐一罗列）。
 
 ```rust
 pub mod prelude {

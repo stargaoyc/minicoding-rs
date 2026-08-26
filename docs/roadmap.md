@@ -143,7 +143,7 @@
 > **范围调整说明**：参考 CC/Codex 后将原 M5 的 MCP client 与 Journal/`/undo` 前置到 M4，与 OS 沙箱同步交付——MCP 远程工具与文件回滚都依赖沙箱作为安全底线，同里程碑交付避免 M5 出现"有 Hook 无沙箱兜底"的窗口期。dev-plan M4 含 11 个 task，M5 聚焦 Hooks/子 Agent/Plan。
 
 **范围**
-- `sandbox`：`SandboxDriver` trait 实现落地——Linux Landlock 直连（自研 pre_exec 胶水，`landlock` crate；`libseccomp` 待接入，M4 主交付）；macOS Seatbelt 与 Windows 受限令牌在 M5+/M6+ 补齐（见平台优先级）。
+- `sandbox`：`SandboxDriver` trait 实现落地——Linux Landlock 直连（自研 pre_exec 胶水，`landlock` crate；`libseccomp` 已接（opt-in feature `seccomp`，默认关；见 security.md §8.11），M4 主交付）；macOS Seatbelt 与 Windows 受限令牌在 M5+/M6+ 补齐（见平台优先级）。
 - `sandbox`：pre-main 进程硬化（`PR_SET_DUMPABLE=0`/`RLIMIT_CORE=0`/清 `LD_*`）。
 - `sandbox`：`ExternalSandbox` 策略（CI/容器场景，依赖外层隔离，`NoopDriver` + info 日志）。
 - `sandbox`：`.git`/`.hg`/`.svn` 默认只读保护（防破坏版本库）。
