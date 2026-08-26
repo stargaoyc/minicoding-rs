@@ -157,9 +157,22 @@ jobs:
           cd "target/${{ matrix.target }}/release/bundle"
           out="../../../../SHA256SUMS-desktop-${{ matrix.os }}.txt"
           : > "$out"
-          for pat in *.dmg *.msi *.exe *.AppImage *.deb */*.dmg */*.msi */*.exe                      */*.AppImage */*.deb */*.exe */*.AppImage; do
+          # 跨平台：Linux 有 sha256sum；macOS 只有 shasum -a 256（R3 发布
+          # 教训：macOS 上 sha256sum 不存在——首跑 || true 吞错产出空 SUMS
+          # 致 gh 上传 HTTP 400，二跑严格守卫显式暴露）
+          if command -v sha256sum >/dev/null 2>&1; then
+            sum() { sha256sum "$@"; }
+          elif command -v shasum >/dev/null 2>&1; then
+            sum() { shasum -a 256 "$@"; }
+          else
+            echo "::error::无 sha256sum/shasum 可用"
+            exit 1
+          fi
+          for pat in *.dmg *.msi *.exe *.AppImage *.deb \
+                     */*.dmg */*.msi */*.exe \
+                     */*.AppImage */*.deb; do
             [ -f "$pat" ] || continue
-            sha256sum "$pat" >> "$out"
+            sum "$pat" >> "$out"
           done
           if [ ! -s "$out" ]; then
             echo "::error::未找到任何桌面安装包，SHA256SUMS 为空"
