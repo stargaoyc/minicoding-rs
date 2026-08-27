@@ -23,17 +23,46 @@ use tokio::fs;
 /// 取舍见模块 doc；C-28 行为文档由主控统一收口。
 const MAX_JOURNAL_ENTRIES: usize = 200;
 
+/// 计算单条 `ChangeEntry` 的内存占用（近似：路径 + before/after 全文字节）。
+fn entry_bytes(entry: &ChangeEntry) -> usize {
+    entry
+        .files
+        .iter()
+        .map(|f| {
+            let path_len = f.path().as_str().len();
+            path_len
+                + match f {
+                    FileChange::Written { before, after, .. } => {
+                        before.as_ref().map_or(0, Vec::len) + after.len()
+                    }
+                    FileChange::Edited { before, after, .. } => before.len() + after.len(),
+                    FileChange::Deleted { content, .. } | FileChange::Created { content, .. } => {
+                        content.len()
+                    }
+                }
+        })
+        .sum::<usize>()
+}
+
+/// journal 总字节上限（ST-5，2026-08-27 R5 审查）：此前仅按条数限 200——
+/// 每条 entry 携带 `before`/`after` 全文（`fs.write` 整文件），会话触碰多 MB
+/// 文件可占用数百 MB-RAM（"内存上限"文档承诺未兑现）。按字节预算收缩：
+/// 32 MiB 足够覆盖交互式 `/undo` 回溯窗口，且防大文件改动撑爆内存。
+const MAX_JOURNAL_BYTES: usize = 32 * 1024 * 1024;
+
 /// 文件改动 journal（纯内存，不落盘，C-28）。
 ///
 /// 持有按操作顺序追加的 `ChangeEntry` 列表。`Mutex<Vec<ChangeEntry>>` 保护并发
 /// 访问（Runtime 内 `Arc<dyn Journal>` 共享）。`undo` 从尾部反向遍历。
 ///
-/// 列表长度受 [`MAX_JOURNAL_ENTRIES`] 约束，超限丢最旧（D3）。
+/// 容量双约束（D3 + ST-5）：列表长度 ≤ [`MAX_JOURNAL_ENTRIES`] 且累计字节
+/// ≤ [`MAX_JOURNAL_BYTES`]，超限丢最旧（尾部 LIFO 撤销序不受影响）。
 ///
 /// `workdir` 用于恢复路径校验（拒绝越界恢复，C-03/C-28）。若 `None`，路径校验
 /// 仅拒绝绝对路径外的 `..` 逃逸（保守）。
 pub struct FileChangeJournal {
     entries: Mutex<Vec<ChangeEntry>>,
+    total_bytes: Mutex<usize>,
     workdir: Option<camino::Utf8PathBuf>,
 }
 
@@ -46,6 +75,7 @@ impl FileChangeJournal {
     pub fn new(workdir: Option<camino::Utf8PathBuf>) -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            total_bytes: Mutex::new(0),
             workdir,
         }
     }
@@ -73,20 +103,33 @@ impl Journal for FileChangeJournal {
     #[tracing::instrument(skip(self), fields(otel.name = span_name::JOURNAL_RECORD, journal.op = "record"))]
     fn record(&self, entry: ChangeEntry) -> BoxFuture<'_, Result<(), JournalError>> {
         Box::pin(async move {
+            let new_entry_bytes = entry_bytes(&entry);
             let mut guard = self
                 .entries
                 .lock()
                 .map_err(|e| JournalError::Conflict(format!("journal lock poisoned: {e}")))?;
             guard.push(entry);
-            // D3 内存上限：超限从头部丢弃最旧条目。只截头部最旧段，尾部 LIFO
-            // 撤销序与 S-7 失败回推尾部原位的语义均不受影响（失败条目仅在
-            // 之后又累计等量新写入时才会被挤出，属预期的容量行为）。
-            if guard.len() > MAX_JOURNAL_ENTRIES {
-                let dropped = guard.len() - MAX_JOURNAL_ENTRIES;
-                guard.drain(..dropped);
+            // ST-5：累计字节预算追踪（含本条）——超限从头部丢弃最旧条目，
+            // 尾部 LIFO 撤销序与 S-7 失败回推尾部原位的语义均不受影响。
+            let mut budget = self
+                .total_bytes
+                .lock()
+                .map_err(|e| JournalError::Conflict(format!("journal bytes lock poisoned: {e}")))?;
+            *budget += new_entry_bytes;
+            let mut dropped = 0usize;
+            while guard.len() > MAX_JOURNAL_ENTRIES || *budget > MAX_JOURNAL_BYTES {
+                if guard.is_empty() {
+                    break;
+                }
+                let removed = guard.remove(0);
+                *budget = budget.saturating_sub(entry_bytes(&removed));
+                dropped += 1;
+            }
+            if dropped > 0 {
                 tracing::debug!(
                     journal.dropped = dropped,
-                    "journal 条目达上限，已丢弃最旧条目"
+                    journal.bytes = *budget,
+                    "journal 超容量约束（条数/字节），已丢弃最旧条目"
                 );
             }
             Ok(())
