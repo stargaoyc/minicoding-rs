@@ -67,7 +67,8 @@ impl Tool for WebSearch {
         // client 零超时（挂起请求不受 ctx.timeout 约束，违反 C-07）、
         // `resp.text()` 无界缓冲。
         let timeout = ctx.timeout;
-        let max_body = ctx.max_output_bytes.max(64 * 1024);
+        let max_output_bytes = ctx.max_output_bytes;
+        let max_body = max_output_bytes.max(64 * 1024);
         Box::pin(async move {
             let query: String = params
                 .get("query")
@@ -137,7 +138,14 @@ impl Tool for WebSearch {
                 );
             }
 
-            Ok(ToolResult::ok_text(text))
+            // TL-2（2026-08-27 R5 审查）：最终文本此前不受 `ctx.max_output_bytes`
+            // 约束（只有 HTTP body 读取用 `max(64KiB)` 下限）——配置 1KB 仍吃
+            // 至少 64KB 上下文预算。格式化的结果文本经 `truncate_output` 截断。
+            // （HTTP body 读取保留 64KiB 下限以支持 DDG 页面解析，不属上下文预算。）
+            let (text, truncated) = crate::util::truncate_output(text, max_output_bytes);
+            let mut result = ToolResult::ok_text(text);
+            result.metadata.truncated = truncated;
+            Ok(result)
         })
     }
 

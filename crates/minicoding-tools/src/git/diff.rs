@@ -91,6 +91,10 @@ impl Tool for GitDiff {
         let workdir = ctx.workdir.clone();
         let env = ctx.env.clone();
         let timeout = ctx.timeout;
+        // TL-1（2026-08-27 R5 审查）：git.diff 输出此前不截断——大仓库 diff 可达
+        // MB 级直接入上下文，是唯一不遵守 C-07 的读工具。经 `truncate_output`
+        // 在 UTF-8 字符边界截断到 `ctx.max_output_bytes`。
+        let max_bytes = ctx.max_output_bytes;
         let git_ref = params
             .get("ref")
             .and_then(|v| v.as_str())
@@ -136,7 +140,12 @@ impl Tool for GitDiff {
                             String::from_utf8_lossy(&output.stderr)
                         )));
                     }
-                    Ok(ToolResult::ok_text(String::from_utf8_lossy(&output.stdout)))
+                    // TL-1（R5）：C-07 输出字节上限（与 fs.read/web.fetch 同款）
+                    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let (text, truncated) = crate::util::truncate_output(text, max_bytes);
+                    let mut result = ToolResult::ok_text(text);
+                    result.metadata.truncated = truncated;
+                    Ok(result)
                 }
             }
         })

@@ -42,8 +42,23 @@ impl ToolRegistry {
     }
 
     /// 注册工具（同名覆盖）。
+    ///
+    /// TL-3（2026-08-27 R5 审查）：`tool.name()` 是注册键与 dispatch 查找的唯一
+    /// 事实源；`schema().name` 若与之不一致（第三方/MCP 工具声明漂移），LLM 会
+    /// 按 schema 名字调用而 dispatch 按 name 查找——静默 `NotFound`。注册时校验
+    /// 二者一致性并 warn（不拒绝：兼容 schema.name 为空的既有工具）。
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        let schema_name = tool.schema().name.as_str();
+        if !schema_name.is_empty() && schema_name != name {
+            tracing::warn!(
+                tool.name = %name,
+                schema.name = schema_name,
+                "Tool::name() 与 schema().name 不一致——LLM 将按 schema.name 调用，
+                 dispatch 按 Tool::name() 查找，二者不一致会导致 NotFound；
+                 schemas() 已统一改写为 Tool::name() 兜底"
+            );
+        }
         self.tools.insert(name, tool);
     }
 
@@ -54,9 +69,20 @@ impl ToolRegistry {
     }
 
     /// 所有已注册工具的 schema（供 LLM 调用参考）。
+    ///
+    /// TL-3（R5）：schema 的 `name` 字段统一改写为 `Tool::name()`——保证 LLM
+    /// 看到的工具名与 dispatch 查找键一致（单一事实源），消除双字段漂移导致
+    /// 的"调用 `NotFound`"。
     #[must_use]
     pub fn schemas(&self) -> Vec<ToolSchema> {
-        self.tools.values().map(|t| t.schema().clone()).collect()
+        self.tools
+            .values()
+            .map(|t| {
+                let mut schema = t.schema().clone();
+                schema.name = t.name().to_string();
+                schema
+            })
+            .collect()
     }
 
     /// 派发工具调用。
@@ -109,5 +135,74 @@ impl std::fmt::Debug for ToolRegistry {
         f.debug_struct("ToolRegistry")
             .field("count", &self.tools.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+    use crate::model::ToolResult;
+
+    /// 测试工具：`name()` 与 `schema().name` 不一致（模拟第三方/MCP 工具漂移）。
+    struct DriftingTool {
+        schema: ToolSchema,
+    }
+
+    impl DriftingTool {
+        fn new() -> Self {
+            // 注意：schema.name 故意写错为 "fs.write"
+            Self {
+                schema: ToolSchema {
+                    name: "fs.write".to_owned(),
+                    description: "test".to_owned(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+            }
+        }
+    }
+
+    impl Tool for DriftingTool {
+        fn name(&self) -> &str {
+            "fs.read"
+        }
+        fn schema(&self) -> &ToolSchema {
+            &self.schema
+        }
+        fn side_effect(&self) -> crate::model::SideEffect {
+            crate::model::SideEffect::None
+        }
+        fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::provider::BoxFuture<'_, Result<ToolResult, ToolError>> {
+            Box::pin(async { Ok(ToolResult::ok_text("ok".to_string())) })
+        }
+    }
+
+    #[test]
+    fn schemas_uses_tool_name_as_single_source_of_truth() {
+        // TL-3（R5）：schema.name 与 Tool::name() 不一致时，schemas() 必须以
+        // Tool::name() 为准——LLM 按 schema.name 调用、dispatch 按 name 查找，
+        // 二者不一致会导致静默 `NotFound`。
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(DriftingTool::new()));
+        let schemas = reg.schemas();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(
+            schemas[0].name, "fs.read",
+            "schemas() 应以 Tool::name() 改写 schema.name"
+        );
+        // dispatch 按 Tool::name() 可命中
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "fs.read".into(),
+            input: serde_json::json!({}),
+        };
+        let ctx = ToolContext::new("/tmp".into(), "t".into());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = rt.block_on(reg.dispatch(&call, &ctx));
+        assert!(r.is_ok(), "按 Tool::name() 查找应命中");
     }
 }

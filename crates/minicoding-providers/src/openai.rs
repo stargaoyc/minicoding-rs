@@ -167,6 +167,25 @@ impl OpenAiProvider {
         if !reasoning_model && let Some(t) = req.params.top_p {
             body["top_p"] = json!(t);
         }
+        // PTM-13（2026-08-27 R5 审查）：o1/o3 等推理模型拒绝 `seed`/`stop` 参数
+        // （发送即 400）——此前仅 gate temperature/top_p，seed/stop 直发导致
+        // 推理模型神秘 400。推理模型下省略并 warn 提示用户配置无效。
+        if !reasoning_model && !req.params.stop.is_empty() {
+            body["stop"] = json!(req.params.stop);
+        } else if reasoning_model && !req.params.stop.is_empty() {
+            tracing::warn!(
+                model,
+                "OpenAI 推理模型不支持 `stop` 参数，已忽略（避免 400）"
+            );
+        }
+        if !reasoning_model && let Some(seed) = req.params.seed {
+            body["seed"] = json!(seed);
+        } else if reasoning_model && req.params.seed.is_some() {
+            tracing::warn!(
+                model,
+                "OpenAI 推理模型不支持 `seed` 参数，已忽略（避免 400）"
+            );
+        }
         if let Some(m) = req.params.max_output_tokens {
             if uses_max_completion_tokens(model) {
                 body["max_completion_tokens"] = json!(m);
@@ -174,11 +193,14 @@ impl OpenAiProvider {
                 body["max_tokens"] = json!(m);
             }
         }
-        if !req.params.stop.is_empty() {
-            body["stop"] = json!(req.params.stop);
-        }
-        if let Some(seed) = req.params.seed {
-            body["seed"] = json!(seed);
+        // PT-1（2026-08-27 R5 审查）：`thinking_budget_tokens` 是 Anthropic 的
+        // `thinking` 预算概念，OpenAI 无直接对应（推理强度用 reasoning_effort）。
+        // 此前静默丢弃用户配置——显式 warn 提示不生效，避免"配置了却没效果"。
+        if req.params.thinking_budget_tokens.is_some() {
+            tracing::warn!(
+                model,
+                "OpenAI 兼容 API 不支持 `thinking_budget_tokens`（Anthropic 概念），已忽略"
+            );
         }
         body
     }
