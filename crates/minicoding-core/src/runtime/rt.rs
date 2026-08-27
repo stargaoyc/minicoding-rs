@@ -202,6 +202,15 @@ pub struct Runtime {
     pub(crate) session_allows: std::sync::Mutex<HashSet<String>>,
     /// asyncRewake 调度器（全量接线；默认 Noop 拒绝 spawn）。
     pub(crate) rewake: Arc<dyn crate::hooks::AsyncRewakeScheduler>,
+    /// 沙箱拒绝权威标记防伪 nonce。
+    ///
+    /// 每次 `Runtime` 构造随机生成（UUID v4）。`build_denial_result` 合成权威
+    /// 标记时嵌入：`\x01MINICODING_DENIED_ERRNO=<errno>:<nonce>\x02`——子进程
+    /// stderr 可打印裸 `\x01MINICODING_DENIED_ERRNO=` 前缀（此前检测器对含前缀
+    /// 文本直接置 authoritative，恶意命令可伪造标记触发 C-30 熔断 DoS），但
+    /// **不知道本 nonce**，无法伪造完整标记；权威判定由 `build_denial_result`
+    /// 验证"Runtime 自己追加的标记行"决定，不再信任检测器的裸前缀匹配。
+    pub(crate) denial_nonce: String,
     /// `SessionStart` Hook 是否已派发（每会话恰一次）。
     pub(crate) session_start_done: std::sync::atomic::AtomicBool,
     /// 单 turn 门闩：`run_turn` 入口 `try_lock`，
@@ -277,6 +286,12 @@ impl Runtime {
     #[must_use]
     pub async fn workdir(&self) -> Utf8PathBuf {
         self.workdir.read().await.clone()
+    }
+
+    /// 返回沙箱拒绝标记 nonce（供 `build_denial_result` 防伪）。
+    #[must_use]
+    pub fn denial_nonce(&self) -> &str {
+        &self.denial_nonce
     }
 
     /// 返回取消 token 的克隆（供 frontend 在 `select!` 中组合等待，如 Ctrl-C handler）。
@@ -410,6 +425,14 @@ impl Runtime {
     /// 在会话退出前调用：从 `ContextManager` 快照消息 → 调注入的
     /// `SessionSummarizer` 生成摘要（降级链：主 provider → 备用 → 启发式兜底，
     /// C-29 永不失败）→ `Storage::update_summary` 落盘。
+    ///
+    /// 摘要的**消费方**仅会话列表展示
+    /// （`Storage::list_sessions` 的 `summary` 字段，server 侧 `session_mgr` 用）——
+    /// "跨会话恢复"（新会话 system 段注入 `session_context` 块，见 rules.md §5
+    /// `[Context]`）的注入半边**未实现**。注入涉及工作目录作用域设计决策
+    /// （`SessionListItem` 无 workdir 字段，无法按项目过滤摘要来源），
+    /// 误注入会把无关项目上下文带入新会话——修复列为设计决策项，不在此
+    /// 半实现（避免行为惊吓）。
     ///
     /// `session_summarizer` 未注入或会话无消息时为 no-op。摘要失败仅记 `warn`
     /// 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
@@ -1284,6 +1307,8 @@ impl Runtime {
         // 拒绝不落 audit.log，最值得取证的事件无痕。
         let audit = self.audit.clone();
         let session_id = self.session.id.clone();
+        // 防伪 nonce 克隆进闭包（子进程不可知的随机值）
+        let denial_nonce = self.denial_nonce.clone();
         let ro_futs: Vec<ToolFuture> = readonly
             .iter()
             .map(|call| {
@@ -1296,6 +1321,7 @@ impl Runtime {
                 let sandbox_breaker = sandbox_breaker.clone();
                 let audit = audit.clone();
                 let session_id = session_id.clone();
+                let denial_nonce = denial_nonce.clone();
                 // `call` 是 `&&ToolCall`（来自 `Vec<&ToolCall>::iter`），需解引用到
                 // `ToolCall` 再 clone，否则只克隆引用，async 块仍借用 `readonly`。
                 let call: ToolCall = (**call).clone();
@@ -1333,6 +1359,7 @@ impl Runtime {
                                 sandbox_breaker.as_ref(),
                                 &tool_name,
                                 &e,
+                                &denial_nonce,
                             ) {
                                 // 审计与副作用路径同格式落盘
                                 if let Some(info) = &r.metadata.sandbox_denied {

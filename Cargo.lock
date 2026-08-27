@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-cli"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -3239,6 +3239,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rpassword",
  "rustyline",
  "serde",
  "serde_json",
@@ -3255,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-context"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "criterion",
@@ -3274,7 +3275,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "futures",
@@ -3298,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-desktop"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "camino",
@@ -3320,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-extension-sdk"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3334,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-hooks"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3349,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-journal"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3365,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-mcp"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "base64 0.22.1",
  "camino",
@@ -3388,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-memory"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "futures",
@@ -3405,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-policy"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "minicoding-core",
@@ -3423,7 +3424,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-protocol"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "minicoding-core",
  "serde",
@@ -3436,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-providers"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "futures",
  "minicoding-core",
@@ -3453,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sandbox"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "landlock",
@@ -3469,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-sdk"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "camino",
@@ -3501,7 +3502,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-server"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -3543,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-storage"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "fs2",
@@ -3559,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tools"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "camino",
  "futures",
@@ -3587,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "minicoding-tui"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "camino",
@@ -5287,6 +5288,27 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

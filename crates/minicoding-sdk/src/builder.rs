@@ -16,8 +16,8 @@ use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
 use minicoding_memory::{
-    AutoCategory, AutoMemory, AutoMemoryContributor, LongTermMemory, ProjectDocLoaderImpl,
-    SessionSummarizerImpl, inject_project_doc_sync,
+    AutoCategory, AutoMemory, LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl,
+    inject_project_doc_sync,
 };
 use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter, ReplayPolicy};
 use minicoding_providers::{
@@ -117,7 +117,10 @@ fn inner_build_runtime(
     workdir: &str,
     system: Option<&str>,
     mode: &SessionLoadMode,
-    sandbox_override: Option<SandboxPolicy>,
+    // sandbox feature 关闭时该参数无消费方（避免 unused 告警）
+    #[cfg_attr(not(feature = "sandbox"), allow(unused_variables))] sandbox_override: Option<
+        SandboxPolicy,
+    >,
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
 ) -> Result<(Runtime, Option<MemoryQuerySlot>)> {
@@ -276,11 +279,13 @@ fn inner_build_runtime(
     // 注入共享句柄；CLI REPL 在每轮 turn 前经 `memory_query_slot` 写入用户
     // 输入，BM25 top-5 检索注入生效（此前契约生产端零写入，检索永不触发，
     // 超 4096 字符尾部条目静默截断）。extensions 未启用时无消费方（无害）。
-    #[cfg(feature = "extensions")]
+    // 槽位与 long_term_store 被 `memory.write`
+    // 工具与返回值**无条件**引用（6b 步/函数返回），原 `#[cfg(feature =
+    // "extensions")]` 门控导致 `--no-default-features` 编译断链——移除门控，
+    // 两变量恒定义（minicoding-memory 是非 optional 依赖，无 feature 依赖）。
     let memory_query_slot: Arc<std::sync::Mutex<Option<String>>> =
         Arc::new(std::sync::Mutex::new(None));
     // 检索语料扩展为 auto + long_term 分节（与 6b 的 memory.write 共享实例）
-    #[cfg(feature = "extensions")]
     let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
 
     // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
@@ -317,7 +322,7 @@ fn inner_build_runtime(
         // B2/B3：auto memory 注入 stable 区（order=Environment，cacheable=true，
         // 排在 environment 段之前——同 order 内按 contributor_name 稳定排序）。
         contributors.push(Arc::new(
-            AutoMemoryContributor::with_query_slot(
+            minicoding_memory::auto_contributor::AutoMemoryContributor::with_query_slot(
                 auto_memory.clone(),
                 minicoding_memory::auto_contributor::DEFAULT_MAX_CHARS,
                 memory_query_slot.clone(),
@@ -511,8 +516,7 @@ fn inner_build_runtime(
     // 11a. 预构建 Hook registry（`hooks` feature 启用时）
     //      必须在 `config` move 进 builder 之前读 `config.hooks`。
     //      未启用 hooks feature 时不构建（RuntimeBuilder 默认 NoopHookRegistry）。
-    #[cfg(feature = "hooks")]
-    let hook_registry = build_hook_registry(&config.hooks);
+    //      构造时机后移至 sandbox_pair 就绪后（见下），便于注入 OS 沙箱。
 
     // 11a-2. 启动配置文件监听（热更新，best-effort：监听失败不阻塞启动）
     //        `ConfigWatcher::start` 内部捕获错误并降级为空壳，故结果直接注入。
@@ -532,12 +536,14 @@ fn inner_build_runtime(
     //        注入必须在 `build()` 之前——`task.spawn` 工具经 `rt.subagent_runner()`
     //        拿到的引用即此处注入的实现（12 步）。
     let sandbox_pair: Option<(Arc<dyn SandboxDriver>, SandboxPolicy)> = {
-        let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
-            workdir: workdir_path.clone(),
-            writable: Vec::new(),
-        });
         #[cfg(feature = "sandbox")]
         {
+            // policy 仅在 sandbox feature 下消费（`--no-default-features`
+            // 编译时无 sandbox 分支引用，`#[cfg]` 内定义避免 unused 告警）
+            let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+                workdir: workdir_path.clone(),
+                writable: Vec::new(),
+            });
             Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
         }
         #[cfg(not(feature = "sandbox"))]
@@ -547,6 +553,9 @@ fn inner_build_runtime(
             None
         }
     };
+    // Hook registry 移至 sandbox_pair 就绪后构造（OS 沙箱注入）
+    #[cfg(feature = "hooks")]
+    let hook_registry = build_hook_registry(&config.hooks, sandbox_pair.as_ref());
     let child_tokenizer: Arc<dyn Tokenizer> = tokenizer
         .clone()
         .unwrap_or_else(crate::subagent::fallback_tokenizer);
@@ -769,9 +778,14 @@ pub fn build_runtime(
 /// 把每个 `HookEntry` 转为 `ScriptHook`（外部脚本 Hook）并注册。`matcher` 字段
 /// 解析为 `HookMatcher::for_tools`（工具相关事件）或 `HookMatcher::for_events`
 /// （非工具事件）。`timeout_sec` 缺省时用 `default_timeout_sec`。
+///
+/// `sandbox_pair` 为 `Some` 时（`sandbox` feature +
+/// 配置预设）注入 `ScriptHook::with_sandbox`——hook 子进程受 OS 沙箱约束
+/// （C-26 后台 Hook 同等待遇）。
 #[cfg(feature = "hooks")]
 fn build_hook_registry(
     cfg: &minicoding_core::config::HooksConfig,
+    sandbox_pair: Option<&(Arc<dyn SandboxDriver>, SandboxPolicy)>,
 ) -> minicoding_hooks::HookRegistryImpl {
     use minicoding_core::hooks::{HookEvent, HookMatcher, HookRegistry};
     use minicoding_hooks::ScriptHook;
@@ -830,7 +844,11 @@ fn build_hook_registry(
                 .timeout_sec
                 .map_or(default_timeout, Duration::from_secs);
             let name = format!("{}[{idx}]", events[0].as_str());
-            let hook = ScriptHook::new(name, matcher, entry.command.clone(), timeout);
+            let mut hook = ScriptHook::new(name, matcher, entry.command.clone(), timeout);
+            // hook 子进程注入 OS 沙箱（C-26）
+            if let Some((driver, policy)) = sandbox_pair {
+                hook = hook.with_sandbox(driver.clone(), policy.clone());
+            }
             registry.register(Arc::new(hook));
         }
     }
