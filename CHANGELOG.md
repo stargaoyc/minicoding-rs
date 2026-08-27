@@ -4,6 +4,84 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.6] - 2026-08-27
+
+> 本版本为 `docs/project-review-20260827-r5.md` 第五轮全面审查修复版：
+> 八领域深审收口 P0×2/P1×9，分六阶段落地。核心主题是"审查报告已就绪，
+> 按 A–F 阶段逐项落地"——重点覆盖安全检查闭环（路径逃逸/SSRF/Hook 沙箱/
+> 熔断标记防伪）、构建断链与 DTO 过期、工具/Provider 边界、上下文/记忆预算
+> 口径、前端与存储/MCP 运维健壮性。
+
+### Security
+
+- **core：`@import` 路径逃逸（P0）**——文件加载工具此前直接拼接 `@import`
+  相对路径，`@import ../../etc/passwd` 可越界读任意文件（C-03 击穿）。
+  新增 `resolve_lexical` 词法校验，越界路径直接报 `PathEscaped`（回归测试
+  用真实库外文件验证）
+- **providers：SSRF IPv4-mapped IPv6 绕过（P0）**——`::ffff:127.0.0.1`
+  等 mapped 形式此前经 `IpAddr::from_str` 落为 IPv6 地址族，绕过
+  `check_ipv4` 私网/环回黑名单直连内网（防护形同虚设）。改用
+  `to_ipv4_mapped()` 归一化后重新校验，新增 4 条映射攻击回归测试
+- **hooks：Hook 子进程 OS 沙箱落地（P1）**——`ScriptHook` 新增
+  `with_sandbox`，spawn 前应用 OS 沙箱（受限 token/Seatbelt 等），SDK
+  builder 自动注入 sandbox_pair；Windows 占位扩展展开禁用 + stderr 1 MiB
+  上限（此前 Hook 可将任意凭证经钩子脚本外泄或打爆父进程内存）
+- **sandbox：denial 标记防伪（P1）**——熔断标记此前为固定
+  `{PREFIX}{errno}{SUFFIX}`，工具输出含同形文本可伪造拒绝计数耗尽熔断预算
+  或伪造"沙箱拒绝"放行（C-30 依赖内核级硬反馈）。改为 per-Runtime UUID
+  nonce，校验时比对正确 nonce，两条伪造回归测试
+- **sandbox/macos：Seatbelt 凭证读取防泄露（P1）**——追加 `$HOME` 与关键
+  凭证目录 deny，Worktree 子代理 git 子进程环境白名单化（C-04 凭证泄入
+  仓库钩子通道关闭）
+- **mcp：C-24 批准决策落 audit.log（P2）**——project 作用域 MCP server
+  首次批准决策此前不落审计（§5.5 要求任何权限决策可取证），现经
+  `check_project_scope_approval` 的 AuditSink 参数落 `PermissionResolved`
+
+### Fixed
+
+- **sdk：`--no-default-features` 构建断链（P1）**——扩展 host 与内存查询槽
+  模块此前无条件引用 `policy` 等仅 sandbox feature 下可用的类型，关闭默认
+  feature 即编译失败（ARCH-1）。按 feature gate 重组，SDK 零默认 feature
+  可独立编译
+- **web：DTO 过期（P1）**——`StopReason` 缺 `Filtered { reason }` 变体，
+  生成的 TS 类型与 Rust 源漂移（FE-1）。重新生成后 `git diff --exit-code`
+  校验通过
+- **tools：git.diff 截断 + schema 双事实源**——`git.diff` 输出此前无截断，
+  超长 diff 可撑爆上下文窗口（TL-1，现按 `ctx.max_output_bytes` 截断）；
+  `web.search` 最终文本同修（TL-2）；`ToolRegistry::schemas()` 此前直接
+  返回注册表内原始 schema（name 可能过时），现由 `Tool::name()` 重写并
+  注册时告警（TL-3）
+- **providers：openai 参数静默忽略**——`thinking_budget_tokens` 对无
+  thinking 支持的模型静默忽略（PT-1，现 warn）；o1/o3 上 `seed`/`stop`
+  被 API 忽略（PT-2，现 warn + 移除）
+- **context：post-compact 预算口径 + 小窗口自愈**——压缩后注入消息预算
+  此前按固定剩余量注入，可能再超窗（CTX-1，改按 `threshold - 压缩后消息`
+  动态收缩）；`effective_threshold == 0` 时压缩判定每轮必触发（CTX-2，现
+  正确跳过）；append delta 计数此前被回复预留项污染（CTX-4）；会话摘要此前
+  逐条拼接（CTX-6，改用 `full_text()` 保持流式一致性）；CTX-5 跨会话摘要
+  注入记录为设计取舍不实现（SessionListItem 无 workdir，防跨项目泄漏）
+- **core：事件持久化 seq 缺口（P1）**——best-effort append 失败后 seq 已
+  `+=1`，`--replay` 要求严格连续 seq，一次瞬时 IO 故障即永久报废该会话
+  （ST-1）。append 失败回滚 seq，缺口不再产生
+- **mcp：shutdown 无超时挂起（P2）**——`cancel().await` 对不关闭 stdout 的
+  server 永久等待且持写锁阻塞后续调用（ST-6）。套 5s 超时，超时放弃等待
+- **journal：字节上限（P2）**——仅按条数限 200，每条 FileChange 持有
+  before/after 全文，长会话触碰多 MB 文件可占数百 MB RAM（ST-5）。新增
+  32 MiB 字节预算，超限丢最旧（尾部 LIFO 撤销序不变）
+- **tui：用户消息双显 / CJK 乱码 / 弹窗下溢**——submit 乐观入列 +
+  MessageAppended 事件再入列造成双显（FE-2，改事件驱动）；markdown 逐字节
+  `as char` 渲染多字节 UTF-8 全乱码（FE-3，按字符边界解码推进游标）；
+  权限弹窗 `(height-7)/2` 在 <7 行终端 u16 下溢 panic（FE-4，高度 clamp）
+- **cli：`cred store` 明文回显 API key（P2）**——注释自认"不回显"但用
+  `read_line`，key 进终端/scrollback（FE-5）。引入 `rpassword` 隐藏输入，
+  与声明一致（MIT 许可，过 deny 白名单）
+
+### Docs
+
+- 第五轮全面审查报告 `docs/project-review-20260827-r5.md`（P0×2/P1×9/
+  P2×30/P3×30+ 完整清单 + A–F 修复阶段划分）；CTX-5 跨会话摘要注入记录为
+  决策取舍
+
 ## [0.3.5] - 2026-08-26
 
 > 本版本为 `docs/project-review-20260826-r3.md` 第三轮全面审查修复版：
