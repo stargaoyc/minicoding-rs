@@ -96,7 +96,7 @@
 
 - **协议**：HTTP/SSE JSON-RPC 2.0（复用 `minicoding-protocol` 的 wire types，见 `modules.md` §15）；
 - **传输**：
-  - Web 模式：浏览器 → HTTPS → `minicoding-server`（`minicoding serve --http`）；
+  - Web 模式：浏览器 → HTTPS → `minicoding-server`（`minicoding serve --bind 127.0.0.1:8080`）；
   - 桌面模式（Tauri）：前端 → Tauri IPC → Rust sidecar 进程（即 `minicoding-server`），sidecar 与前端同进程组，避免跨进程序列化开销大的操作走 IPC、其他走 HTTP；
 - **流式**：SSE 推送 `Event::Token`/`Event::ToolCall`/`Event::PermissionRequest`，前端用 TanStack Query 的 `useQuery` + `queryClient.setQueryData` 增量更新；
 - **权限交互**：`PermissionPrompt` 经 SSE 推到前端，弹出 shadcn/ui Dialog，用户决策经 JSON-RPC `permission.resolve` 回传；

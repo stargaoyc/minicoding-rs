@@ -15,9 +15,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+# 审计记录时间戳（Hook 协议违规记 audit.log 需 ts 字段）
+time = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# 超时杀孙进程——`killpg` 杀整个进程组
+libc = { workspace = true }
 
 [dev-dependencies]
-time = { workspace = true }
 # 架构守卫：复用 core 的 manifest 断言
 minicoding-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

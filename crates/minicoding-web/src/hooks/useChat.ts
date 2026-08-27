@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useUIStore } from "../stores/ui";
 import {
   getSession,
   getPendingPermissions,
@@ -160,6 +161,10 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
     (event: EventDto) => {
       if (event.type === "turn_streaming_started") {
         turnStartedAt.current = Date.now();
+      }
+      // 权限模式切换（SSE 事件）同步到 UI store——侧栏模式切换器据此刻画高亮
+      if (event.type === "permission_mode_changed") {
+        useUIStore.getState().setPermissionMode(event.to);
       }
       const { state, effects } = applyChatEvent(chatStateRef.current, event);
       chatStateRef.current = state;

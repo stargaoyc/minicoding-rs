@@ -25,3 +25,13 @@ export function formatTime(iso: string): string {
 export function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) + "…" : text;
 }
+
+/**
+ * 清理路径中的 Windows `\\?\` 前缀（canonicalize 返回的 extended-length path
+ * 前缀），并统一为正斜杠。仅用于显示，不改变实际路径值。
+ */
+export function displayPath(path: string): string {
+  // Windows `\\?\E:\...` → `E:\...` → 统一正斜杠
+  const cleaned = path.replace(/^\\\\\?\\/, "").replace(/\\/g, "/");
+  return cleaned;
+}

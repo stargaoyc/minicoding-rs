@@ -2958,7 +2958,7 @@ get_or_load(id) ──► 内存命中？──否──► restore_session(id)
 │  Browser (React 19.2 SPA)                                        │
 │     │  HTTPS  │  SSE (Event stream)                              │
 │     ▼        ▼                                                   │
-│  minicoding-server (--http --web ./dist --cors-origin ...)       │
+│  minicoding-server (--bind 127.0.0.1:8080 --web ./dist --cors-origin ...)       │
 │     │                                                            │
 │     ▼                                                            │
 │  Runtime (Agent loop)                                            │
@@ -2970,7 +2970,7 @@ get_or_load(id) ──► 内存命中？──否──► restore_session(id)
 │  Tauri Window (WebView 加载 minicoding-web dist)                 │
 │     │  Tauri IPC (invoke)  │  SSE (本地 HTTP)                    │
 │     ▼                      ▼                                     │
-│  Rust sidecar: minicoding-server (--http --bind 127.0.0.1:PORT) │
+│  Rust sidecar: minicoding-server (--bind 127.0.0.1:PORT) │
 │     │                                                            │
 │     ▼                                                            │
 │  Runtime (Agent loop)                                            │
@@ -3078,13 +3078,13 @@ function useEventStream(sessionId: string, cursor: number) {
 
 ```rust
 // minicoding-desktop/src/main.rs（Tauri 命令）
-// 启动 sidecar：minicoding-server --http --bind 127.0.0.1:0（随机端口）
+// 启动 sidecar：minicoding-server --bind 127.0.0.1:0（随机端口）
 // sidecar 启动后通过 stdout 输出实际端口，Tauri 读取后注入前端
 #[tauri::command]
 async fn start_session(app: tauri::AppHandle) -> Result<SessionInfo, String> {
     let sidecar = app.shell().sidecar("minicoding-server")
         .map_err(|e| e.to_string())?;
-    let (mut rx, child) = sidecar.args(["--http", "--bind", "127.0.0.1:0"])
+    let (mut rx, child) = sidecar.args(["--bind", "127.0.0.1:0"])
         .spawn()
         .map_err(|e| e.to_string())?;
     // 读取 sidecar stdout 获取实际监听端口

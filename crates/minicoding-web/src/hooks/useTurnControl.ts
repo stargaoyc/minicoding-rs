@@ -4,6 +4,7 @@ import {
   cancelTurn,
   getServerConfig,
   setApiBase,
+  setPermissionMode,
   undoSession,
 } from "../api/client";
 
@@ -51,4 +52,17 @@ export function useUndoSession() {
  * 失败抛出由调用方处理（Setup 对话框自行降级默认值）。 */
 export function useServerConfig() {
   return useCallback(() => getServerConfig(), []);
+}
+
+/** 运行时切换会话权限模式（`POST /sessions/{id}/permission-mode`）。
+ * 成功同步 UI store；失败抛错由调用方 toast 展示。 */
+export function useSetPermissionMode() {
+  const qc = useQueryClient();
+  return useCallback(
+    async (sessionId: string, mode: import("../api/generated").PermissionMode) => {
+      await setPermissionMode(sessionId, mode);
+      void qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    [qc],
+  );
 }

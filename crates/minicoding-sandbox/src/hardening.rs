@@ -108,6 +108,9 @@ pub fn vcs_protected_dirs(workdir: &Path) -> Vec<PathBuf> {
 }
 
 /// env 变量优先；未设置时回退 `$HOME`/`default_rel`（`home` 为 `None` 时无默认）。
+// 仅 linux/macos 的 sandbox 驱动消费（windows 用 Job Object，无 HOME 白名单），
+// 非 linux/macos 平台标注 allow 防 dead_code。
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn env_or_home(env_key: &str, default_rel: &str, home: Option<&Path>) -> Option<PathBuf> {
     if let Ok(v) = std::env::var(env_key)
         && !v.is_empty()
@@ -133,6 +136,9 @@ fn env_or_home(env_key: &str, default_rel: &str, home: Option<&Path>) -> Option<
 /// 落点）与 `~/.cargo`（crates.io 令牌 `credentials` 落点）仍属低概率凭证通道——
 /// macOS 侧以 profile 尾部显式 deny 覆盖（`credential_dir_deny_paths`），
 /// Linux landlock 侧依赖 ABI 5+ deny 规则优先级（见 `linux.rs`）。
+// 仅 linux/macos 的 sandbox 驱动消费（windows 用 Job Object），非 linux/macos
+// 平台标注 allow 防 dead_code（与 credential_dir_deny_paths 同模式）。
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 #[must_use]
 pub fn home_read_allow_paths() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")

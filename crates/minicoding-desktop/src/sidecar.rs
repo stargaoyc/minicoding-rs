@@ -15,6 +15,9 @@ use tokio::process::Command;
 // 本文件独立使用需显式引入；CI 的 desktop feature build 会因缺失而失败）。
 #[cfg(feature = "desktop")]
 use tauri::Manager;
+// sidecar 退出事件（rx 耗尽时 emit 到前端）。
+#[cfg(feature = "desktop")]
+use tauri::Emitter;
 
 /// sidecar 启动后等待端口输出的超时时间。
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -286,12 +289,19 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     // 保存 child 句柄到 managed state：`CommandChild` 无 Drop 清理，退出时
     // 由 `RunEvent::Exit` → `kill_sidecar` 显式终止（防孤儿进程）。
+    // 覆盖前如果已有旧 child，先 kill（旧 sidecar
+    // 含独立 token 的 HTTP server 成孤儿进程）。
     {
         let state = app.state::<SidecarProcess>();
-        *state
+        let mut guard = state
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(old) = guard.take() {
+            log::info!("检测到旧 sidecar 进程，正在终止...");
+            let _ = old.kill();
+        }
+        *guard = Some(child);
     }
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {
@@ -336,7 +346,6 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         }
         // rx 耗尽 = sidecar 进程已退出
         log::error!("minicoding-server sidecar 进程已退出（崩溃或被终止）");
-        use tauri::Emitter;
         let _ = app_handle.emit("sidecar-exited", ());
     });
 

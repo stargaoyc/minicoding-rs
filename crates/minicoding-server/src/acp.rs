@@ -243,6 +243,16 @@ where
     let len = content_length
         .ok_or_else(|| AcpError::Frame("missing Content-Length header".to_string()))?;
 
+    // Content-Length 无上限——本地客户端可
+    // 声明任意大 len 使 server 分配巨量内存（OOM）。上限 256 MiB 与
+    // web.fetch 等工具的输出上限一致，覆盖真实请求场景（payload 含 session
+    // 历史可能达数 MB），超出则直接拒绝（fail-closed，不读 body）。
+    if len > 256 * 1024 * 1024 {
+        return Err(AcpError::Frame(format!(
+            "Content-Length {len} exceeds maximum (256 MiB)"
+        )));
+    }
+
     // 2. 读 body
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(AcpError::Io)?;
@@ -268,15 +278,15 @@ async fn write_jsonrpc<T: serde::Serialize>(
     write_message(stdout, &json).await
 }
 
-/// 写 parse error 通知（无法获取 request id）。
+/// 写 parse error 响应（无法获取 request id）。
 async fn write_parse_error(stdout: &SharedStdout, e: serde_json::Error) -> Result<(), AcpError> {
-    // 无 id 时按 JSON-RPC 规范发 notification（实际客户端会忽略无法配对的消息）
-    let notif = Notification {
-        jsonrpc: Version,
-        method: "minicoding/parseError".to_string(),
-        params: Some(serde_json::json!({"message": e.to_string()})),
-    };
-    write_jsonrpc(stdout, &notif).await
+    // 此前发自定义 `minicoding/parseError` notification
+    // ——非标准 JSON-RPC 行为，客户端无法按规范处理。按 JSON-RPC 2.0 规范
+    // §5.1 发 -32700 Parse error 响应（id 用 0 占位——无法从损坏 payload 中提取
+    // 原 id，标准行为即如此）。
+    let err = RpcError::parse_error(e.to_string());
+    let resp = Response::err(Id::Number(0), err);
+    write_jsonrpc(stdout, &resp).await
 }
 
 /// 写 JSON-RPC 错误响应。

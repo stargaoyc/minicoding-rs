@@ -284,7 +284,8 @@ async fn write_private_async(path: &std::path::Path, bytes: &[u8]) -> std::io::R
     #[cfg(unix)]
     opts.mode(0o600);
     let mut f = opts.open(path).await?;
-    f.write_all(bytes).await
+    f.write_all(bytes).await?;
+    f.sync_all().await
 }
 
 impl Default for AutoMemory {

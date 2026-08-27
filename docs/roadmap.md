@@ -320,7 +320,7 @@
 - 文档：Web/桌面部署指南、前端架构说明、Tauri sidecar 配置、CORS 与安全策略。
 
 **验收**
-- `minicoding serve --http` 启动后，浏览器访问 `http://localhost:PORT` 能完整对话、工具调用、权限确认；
+- `minicoding serve --bind 127.0.0.1:8080` 启动后，浏览器访问 `http://localhost:PORT` 能完整对话、工具调用、权限确认；
 - Tauri 桌面应用在 macOS/Windows/Linux 三平台可构建，体积 < 15MB；
 - 前端 Lighthouse 性能评分 ≥ 90；
 - oxlint + oxfmt + tsc 全绿；

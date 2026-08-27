@@ -19,7 +19,8 @@
 //!
 //! ## seq 语义
 //!
-//! - 流式事件（`SendUserMessage` 期间）：`seq` 单调递增（1, 2, 3, ...），客户端用于检测丢失；
+//! - 流式事件（`SendUserMessage` 期间）：`seq` 来自会话级 cursor（`subscribe_sequenced`），
+//!   与 SSE/ACP/LSP 共享同一 seq 空间——跨协议切换/重连游标一致；
 //! - 非流式响应（`SessionCreated`/`SessionsListed`/...）：`seq=0`（非流式事件，不参与 cursor）；
 //! - `CommandError`：`seq=0`。
 //!
@@ -68,6 +69,9 @@ pub enum NdjsonError {
 ///
 /// 使用 `Box<dyn AsyncWrite + Send + Unpin>` 让生产代码（`Stdout`）与测试代码
 /// （`tokio::io::sink()`）共用同一类型，避免为测试单独抽象。
+/// 单行 NDJSON 上限（2026-08-28收尾）：恶意/异常客户端可发无限长
+/// 单行使 server OOM。256 KiB 覆盖真实请求（含大工具调用参数）。
+const MAX_LINE_BYTES: usize = 256 * 1024;
 type SharedStdout = Arc<Mutex<tokio::io::BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>;
 
 /// 启动 NDJSON server：从 stdin 读 `Command`，向 stdout 写 `EventDto`。
@@ -95,8 +99,33 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(16);
     let reader_stdout = stdout.clone();
     let reader_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        while let Some(line) = lines.next_line().await? {
+        // NDJSON 行读取无上限——恶意/异常本地客户端
+        // 可发无限长单行使 server 无限缓冲 OOM。用 `take(MAX_LINE_BYTES + 1)`
+        // 截断读：单行超限即报 FrameTooLarge（fail-closed，不继续解析），与
+        // ACP 的 Content-Length 上限同一防线。
+        let mut reader = BufReader::new(tokio::io::stdin());
+        loop {
+            let mut line = String::new();
+            let n = match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ndjson: stdin read failed");
+                    break;
+                }
+            };
+            // 超限行：丢弃该行（含残余）并报错
+            if n > MAX_LINE_BYTES {
+                write_command(
+                    &reader_stdout,
+                    0,
+                    &NdjsonCommandKind::CommandError {
+                        message: format!("ndjson line exceeds {MAX_LINE_BYTES} bytes"),
+                    },
+                )
+                .await?;
+                continue;
+            }
             // 空行跳过（编辑器可能发送心跳/空行）
             if line.trim().is_empty() {
                 continue;
@@ -259,7 +288,25 @@ async fn dispatch_command(
 ) -> Result<(), NdjsonError> {
     match cmd {
         Command::CreateSession { config } => {
-            let params = build_params_from_config(mgr.default_params(), config);
+            // 13（2026-08-28收尾）：与 HTTP 路径对齐——CreateSession
+            // 预校验 workdir 存在 + 规范化（canonicalize），否则相对路径隐式绑定
+            // server CWD、目录不存在首个 turn 才报错。
+            let mut params = build_params_from_config(mgr.default_params(), config);
+            if !params.workdir.as_str().trim().is_empty() {
+                let canonical =
+                    std::fs::canonicalize(params.workdir.as_std_path()).map_err(|e| {
+                        NdjsonError::Session(SessionManagerError::BuildFailed(format!(
+                            "工作目录不存在或不可访问：{}（{e}）",
+                            params.workdir
+                        )))
+                    })?;
+                params.workdir = camino::Utf8PathBuf::from_path_buf(canonical).map_err(|_| {
+                    NdjsonError::Session(SessionManagerError::BuildFailed(format!(
+                        "工作目录非 UTF-8：{}",
+                        params.workdir
+                    )))
+                })?;
+            }
             let session = mgr.create_session(Some(params))?;
             let session_id = session.session_id().clone();
             write_event(
@@ -456,9 +503,12 @@ async fn handle_send_user_message(
         .await
         .map_err(|_| NdjsonError::SessionNotFound(session_id.clone()))?;
 
-    // 先订阅 EventBus，避免 spawn turn task 后错过早期事件
-    let runtime = session.runtime.clone();
-    let mut rx = runtime.events().subscribe();
+    // 先订阅带 seq 的会话级事件流（2026-08-28收尾）：此前 NDJSON
+    // 自造每 turn seq=1..n，与 SSE/ACP/LSP 的会话级 cursor seq 空间不一致——
+    // 跨协议切换/重连破坏游标语义。改走 `subscribe_sequenced`（seq 由会话
+    // 常驻 sequencer 单一分配），与其余协议对齐。避免 spawn turn task 后错过
+    // 早期事件（先订阅后 spawn）。
+    let mut rx = session.subscribe_sequenced();
 
     // 后台 task 执行 send_message_boxed（持有 turn_lock，串行化）
     let mgr_clone = mgr.clone();
@@ -471,15 +521,13 @@ async fn handle_send_user_message(
     // 转发事件，直到 turn_task 完成；turn 期间继续消费 stdin 命令
     // （`ResolvePermission` 唤醒权限等待、`Cancel` 中断 turn），
     // 否则客户端无法在 turn 进行中应答权限（死锁）。
-    let mut seq: u64 = 0;
     loop {
         tokio::select! {
             biased;
             turn_result = &mut turn_task => {
                 // turn_task 完成：drain 剩余事件（TurnEnd 通常在 turn_task 返回前已发出）
-                while let Ok(event) = rx.try_recv() {
-                    seq += 1;
-                    write_event(stdout, seq, &EventKind::from(&event)).await?;
+                while let Ok((seq, kind)) = rx.try_recv() {
+                    write_event(stdout, seq, &kind).await?;
                 }
                 // 根据 turn 结果发最终事件
                 match turn_result {
@@ -516,9 +564,8 @@ async fn handle_send_user_message(
             }
             event_result = rx.recv() => {
                 match event_result {
-                    Ok(event) => {
-                        seq += 1;
-                        write_event(stdout, seq, &EventKind::from(&event)).await?;
+                    Ok((seq, kind)) => {
+                        write_event(stdout, seq, &kind).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // 消费慢导致丢事件——：

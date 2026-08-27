@@ -59,7 +59,8 @@ struct Cli {
     #[arg(long)]
     web: Option<String>,
 
-    /// CORS 允许的来源（M9，可多次指定；默认允许任意来源，见 `design.md` §26.6）
+    /// CORS 允许的来源（M9，可多次指定；默认仅允许本机来源
+    /// `localhost`/`127.0.0.1`/`[::1]`，见 `design.md` §26.6）
     #[arg(long = "cors-origin")]
     cors_origins: Vec<String>,
 

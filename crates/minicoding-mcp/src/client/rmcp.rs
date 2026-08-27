@@ -88,6 +88,10 @@ struct ServerConnection {
     hints: HashMap<String, minicoding_core::mcp::ToolHint>,
     /// 工具调用超时（来自 server 配置）。
     tool_timeout: Duration,
+    /// server 名（用于 `warm_up` 中 `convert_rmcp_tools` 的命名参数）。
+    cfg_name: String,
+    /// `enabled_tools` 过滤列表（`warm_up` 刷新工具列表时复用过滤逻辑）。
+    enabled_tools: Option<Vec<String>>,
 }
 
 /// 基于 `rmcp` 2.2 的 `McpClient` 实现（stdio 传输）。
@@ -306,7 +310,8 @@ impl RmcpClient {
 
         // 转换 schema + 命名 + enabled_tools 过滤（抽为自由函数， 修复时
         // start_one 超 too_many_lines 阈值，顺带拆分职责）
-        let (tools, hints) = convert_rmcp_tools(cfg, rmcp_tools)?;
+        let (tools, hints) =
+            convert_rmcp_tools(&cfg.name, cfg.enabled_tools.as_deref(), rmcp_tools)?;
 
         // 缓存连接 + 工具
         let conn = ServerConnection {
@@ -314,6 +319,8 @@ impl RmcpClient {
             hints: hints.clone(),
             tools: tools.clone(),
             tool_timeout,
+            cfg_name: cfg.name.clone(),
+            enabled_tools: cfg.enabled_tools.clone(),
         };
         let mut connections = self.connections.write().await;
         // 同名 server 直接 insert 会静默覆盖旧连接——
@@ -354,8 +361,14 @@ impl RmcpClient {
 ///
 /// 从 `start_one` 抽出： 修复时该函数超 `clippy::too_many_lines` 阈值，
 /// 顺带拆分"握手"与"schema 转换"职责。
+///
+/// `warm_up` 刷新工具列表也必须走本函数——
+/// 此前 `warm_up` 手写裸转换（丢 `enabled_tools` 过滤、hints、非法工具名裸注册）。
+/// 参数从 `&McpServerConfig` 收窄为 `name` + `enabled_tools`（`warm_up` 侧
+/// `ServerConnection` 不持有完整 config）。
 fn convert_rmcp_tools(
-    cfg: &McpServerConfig,
+    server_name: &str,
+    enabled_tools: Option<&[String]>,
     rmcp_tools: Vec<rmcp::model::Tool>,
 ) -> Result<
     (
@@ -366,13 +379,9 @@ fn convert_rmcp_tools(
 > {
     let tools_with_hints: Vec<(ToolSchema, minicoding_core::mcp::ToolHint)> = rmcp_tools
         .into_iter()
-        .filter(|t| {
-            cfg.enabled_tools
-                .as_ref()
-                .is_none_or(|list| list.iter().any(|n| n == &t.name))
-        })
+        .filter(|t| enabled_tools.is_none_or(|list| list.iter().any(|n| n == &t.name)))
         .map(|t| {
-            let name = crate::naming::mcp_tool_name(&cfg.name, &t.name)
+            let name = crate::naming::mcp_tool_name(server_name, &t.name)
                 .map_err(|e| McpError::Config(format!("tool name `{}` invalid: {e}", t.name)));
             let annotations = t.annotations.clone().unwrap_or_default();
             let hint = match (annotations.read_only_hint, annotations.destructive_hint) {
@@ -414,7 +423,11 @@ impl McpClient for RmcpClient {
             guard.clone_from(&configs);
         }
         Box::pin(async move {
-            // 并发启动各 server（设计 §19.6）；required 失败收集后返回首个错误
+            // 顺序启动各 server（2026-08-28收尾：注释曾声称"并发启动"
+            // 实为串行循环——文档与行为不符）。串行是设计取舍：进程池模式共享
+            // `connections` 写锁，且启动失败的错误收集/required 语义在顺序路径下
+            // 更直观；服务器间存在启动顺序依赖时（如 gateway 依赖 backend）串行
+            // 保证确定性。required 失败收集后返回首个错误。
             let mut required_errors: Vec<McpError> = Vec::new();
             for cfg in configs {
                 if !cfg.enabled {
@@ -634,27 +647,38 @@ impl McpClient for RmcpClient {
             let mut guard = connections.write().await;
             let mut errors: Vec<(String, String)> = Vec::new();
             for (name, conn) in guard.iter_mut() {
-                // 刷新工具列表（server 可能在运行期间增删工具）
+                // 刷新工具列表（server 可能在运行期间增删工具）。
+                // 复用 convert_rmcp_tools——此前手写裸转换丢 enabled_tools
+                // 过滤、hints 过期、非法工具名裸注册（不可调用）。
                 match tokio::time::timeout(conn.tool_timeout, conn.service.list_all_tools()).await {
                     Ok(Ok(rmcp_tools)) => {
-                        let tools: Vec<ToolSchema> = rmcp_tools
-                            .into_iter()
-                            .map(|t| ToolSchema {
-                                name: crate::naming::mcp_tool_name(name, &t.name)
-                                    .unwrap_or_else(|_| t.name.to_string()),
-                                description: t.description.as_deref().unwrap_or("").to_string(),
-                                input_schema: serde_json::Value::Object(
-                                    t.input_schema.as_ref().clone(),
-                                ),
-                            })
-                            .collect();
-                        let old_count = conn.tools.len();
-                        conn.tools = tools;
-                        tracing::debug!(
-                            server = %name,
-                            old_count, new_count = conn.tools.len(),
-                            "mcp warm_up: tool list refreshed"
+                        let result = convert_rmcp_tools(
+                            &conn.cfg_name,
+                            conn.enabled_tools.as_deref(),
+                            rmcp_tools,
                         );
+                        match result {
+                            Ok((tools, hints)) => {
+                                let old_count = conn.tools.len();
+                                conn.tools = tools;
+                                conn.hints = hints;
+                                tracing::debug!(
+                                    server = %name,
+                                    old_count, new_count = conn.tools.len(),
+                                    "mcp warm_up: tool list refreshed"
+                                );
+                            }
+                            Err(e) => {
+                                // 命名失败（远端工具名含非法字符）：整批刷新失败，
+                                // 保留旧列表（fail-safe，不因单个坏名清空全部工具）。
+                                tracing::warn!(
+                                    server = %name,
+                                    error = %e,
+                                    "mcp warm_up: tool conversion failed, keeping old list"
+                                );
+                                errors.push((name.clone(), format!("tool conversion failed: {e}")));
+                            }
+                        }
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(server = %name, error = %e, "mcp warm_up: list_tools failed");
@@ -730,11 +754,15 @@ fn convert_one(block: &ContentBlock) -> ToolContent {
             }
         }
         ContentBlock::Audio(a) => {
-            let data = base64_decode(&a.data).unwrap_or_else(|| a.data.as_bytes().to_vec());
-            ToolContent::Image {
-                mime: a.mime_type.clone(),
-                data,
-            }
+            // Audio 块此前被转成 `ToolContent::Image`
+            // （mime 标签与数据错配，provider 按 image 渲染失败或误报）。多数
+            // LLM 不支持音频输入，转 Text 元数据表示（含 mime 与字节数），
+            // 既不谎报类型也不丢数据。
+            ToolContent::Text(format!(
+                "[audio content: mime={}, bytes={}]",
+                a.mime_type,
+                base64_decode(&a.data).map_or(a.data.len(), |v| v.len())
+            ))
         }
         ContentBlock::Resource(r) => {
             // 嵌入资源转文本表示
