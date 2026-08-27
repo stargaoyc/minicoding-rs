@@ -90,7 +90,7 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 indicatif = "0.17"
 anstream = "0.6"
 anstyle = "1.0"
-rustyline = "15.0"
+rustyline = "18.0"
 # 隐藏终端输入（FE-5，2026-08-27 R5 审查：`cred store` 回显 API key 到终端/
 # scrollback 与"不回显"声明不符；rpassword 是标准隐藏输入方案，MIT 许可）
 rpassword = "7.3"
