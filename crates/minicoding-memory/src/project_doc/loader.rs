@@ -71,10 +71,17 @@ fn canonical_key(path: &Utf8Path) -> String {
 /// `repo/.../deep/../../../../etc/passwd` 的组件前缀与 `base_dir` 命中即放行，
 /// `..` 逃逸不被察觉，恶意仓库可经 `@import ../../etc/passwd` 把本机任意文件
 /// 展开进 `<project_doc>` 外发 LLM 厂商（CT4-3 防护被绕过）。已实测复现。
+///
+/// 2026-08-27 发布修复（跨平台）：`dir` 与 `base` **都必须**过 `resolve_lexical`——
+/// 该规范化会把 Windows 绝对路径 `C:\...` 的驱动前缀并入根（`Prefix` 后被
+/// `RootDir` 清空、再补 `/` 根），裸 `base` 保留 `Prefix("C:")`，与规范化后的
+/// `dir` 组件首位不一致，Windows 上所有合法 import 都被误判越界、`dir_chain`
+/// 退化为单级。两侧对称规范化后比较一致。
 fn path_within(dir: &Utf8Path, base: &Utf8Path) -> bool {
-    let normalized = resolve_lexical(dir);
-    let d: Vec<_> = normalized.components().collect();
-    let b: Vec<_> = base.components().collect();
+    let norm_dir = resolve_lexical(dir);
+    let norm_base = resolve_lexical(base);
+    let d: Vec<_> = norm_dir.components().collect();
+    let b: Vec<_> = norm_base.components().collect();
     d.len() >= b.len() && d[..b.len()] == b[..]
 }
 
