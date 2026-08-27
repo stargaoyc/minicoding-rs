@@ -321,7 +321,18 @@ mod tests {
     fn build_profile_readonly_denies_writes() {
         let p = build_profile(&SandboxPolicy::ReadOnly).expect("profile");
         assert!(p.contains("(deny file-write*)"));
-        assert!(p.contains("(allow file-read*)"));
+        // SEC-4：读为 deny-first + 系统路径 subpath 白名单（非裸 allow file-read*）
+        assert!(
+            p.contains("(allow file-read* (subpath \""),
+            "profile should allow read on system paths, got: {}",
+            p
+        );
+        // 凭证目录必须显式 deny（SEC-4：$HOME 默认拒绝读）
+        assert!(
+            p.contains("(deny file-read*"),
+            "profile should deny reads on credentials, got: {}",
+            p
+        );
         // ReadOnly 不应放行任何写路径
         assert!(!p.contains("(allow file-write*"));
     }
