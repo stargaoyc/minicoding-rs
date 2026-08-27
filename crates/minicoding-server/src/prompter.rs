@@ -12,7 +12,7 @@
 //! 超时保护：默认 300s 无响应则返回 `Deny`（避免永久挂起阻塞 Runtime）。
 //! 超时时长由 `ServerConfig::permission_timeout_sec` 控制。
 
-use minicoding_core::policy::{Decision, PermissionPrompt, PermissionPrompter, Risk};
+use minicoding_core::policy::{Decision, PermissionPrompt, PermissionPrompter, PromptOption, Risk};
 use minicoding_core::provider::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +33,10 @@ pub struct PendingPermissionEntry {
     pub tool: String,
     pub summary: String,
     pub risk: Risk,
+    /// R4（FE4-1）：prompt 提供的决策选项集——`GET /permissions/pending`
+    /// 快照原样返回，前端按 `options` 渲染按钮（此前恒返回空数组，Web 对
+    /// C-23 受限 prompt 也显示"始终允许"，core 折叠兜底无害化但 UI 误导）。
+    pub options: Vec<PromptOption>,
     pub tx: oneshot::Sender<Decision>,
 }
 
@@ -85,7 +89,8 @@ pub async fn list_pending_permissions(pending: &PendingPermissions) -> Vec<Permi
             tool: e.tool.clone(),
             summary: e.summary.clone(),
             risk: e.risk,
-            options: Vec::new(),
+            // R4（FE4-1）：原样返回真实 options（此前恒空数组）
+            options: e.options.clone(),
         })
         .collect();
     drop(guard);
@@ -118,6 +123,8 @@ impl PermissionPrompter for ServerPrompter {
                         tool: req.tool.clone(),
                         summary: req.summary.clone(),
                         risk: req.risk,
+                        // R4（FE4-1）：保存真实 options 供 pending 快照返回
+                        options: req.options.clone(),
                         tx,
                     },
                 );

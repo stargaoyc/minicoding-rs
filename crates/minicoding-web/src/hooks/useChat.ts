@@ -79,6 +79,8 @@ interface SSEStreamOptions {
     tool: string;
     summary: string;
     risk: "low" | "medium" | "high";
+    /** R4（FE4-1）：pending 快照携带的 options，SSE 实时事件无此字段 */
+    options?: string[];
   }) => void;
   onTaskUpdated?: () => void;
 }
@@ -106,8 +108,20 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
 
   /** 处理一条权限请求（SSE 实时事件或 pending 快照恢复共用）。 */
   const handlePermissionRequested = useCallback(
-    (e: { id: string; tool: string; summary: string; risk: "low" | "medium" | "high" }) => {
-      const w: WaitingPermission = { id: e.id, tool: e.tool, summary: e.summary, risk: e.risk };
+    (e: {
+      id: string;
+      tool: string;
+      summary: string;
+      risk: "low" | "medium" | "high";
+      options?: string[];
+    }) => {
+      const w: WaitingPermission = {
+        id: e.id,
+        tool: e.tool,
+        summary: e.summary,
+        risk: e.risk,
+        options: e.options,
+      };
       waitingRef.current = w;
       setChatState((prev) => {
         const next = { ...prev, waitingPermission: w, permissionDeniedMsg: null };
@@ -185,6 +199,8 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
               tool: p.tool,
               summary: p.summary,
               risk: p.risk,
+              // R4（FE4-1）：快照携带真实 options，前端据此渲染按钮
+              options: p.options,
             });
           }
         })
@@ -225,6 +241,7 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
               tool: p.tool,
               summary: p.summary,
               risk: p.risk,
+              options: p.options,
             });
           }
         })

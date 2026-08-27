@@ -9,7 +9,8 @@
 //! ## 切换语义
 //!
 //! 切换到历史会话等价于 `--resume <id>`：保留原会话 ID，新消息追加写入原
-//! JSONL 文件。当前会话不自动 summarize（避免阻塞 UI），用户可手动 `/summary`。
+//! JSONL 文件。TUI 当前**不**自动 summarize（避免退出阻塞；`/summary` 命令
+//! 与退出路径摘要均未实现，见 roadmap CT4-7 开放项）。
 
 use minicoding_core::storage::SessionListItem;
 use ratatui::Frame;

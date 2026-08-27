@@ -9,8 +9,8 @@ import type { Decision, Risk } from "../api/generated";
  * `POST /sessions/{id}/permissions/{pid}` 回传 → 后端继续/中止工具调用。
  *
  * 权限检查在后端强制（C-01），前端仅回传 `Decision`，不短路。
- * 权限选项固定为 Allow / Allow Always / Deny / Deny Always（对齐
- * `core::policy::PromptOption`，前端不需要从后端获取 options 列表）。
+ * 权限选项由后端 `options` 字段指明（`GET /permissions/pending` 返回），
+ * 前端据此渲染按钮（C-23 受限 prompt 不含 AllowAlways，前端不显示"始终允许"）。
  */
 export interface PendingPermission {
   sessionId: string;
@@ -18,6 +18,8 @@ export interface PendingPermission {
   tool: string;
   summary: string;
   risk: Risk;
+  /** R4（FE4-1）：prompt 提供的决策选项，前端据此渲染按钮。 */
+  options?: string[];
 }
 
 export type PermissionChoice = "allow" | "allow_always" | "deny" | "deny_always";

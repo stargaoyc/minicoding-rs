@@ -15,6 +15,9 @@ export interface WaitingPermission {
   tool: string;
   summary: string;
   risk: "low" | "medium" | "high";
+  /** R4（FE4-1）：prompt 提供的决策选项（`GET /permissions/pending` 快照携带；
+   * 实时 SSE 事件 DTO 暂无此字段，缺失时前端按全按钮渲染、core 折叠兜底）。 */
+  options?: string[];
 }
 
 /**

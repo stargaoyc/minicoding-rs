@@ -36,17 +36,22 @@ const RISK_CONFIG: Record<
 };
 
 // 四按钮（2026-08-23 审查遗留#3 贯通）：Always 决策由服务端持久化到
-// ~/.minicoding/policy.toml 后折叠为一次性语义执行；C-23 受保护文件的
-// prompt 不含 Always 选项，此处按 pending.options 渲染时自然不会误显。
-const CHOICES: {
+// ~/.minicoding/policy.toml 后折叠为一次性语义执行。
+// R4（FE4-1）：按 `pending.options` 过滤渲染——C-23 受保护文件的 prompt 不含
+// Always 选项，此前注释声称"按 options 渲染"但代码恒渲染四按钮（服务端
+// pending 快照也恒返回空 options），UI 与真实选项集不符。后端 `GET
+// /permissions/pending` 现返回真实 options；SSE 实时事件暂不携带（协议 DTO
+// 未含字段，roadmap 登记），缺失时回退全按钮 + core SEC-3 折叠兜底。
+const ALL_CHOICES: {
   value: PermissionChoice;
   label: string;
   variant: "default" | "secondary" | "danger";
+  requires: string;
 }[] = [
-  { value: "allow", label: "允许", variant: "default" },
-  { value: "allow_always", label: "始终允许", variant: "secondary" },
-  { value: "deny", label: "拒绝", variant: "danger" },
-  { value: "deny_always", label: "始终拒绝", variant: "danger" },
+  { value: "allow", label: "允许", variant: "default", requires: "allow_once" },
+  { value: "allow_always", label: "始终允许", variant: "secondary", requires: "allow_always" },
+  { value: "deny", label: "拒绝", variant: "danger", requires: "deny_once" },
+  { value: "deny_always", label: "始终拒绝", variant: "danger", requires: "deny_always" },
 ];
 
 interface PermissionDialogProps {
@@ -89,6 +94,11 @@ function PermissionContent({
 }) {
   const riskConfig = RISK_CONFIG[pending.risk] ?? RISK_CONFIG.medium;
   const RiskIcon = riskConfig.icon;
+  // R4（FE4-1）：按后端 options 过滤按钮。option 名称对齐 `PromptOption`
+  // 的 snake_case 序列化（allow_once/deny_once/allow_always/deny_always）。
+  const choices = ALL_CHOICES.filter(
+    (c) => !pending.options?.length || pending.options.includes(c.requires),
+  );
 
   return (
     <>
@@ -122,7 +132,7 @@ function PermissionContent({
 
       {/* Actions */}
       <div className="grid grid-cols-2 gap-2">
-        {CHOICES.map((c) => (
+        {choices.map((c) => (
           <Button
             key={c.value}
             variant={c.variant}
