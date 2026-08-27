@@ -14,6 +14,7 @@ use minicoding_core::hooks::{
 };
 use minicoding_core::metrics;
 use minicoding_core::provider::BoxFuture;
+use tracing::Instrument;
 
 use super::dispatch::{HookErrorAction, merge_decision, run_hook_once};
 use std::sync::{Arc, Mutex};
@@ -75,10 +76,16 @@ async fn dispatch_hooks(
             event = ?event,
             otel.name = "hook.run",
         );
-        let _enter = span.enter();
+        // R4（SE4-13）：`span.instrument` 替代 `span.enter()`——hook 可能跨
+        // await 等待子进程完成，`Entered` guard 存活跨越 await 点，多线程
+        // tokio runtime 下 future 会在 worker 线程间迁移，线程局部 span 语义
+        // 失真/串号（与 R3 RT-7 同型漏网实例）。
         let hook_timer = metrics::start_timer();
 
-        match run_hook_once(hook.as_ref(), &input, &config).await {
+        match run_hook_once(hook.as_ref(), &input, &config)
+            .instrument(span)
+            .await
+        {
             Ok(output) => {
                 let result_str = if matches!(output.decision, HookDecision::Deny) {
                     "deny"

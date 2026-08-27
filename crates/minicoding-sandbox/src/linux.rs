@@ -233,6 +233,22 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     let fs_abi = probe_fs_abi().ok_or_else(|| {
         SandboxError::Sandbox("landlock FS 限制不可用（应先经 landlock_available 探测）".into())
     })?;
+    // SE4-10（R4）：ABI 版本能力降级如实警告——此前静默降级，用户不知道
+    // ReadOnly 预设的实际写保护面小于预期。
+    // - ABI<V3：truncate(2) 不受 landlock 约束（TRUNCATE 访问权 V3 引入）；
+    // - ABI<V5：ioctl-dev（raw 设备访问）不受约束（V5 引入）。
+    if fs_abi < landlock::ABI::V3 {
+        tracing::warn!(
+            ?fs_abi,
+            "landlock ABI < V3: truncate(2) 不受内核约束 \
+             (ReadOnly 预设的写保护面小于预期)"
+        );
+    } else if fs_abi < landlock::ABI::V5 {
+        tracing::warn!(
+            ?fs_abi,
+            "landlock ABI < V5: ioctl-dev（raw 设备访问）不受内核约束"
+        );
+    }
     let restrict_net_requested = matches!(
         policy,
         SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. }

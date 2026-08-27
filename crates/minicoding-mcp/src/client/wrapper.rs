@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use minicoding_core::mcp::{McpClient, ToolHint};
-use minicoding_core::model::{SideEffect, ToolError, ToolResult, ToolSchema};
+use minicoding_core::model::{McpError, SideEffect, ToolError, ToolResult, ToolSchema};
 use minicoding_core::provider::BoxFuture;
 use minicoding_core::tool::{Tool, ToolContext};
 
@@ -122,18 +122,23 @@ impl Tool for McpToolWrapper {
             let _enter = span.enter();
             match client.call(&server, &tool, input.clone()).await {
                 Ok(r) => Ok(r),
-                // 断线一次性重启重试（2026-08-23 审查遗留#5）：连接级故障
-                // （进程退出/管道断开）经 restart 重建后重试；业务错误不重试。
-                Err(e) => match client.restart().await {
-                    Ok(()) => client.call(&server, &tool, input).await.map_err(|e2| {
-                        ToolError::Exec(format!(
-                            "mcp {server}__{tool}: 重启后仍失败: {e2}（首次: {e}）"
-                        ))
-                    }),
-                    Err(restart_err) => Err(ToolError::Exec(format!(
-                        "mcp {server}__{tool}: {e}（重启失败: {restart_err}）"
-                    ))),
-                },
+                // CT4-4（R4）：仅连接级错误启动重启——业务错误（`ToolNotFound`、
+                // `CallFailed` 含 Schema 不匹配/参数错等）不触发全池重建，
+                // 此前任何调用失败都触 `client.restart()`（杀死并重启所有子进程），
+                // 且并发多路失败时竞争重建、中断期间 call 持 read 锁排队。
+                Err(e @ (McpError::NotReady(_) | McpError::StartFailed { .. })) => {
+                    match client.restart().await {
+                        Ok(()) => client.call(&server, &tool, input).await.map_err(|e2| {
+                            ToolError::Exec(format!(
+                                "mcp {server}__{tool}: 重启后仍失败: {e2}（首次: {e}）"
+                            ))
+                        }),
+                        Err(restart_err) => Err(ToolError::Exec(format!(
+                            "mcp {server}__{tool}: {e}（重启失败: {restart_err}）"
+                        ))),
+                    }
+                }
+                Err(e) => Err(ToolError::Exec(format!("mcp {server}__{tool}: {e}"))),
             }
         })
     }
