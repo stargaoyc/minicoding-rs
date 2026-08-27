@@ -16,8 +16,8 @@ use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
 use minicoding_memory::{
-    AutoCategory, AutoMemory, AutoMemoryContributor, LongTermMemory, ProjectDocLoaderImpl,
-    SessionSummarizerImpl, inject_project_doc_sync,
+    AutoCategory, AutoMemory, LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl,
+    inject_project_doc_sync,
 };
 use minicoding_policy::{BuiltinPolicy, InteractivePrompter, NonInteractivePrompter, ReplayPolicy};
 use minicoding_providers::{
@@ -117,7 +117,10 @@ fn inner_build_runtime(
     workdir: &str,
     system: Option<&str>,
     mode: &SessionLoadMode,
-    sandbox_override: Option<SandboxPolicy>,
+    // ARCH-1（R5）：sandbox feature 关闭时该参数无消费方（避免 unused 告警）
+    #[cfg_attr(not(feature = "sandbox"), allow(unused_variables))] sandbox_override: Option<
+        SandboxPolicy,
+    >,
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
 ) -> Result<(Runtime, Option<MemoryQuerySlot>)> {
@@ -276,11 +279,13 @@ fn inner_build_runtime(
     // 注入共享句柄；CLI REPL 在每轮 turn 前经 `memory_query_slot` 写入用户
     // 输入，BM25 top-5 检索注入生效（此前契约生产端零写入，检索永不触发，
     // 超 4096 字符尾部条目静默截断）。extensions 未启用时无消费方（无害）。
-    #[cfg(feature = "extensions")]
+    // ARCH-1（2026-08-27 R5 审查）：槽位与 long_term_store 被 `memory.write`
+    // 工具与返回值**无条件**引用（6b 步/函数返回），原 `#[cfg(feature =
+    // "extensions")]` 门控导致 `--no-default-features` 编译断链——移除门控，
+    // 两变量恒定义（minicoding-memory 是非 optional 依赖，无 feature 依赖）。
     let memory_query_slot: Arc<std::sync::Mutex<Option<String>>> =
         Arc::new(std::sync::Mutex::new(None));
     // CTX-5：检索语料扩展为 auto + long_term 分节（与 6b 的 memory.write 共享实例）
-    #[cfg(feature = "extensions")]
     let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
 
     // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
@@ -317,7 +322,7 @@ fn inner_build_runtime(
         // B2/B3：auto memory 注入 stable 区（order=Environment，cacheable=true，
         // 排在 environment 段之前——同 order 内按 contributor_name 稳定排序）。
         contributors.push(Arc::new(
-            AutoMemoryContributor::with_query_slot(
+            minicoding_memory::auto_contributor::AutoMemoryContributor::with_query_slot(
                 auto_memory.clone(),
                 minicoding_memory::auto_contributor::DEFAULT_MAX_CHARS,
                 memory_query_slot.clone(),
@@ -531,12 +536,14 @@ fn inner_build_runtime(
     //        注入必须在 `build()` 之前——`task.spawn` 工具经 `rt.subagent_runner()`
     //        拿到的引用即此处注入的实现（12 步）。
     let sandbox_pair: Option<(Arc<dyn SandboxDriver>, SandboxPolicy)> = {
-        let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
-            workdir: workdir_path.clone(),
-            writable: Vec::new(),
-        });
         #[cfg(feature = "sandbox")]
         {
+            // ARCH-1（R5）：policy 仅在 sandbox feature 下消费（`--no-default-features`
+            // 编译时无 sandbox 分支引用，`#[cfg]` 内定义避免 unused 告警）
+            let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+                workdir: workdir_path.clone(),
+                writable: Vec::new(),
+            });
             Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
         }
         #[cfg(not(feature = "sandbox"))]
