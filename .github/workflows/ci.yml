@@ -198,10 +198,14 @@ jobs:
   # windows-sys FFI 分支只在真实 Windows runner 的 cross-platform job 中才被编译，
   # Linux 本地任何门禁均不可达，问题直到推送后才暴露。SEC-4 教训：
   # QueryInformationJobObject FFI 声明错误本可在 ubuntu 上用 `--target` check
-  # 提前拦截。纯 check 无需 MSVC linker；ring/aws-lc 不在下列 crate 的
-  # windows 依赖闭包中。并发取消沿用 workflow 级 concurrency 组，无需 job 级配置。
+  # 提前拦截。并发取消沿用 workflow 级 concurrency 组，无需 job 级配置。
   # 不含 minicoding-desktop：其 windows 依赖闭包重且 sidecar 占位二进制按目标
   # 平台命名，desktop 由 cross-platform(windows-latest) 原生覆盖。
+  #
+  # 2026-08-27 发布修复（ENG-11 回补）：扩到全 workspace 后 reqwest→rustls→
+  # ring/aws-lc-sys 进入 windows 依赖闭包，ubuntu 交叉编译 MSVC target 需 MSVC
+  # 工具链（ring 拒 GNU 编译器、cc crate 找 lib.exe）。装 LLVM 交叉工具链
+  # （clang-cl 编译 + llvm-lib 归档替代 lib.exe）+ nasm（aws-lc-sys x86_64 汇编）。
   windows-target-check:
     name: cargo check (x86_64-pc-windows-msvc)
     runs-on: ubuntu-latest
@@ -213,6 +217,17 @@ jobs:
           toolchain: nightly-2026-08-18
       - name: Add Windows MSVC target
         run: rustup target add x86_64-pc-windows-msvc
+      - name: Install MSVC cross-toolchain (clang-cl + llvm-lib + nasm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm clang lld nasm
+          # clang-cl/llvm-lib 在 /usr/lib/llvm-*/bin（不在默认 PATH）
+          llvm_bin="$(ls -d /usr/lib/llvm-*/bin | head -1)"
+          echo "$llvm_bin" >> "$GITHUB_PATH"
+          # cc crate 按 MSVC 惯例找 lib.exe（归档器）——llvm-lib 兼容 .lib 格式
+          sudo ln -sf "$llvm_bin/llvm-lib" /usr/local/bin/lib.exe
+          echo "CC_x86_64_pc_windows_msvc=clang-cl" >> "$GITHUB_ENV"
+          echo "AR_x86_64_pc_windows_msvc=llvm-lib" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: cargo check --target x86_64-pc-windows-msvc (--all-targets 含测试)
         # --all-targets 必须含：cfg(test) 下的平台分支错误（如 ENV_SERIAL_LOCK
