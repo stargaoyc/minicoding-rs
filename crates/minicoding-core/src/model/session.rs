@@ -84,6 +84,12 @@ pub enum StopReason {
     ToolUse,
     Stopped,
     Interrupted,
+    /// R4（PT4-2）：内容过滤命中——`OpenAI` `content_filter` / `delta.refusal`。
+    /// 此前归入 `Stopped`，用户看到"模型莫名闭嘴"；结构化后前端可提示"被安全
+    /// 策略拦截"。
+    Filtered {
+        reason: String,
+    },
 }
 
 /// 一轮对话的结果。

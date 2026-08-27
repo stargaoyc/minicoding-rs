@@ -118,8 +118,16 @@ impl OpenAiProvider {
             messages.push(message_to_openai(m));
         }
 
+        // PT4-1（R4）：空 model 回退到 provider 自身配置的默认模型（小 LLM 摘要/
+        // 压缩路径传空 model 导致真实 API 400；注释曾声称"provider 使用自身默认"
+        // 但此前无实现，M-12 后三家 provider 一律取 params.model 无回退）。
+        let model = if req.params.model.is_empty() {
+            &self.model
+        } else {
+            &req.params.model
+        };
         let mut body = json!({
-            "model": req.params.model,
+            "model": model,
             "messages": messages,
             "stream": true,
             "stream_options": {"include_usage": true},
@@ -152,7 +160,7 @@ impl OpenAiProvider {
         // 推理系模型（o1/o3/o4/gpt-5）拒绝自定义 temperature 与 top_p（发送即
         // 400），直接省略；其余模型维持原行为（2026-08-25 审查 PR-2；
         // PTM-9 补 top_p gate——此前只挡 temperature，gpt-5 带 top_p 仍 400）
-        let reasoning_model = uses_max_completion_tokens(&req.params.model);
+        let reasoning_model = uses_max_completion_tokens(model);
         if !reasoning_model && let Some(t) = req.params.temperature {
             body["temperature"] = json!(t);
         }
@@ -160,7 +168,7 @@ impl OpenAiProvider {
             body["top_p"] = json!(t);
         }
         if let Some(m) = req.params.max_output_tokens {
-            if uses_max_completion_tokens(&req.params.model) {
+            if uses_max_completion_tokens(model) {
                 body["max_completion_tokens"] = json!(m);
             } else {
                 body["max_tokens"] = json!(m);
@@ -398,6 +406,16 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
         && let Some(choice) = choices.first()
     {
         if let Some(delta) = choice.get("delta") {
+            // R4（PT4-2）：`delta.refusal` 非空 = 内容过滤拒绝（拒绝内容含于
+            // `refusal` 字段，`content` 为空）——此前完全不解析，与
+            // `finish_reason="content_filter"` 同呈现为正常结束。
+            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str)
+                && !refusal.is_empty()
+            {
+                deltas.push(Delta::Stop(StopReason::Filtered {
+                    reason: refusal.to_string(),
+                }));
+            }
             // 思考过程：DeepSeek 用 `reasoning_content`，OpenAI o 系列用 `reasoning`
             if let Some(reasoning) = delta
                 .get("reasoning_content")
@@ -454,7 +472,9 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
 ///
 /// 推理系模型已废弃 `max_tokens` 参数（改用 `max_completion_tokens`），且拒绝
 /// 自定义 `temperature`（发送即 400）。DeepSeek 等兼容网关仍只认旧参数，故按
-/// 模型名启发式分派而非全局切换（2026-08-25 审查 PR-2）。
+/// 模型前缀区分。注意与 `tokenizer::uses_o200k_vocab` 的差异：`gpt-4o` 用
+/// `o200k` 词表但**不是**推理系（接受 `max_tokens` 与 `temperature`）——两者
+/// 语义不同，不可合并为单一判定（R4 PT4-8 曾尝试合并，回归测试拦截）。
 fn uses_max_completion_tokens(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     ["o1", "o3", "o4", "gpt-5"]
@@ -500,9 +520,11 @@ fn map_stop_reason(reason: &str) -> StopReason {
         "stop" => StopReason::EndTurn,
         "length" => StopReason::MaxTokens,
         "tool_calls" | "function_call" => StopReason::ToolUse,
-        // PTM-7：`content_filter`（内容过滤）与未知原因同落 `Stopped`——
-        // 语义上过滤拒绝应结构化上报（LlmError::Filtered 已定义、流式终止
-        // 信号通路待接线），此处保持 Stopped 不丢失消息。
+        // R4（PT4-2）：内容过滤结构化上报（此前落 `Stopped`，用户看到"模型
+        // 莫名闭嘴"；`LlmError::Filtered` 已定义、流式信号通路此前未接线）。
+        "content_filter" => StopReason::Filtered {
+            reason: "content_filter".to_string(),
+        },
         _ => StopReason::Stopped,
     }
 }
@@ -871,6 +893,21 @@ mod tests {
         // 无可选 params 时不出现对应字段
         assert!(body.get("temperature").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn empty_model_falls_back_to_provider_default() {
+        // PT4-1（R4）：小 LLM 摘要/压缩路径传空 model（LlmProvider 降级链），
+        // 此前真实 API 必 400——"provider 使用自身默认模型"的注释承诺无实现
+        let provider = OpenAiProvider::new("https://api.openai.com/v1", "sk-test", "gpt-4o")
+            .expect("构造 provider");
+        let mut req = basic_req();
+        req.params.model.clear();
+        let body = provider.build_request_body(&req);
+        assert_eq!(
+            body["model"], "gpt-4o",
+            "空 model 应回退到 provider 自身默认模型"
+        );
     }
 
     // --- uses_max_completion_tokens / PR-2 参数分派 ---

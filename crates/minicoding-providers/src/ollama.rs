@@ -113,8 +113,14 @@ impl OllamaProvider {
             messages.push(message_to_ollama(m));
         }
 
+        // PT4-1（R4）：空 model 回退到 provider 自身配置的默认模型
+        let model = if req.params.model.is_empty() {
+            &self.model
+        } else {
+            &req.params.model
+        };
         let mut body = json!({
-            "model": req.params.model,
+            "model": model,
             "messages": messages,
             "stream": true,
         });
@@ -163,14 +169,17 @@ impl OllamaProvider {
             options.insert("seed".to_string(), json!(seed));
         }
         // num_ctx 显式下发（2026-08-23 审查 §5-P2）：本地 Ollama 默认上下文仅
-        // 2048/4096，长对话会被**静默截断**（capability 却声明 8192）。取
-        // provider 声明的 `context_window`；用户可用环境变量 `OLLAMA_NUM_CTX`
-        // 覆盖（注意：请求 options 优先级高于 Modelfile 内的默认值）。
-        let num_ctx = std::env::var("OLLAMA_NUM_CTX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(self.capabilities().context_window);
-        options.insert("num_ctx".to_string(), json!(num_ctx));
+        // 2048/4096，长对话会被**静默截断**（capability 却声明 8192）。
+        // R4（PT4-9）：仅在环境变量显式设置 `OLLAMA_NUM_CTX` 时下发——此前
+        // 恒插默认 8192，请求 options 优先级高于 Modelfile 默认值，用户在
+        // Modelfile 配的 32K 上下文被静默压回 8192 造成截断；未设置时交给
+        // Modelfile/模型默认（不干预）。
+        if let Ok(raw) = std::env::var("OLLAMA_NUM_CTX")
+            && let Ok(num_ctx) = raw.parse::<usize>()
+            && num_ctx > 0
+        {
+            options.insert("num_ctx".to_string(), json!(num_ctx));
+        }
         if !options.is_empty() {
             body["options"] = Value::Object(options);
         }
@@ -455,6 +464,10 @@ fn usize_from_json(v: Option<&Value>) -> usize {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::needless_pass_by_value)]
+
+    /// 串行化读写 `OLLAMA_NUM_CTX` 等进程级 env 的测试（R4 PT4-9）——
+    /// Rust 2024 并行测试对 env 无隔离，裸 `set_var` 会互相污染。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use super::*;
     use futures::stream::StreamExt;
@@ -941,6 +954,10 @@ mod tests {
 
     #[test]
     fn build_request_body_no_system_no_tools_minimal() {
+        // 持 ENV_LOCK：与 num_ctx_sent_only_when_env_set 并行会互相污染 env
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let provider = OllamaProvider::new("http://localhost:11434", "llama3").expect("构造");
         let body = provider.build_request_body(&basic_req());
         assert_eq!(body["model"], "llama3");
@@ -950,9 +967,34 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
         // 无 tools 时不出现 tools 字段
         assert!(body.get("tools").is_none());
-        // 无可选 params 时 options 仅含 num_ctx（2026-08-23 审查 §5-P2：显式
-        // 下发上下文窗口，防本地 Ollama 默认 2048 静默截断长对话）
-        assert_eq!(body["options"]["num_ctx"], json!(8_192));
+        // 无可选 params 时 options 为空——num_ctx 仅在显式设置 OLLAMA_NUM_CTX
+        // 时下发（R4 PT4-9：此前恒发默认 8192，请求 options 优先级高于 Modelfile
+        // 默认，用户 Modelfile 配的 32K 上下文被静默压回 8192 造成截断）。
+        assert!(
+            body.get("options").is_none(),
+            "无 OLLAMA_NUM_CTX 时不下发 num_ctx"
+        );
+    }
+
+    #[test]
+    fn num_ctx_sent_only_when_env_set() {
+        // PT4-9：环境变量显式设置时才下发 num_ctx。
+        // static Mutex 串行化 env 读写测试（并行跑会互相污染 OLLAMA_NUM_CTX）
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: 持有 ENV_LOCK，进程内无并发 env 读写
+        unsafe { std::env::set_var("OLLAMA_NUM_CTX", "32768") };
+        let provider =
+            OllamaProvider::new("http://localhost:11434", "llama3").expect("构造 provider");
+        let body = provider.build_request_body(&basic_req());
+        unsafe { std::env::remove_var("OLLAMA_NUM_CTX") };
+        assert_eq!(body["options"]["num_ctx"], json!(32_768));
+        // 非法值（=0/非数字）不下发
+        unsafe { std::env::set_var("OLLAMA_NUM_CTX", "0") };
+        let body2 = provider.build_request_body(&basic_req());
+        unsafe { std::env::remove_var("OLLAMA_NUM_CTX") };
+        assert!(body2.get("options").is_none() || body2["options"].get("num_ctx").is_none());
     }
 
     // --- headers ---

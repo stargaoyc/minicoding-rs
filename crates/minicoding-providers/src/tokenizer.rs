@@ -79,16 +79,13 @@ impl TiktokenTokenizer {
     /// 根据 model 名称选择对应分词器。
     ///
     /// 选择规则：
-    /// - `gpt-4o` / `gpt-4o-mini` / `o1` / `o3` 系列 → `o200k_base`
+    /// - `gpt-4o` / `o1` / `o3` / `o4` / `gpt-5` 系列 → `o200k_base`
     /// - 其它默认 → `cl100k_base`
     ///
     /// # Errors
     /// 词表加载失败时返回错误描述。
     pub fn new_for_model(model: &str) -> Result<Self, String> {
-        let lower = model.to_ascii_lowercase();
-        let uses_o200k =
-            lower.starts_with("gpt-4o") || lower.starts_with("o1") || lower.starts_with("o3");
-        if uses_o200k {
+        if Self::uses_o200k_vocab(model) {
             Self::new_o200k()
         } else {
             Self::new_cl100k()
@@ -99,6 +96,20 @@ impl TiktokenTokenizer {
     #[must_use]
     pub fn kind(&self) -> TiktokenKind {
         self.kind
+    }
+
+    /// 判定模型是否使用 `o200k_base` 词表（R4 PT4-8：统一事实源——此前
+    /// `tokenizer::new_for_model` 与 `openai::uses_max_completion_tokens` 各自
+    /// 维护一套模型族词表，`o4`/`gpt-5` 在 tokenizer 端落 `cl100k` 而推理系
+    /// 判定认定它们为推理族，两处标准不一致仅影响估算精度）。
+    #[must_use]
+    pub fn uses_o200k_vocab(model: &str) -> bool {
+        let lower = model.to_ascii_lowercase();
+        lower.starts_with("gpt-4o")
+            || lower.starts_with("o1")
+            || lower.starts_with("o3")
+            || lower.starts_with("o4")
+            || lower.starts_with("gpt-5")
     }
 
     /// 编码文本并返回 token 数（不含特殊 token）。

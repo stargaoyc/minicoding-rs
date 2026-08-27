@@ -130,8 +130,14 @@ impl AnthropicProvider {
             }
         }
 
+        // PT4-1（R4）：空 model 回退到 provider 自身配置的默认模型
+        let model = if req.params.model.is_empty() {
+            &self.model
+        } else {
+            &req.params.model
+        };
         let mut body = json!({
-            "model": req.params.model,
+            "model": model,
             "messages": messages,
             "stream": true,
             // max_tokens 计算见 compute_max_tokens（2026-08-25 审查 PR-4）
@@ -564,9 +570,11 @@ fn compute_max_tokens(max_output_tokens: Option<usize>, thinking_budget: Option<
     const DEFAULT_MAX_TOKENS: usize = 4_096;
     const THINKING_MIN_HEADROOM: usize = 1_024;
     match thinking_budget {
+        // R4（PT4-10）：用户显式 `Some(0)` 时此前产出 `max_tokens: 0` 直接
+        // 400——`max(1)` 保证最小合法值（0 通常表示"不限制"的误传）。
         None => max_output_tokens
             .unwrap_or(DEFAULT_MAX_TOKENS)
-            .min(MAX_OUTPUT_LIMIT),
+            .clamp(1, MAX_OUTPUT_LIMIT),
         Some(budget) => {
             let headroom = max_output_tokens
                 .unwrap_or(DEFAULT_MAX_TOKENS)

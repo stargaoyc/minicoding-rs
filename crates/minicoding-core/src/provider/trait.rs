@@ -156,3 +156,85 @@ pub trait Tokenizer: Send + Sync {
 }
 
 // `LlmError` → `RuntimeError` 由 `#[from]` 自动实现（见 `model::error`）。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_incremental_preserves_input_tokens() {
+        // PTM-1 message_start{input:100,cache_read:Some(50),output:1}
+        // → message_delta{output:20}：input 与 cache 保留旧值
+        let mut u = Usage {
+            input_tokens: 100,
+            output_tokens: 1,
+            cache_read: Some(50),
+            cache_write: None,
+        };
+        u.merge_incremental(&Usage {
+            input_tokens: 0,
+            output_tokens: 20,
+            cache_read: None,
+            cache_write: None,
+        });
+        assert_eq!(u.input_tokens, 100, "input 保留旧值");
+        assert_eq!(u.output_tokens, 20, "output 取较大值");
+        assert_eq!(u.cache_read, Some(50), "cache_read 保留旧值");
+    }
+
+    #[test]
+    fn merge_incremental_replaces_nonzero_input() {
+        // 后续 chunk 带新 input 值时替换（OpenAI 兼容网关每 chunk 发快照）
+        let mut u = Usage {
+            input_tokens: 100,
+            output_tokens: 5,
+            cache_read: None,
+            cache_write: None,
+        };
+        u.merge_incremental(&Usage {
+            input_tokens: 120,
+            output_tokens: 10,
+            cache_read: None,
+            cache_write: None,
+        });
+        assert_eq!(u.input_tokens, 120, "input 新值非零时替换");
+        assert_eq!(u.output_tokens, 10, "output 取较大值");
+    }
+
+    #[test]
+    fn merge_incremental_some_none_does_not_overwrite_cache() {
+        let mut u = Usage {
+            input_tokens: 50,
+            output_tokens: 3,
+            cache_read: Some(30),
+            cache_write: Some(10),
+        };
+        // newer 全部 None —— 保留旧值
+        u.merge_incremental(&Usage {
+            input_tokens: 0,
+            output_tokens: 5,
+            cache_read: None,
+            cache_write: None,
+        });
+        assert_eq!(u.cache_read, Some(30));
+        assert_eq!(u.cache_write, Some(10));
+    }
+
+    #[test]
+    fn merge_incremental_none_does_not_replace_with_zero() {
+        // 0 值 output_tokens 不会降低计数（max 语义）
+        let mut u = Usage {
+            input_tokens: 50,
+            output_tokens: 100,
+            cache_read: None,
+            cache_write: None,
+        };
+        u.merge_incremental(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read: None,
+            cache_write: None,
+        });
+        assert_eq!(u.output_tokens, 100, "0 不降低 output");
+    }
+}
