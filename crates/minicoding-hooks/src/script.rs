@@ -15,6 +15,7 @@ use crate::protocol;
 use minicoding_core::hooks::{Hook, HookError, HookInput, HookMatcher, HookOutput};
 use minicoding_core::provider::BoxFuture;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -38,11 +39,19 @@ pub(crate) const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_
 /// # 安全
 ///
 /// 见模块级文档。
+///
+/// # 沙箱（C-26，SEC-5，2026-08-27 R5 审查）
+///
+/// 可选注入 `SandboxDriver` + `SandboxPolicy`——启用时 hook 子进程与 `shell.run`
+/// 子进程受同等级别的 OS 沙箱约束（landlock/Seatbelt/Job Object）。未注入时
+/// 无内核级隔离（legacy 行为）。见 `with_sandbox`。
 pub struct ScriptHook {
     name: String,
     matcher: HookMatcher,
     command: String,
     timeout: Duration,
+    sandbox_driver: Option<Arc<dyn minicoding_core::sandbox::SandboxDriver>>,
+    sandbox_policy: Option<minicoding_core::sandbox::SandboxPolicy>,
 }
 
 impl ScriptHook {
@@ -65,7 +74,24 @@ impl ScriptHook {
             matcher,
             command: command.into(),
             timeout,
+            sandbox_driver: None,
+            sandbox_policy: None,
         }
+    }
+
+    /// 注入 OS 沙箱（C-26：hook 子进程与 `shell.run` 同等待遇，SEC-5）。
+    ///
+    /// `apply` 在 spawn 前经 `pre_exec`（Linux/macOS）或 `CREATE_SUSPENDED`
+    /// （Windows）约束子进程；未注入时无内核隔离（兼容既有调用方）。
+    #[must_use]
+    pub fn with_sandbox(
+        mut self,
+        driver: Arc<dyn minicoding_core::sandbox::SandboxDriver>,
+        policy: minicoding_core::sandbox::SandboxPolicy,
+    ) -> Self {
+        self.sandbox_driver = Some(driver);
+        self.sandbox_policy = Some(policy);
+        self
     }
 }
 
@@ -82,7 +108,19 @@ impl Hook for ScriptHook {
         let name = self.name.clone();
         let command = self.command.clone();
         let timeout = self.timeout;
-        Box::pin(async move { run_script_hook(&name, &command, timeout, input).await })
+        let sandbox_driver = self.sandbox_driver.clone();
+        let sandbox_policy = self.sandbox_policy.clone();
+        Box::pin(async move {
+            run_script_hook(
+                &name,
+                &command,
+                timeout,
+                input,
+                sandbox_driver,
+                sandbox_policy,
+            )
+            .await
+        })
     }
 }
 
@@ -92,6 +130,8 @@ async fn run_script_hook(
     command_template: &str,
     timeout: Duration,
     input: HookInput,
+    sandbox_driver: Option<Arc<dyn minicoding_core::sandbox::SandboxDriver>>,
+    sandbox_policy: Option<minicoding_core::sandbox::SandboxPolicy>,
 ) -> Result<HookOutput, HookError> {
     // 1. 展开 ${TOOL_INPUT_<KEY>} 占位符（经 shell 转义防注入）。
     //
@@ -100,15 +140,21 @@ async fn run_script_hook(
     // 活动字符，LLM 可控参数（如 `path = "\" & calc & echo \""`）直接拼接执行。
     // 完整输入已通过 stdin JSON 下发（步骤 5），脚本应从 stdin 取参而非命令行；
     // 模板中残留的占位符按字面传递（由脚本自行处理）。
+    //
+    // SEC-3（2026-08-27 R5 审查）：此前 `#[cfg(windows)]` 块只打 warn，`expand_placeholders`
+    // 无条件执行——占位符仍被替换并拼进 `cmd /C`，注释承诺的"禁用"未实现（命令注入
+    // 实锤）。现改为 Windows 下直接返回字面模板，占位符原样传给脚本自处理。
     #[cfg(windows)]
-    {
+    let expanded = {
         if command_template.contains("${TOOL_INPUT_") {
             tracing::warn!(
                 hook = %name,
-                "hook template contains ${{TOOL_INPUT_*}} placeholders; expansion is disabled on                  Windows (cmd.exe does not honor POSIX quoting). Read input from stdin JSON instead."
+                "hook template contains ${{TOOL_INPUT_*}} placeholders; expansion is disabled on Windows (cmd.exe does not honor POSIX quoting). Read input from stdin JSON instead."
             );
         }
-    }
+        command_template.to_string()
+    };
+    #[cfg(not(windows))]
     let expanded = expand_placeholders(command_template, &input);
 
     // 2. 构造子进程命令（Unix: sh -c，Windows: cmd /C）。
@@ -134,6 +180,14 @@ async fn run_script_hook(
         if let Ok(value) = std::env::var(env_name) {
             command.env(env_name, value);
         }
+    }
+
+    // 3b. OS 沙箱（C-26，SEC-5）：与 `shell.run` 同等待遇——landlock/Seatbelt/
+    //     Job Object 约束 hook 子进程。未注入驱动时跳过（兼容既有调用方）。
+    if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref()) {
+        driver.apply(policy, command.as_std_mut()).map_err(|e| {
+            HookError::Internal(format!("sandbox apply failed for hook `{name}`: {e}"))
+        })?;
     }
 
     // 4. spawn 子进程。
@@ -189,7 +243,17 @@ async fn run_script_hook(
     } else {
         String::from_utf8_lossy(&output.stdout).into_owned()
     };
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stderr = if output.stderr.len() > MAX_STDOUT_BYTES {
+        tracing::warn!(
+            hook = name,
+            bytes = output.stderr.len(),
+            max = MAX_STDOUT_BYTES,
+            "hook stderr 超过 1 MiB 上限，截断"
+        );
+        String::from_utf8_lossy(&output.stderr[..MAX_STDOUT_BYTES]).into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
 
     // 8. 退出码映射（0=正常解析、2=deny、其他=错误）。
     let code = output.status.code().unwrap_or(-1);

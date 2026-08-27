@@ -162,6 +162,14 @@ fn check_ipv4(ip: std::net::Ipv4Addr, opts: SsrfOptions) -> Result<(), SsrfError
 }
 
 fn check_ipv6(ip: std::net::Ipv6Addr, opts: SsrfOptions) -> Result<(), SsrfError> {
+    // SEC-1（2026-08-27 R5 审查）：IPv4-mapped IPv6 地址（::ffff:a.b.c.d）
+    // 的 `to_ipv4_mapped()` 返回 `Some(Ipv4Addr)`——解析为 `url::Host::Ipv6`
+    // 的 `[::ffff:169.254.169.254]` 此前不触发 check_ipv4 的私网/回环/元数据
+    // 检查，可直接到达云元数据接口、内网服务、回环端口。已实测复现。
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return check_ipv4(v4, opts);
+    }
+
     // ::1 回环
     if ip.is_loopback() && !opts.allow_loopback {
         return Err(SsrfError::Loopback(ip.to_string()));
@@ -271,6 +279,37 @@ mod tests {
         let ip: IpAddr = "fc00::1".parse().unwrap();
         let result = check_ip(&ip, opts);
         assert!(matches!(result, Err(SsrfError::PrivateIp(_))));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_blocked() {
+        // SEC-1（R5）：IPv4-mapped IPv6 必须经 check_ipv4 语义拒绝——
+        // [::ffff:169.254.169.254]、[::ffff:10.0.0.1]、[::ffff:127.0.0.1]、
+        // [::ffff:192.168.1.1] 此前全部放行（is_loopback/is_unicast_link_local
+        // 对 mapped 地址均 false，fc00::/7 不命中）
+        let opts = SsrfOptions::strict();
+        assert!(matches!(
+            check_url("http://[::ffff:169.254.169.254]/latest/meta-data/", opts),
+            Err(SsrfError::LinkLocal(_))
+        ));
+        assert!(matches!(
+            check_url("http://[::ffff:10.0.0.1]/", opts),
+            Err(SsrfError::PrivateIp(_))
+        ));
+        assert!(matches!(
+            check_url("http://[::ffff:127.0.0.1]:8080/", opts),
+            Err(SsrfError::Loopback(_))
+        ));
+        assert!(matches!(
+            check_url("http://[::ffff:192.168.1.1]/", opts),
+            Err(SsrfError::PrivateIp(_))
+        ));
+        // allow_loopback 时 mapped 回环放行（与纯 IPv4 语义一致）
+        let opts = SsrfOptions::local_dev();
+        assert!(check_url("http://[::ffff:127.0.0.1]:11434/", opts).is_ok());
+        // 公网 mapped 地址仍放行
+        let opts = SsrfOptions::strict();
+        assert!(check_url("http://[::ffff:8.8.8.8]/", opts).is_ok());
     }
 
     #[test]

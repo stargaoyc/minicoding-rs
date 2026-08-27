@@ -190,11 +190,21 @@ fn apply_seatbelt(
 ///
 /// - `ReadOnly`：全盘只读，仅允许 exec 系统路径；
 /// - `WorkspaceWrite`：workdir + writable 可写，其余只读，VCS 目录保护。
+///
+/// ## 读权限模型（SEC-4，2026-08-27 R5 审查）
+///
+/// 此前的 `(allow file-read*)` 让沙箱化 `shell.run` 子进程可读取
+/// `~/.ssh/id_rsa`、`~/.aws/credentials` 等全部凭证并复制到可写 workdir
+/// （Linux A3 已封此通道，macOS 未移植）。现改为 deny-first + 白名单：
+/// 系统路径与 workdir 显式放行，`$HOME` 默认拒绝读，仅放行工具链/缓存白名单
+/// （[`crate::hardening::home_read_allow_paths`]），白名单内凭证高危落点
+/// （gh/gcloud/cargo credentials）尾部显式 deny 覆盖。Seatbelt 规则
+/// **最后匹配者优先**——`deny $HOME` 必须置于系统路径 allow 之后，
+/// workdir 允许必须置于 `deny $HOME` 之后（workdir 常见于 HOME 内）。
 fn build_profile(policy: &SandboxPolicy) -> std::io::Result<String> {
     let mut p = String::new();
 
-    // 基础：允许读、允许 exec 系统路径、允许必要系统操作。
-    p.push_str("(allow file-read*)\n");
+    // 基础：允许 exec 系统路径、允许必要系统操作。
     p.push_str("(allow process-exec (subpath \"/usr/bin\") (subpath \"/bin\") (subpath \"/usr/sbin\") (subpath \"/sbin\") (subpath \"/usr/libexec\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\"))\n");
     p.push_str("(allow process-fork)\n");
     p.push_str("(allow signal)\n");
@@ -211,24 +221,61 @@ fn build_profile(policy: &SandboxPolicy) -> std::io::Result<String> {
     // 写权限：默认拒绝
     p.push_str("(deny file-write*)\n");
 
+    // 读权限（SEC-4）：系统路径显式放行（在 deny $HOME 之前，最后匹配优先）
+    p.push_str("(allow file-read* (subpath \"/System\") (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/etc\") (subpath \"/private\") (subpath \"/dev\") (subpath \"/var\") (subpath \"/tmp\") (subpath \"/opt\") (subpath \"/Library\") (subpath \"/Applications\"))\n");
+
+    // 凭证目录读保护（SEC-4）：$HOME 默认拒绝读，仅白名单目录放行
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        let home = home.to_string_lossy();
+        p.push_str(&format!(
+            "(deny file-read* (subpath \"{}\"))\n",
+            seatbelt_escape(&home)?
+        ));
+        // 工具链/缓存白名单（与 Linux A3 同语义；存在性过滤）
+        for w in crate::hardening::home_read_allow_paths() {
+            p.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                seatbelt_escape(&w.to_string_lossy())?
+            ));
+        }
+        // 白名单内凭证高危落点尾部 deny（最后匹配优先，覆盖白名单 allow）
+        for cred in crate::hardening::credential_dir_deny_paths() {
+            p.push_str(&format!(
+                "(deny file-read* (subpath \"{}\"))\n",
+                seatbelt_escape(&cred.to_string_lossy())?
+            ));
+        }
+    }
+
     match policy {
         SandboxPolicy::ReadOnly => {
-            // ReadOnly：不额外放行任何写路径（workdir 只读）
+            // ReadOnly：仅 workdir 可读（在 deny $HOME 之后放行，workdir 常见于 HOME 内）
+            // 注意：ReadOnly 策略无 workdir 字段，全盘系统路径 + 白名单已覆盖可读面
         }
         SandboxPolicy::WorkspaceWrite { workdir, writable } => {
-            // workdir 可写（路径经 seatbelt_escape 防元字符注入）
+            // workdir 可读（在 deny $HOME 之后——workdir 常位于 HOME 内，
+            // 最后匹配优先保证 workdir 读不被 HOME deny 覆盖）
             p.push_str(&format!(
-                "(allow file-write* (subpath \"{}\"))\n",
+                "(allow file-read* (subpath \"{}\"))\n",
                 seatbelt_escape(workdir.as_str())?
             ));
-            // 额外 writable 可写
+            // 额外 writable 目录可读写
             for w in writable {
+                p.push_str(&format!(
+                    "(allow file-read* (subpath \"{}\"))\n",
+                    seatbelt_escape(w.as_str())?
+                ));
                 p.push_str(&format!(
                     "(allow file-write* (subpath \"{}\"))\n",
                     seatbelt_escape(w.as_str())?
                 ));
             }
-            // VCS 目录写保护（deny 优先级高于 allow，确保 .git 等不可写）
+            // workdir 可写（路径经 seatbelt_escape 防元字符注入）
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                seatbelt_escape(workdir.as_str())?
+            ));
+            // VCS 目录写保护（deny 最后匹配优先，确保 .git 等不可写）
             let vcs_dirs = vcs_protected_dirs(workdir.as_std_path());
             for vcs in vcs_dirs {
                 p.push_str(&format!(

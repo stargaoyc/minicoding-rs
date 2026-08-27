@@ -98,10 +98,11 @@ impl DenialDetector {
 
 impl SandboxDenialDetector for DenialDetector {
     fn detect(&self, tool: &str, error_text: &str) -> Option<DenialMatch> {
-        // S-6：Runtime 合成的 errno 标记优先判定权威性。`\x01`/`\x02` 控制字符
-        // 序列无法被子进程 stderr 输出可靠伪造，且标记由 Runtime 在进程内合成
-        // （仅当错误携带结构化 EPERM/EACCES 时追加）——命中即内核级硬反馈；
-        // 仅传统文本模式命中的为 advisory（可能来自业务失败或提示注入伪造）。
+        // SEC-6（2026-08-27 R5 审查）：authoritative 字段语义更新——本检测器
+        // 仅按裸前缀做**提示性**标记（子进程可伪造 `\x01MINICODING_DENIED_ERRNO=`
+        // 文本，控制字符并非不可输出）；权威判定由 `Runtime::build_denial_result`
+        // 验证"含防伪 nonce 的完整标记 + 末尾追加位置"后**覆盖**本字段。
+        // 保留字段赋值仅为 trait 契约兼容与单独使用时的保守语义。
         let authoritative =
             error_text.contains(minicoding_core::sandbox::DENIED_ERRNO_MARKER_PREFIX);
         for sig in PLATFORM_SIGNATURES {

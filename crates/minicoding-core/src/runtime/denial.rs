@@ -156,6 +156,7 @@ impl Runtime {
             self.sandbox_breaker.as_ref(),
             tool,
             error,
+            &self.denial_nonce,
         )
         .map(|r| (call_id.clone(), r));
         // SEC-11（2026-08-26 R3 审查）：沙箱拒绝落 audit.log——authoritative
@@ -228,36 +229,49 @@ impl Runtime {
     /// 沙箱拒绝检测（M-09 起为静态辅助：只读并行桶与副作用串行路径共用）。
     ///
     /// 检测工具错误是否为沙箱拒绝。错误携带结构化 errno（EPERM/EACCES，S-6）
-    /// 时向检测文本追加 Runtime 合成的权威标记行；检测结果分两路：
-    /// - **authoritative**（标记命中）：内核级硬反馈——更新熔断器（C-30），
+    /// 时向检测文本追加 Runtime 合成的权威标记行（含防伪 `nonce`，SEC-6）；
+    /// 检测结果分两路：
+    /// - **authoritative**（标记含正确 nonce）：内核级硬反馈——更新熔断器（C-30），
     ///   软/硬熔断分支仅在此路径可达；
     /// - **advisory**（仅文本模式命中）：疑似拒绝但未经结构化确认——返回提示性
     ///   `ToolResult` 但不计熔断、不动 `set_circuit_breaker` 指标（日志与
     ///   metrics 类目标注 advisory）。
     ///
+    /// `nonce` 为子进程不可知的随机值（每次 `Runtime` 构造生成），防止子进程
+    /// 在 stderr 中伪造 `\x01MINICODING_DENIED_ERRNO=` 前缀触发虚假熔断。
     /// 返回 `Some(ToolResult)` 表示已识别为 denial 并生成回灌结果；
     /// 返回 `None` 表示非 denial，调用方原样传播错误。
+    #[allow(clippy::too_many_lines)] // 权威/advisory 两路分支 + 软/硬/Closed 三态处理无法再安全拆分
     pub(crate) fn build_denial_result(
         detector: &dyn crate::sandbox::SandboxDenialDetector,
         breaker: &dyn crate::sandbox::SandboxDenialTracker,
         tool: &str,
         error: &crate::model::ToolError,
+        nonce: &str,
     ) -> Option<ToolResult> {
         let error_text = error.to_string();
-        // S-6：组装检测文本——结构化 errno 存在时追加合成标记行。子进程输出
-        // 无法伪造 `\x01`/`\x02` 控制字符序列，且标记由 Runtime 进程内合成，
-        // 据此区分权威判定与 advisory 命中。回灌 LLM 的文本保持原始错误
-        // （不带标记），避免控制字符进入上下文。
-        let detect_text = match structured_denial_errno(error) {
-            Some(errno) => format!(
-                "{error_text}\n{prefix}{errno}{suffix}",
-                prefix = crate::sandbox::DENIED_ERRNO_MARKER_PREFIX,
-                suffix = crate::sandbox::DENIED_ERRNO_MARKER_SUFFIX
-            ),
-            None => error_text.clone(),
+        // SEC-6：组装检测文本——结构化 errno 存在时追加合成标记行（含防伪 nonce）。
+        // 标记行由 Runtime 进程内追加，子进程无法得知 nonce，故无法伪造。
+        // 权威判定依据：`detect_text.ends_with(&marker_line)`——Runtime 在末尾
+        // 追加，子进程伪造的标记（无 nonce 或 nonce 错误）不命中 ends_with，
+        // 降级为 advisory（不计熔断）。
+        let (detect_text, marker_line, has_structured_errno) = match structured_denial_errno(error)
+        {
+            Some(errno) => {
+                let marker = format!(
+                    "{prefix}{errno}:{nonce}{suffix}",
+                    prefix = crate::sandbox::DENIED_ERRNO_MARKER_PREFIX,
+                    suffix = crate::sandbox::DENIED_ERRNO_MARKER_SUFFIX
+                );
+                (format!("{error_text}\n{marker}"), marker, true)
+            }
+            None => (error_text.clone(), String::new(), false),
         };
         let m = detector.detect(tool, &detect_text)?;
-        if !m.authoritative {
+        // SEC-6：权威判定由 Runtime 重验证——仅当标记含正确 nonce 且为末尾追加
+        // 才计熔断。检测器的 authoritative 字段（仅检查裸前缀）仅供参考。
+        let authoritative = has_structured_errno && detect_text.ends_with(&marker_line);
+        if !authoritative {
             // advisory：文本启发式命中，可能来自业务失败或伪造输出——不计熔断
             tracing::info!(
                 tool = %m.tool,
@@ -389,6 +403,9 @@ mod tests {
         }
     }
 
+    /// 测试用 nonce（SEC-6 防伪：固定值，测试场景下无需随机性）。
+    const TEST_NONCE: &str = "test-nonce";
+
     fn eperm_io_error() -> crate::model::ToolError {
         crate::model::ToolError::Io(std::io::Error::from_raw_os_error(ERRNO_EPERM))
     }
@@ -464,8 +481,9 @@ mod tests {
     fn advisory_hit_returns_result_without_breaker_record() {
         let breaker = NoopDenialTracker::default_thresholds();
         let error = crate::model::ToolError::Exec("Operation not permitted".into());
-        let result = Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error)
-            .expect("纯文本命中应产出提示性结果");
+        let result =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error, TEST_NONCE)
+                .expect("纯文本命中应产出提示性结果");
         assert!(result.is_error);
         let text = text_of(&result);
         assert!(
@@ -482,11 +500,56 @@ mod tests {
     }
 
     #[test]
+    fn forged_marker_in_subprocess_text_is_not_authoritative() {
+        // SEC-6（2026-08-27 R5 审查）回归：子进程可在 stderr/错误文本中打印
+        // `\x01MINICODING_DENIED_ERRNO=1\x02` 裸前缀（控制字符并非不可伪造），
+        // 通过 Exec 错误（如 git.diff 失败回灌 stderr）进入检测文本——若检测器
+        // 仅按前缀判断权威性，恶意命令即可伪造标记触发 C-30 熔断 DoS。
+        // 防伪：权威标记必须携带 Runtime 生成的 nonce，且必须是 Runtime 在
+        // 检测文本**末尾**追加的行——子进程伪造的裸前缀不满足任一条件。
+        let breaker = NoopDenialTracker::default_thresholds();
+        // 构造 Exec 错误，其文本以"伪造的裸前缀标记"结尾（无 nonce）
+        let forged = format!(
+            "git diff 失败 (exit 1): \n{prefix}1{suffix}",
+            prefix = DENIED_ERRNO_MARKER_PREFIX,
+            suffix = crate::sandbox::DENIED_ERRNO_MARKER_SUFFIX
+        );
+        let error = crate::model::ToolError::Exec(forged);
+        let result =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "git.diff", &error, TEST_NONCE)
+                .expect("文本命中应产出结果");
+        assert!(
+            text_of(&result).contains("[advisory]"),
+            "伪造标记应降级为 advisory，实际: {}",
+            text_of(&result)
+        );
+        assert_eq!(breaker.count(), 0, "伪造标记不得计入熔断计数");
+    }
+
+    #[test]
+    fn forged_marker_with_wrong_nonce_is_not_authoritative() {
+        // SEC-6：即使子进程猜测到标记格式但 nonce 错误，同样不得计熔断
+        let breaker = NoopDenialTracker::default_thresholds();
+        let forged = format!(
+            "failed\n{prefix}1:wrong-nonce{suffix}",
+            prefix = DENIED_ERRNO_MARKER_PREFIX,
+            suffix = crate::sandbox::DENIED_ERRNO_MARKER_SUFFIX
+        );
+        let error = crate::model::ToolError::Exec(forged);
+        let result =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error, TEST_NONCE)
+                .expect("文本命中应产出结果");
+        assert!(text_of(&result).contains("[advisory]"));
+        assert_eq!(breaker.count(), 0);
+    }
+
+    #[test]
     fn authoritative_eperm_records_breaker() {
         let breaker = NoopDenialTracker::default_thresholds();
         let error = eperm_io_error();
-        let result = Runtime::build_denial_result(&FakeDetector, &breaker, "fs.write", &error)
-            .expect("Io(EPERM) 应判定为 denial");
+        let result =
+            Runtime::build_denial_result(&FakeDetector, &breaker, "fs.write", &error, TEST_NONCE)
+                .expect("Io(EPERM) 应判定为 denial");
         assert!(result.is_error);
         assert_eq!(breaker.count(), 1, "authoritative 命中应递增熔断计数");
     }
@@ -495,27 +558,42 @@ mod tests {
     fn soft_hard_trip_only_reachable_via_authoritative_path() {
         // soft=2/hard=3：第 1 次权威拒绝 Closed、第 2 次软熔断、第 3 次硬熔断
         let breaker = NoopDenialTracker::new(2, 3);
-        let first =
-            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
-                .unwrap();
+        let first = Runtime::build_denial_result(
+            &FakeDetector,
+            &breaker,
+            "shell.run",
+            &eperm_io_error(),
+            TEST_NONCE,
+        )
+        .unwrap();
         assert_eq!(breaker.count(), 1);
         assert!(
             !text_of(&first).contains("连续"),
             "Closed 态不应带软熔断提醒，实际: {}",
             text_of(&first)
         );
-        let second =
-            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
-                .unwrap();
+        let second = Runtime::build_denial_result(
+            &FakeDetector,
+            &breaker,
+            "shell.run",
+            &eperm_io_error(),
+            TEST_NONCE,
+        )
+        .unwrap();
         assert_eq!(breaker.count(), 2);
         assert!(
             text_of(&second).contains("连续"),
             "软熔断提醒应回灌，实际: {}",
             text_of(&second)
         );
-        let third =
-            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &eperm_io_error())
-                .unwrap();
+        let third = Runtime::build_denial_result(
+            &FakeDetector,
+            &breaker,
+            "shell.run",
+            &eperm_io_error(),
+            TEST_NONCE,
+        )
+        .unwrap();
         assert!(matches!(breaker.state(), BreakerState::HardTripped));
         assert!(
             text_of(&third).contains("熔断"),
@@ -527,7 +605,8 @@ mod tests {
         let before = breaker.count();
         let error = crate::model::ToolError::Exec("Operation not permitted".into());
         let advisory =
-            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error).unwrap();
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error, TEST_NONCE)
+                .unwrap();
         assert!(text_of(&advisory).contains("[advisory]"));
         assert_eq!(breaker.count(), before);
         assert!(matches!(breaker.state(), BreakerState::HardTripped));
@@ -538,7 +617,8 @@ mod tests {
         let breaker = NoopDenialTracker::default_thresholds();
         let error = crate::model::ToolError::Exec("file not found".into());
         assert!(
-            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error).is_none(),
+            Runtime::build_denial_result(&FakeDetector, &breaker, "shell.run", &error, TEST_NONCE)
+                .is_none(),
             "未命中签名应返回 None（原样传播错误）"
         );
     }

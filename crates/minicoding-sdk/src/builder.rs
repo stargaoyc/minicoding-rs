@@ -511,8 +511,7 @@ fn inner_build_runtime(
     // 11a. 预构建 Hook registry（`hooks` feature 启用时，T-M5-8）
     //      必须在 `config` move 进 builder 之前读 `config.hooks`。
     //      未启用 hooks feature 时不构建（RuntimeBuilder 默认 NoopHookRegistry）。
-    #[cfg(feature = "hooks")]
-    let hook_registry = build_hook_registry(&config.hooks);
+    //      SEC-5（R5）：构造时机后移至 sandbox_pair 就绪后（见下），便于注入 OS 沙箱。
 
     // 11a-2. 启动配置文件监听（S-22 热更新，best-effort：监听失败不阻塞启动）
     //        `ConfigWatcher::start` 内部捕获错误并降级为空壳，故结果直接注入。
@@ -547,6 +546,9 @@ fn inner_build_runtime(
             None
         }
     };
+    // SEC-5（R5）：Hook registry 移至 sandbox_pair 就绪后构造（OS 沙箱注入）
+    #[cfg(feature = "hooks")]
+    let hook_registry = build_hook_registry(&config.hooks, sandbox_pair.as_ref());
     let child_tokenizer: Arc<dyn Tokenizer> = tokenizer
         .clone()
         .unwrap_or_else(crate::subagent::fallback_tokenizer);
@@ -769,9 +771,14 @@ pub fn build_runtime(
 /// 把每个 `HookEntry` 转为 `ScriptHook`（外部脚本 Hook）并注册。`matcher` 字段
 /// 解析为 `HookMatcher::for_tools`（工具相关事件）或 `HookMatcher::for_events`
 /// （非工具事件）。`timeout_sec` 缺省时用 `default_timeout_sec`。
+///
+/// SEC-5（2026-08-27 R5 审查）：`sandbox_pair` 为 `Some` 时（`sandbox` feature +
+/// 配置预设）注入 `ScriptHook::with_sandbox`——hook 子进程受 OS 沙箱约束
+/// （C-26 后台 Hook 同等待遇）。
 #[cfg(feature = "hooks")]
 fn build_hook_registry(
     cfg: &minicoding_core::config::HooksConfig,
+    sandbox_pair: Option<&(Arc<dyn SandboxDriver>, SandboxPolicy)>,
 ) -> minicoding_hooks::HookRegistryImpl {
     use minicoding_core::hooks::{HookEvent, HookMatcher, HookRegistry};
     use minicoding_hooks::ScriptHook;
@@ -830,7 +837,11 @@ fn build_hook_registry(
                 .timeout_sec
                 .map_or(default_timeout, Duration::from_secs);
             let name = format!("{}[{idx}]", events[0].as_str());
-            let hook = ScriptHook::new(name, matcher, entry.command.clone(), timeout);
+            let mut hook = ScriptHook::new(name, matcher, entry.command.clone(), timeout);
+            // SEC-5（R5）：hook 子进程注入 OS 沙箱（C-26）
+            if let Some((driver, policy)) = sandbox_pair {
+                hook = hook.with_sandbox(driver.clone(), policy.clone());
+            }
             registry.register(Arc::new(hook));
         }
     }

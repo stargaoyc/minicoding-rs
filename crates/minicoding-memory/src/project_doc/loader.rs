@@ -66,10 +66,52 @@ fn canonical_key(path: &Utf8Path) -> String {
 
 /// 组件级路径包含判定（CTX-5）：`dir` 与 `base` 逐组件比较前缀，
 /// 消除裸字符串 `starts_with` 的兄弟目录误判与尾斜杠退化。
+///
+/// SEC-1（2026-08-27 R5 审查）：比较前先词法消解 `..` 段——此前
+/// `repo/.../deep/../../../../etc/passwd` 的组件前缀与 `base_dir` 命中即放行，
+/// `..` 逃逸不被察觉，恶意仓库可经 `@import ../../etc/passwd` 把本机任意文件
+/// 展开进 `<project_doc>` 外发 LLM 厂商（CT4-3 防护被绕过）。已实测复现。
 fn path_within(dir: &Utf8Path, base: &Utf8Path) -> bool {
-    let d: Vec<_> = dir.components().collect();
+    let normalized = resolve_lexical(dir);
+    let d: Vec<_> = normalized.components().collect();
     let b: Vec<_> = base.components().collect();
     d.len() >= b.len() && d[..b.len()] == b[..]
+}
+
+/// 词法规范化路径（SEC-1）：消解 `.`/`..` 段，不触碰文件系统、不解 symlink。
+///
+/// `..` 弹出上一段（栈空时保留 `..`，与 `core::util::normalize_lexical_rel_path`
+/// 语义一致）；`RootDir` 重置栈并标记绝对路径。仅用于包含判定，不改变
+/// `read_to_string` 的目标路径语义（读失败仍走 not-found 分支）。
+fn resolve_lexical(path: &Utf8Path) -> Utf8PathBuf {
+    use camino::Utf8Component;
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir => {
+                if parts.last().is_some_and(|p| *p != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..");
+                }
+            }
+            Utf8Component::Normal(s) => parts.push(s),
+            Utf8Component::RootDir => parts.clear(),
+            // Windows 前缀（如 `C:\`）：保留前缀
+            Utf8Component::Prefix(p) => {
+                parts.clear();
+                // 前缀作为第一段——保留原始前缀语义
+                parts.push(p.as_str());
+            }
+        }
+    }
+    let joined = parts.join("/");
+    if path.is_absolute() {
+        Utf8PathBuf::from("/").join(&joined)
+    } else {
+        Utf8PathBuf::from(&joined)
+    }
 }
 
 /// 项目文档加载器实现。
@@ -788,5 +830,35 @@ mod tests {
             !out2.contains("TOP-SECRET"),
             ".. 逃逸不得越出 base_dir: {out2}"
         );
+    }
+
+    #[test]
+    fn import_parent_escape_with_real_file_is_blocked() {
+        // SEC-1（2026-08-27 R5 审查）：回归测试——`..` 逃逸指向**真实存在**、
+        // 位于 base_dir 之外的敏感文件。此前 `path_within` 只做组件级前缀比较，
+        // `repo/deep/../../secret.txt` 的前缀组件命中 base_dir 即放行，
+        // 恶意仓库可 `@import ../../secret.txt` 把本机任意文件展开进
+        // `<project_doc>` 外发 LLM 厂商（CT4-3 防护被绕过）。
+        // 旧测试仅覆盖"逃逸目标不存在"（走 not-found 分支），从未命中逃逸路径。
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let base = Utf8PathBuf::from_path_buf(tmp.path().join("repo")).unwrap();
+        std::fs::create_dir_all(base.join("deep")).expect("create repo/deep");
+        // 敏感文件位于 base_dir（repo）之外，但可由 repo/deep 经 `../..` 到达
+        let secret_path = tmp.path().join("secret.txt");
+        std::fs::write(&secret_path, "TOP-SECRET-REAL-FILE").expect("write secret");
+
+        let mut visited = HashSet::new();
+        let out = expand_imports_sync(
+            "@import ../../secret.txt",
+            &base.join("deep"),
+            0,
+            &mut visited,
+            &base,
+        );
+        assert!(
+            !out.contains("TOP-SECRET-REAL-FILE"),
+            "`..` 逃逸指向真实越界文件必须被拦截: {out}"
+        );
+        assert!(out.contains(IMPORT_SKIP_OUTSIDE), "越界应插入 skip 标注");
     }
 }

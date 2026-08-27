@@ -468,6 +468,10 @@ impl RuntimeBuilder {
                 writable: Vec::new(),
             });
 
+        // SEC-6（R5）：沙箱拒绝标记防伪 nonce——每次 Runtime 构造随机生成，
+        // 子进程无法得知，故无法伪造 `build_denial_result` 追加的权威标记。
+        let denial_nonce = uuid::Uuid::new_v4().to_string();
+
         Ok(Runtime {
             provider,
             ctx,
@@ -504,6 +508,7 @@ impl RuntimeBuilder {
             sandbox_breaker: self.sandbox_breaker.unwrap_or_else(|| {
                 Arc::new(crate::sandbox::NoopDenialTracker::default_thresholds())
             }),
+            denial_nonce,
             hook_registry: self
                 .hook_registry
                 .unwrap_or_else(|| Arc::new(NoopHookRegistry)),

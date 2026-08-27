@@ -108,7 +108,6 @@ pub fn vcs_protected_dirs(workdir: &Path) -> Vec<PathBuf> {
 }
 
 /// env 变量优先；未设置时回退 `$HOME`/`default_rel`（`home` 为 `None` 时无默认）。
-#[cfg(target_os = "linux")]
 fn env_or_home(env_key: &str, default_rel: &str, home: Option<&Path>) -> Option<PathBuf> {
     if let Ok(v) = std::env::var(env_key)
         && !v.is_empty()
@@ -118,17 +117,22 @@ fn env_or_home(env_key: &str, default_rel: &str, home: Option<&Path>) -> Option<
     home.map(|h| h.join(default_rel))
 }
 
-/// HOME 下的细粒度只读白名单（A3，仅 Linux；landlock RO 规则用）。
+/// HOME 下的细粒度只读白名单（A3；Linux landlock RO 规则与 macOS Seatbelt 共用，
+/// R5 SEC-4 修复后跨平台）。
 ///
 /// 覆盖工具链与缓存的常见落点，环境变量优先于 `$HOME/<默认名>`：
 /// `$CARGO_HOME`||`~/.cargo`、`$RUSTUP_HOME`||`~/.rustup`、`~/.config`、
 /// `~/.cache`、`~/.local`、`$NVM_DIR`||`~/.nvm`、`$VOLTA_HOME`||`~/.volta`、
 /// `~/.npm`、`~/go`、`$GOPATH`。
 ///
-/// 基于存在性过滤（不存在的条目跳过，避免 `landlock` `PathFd` 打开失败）并
-/// 去重。**刻意不含 `$HOME` 本身**：凭证目录（`.ssh`/`.aws`/`.gnupg`）不可读，
-/// 这是 A3 对"HOME 整体只读放行"旧语义的收敛（见 `linux.rs` 的 `build_ruleset`）。
-#[cfg(target_os = "linux")]
+/// 基于存在性过滤（不存在的条目跳过）并去重。**刻意不含 `$HOME` 本身**：凭证目录
+/// （`.ssh`/`.aws`/`.gnupg`）不可读，这是 A3 对"HOME 整体只读放行"旧语义的收敛
+/// （见 `linux.rs` 的 `build_ruleset` 与 `macos.rs` 的 `build_profile`）。
+///
+/// SEC-11（2026-08-27 R5 审查，如实记录）：白名单内 `~/.config`（gh/gcloud 凭证
+/// 落点）与 `~/.cargo`（crates.io 令牌 `credentials` 落点）仍属低概率凭证通道——
+/// macOS 侧以 profile 尾部显式 deny 覆盖（`credential_dir_deny_paths`），
+/// Linux landlock 侧依赖 ABI 5+ deny 规则优先级（见 `linux.rs`）。
 #[must_use]
 pub fn home_read_allow_paths() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
@@ -158,6 +162,33 @@ pub fn home_read_allow_paths() -> Vec<PathBuf> {
         }
     }
     allow
+}
+
+/// 白名单内的凭证高危落点（SEC-11）：对已允许的 `~/.config`/`~/.cargo` 子树
+/// 内的活凭证文件/目录做尾部显式 deny（Seatbelt 最后匹配规则优先，
+/// Linux landlock 侧 deny 规则优先级见 `linux.rs`）。
+///
+/// 仅返回实际存在的条目（避免 profile 内引用不存在路径）。
+// 仅 macOS Seatbelt profile 消费（Linux 侧 landlock deny 规则未启用该列表，
+// 故非 mac 平台标注 allow 防 dead_code——mac 编译时正常使用）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[must_use]
+pub fn credential_dir_deny_paths() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let candidates = [
+        home.join(".ssh"),
+        home.join(".aws"),
+        home.join(".gnupg"),
+        home.join(".config/gh"),
+        home.join(".config/gcloud"),
+        home.join(".cargo/credentials"),
+    ];
+    candidates.into_iter().filter(|p| p.exists()).collect()
 }
 
 #[cfg(test)]
