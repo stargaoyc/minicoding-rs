@@ -352,7 +352,14 @@ impl ContextManagerImpl {
                 // CT4-2（R4）：成功判据使用有效阈值（扣除 fixed_overhead）——
                 // 此前只看 messages-only，fixed_overhead 大时压缩"成功"后实际
                 // 请求仍超窗，且熔断被 record_success 重置。
-                if new_tokens > effective_threshold {
+                //
+                // CTX-2（R5）：`effective_threshold == 0` 表示 system prompt +
+                // 工具 schemas 本身已 ≥ 完整阈值——小窗口模型下任何压缩都无济于事，
+                // 此时判定"超阈值"会让**每**次压缩都 oversize → thrash 熔断，
+                // 会话连第一条消息都发不出（无降级路径）。改为：窗口装不下固定
+                // 开销时跳过 oversize 分支（记录 normal，交由 build_chat_request
+                // 侧的能力降级：post_compact 预算随剩余窗口收缩）。
+                if effective_threshold > 0 && new_tokens > effective_threshold {
                     // CT4-2（R4）：used 报有效用量（messages + fixed_overhead），
                     // budget 报原始阈值——此前 used 只报 messages 误导排障
                     Self::handle_oversize(&mut breaker, level, new_tokens, effective_threshold)?;
@@ -484,11 +491,19 @@ impl ContextManager for ContextManagerImpl {
 
     fn append(&self, msg: Message) -> BoxFuture<'_, ()> {
         // 增量计算新消息 token（含消息框架开销），append 后加到缓存。
+        // CTX-4（2026-08-27 R5 审查）：`count_messages` 在末尾统一加
+        // `TOKENS_REPLY_PRIMING`（3 token，单次消息列表开销），逐条 append
+        // 调用时每消息多计 3 token——N 条后缓存虚高 3×(N-1)，系统性提前触发
+        // 压缩（方向安全但浪费预算）且 `snapshot().token_count` 与 `token_count()`
+        // 不一致。`count_messages(&[])` 返回独立 priming 量，delta 扣除该值。
         let delta = self.tokenizer.count_messages(std::slice::from_ref(&msg));
+        let priming = self.tokenizer.count_messages(&[]);
+        let delta_no_priming = delta.saturating_sub(priming);
         Box::pin(async move {
             self.messages.write().await.push(msg);
             self.count.fetch_add(1, Ordering::SeqCst);
-            self.token_cache.fetch_add(delta, Ordering::SeqCst);
+            self.token_cache
+                .fetch_add(delta_no_priming, Ordering::SeqCst);
             // M-07：消息序号锚点递增（压缩追溯区间推算基准）
             self.append_seq.fetch_add(1, Ordering::SeqCst);
         })
@@ -608,14 +623,30 @@ impl ContextManager for ContextManagerImpl {
                         },
                         |t| t.workdir.as_std_path().to_path_buf(),
                     );
-                    inject_post_compact(
-                        &base_system,
-                        &read_files,
-                        &post_compact_cfg,
-                        self.tokenizer.as_ref(),
-                        &workdir,
-                    )
-                    .await
+                    // CTX-1（R5）：post_compact 注入预算必须服从**剩余窗口**——
+                    // 此前独立用配置的 `post_compact_token_budget`（默认 50K token），
+                    // 压缩"成功"判据（CT4-2，仅计 base_system+tools）漏计注入内容，
+                    // 大文件重注入 + 小窗口模型下真实请求超窗且熔断检测不到。
+                    // 现按 `threshold - (压缩后 messages + fixed_overhead)` 收缩
+                    // token_budget（剩余窗口为 0 时跳过注入）。
+                    let tokens_after_compress = self.token_count();
+                    let remaining_window = threshold
+                        .saturating_sub(tokens_after_compress.saturating_add(fixed_overhead));
+                    let mut effective_cfg = post_compact_cfg.clone();
+                    effective_cfg.token_budget = effective_cfg.token_budget.min(remaining_window);
+                    if effective_cfg.token_budget == 0 {
+                        tracing::debug!(remaining_window, "post-compact: 剩余窗口不足，跳过注入");
+                        base_system
+                    } else {
+                        inject_post_compact(
+                            &base_system,
+                            &read_files,
+                            &effective_cfg,
+                            self.tokenizer.as_ref(),
+                            &workdir,
+                        )
+                        .await
+                    }
                 }
             } else {
                 base_system

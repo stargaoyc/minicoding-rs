@@ -67,9 +67,12 @@ impl SessionSummarizerImpl {
     #[tracing::instrument(skip(self), fields(otel.name = span_name::LLM_CHAT_STREAM, memory.type = "session_summary"))]
     pub async fn summarize(&self, messages: &[Message]) -> Result<String, MemoryError> {
         // 渲染待摘要消息为 LLM 输入文本
+        // CTX-6（2026-08-27 R5 审查）：用 `full_text()` 而非 `text()`——工具
+        // 结果内容（工具输出占会话大头）此前被丢弃，摘要 LLM 看不到工具产出，
+        // 摘要质量系统性下降；与分词器口径（tokenizer.rs full_text 计数）对齐。
         let input = messages
             .iter()
-            .map(|m| format!("[{}] {}", role_label(&m.role), m.text()))
+            .map(|m| format!("[{}] {}", role_label(&m.role), m.full_text()))
             .collect::<Vec<_>>()
             .join("\n\n");
 

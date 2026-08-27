@@ -426,6 +426,14 @@ impl Runtime {
     /// `SessionSummarizer` 生成摘要（降级链：主 provider → 备用 → 启发式兜底，
     /// C-29 永不失败）→ `Storage::update_summary` 落盘。
     ///
+    /// CTX-5（2026-08-27 R5 审查，如实记录）：摘要的**消费方**仅会话列表展示
+    /// （`Storage::list_sessions` 的 `summary` 字段，server 侧 `session_mgr` 用）——
+    /// "跨会话恢复"（新会话 system 段注入 `session_context` 块，见 rules.md §5
+    /// `[Context]`）的注入半边**未实现**。注入涉及工作目录作用域设计决策
+    /// （`SessionListItem` 无 workdir 字段，无法按项目过滤摘要来源），
+    /// 误注入会把无关项目上下文带入新会话——修复列为设计决策项，不在此
+    /// 半实现（避免行为惊吓）。
+    ///
     /// `session_summarizer` 未注入或会话无消息时为 no-op。摘要失败仅记 `warn`
     /// 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
     ///
