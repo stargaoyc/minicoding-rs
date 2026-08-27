@@ -447,3 +447,21 @@ M0 ── M1 ── M2 ── M3 ── M4 ── M5 ── M6 ── M7 ── 
 | Windows cmd 动词表持续维护 | ✅ 已完成（2026-08-25 R2 批次）：builtin 黑名单补齐 PowerShell 动词 remove-item/set-content/out-file/clear-content/add-content/new-item/move-item/copy-item 及别名（A5，前瞻性收口） |
 | desktop 依赖纳入 cargo deny 扫描 | deny.toml 整体豁免 minicoding-desktop（Tauri 依赖树部分许可证不在白名单），发行包依赖不经供应链扫描；需逐依赖评估后决定白名单扩充或替代（ENG-3） |
 | release.yml dist 安装脚本校验和钉版 | ✅ 已完成（2026-08-25 R2 批次）：dist 安装改用 taiki-e/install-action@v2 + dist@0.32.0 校验和钉版，不再 `curl \| sh` |
+
+## 2026-08-26 R4 审查登记（第四轮审查新增）
+
+以下事项经第四轮全面审查（`docs/project-review-20260826-r4.md`）确认，属"需立项/需产品讨论/依赖前置条件"（仅登记，不含排期承诺）：
+
+| 事项 | 一句话理由 |
+|------|-----------|
+| 约束文件目标 fail-closed 方向反转（SE4-6） | 动词白名单逃逸族（eval/xargs/find -delete/install/ln -sf/patch 等）写穿 AGENTS.md 保护；改为"命中保护目标即 Deny 除非段内有明确纯读动词"是决策方向变更，需产品讨论（AGENTS.md §7.3） |
+| MCP list_changed 订阅（CT4-5） | 运行期 server 增删工具不可见（warm_up 无生产调用方），需 rmcp 事件循环改造 |
+| ContextLength 紧急压缩联动（PT4-3） | `LlmError::ContextLength` 已有生产者无消费者，触发自动压缩需 Runtime 状态机设计 |
+| ACP 方法名对齐官方规范（FE4-3） | `newConversation` 等私有命名非 `session/new` 规范，协议破坏性变更需与客户端（Zed 等）协调 |
+| TUI 会话摘要接通（CT4-7） | `/summary` 命令与退出路径摘要均未实现（仅 CLI REPL 通车）；sidebar 注释已如实化 |
+| FE2/ENG-10 测试资产扩展 | cli/tui/server 三入口集成测试补齐后，coverage 结构性排除才能收紧 |
+| server 子代理接线（PTM-4/R3 遗留） | server/Web 端 task.spawn 落 Noop；随双轨 builder 合并统一接线 |
+| asyncRewake 触发路径接线（SE4-11） | `PreToolUse.supports_async_rewake()` 恒 false，spawn 死代码；在 Stop/PostToolUse 真正接线或移除死代码 |
+| Windows Job Object 策略差异（SE4-15） | ReadOnly/WorkspaceWrite 的 Job Object 无差异且未文档化；apply-spawn FIFO 残余 |
+| web 端权限协议 options 下发（SEC-3 协议侧） | `PermissionRequested` DTO 增加 options 字段涉及四端协议版本协调（core 门控与 pending 快照已兜底） |
+| 双轨 builder 合并 | server 缺 PromptPipeline/记忆注入/memory.write/MCP attach/Hook/PolicyPersist；四形态漂移单一根因 |

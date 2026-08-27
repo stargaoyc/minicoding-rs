@@ -64,7 +64,7 @@
 | T-10 | `web.search` | 网页搜索（DuckDuckGo HTML，无需 API key） | Network | M8 | 已实现 |
 | T-11 | `git.diff` | 查看 diff（只读，路径沙箱） | None | M8 | 已实现 |
 | T-12 | `git.apply` | 应用 patch（路径沙箱 + 权限审批） | FileWrite | M8 | 已实现 |
-| T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现（InProcessSubagentRunner 已接入生产通路，扇出上限 4，见 `api.md` §2.5） |
+| T-13 | `task.spawn` | 启动类型化子 Agent | None | M5 | 已实现（CLI/SDK 通路：InProcessSubagentRunner 扇出上限 4 + Worktree 隔离；server/Web 端仍为 Noop——双轨 builder 合并后统一接线，见 `roadmap.md` R4 登记） |
 | T-14 | `task.create`/`update`/`list` | 增量任务管理 + 依赖 + 持久化（替代 todo.write） | None | M3 | 已实现 |
 | T-15 | `plan.exit` | 退出 Plan 模式并提交计划 | None | M5 | 已实现 |
 | T-15b | `plan.list` | 查询 Plan 模式状态与预批准命令（M-11 新增；只读，穿透 Plan 硬门；输出 `PlanModeController::snapshot()` 的 mode + allowed_prompts，前端渲染为表格 `tool`/`prompt`） | None | M11 | 已实现 |

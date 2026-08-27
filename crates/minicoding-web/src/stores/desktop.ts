@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { listen } from "@tauri-apps/api/event";
 import {
   isTauri,
   startSession,
@@ -146,6 +147,18 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       setApiBase(base);
       setApiToken(session.token);
       set({ phase: "ready", apiBase: base, error: null });
+      // FE4-2（R4）：sidecar 崩溃通知——Rust 侧 `sidecar-exited` 事件此前
+      // 无前端消费，崩溃静默（FE-12 半修）。监听并置 error 阶段，用户看到
+      // 明确错误而非"接口静默无响应"。
+      listen("sidecar-exited", () => {
+        set({
+          phase: "error",
+          error: "后端进程意外退出（sidecar-exited）。请重启应用。",
+          apiBase: "",
+        });
+      }).catch(() => {
+        // 事件订阅失败不影响主流程（非 Tauri 环境 listen 会 reject）
+      });
     } catch (e) {
       set({
         phase: "error",

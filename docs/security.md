@@ -232,13 +232,18 @@ pub fn resolve_under(workdir: &Utf8Path, input: &str) -> Result<Utf8PathBuf, Too
 ```
 :(){ ... };:           # fork bomb 字面量（整串检查）
 mkfs*                  # 格式化（任意 mkfs 前缀变体）
-dd of=/dev/<dev>       # 写设备（含 of==/dev/ 连写形态）
+dd of=/dev/<dev>       # 写设备（of=/dev/null|zero|stdout|stderr 豁免）
 rm <递归旗标> /|/*     # 递归删除根（-r/-R/--recursive/-rf/-Rf/-fr 等）
-chmod -R <mode> /|/*   # 递归授权 + 根目标
-chown -R <spec> /|/*   # 同上
-curl|wget ... | sh|bash|zsh|dash|ksh|ash   # 管道执行远程脚本（切段前整串判定）
+chmod -R ... /|/*      # 递归授权 + 根目标（复用 rm 同款递归旗标判定）
+chown -R ... /|/*      # 同上
+curl|wget ... | sh|bash|...|python3|perl|node|ruby|lua  # 管道执行
+      （sudo/doas/env/xargs/nice 前缀跳过；解释器须为语句末 token）
+bash <(curl ...)       # 进程替换消费远程流（无管道符，独立判定）
+sh -c '<payload>'      # -c 参数递归判定（切段后重跑黑名单）
 sudo/doas 前缀剥离后同上判定               # 提权不改变危险性
 ```
+
+R4 补强：`$()` 命令替换参与切段、`>&`/`&>` 重定向变体归一至 `>`、`dd of=/dev/null` 等合法用法豁免。对抗性变形绕过（base64 编码、环境变量展开等）不在词法能力内，由 OS 沙箱与用户审批兜底。
 
 另见 §4.1 的 shell 旁路保护（约束文件/VCS 元数据写入拦截）。
 

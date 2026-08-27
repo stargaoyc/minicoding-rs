@@ -200,4 +200,29 @@ R3 的修复工程质量整体过硬：**29 项已修条目中 24 项经对抗�
 
 ## 10. 修复执行记录（随批次追加）
 
-（占位——各阶段完成后回填提交哈希与覆盖问题编号）
+| 阶段 | 提交 | 覆盖问题 |
+|------|------|---------|
+| R4-1 | `590c272` | SE4-1~5/7（词法黑名单对抗性补强）+ 6 组回归锁 |
+| R4-2 | `5002a6e` | RT4-1~9（运行时正确性）+ 测试 |
+| R4-3 | `7f55654` | PT4-1/2/4/8/9/10（Provider 层）+ 测试 |
+| R4-4 | `0bb0ff2` | CT4-1/2/3/6/9（Context/Server 对齐）+ 测试 |
+| R4-5 | `a728e61` | CT4-4/SE4-12/13/10（MCP/Hooks 加固）+ 测试 |
+| R4-6 | `68b2758` | FE4-1（弹窗 options 贯通）、CT4-7（TUI 注释修正） |
+| R4-7 | 本提交 | FE4-2（sidecar-exited 监听）+ 文档同步（见下） |
+
+### 10.1 开放项登记（随 R4 修复新增）
+
+| 编号 | 原因 | 去向 |
+|------|------|------|
+| SE4-6 约束文件目标 fail-closed 方向反转 | 决策方向变更需产品讨论（AGENTS §7.3） | roadmap |
+| CT4-5 MCP list_changed 订阅 | 需 rmcp 事件循环改造 | roadmap |
+| PT4-3 ContextLength 紧急压缩联动 | 需 Runtime 状态机设计 | roadmap |
+| FE4-3 ACP 方法名对齐 | 协议破坏性变更需与客户端协调 | roadmap |
+| ENG-10 coverage 结构性收紧 | 需先补三入口集成测试资产 | roadmap |
+| 双轨 builder 合并 | 大改造（R3 遗留） | roadmap 高优 |
+| PTM-4 server 端子代理接线 | 随双轨 builder 合并 | roadmap |
+| asyncRewake 触发路径接线 | 建成未通车（SE4-11） | roadmap |
+
+### 10.2 文档同步清单（本阶段）
+
+security.md（§4.2 黑名单覆盖范围更新：sh -c/$()/>&/解释器族/进程替换）、rules.md（C-02 映射 SSRF 指向 tools/web/ssrf.rs）、roadmap.md（§9 开放项登记）、features.md（T-13 措辞如实化：task.spawn 仅 CLI/SDK 通路）、AGENTS.md（无需改动——本阶段未涉及规范变更）。
