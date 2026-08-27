@@ -42,6 +42,8 @@ pub const MAX_IMPORT_DEPTH: usize = 3;
 const IMPORT_SKIP_DEPTH: &str = "<!-- import skipped: depth -->";
 /// @import 环引用跳过标注。
 const IMPORT_SKIP_CYCLE: &str = "<!-- import skipped: cycle -->";
+/// CT4-3（R4）：`@import` 目标越出 `base_dir`（绝对路径 / `..` 逃逸）跳过标注。
+const IMPORT_SKIP_OUTSIDE: &str = "<!-- import skipped: outside base dir -->";
 /// @import 目标缺失/不可读跳过标注。
 fn import_skip_unreadable(path: &Utf8Path) -> String {
     format!("<!-- import skipped: not found ({path}) -->")
@@ -193,12 +195,9 @@ impl ProjectDocLoaderImpl {
                 Ok(content) => {
                     let mut visited = HashSet::new();
                     visited.insert(canonical_key(global_path));
-                    let expanded = expand_imports_sync(
-                        &content,
-                        global_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
-                        0,
-                        &mut visited,
-                    );
+                    let global_dir = global_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                    let expanded =
+                        expand_imports_sync(&content, global_dir, 0, &mut visited, global_dir);
                     push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
                 }
                 // 全局层不可读不阻塞项目层加载（best effort）。
@@ -224,6 +223,7 @@ impl ProjectDocLoaderImpl {
                 path.parent().unwrap_or_else(|| Utf8Path::new(".")),
                 0,
                 &mut visited,
+                &self.repo_root,
             );
             push_part(
                 &mut parts,
@@ -274,11 +274,17 @@ fn merge_parts(parts: &[String], max_bytes: usize) -> String {
 /// - 环检测：canonicalize 后的 key 已在 `visited` → 插入 cycle 标注；
 /// - 深度防护：当前深度 ≥ [`MAX_IMPORT_DEPTH`] 时插入 depth 标注；
 /// - 目标缺失/不可读插入 not found 标注（不 panic、不中断其余行）。
+///
+/// CT4-3（R4）：`base_dir` 包含约束——import 目标必须落在 `base_dir` 内
+/// （组件级包含，拒绝 `..` 逃逸与任意绝对路径）。此前 `@import /home/u/.aws/
+/// credentials` 这类恶意仓库指令可把任意本机文件展开进 `<project_doc>` 随
+/// system prompt 外发（数据外泄通道；`post_compact` 已有同款检查，`@import` 缺位）。
 pub fn expand_imports_sync<S: std::hash::BuildHasher>(
     content: &str,
     cur_dir: &Utf8Path,
     depth: usize,
     visited: &mut HashSet<String, S>,
+    base_dir: &Utf8Path,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -298,6 +304,12 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
                 } else {
                     cur_dir.join(&target)
                 };
+                // CT4-3：包含约束（组件级，防 `..` 逃逸；与 journal S18 同款语义）
+                if !path_within(&target_path, base_dir) {
+                    out.push_str(IMPORT_SKIP_OUTSIDE);
+                    out.push('\n');
+                    continue;
+                }
                 let key = canonical_key(&target_path);
                 if !visited.insert(key) {
                     out.push_str(IMPORT_SKIP_CYCLE);
@@ -311,6 +323,7 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
                         inner_dir,
                         depth + 1,
                         visited,
+                        base_dir,
                     ));
                     out.push('\n');
                 } else {
@@ -326,12 +339,14 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
 /// 异步 `@import` 展开（B4）：与同步版同语义，读文件用 `tokio::fs`。
 ///
 /// 环/深度判定与标注格式与 [`expand_imports_sync`] 完全一致——两版必须同步演化，
-/// 否则启动期（sync）与会话内（async）加载结果漂移。
+/// 否则启动期（sync）与会话内（async）加载结果漂移。`base_dir` 包含约束同
+/// 同步版（CT4-3）。
 async fn expand_imports_async<S: std::hash::BuildHasher>(
     content: &str,
     cur_dir: &Utf8Path,
     depth: usize,
     visited: &mut HashSet<String, S>,
+    base_dir: &Utf8Path,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -351,6 +366,11 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                 } else {
                     cur_dir.join(&target)
                 };
+                if !path_within(&target_path, base_dir) {
+                    out.push_str(IMPORT_SKIP_OUTSIDE);
+                    out.push('\n');
+                    continue;
+                }
                 let key = canonical_key(&target_path);
                 if !visited.insert(key) {
                     out.push_str(IMPORT_SKIP_CYCLE);
@@ -365,6 +385,7 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                         inner_dir,
                         depth + 1,
                         visited,
+                        base_dir,
                     ))
                     .await;
                     out.push_str(&expanded);
@@ -395,13 +416,10 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                     Ok(content) => {
                         let mut visited = HashSet::new();
                         visited.insert(canonical_key(global_path));
-                        let expanded = expand_imports_async(
-                            &content,
-                            global_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
-                            0,
-                            &mut visited,
-                        )
-                        .await;
+                        let global_dir = global_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                        let expanded =
+                            expand_imports_async(&content, global_dir, 0, &mut visited, global_dir)
+                                .await;
                         push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
                     }
                     Err(e) => {
@@ -431,6 +449,7 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                     path.parent().unwrap_or_else(|| Utf8Path::new(".")),
                     0,
                     &mut visited,
+                    &self.repo_root,
                 )
                 .await;
                 push_part(
@@ -723,15 +742,51 @@ mod tests {
         let inner = Utf8PathBuf::from_path_buf(sub.join("inner.md")).unwrap();
         let mut visited = HashSet::new();
         visited.insert(canonical_key(&inner));
+        let base = Utf8PathBuf::from_path_buf(sub.parent().unwrap().to_path_buf()).unwrap();
         let out = expand_imports_sync(
             "@import sibling.md",
             inner.parent().unwrap(),
             0,
             &mut visited,
+            &base,
         );
         assert!(
             out.contains("sibling content"),
             "相对路径应基于当前文件目录: {out}"
+        );
+    }
+
+    #[test]
+    fn import_outside_base_dir_skipped() {
+        // CT4-3：@import 目标越出 base_dir（绝对路径 / `..` 逃逸）必须跳过——
+        // 恶意仓库 `@import /home/u/.aws/credentials` 不能把凭证拉进 system prompt
+        let root_dir = tempfile::tempdir().expect("root tempdir");
+        let secret_dir = tempfile::tempdir().expect("secret tempdir");
+        let root = Utf8PathBuf::from_path_buf(root_dir.path().to_path_buf()).unwrap();
+        let secret = secret_dir.path().join("secret.txt");
+        std::fs::write(&secret, "TOP-SECRET").expect("write secret");
+
+        // 绝对路径越界（secret 在 root 之外）
+        let mut visited = HashSet::new();
+        let out = expand_imports_sync(
+            &format!("@import {}", secret.to_string_lossy()),
+            &root,
+            0,
+            &mut visited,
+            &root,
+        );
+        assert!(
+            !out.contains("TOP-SECRET"),
+            "绝对路径 import 不得越出 base_dir: {out}"
+        );
+        assert!(out.contains(IMPORT_SKIP_OUTSIDE), "越界应插入 skip 标注");
+
+        // `..` 相对逃逸（secret 位于 root 的父级之外）
+        let mut visited = HashSet::new();
+        let out2 = expand_imports_sync("@import ../secret.txt", &root, 0, &mut visited, &root);
+        assert!(
+            !out2.contains("TOP-SECRET"),
+            ".. 逃逸不得越出 base_dir: {out2}"
         );
     }
 }

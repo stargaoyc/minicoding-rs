@@ -192,10 +192,13 @@ pub fn build_runtime(
     // 5. 构造 context manager（ContextManagerImpl + TiktokenTokenizer + 4 级压缩）
     //    L2 摘要 provider 用 small（如有）降本，回退到主 provider（与 CLI 一致）。
     //    CT-4/CTX-8（2026-08-25 R2 审查）：熔断与 L2 摘要配置端到端接线。
+    //    CT4-1（R4）：context_window 取**主** provider——此前误取 summary_provider
+    //    （small 优先），主 ollama(8192)+small OpenAI(128000) 组合预算虚高 15 倍，
+    //    压缩永不触发→真实超窗 400（SDK 侧 R3 已修，server 是同一 bug 第二实例）。
     let ctx: Arc<dyn minicoding_core::context::ContextManager> =
         match TiktokenTokenizer::new_for_model(&config.provider.model) {
             Ok(tokenizer) => {
-                let context_window = summary_provider.capabilities().context_window;
+                let context_window = main_provider.capabilities().context_window;
                 Arc::new(
                     ContextManagerImpl::new(
                         system_prompt,

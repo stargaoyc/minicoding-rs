@@ -53,26 +53,31 @@ fn clip_tool_content(content: &mut ToolContent, config: &ClipConfig) -> bool {
             if text.chars().count() <= config.threshold_chars {
                 return false;
             }
+            let before = text.chars().count();
             *text = clip_text(text, config.keep_lines);
-            true
+            text.chars().count() < before
         }
         ToolContent::Json(value) => {
             // CTX-13（2026-08-26 R3 审查）：Json 工具结果此前完全不裁——一个
             // 500KB JSON 会直接把会话推进 L3/L4 丢历史，而它本可像 Text 一样
             // 首尾裁剪。pretty-print 后按行裁剪（保留结构首尾，中间省略）。
-            if serde_json::to_string_pretty(value)
-                .map(|pretty| pretty.chars().count())
-                .unwrap_or_default()
-                <= config.threshold_chars
-            {
-                return false;
-            }
+            // CT4-9（R4）：消除双重序列化——此前两次 `to_string_pretty` 调用，
+            // 复用一次结果。
             let Ok(pretty) = serde_json::to_string_pretty(value) else {
                 return false;
             };
+            if pretty.chars().count() <= config.threshold_chars {
+                return false;
+            }
+            let before = pretty.chars().count();
             let clipped = clip_text(&pretty, config.keep_lines);
-            *value = serde_json::Value::String(clipped);
-            true
+            // 仅在确实缩短时替换
+            if clipped.chars().count() < before {
+                *value = serde_json::Value::String(clipped);
+                true
+            } else {
+                false
+            }
         }
         ToolContent::Mixed(parts) => {
             let mut clipped = false;

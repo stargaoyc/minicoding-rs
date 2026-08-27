@@ -92,6 +92,11 @@ pub struct ContextManagerImpl {
     // CTX-8（2026-08-25 R2 审查）：L2 摘要配置——此前 compress/mod.rs 硬编码
     // `SummarizeConfig::default()`，llm_timeout_secs 端到端不可配。
     summarize_config: SummarizeConfig,
+    // CT4-2（R4）：system prompt + tool schemas 固定开销（token）——build_chat_request
+    // 触发判定时计算并缓存，compress 的成功/超窗判据复用。压缩目标此前只看
+    // messages-only，fixed_overhead 大时压缩"成功"后有效用量仍超阈值（且熔断被
+    // record_success 重置、每轮白烧一次 L2 摘要）。
+    fixed_overhead: AtomicUsize,
 }
 
 impl ContextManagerImpl {
@@ -121,6 +126,7 @@ impl ContextManagerImpl {
             audit: None,
             session_id: std::sync::Mutex::new(None),
             summarize_config: SummarizeConfig::default(),
+            fixed_overhead: AtomicUsize::new(0),
         }
     }
 
@@ -336,13 +342,20 @@ impl ContextManagerImpl {
         }
 
         let threshold = self.budget.compact_threshold();
+        let fixed_overhead = self.fixed_overhead.load(Ordering::SeqCst);
+        let effective_threshold = threshold.saturating_sub(fixed_overhead);
         let mut breaker = self.circuit_breaker.lock().await;
 
         match outcome {
             Ok(result) => {
                 let level = compress_level(&result);
-                if new_tokens > threshold {
-                    Self::handle_oversize(&mut breaker, level, new_tokens, threshold)?;
+                // CT4-2（R4）：成功判据使用有效阈值（扣除 fixed_overhead）——
+                // 此前只看 messages-only，fixed_overhead 大时压缩"成功"后实际
+                // 请求仍超窗，且熔断被 record_success 重置。
+                if new_tokens > effective_threshold {
+                    // CT4-2（R4）：used 报有效用量（messages + fixed_overhead），
+                    // budget 报原始阈值——此前 used 只报 messages 误导排障
+                    Self::handle_oversize(&mut breaker, level, new_tokens, effective_threshold)?;
                 } else {
                     breaker.record_success();
                     metrics::record_compress(level, "ok");
@@ -360,7 +373,7 @@ impl ContextManagerImpl {
                     metrics::record_compress(0, "err");
                     metrics::set_circuit_breaker("compress", "force_end");
                     return Err(RuntimeError::BudgetExceeded {
-                        used: new_tokens,
+                        used: new_tokens.saturating_add(fixed_overhead),
                         budget: threshold,
                     });
                 }
@@ -372,7 +385,7 @@ impl ContextManagerImpl {
                     metrics::record_compress(0, "err");
                     metrics::set_circuit_breaker("compress", "fused");
                     return Err(RuntimeError::BudgetExceeded {
-                        used: new_tokens,
+                        used: new_tokens.saturating_add(fixed_overhead),
                         budget: threshold,
                     });
                 }
@@ -523,6 +536,8 @@ impl ContextManager for ContextManagerImpl {
                 })
                 .sum::<usize>();
             let fixed_overhead = self.tokenizer.count(&base_system) + tools_fixed;
+            // CT4-2（R4）：缓存固定开销供 compress 成功判据复用（见字段注释）
+            self.fixed_overhead.store(fixed_overhead, Ordering::SeqCst);
             let effective_tokens = current_tokens + fixed_overhead;
 
             // C-08：预测性压缩——当前未超阈值但预测下一 turn 会超时提前压缩

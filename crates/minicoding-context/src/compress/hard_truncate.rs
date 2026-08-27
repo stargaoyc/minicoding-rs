@@ -36,7 +36,10 @@ pub fn hard_truncate(
     // M-07（R-02）：本函数调用前的消息数（追溯区间推算基准，须在 drain 前取）
     let total_before = messages.len();
 
-    // 分离 system（全保留）与非 system（从头部丢弃）
+    // 分离 system（全保留）与非 system（从头部丢弃）；CT4-6（R4）：pinned
+    // 消息并入"全保留"侧——L4 是最后兜底，此前 pinned 消息照样被硬截断丢弃
+    //（weight 的 ×2.0 只是软偏好，n 够大时照样被 L2 摘要替换；L3/L4 更是
+    // 直接选择器）。pinned 语义为"压缩时不裁剪"，此处兑现。
     let mut system_msgs: Vec<Message> = Vec::new();
     let mut non_system: Vec<Message> = Vec::new();
     // M-07（R-02）：原列表中第一个非 system 消息的 index（追溯区间起点）
@@ -45,9 +48,10 @@ pub fn hard_truncate(
         .position(|m| m.role != Role::System)
         .unwrap_or(messages.len());
     for msg in messages.drain(..) {
-        match msg.role {
-            Role::System => system_msgs.push(msg),
-            _ => non_system.push(msg),
+        if msg.role == Role::System || msg.metadata.pinned {
+            system_msgs.push(msg);
+        } else {
+            non_system.push(msg);
         }
     }
 

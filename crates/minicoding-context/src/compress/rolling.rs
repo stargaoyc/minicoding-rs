@@ -36,7 +36,10 @@ pub fn rolling_window(
     tokenizer: &dyn Tokenizer,
     anchor_seq: Option<u64>,
 ) {
-    let non_system_count = messages.iter().filter(|m| m.role != Role::System).count();
+    let non_system_count = messages
+        .iter()
+        .filter(|m| m.role != Role::System && !m.metadata.pinned)
+        .count();
     if non_system_count <= config.window_size {
         return;
     }
@@ -46,11 +49,13 @@ pub fn rolling_window(
     // 边界时须整组纳入——先取候选原始索引，再做组扩展后按集合删除。
     let total_before = messages.len();
 
-    // M-07（R-02）：收集候选（最旧 drop_count 条非 system 消息）的原始索引
+    // M-07（R-02）：收集候选（最旧 drop_count 条非 system 非 pinned 消息）的原始索引
     let mut candidates: Vec<usize> = Vec::with_capacity(drop_count);
     let mut seen_non_system = 0;
     for (i, m) in messages.iter().enumerate() {
-        if m.role == Role::System {
+        // CT4-6（R4）：pinned 消息豁免——priority 扩展不排除（压缩时不裁剪但
+        // 权重模型已声明此语义），L3/L4 选择器更须跳过，否则 pin 仅为软偏好。
+        if m.role == Role::System || m.metadata.pinned {
             continue;
         }
         if seen_non_system < drop_count {
@@ -161,6 +166,29 @@ mod tests {
         );
         assert_eq!(result.dropped_count, 0);
         assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn pinned_messages_exempt_from_rolling() {
+        // CT4-6：pinned 消息豁免滚动窗口——置顶消息此前照样被最旧丢弃
+        let mut msgs: Vec<Message> = (0..30)
+            .map(|i| Message::user_text(format!("msg {i}")))
+            .collect();
+        let mut pinned = Message::user_text("pinned instruction");
+        pinned.metadata.pinned = true;
+        msgs.insert(5, pinned);
+        let mut result = CompressResult::default();
+        rolling_window(
+            &mut msgs,
+            &RollingConfig { window_size: 10 },
+            &mut result,
+            &CharTokenizer,
+            Some(31),
+        );
+        assert!(
+            msgs.iter().any(|m| m.metadata.pinned),
+            "pinned 消息不得被滚动窗口丢弃"
+        );
     }
 
     // === CT-2 回归（2026-08-25 审查）：配对组原子删除 ===
