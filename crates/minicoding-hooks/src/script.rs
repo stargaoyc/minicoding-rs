@@ -268,6 +268,8 @@ async fn run_script_hook(
 /// # 安全
 ///
 /// 所有展开值经 `shell_escape`（POSIX 单引号转义）包裹，防止命令注入。
+// 仅非 Windows 平台使用（Windows 禁用占位符展开，SEC-3）。
+#[cfg(not(windows))]
 fn expand_placeholders(template: &str, input: &HookInput) -> String {
     let tool_input = input
         .tool
@@ -299,6 +301,8 @@ fn expand_placeholders(template: &str, input: &HookInput) -> String {
 }
 
 /// 把 JSON 值转为字符串（字符串去引号；其他类型 JSON 序列化）。
+// 仅非 Windows 平台使用（Windows 禁用占位符展开，SEC-3）。
+#[cfg(not(windows))]
 fn json_value_to_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
@@ -309,6 +313,8 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 /// Shell 单引号转义（POSIX sh 安全）：`value` → `'value'`，内部 `'` → `'\''`。
 ///
 /// 单引号内除 `'` 外所有字符均无特殊含义，是最安全的转义方式。
+// 仅非 Windows 平台使用（Windows 禁用占位符展开，SEC-3）。
+#[cfg(not(windows))]
 fn shell_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('\'');
@@ -327,12 +333,21 @@ fn shell_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]
+    // 本模块全部测试均被 not(windows)/unix gate（占位符展开禁用 + sh 语法），
+    // Windows 上无任何测试编译——import 一并 gate 防 unused 警告。
+    #[cfg(not(windows))]
     use super::*;
+    #[cfg(not(windows))]
     use camino::Utf8PathBuf;
+    #[cfg(not(windows))]
     use minicoding_core::hooks::HookEvent;
+    #[cfg(not(windows))]
     use minicoding_core::model::ToolCall;
+    #[cfg(not(windows))]
     use serde_json::json;
 
+    /// 仅被占位符展开纯函数测试使用（Windows 禁用占位符展开，SEC-3）。
+    #[cfg(not(windows))]
     fn make_input_with_tool(tool_input: serde_json::Value) -> HookInput {
         let mut input = HookInput::new(
             HookEvent::PreToolUse,
@@ -348,28 +363,34 @@ mod tests {
         input
     }
 
+    // 占位符展开纯函数测试：仅非 Windows 编译（Windows 禁用占位符展开，SEC-3）。
+    #[cfg(not(windows))]
     #[test]
     fn shell_escape_plain() {
         assert_eq!(shell_escape("hello"), "'hello'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_escape_with_single_quote() {
         // 含单引号：'...'\''...' 形式
         assert_eq!(shell_escape("a'b"), "'a'\\''b'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_escape_empty() {
         assert_eq!(shell_escape(""), "''");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_escape_special_chars() {
         // $ ` ; & | 等特殊字符在单引号内无含义
         assert_eq!(shell_escape("$HOME;rm -rf /"), "'$HOME;rm -rf /'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_no_placeholders() {
         let input = make_input_with_tool(json!({"path": "/tmp/test.rs"}));
@@ -377,6 +398,7 @@ mod tests {
         assert_eq!(result, "cargo fmt");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_string_value() {
         let input = make_input_with_tool(json!({"path": "/tmp/test.rs"}));
@@ -385,6 +407,7 @@ mod tests {
         assert_eq!(result, "prettier --write '/tmp/test.rs'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_missing_key_replaced_with_empty() {
         let input = make_input_with_tool(json!({"path": "/tmp/test.rs"}));
@@ -392,6 +415,7 @@ mod tests {
         assert_eq!(result, "cmd ''");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_no_tool_input() {
         // 非工具事件（无 tool）→ 占位符替换为空
@@ -400,6 +424,7 @@ mod tests {
         assert_eq!(result, "git status ''");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_injection_attempt_escaped() {
         // 尝试注入：路径中含 ; rm -rf /，应被单引号包裹
@@ -408,6 +433,7 @@ mod tests {
         assert_eq!(result, "cat 'foo; rm -rf /'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_non_string_value() {
         // 非字符串值（数字/布尔）JSON 序列化后转义。
@@ -417,6 +443,7 @@ mod tests {
         assert_eq!(result, "echo '42'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn expand_placeholders_unclosed_placeholder_preserved() {
         let input = make_input_with_tool(json!({"path": "/tmp"}));

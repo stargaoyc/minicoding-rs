@@ -15,6 +15,9 @@ use tokio::process::Command;
 // 本文件独立使用需显式引入；CI 的 desktop feature build 会因缺失而失败）。
 #[cfg(feature = "desktop")]
 use tauri::Manager;
+// sidecar 退出事件（FE-12：rx 耗尽时 emit 到前端）。
+#[cfg(feature = "desktop")]
+use tauri::Emitter;
 
 /// sidecar 启动后等待端口输出的超时时间。
 const SIDECAR_TIMEOUT: Duration = Duration::from_secs(10);
@@ -336,7 +339,6 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
         }
         // FE-12：rx 耗尽 = sidecar 进程已退出
         log::error!("minicoding-server sidecar 进程已退出（崩溃或被终止）");
-        use tauri::Emitter;
         let _ = app_handle.emit("sidecar-exited", ());
     });
 
