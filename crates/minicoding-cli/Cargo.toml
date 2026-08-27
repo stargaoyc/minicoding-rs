@@ -43,6 +43,8 @@ indicatif = { workspace = true }
 anstream = { workspace = true }
 anstyle = { workspace = true }
 rustyline = { workspace = true }
+# 隐藏终端输入（FE-5，R5：cred store 不再回显 API key）
+rpassword = { workspace = true }
 time = { workspace = true }
 ulid = { workspace = true }
 

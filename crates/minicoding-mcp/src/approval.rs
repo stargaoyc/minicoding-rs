@@ -189,6 +189,11 @@ fn project_fingerprint(project_root: &Path) -> String {
 ///
 /// `local`/`user` 作用域 server 直接保留（无需批准）。
 ///
+/// SEC-16（2026-08-27 R5 审查）：弹窗决策落 `audit.log`——C-24 批准/拒绝是
+/// 权限决策，AGENTS.md §5.5 要求"任何权限决策必须落 audit.log"，此前仅写
+/// `mcp_choices.toml` 无审计（批准恶意 server 不可取证）。`audit` 为 `Some`
+/// 时记录 `PermissionResolved`（best-effort，审计失败不阻塞批准流程）。
+///
 /// # Errors
 /// - `McpError::Config`：choices 文件读写/解析失败。
 pub async fn check_project_scope_approval(
@@ -196,6 +201,7 @@ pub async fn check_project_scope_approval(
     project_root: &Utf8PathBuf,
     store: &dyn ChoicesStore,
     prompter: &dyn PermissionPrompter,
+    audit: Option<&dyn minicoding_core::storage::AuditSink>,
 ) -> Result<Vec<McpServerConfig>, McpError> {
     let fingerprint = project_fingerprint(project_root.as_std_path());
     let mut choices = store.load()?;
@@ -245,6 +251,34 @@ pub async fn check_project_scope_approval(
                     Decision::Allow | Decision::AllowAlways => ApprovalState::Approved,
                     Decision::Deny(_) | Decision::DenyAlways(_) => ApprovalState::Rejected,
                 };
+                // SEC-16：C-24 决策落 audit.log（best-effort，不阻塞批准流程）
+                if let Some(audit) = audit {
+                    let rec = minicoding_core::storage::AuditRecord {
+                        ts: time::OffsetDateTime::now_utc(),
+                        session: "mcp-approval".to_string(),
+                        kind: minicoding_core::storage::AuditKind::PermissionResolved,
+                        tool: Some(format!("mcp__{}", cfg.name)),
+                        decision: Some(
+                            if state == ApprovalState::Approved {
+                                "allow"
+                            } else {
+                                "deny"
+                            }
+                            .to_string(),
+                        ),
+                        detail: format!(
+                            "project MCP server approval: server={} project={} state={:?}",
+                            cfg.name, fingerprint, state
+                        ),
+                    };
+                    if let Err(e) = audit.record(rec).await {
+                        tracing::warn!(
+                            error = %e,
+                            server = %cfg.name,
+                            "mcp approval audit failed (best-effort)"
+                        );
+                    }
+                }
                 let now = time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| "unknown".to_string());
@@ -414,6 +448,7 @@ mod tests {
             &Utf8PathBuf::from("/tmp/proj"),
             &store,
             &prompter,
+            None,
         )
         .await
         .unwrap();
@@ -439,6 +474,7 @@ mod tests {
             &Utf8PathBuf::from("/tmp/proj"),
             &store,
             &prompter,
+            None,
         )
         .await
         .unwrap();
@@ -460,6 +496,7 @@ mod tests {
             &Utf8PathBuf::from("/tmp/proj"),
             &store,
             &prompter,
+            None,
         )
         .await
         .unwrap();
@@ -479,6 +516,7 @@ mod tests {
             &Utf8PathBuf::from("/tmp/proj"),
             store.as_ref(),
             &prompter,
+            None,
         )
         .await
         .unwrap();
@@ -490,6 +528,7 @@ mod tests {
             &Utf8PathBuf::from("/tmp/proj"),
             store.as_ref(),
             &ScriptedPrompter::new(vec![]),
+            None,
         )
         .await
         .unwrap();
@@ -503,7 +542,7 @@ mod tests {
         let configs = vec![stdio_config("proj-srv", McpScope::Project)];
         let project = Utf8PathBuf::from("/tmp/proj");
 
-        check_project_scope_approval(configs, &project, &store, &prompter)
+        check_project_scope_approval(configs, &project, &store, &prompter, None)
             .await
             .unwrap();
         assert!(!store.load().unwrap().choices.is_empty());

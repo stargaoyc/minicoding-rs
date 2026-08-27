@@ -683,8 +683,22 @@ impl McpClient for RmcpClient {
             for (name, conn) in guard.drain() {
                 // RunningService::cancel 返回一个 Future（消费 self），故 drain 而非 iter。
                 // await 它以驱动关闭协议（发送 shutdown notification + 等待 peer 退出）。
-                // 关闭阶段的错误（如 peer 已断开）忽略：shutdown 本身是 best-effort。
-                let _ = conn.service.cancel().await;
+                // ST-6（2026-08-27 R5 审查）：rmcp 的 cancel→close 会 await 后台任务
+                // **无超时**——stdout 迟迟不关闭的 server 使 shutdown 永久挂起且
+                // 持写锁阻塞后续所有调用（start_one 的 stale 连接路径已正确用
+                // close_with_timeout(5s)）。此处同样套 5s 超时：超时后放弃等待，
+                // 子进程句柄随 service drop 释放（TokioChildProcess kill on drop）。
+                match tokio::time::timeout(std::time::Duration::from_secs(5), conn.service.cancel())
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(_) => {
+                        tracing::warn!(
+                            server = %name,
+                            "mcp shutdown cancel timed out (5s)，放弃等待（句柄随 drop 释放）"
+                        );
+                    }
+                }
                 tracing::info!(server = %name, "mcp server shutdown");
             }
             tracing::info!(count, "all mcp servers shut down");

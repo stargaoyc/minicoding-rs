@@ -193,9 +193,17 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
             i = end + 1;
             continue;
         }
-        // 普通字符：追加到缓冲
-        buf.push(bytes[i] as char);
-        i += 1;
+        // 普通字符：按 UTF-8 字符边界解码追加到缓冲
+        // FE-3（2026-08-27 R5 审查）：此前 `buf.push(bytes[i] as char)` 逐字节
+        // 转 char——多字节 UTF-8（CJK/emoji）每个字节成一个乱码 char。marker
+        // 判定是 ASCII 字节安全，此处取完整字符并按其字节宽度推进游标。
+        match text[i..].chars().next() {
+            Some(ch) => {
+                buf.push(ch);
+                i += ch.len_utf8();
+            }
+            None => i += 1, // 不可达（bytes 非空），防御性推进防死循环
+        }
     }
     if !buf.is_empty() {
         spans.push(Span::raw(buf));

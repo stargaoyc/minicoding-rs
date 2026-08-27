@@ -611,9 +611,10 @@ impl App {
                 self.handle_slash(cmd, &text);
                 return;
             }
-            // 立即在 UI 显示用户消息（不等待 MessageAppended 事件，提升响应感）
-            self.scroll_offset = 0;
-            self.lines.push(ChatLine::User(text.clone()));
+            // FE-2（2026-08-27 R5 审查）：此前在此**乐观入列** `ChatLine::User`，
+            // Runtime 的 `MessageAppended` 事件（rt.rs 用户消息落盘后广播）又
+            // 追加一次——用户消息双显。改由事件驱动（事件在消息落盘后毫秒级
+            // 到达，无感知延迟），消除重复。
             let _ = self.ui_tx.try_send(UiCommand::Submit(text));
             self.is_turning = true;
             self.status_msg = "等待响应…".to_string();
@@ -822,10 +823,17 @@ impl App {
     }
 
     fn render_permission_popup(frame: &mut Frame, area: Rect, pending: &PendingPermission) {
+        // FE-4（2026-08-27 R5 审查）：高度 7 固定 + `(height - 7) / 2` 在终端
+        // 不足 7 行时 u16 下溢（debug panic / release 乱渲）。取 `min` 钳制，
+        // 且高度不足时贴顶渲染（不做负偏移）。
         let width = 60.min(area.width);
-        let height = 7;
+        let height = 7.min(area.height);
         let x = area.x + (area.width - width) / 2;
-        let y = area.y + (area.height - height) / 2;
+        let y = if area.height > height {
+            area.y + (area.height - height) / 2
+        } else {
+            area.y
+        };
         let popup = Rect::new(x, y, width, height);
 
         let risk_color = match pending.prompt.risk {

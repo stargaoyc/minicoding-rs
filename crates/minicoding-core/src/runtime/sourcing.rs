@@ -129,6 +129,12 @@ impl Runtime {
     /// **best-effort 语义**：持久化失败仅记 `warn` 日志，不中断主流程
     /// （与 audit 失败处理一致）。崩溃时磁盘状态为已持久化事件的子集，
     /// replay 可从最近 snapshot + 剩余事件重建。
+    ///
+    /// ST-1（2026-08-27 R5 审查）：append 失败时**回滚已分配的 seq**——此前
+    /// seq 先递增后落盘失败（如磁盘满），留下持久化缺口；`replay_session_state`
+    /// 要求严格连续 seq，一次瞬时 IO 故障即让该会话 `--replay` 永久报废且无
+    /// 自愈路径。回滚后下一次 `persist_event` 重试同一 seq（单 turn 串行调用，
+    /// 无并发抢号），缺口不再产生。`durable_seq` 仅在成功后更新，语义不变。
     pub(crate) async fn persist_event(&self, event: &Event) {
         let Some(persisted) = try_persist(event) else {
             return; // 瞬态事件，跳过
@@ -150,8 +156,14 @@ impl Runtime {
                 error = %e,
                 session = %self.session.id,
                 seq,
-                "event persist failed (best-effort, continue)"
+                "event persist failed (best-effort, rollback seq)"
             );
+            // ST-1：回滚 seq——避免持久化缺口把 `--replay` 永久报废
+            // （append 单次原子写，失败即未落盘；单 turn 串行无并发抢号）。
+            let mut guard = self.event_seq.lock().await;
+            if *guard > seq {
+                *guard = seq;
+            }
             return;
         }
 

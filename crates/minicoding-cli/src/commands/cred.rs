@@ -64,17 +64,13 @@ pub fn run_cred_command(cmd: &CredCommand) -> Result<()> {
     }
 }
 
-/// 从 stdin 读取一行作为 API key（不回显，避免凭证泄露到终端历史）。
+/// 从终端读取 API key（隐藏输入，不回显——FE-5，2026-08-27 R5 审查：
+/// 此前用 `stdin().read_line()` 明文回显，key 进终端/scrollback；rpassword
+/// 是标准隐藏输入方案，与"不回显"声明一致）。
 fn read_key_from_stdin() -> Result<String> {
-    use std::io::BufRead;
+    use rpassword::read_password;
     eprintln!("请输入 API key（输入后回车，不回显）：");
-    // NOTE: rpassword 之类 crate 可做隐藏输入，但为避免引入新依赖，
-    // 此处用普通 stdin 读取。生产建议后续接入 rpassword。
-    let mut line = String::new();
-    let stdin = std::io::stdin();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("读取 stdin 失败")?;
+    // rpassword 在非 TTY（管道/CI）下读 stdin 一行（仍不回显）。
+    let line = read_password().context("读取 API key 失败")?;
     Ok(line.trim().to_string())
 }

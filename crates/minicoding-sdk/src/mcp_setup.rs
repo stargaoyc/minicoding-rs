@@ -43,6 +43,7 @@ pub async fn attach_mcp_tools(
     }
 
     // C-24：project 作用域首次批准（未决策逐个弹窗；Rejected 不再弹）
+    // SEC-16（R5）：批准决策经 rt.audit() 落 audit.log（C-24 决策可取证）
     let approved = match paths::mcp_choices_path() {
         Ok(path) => {
             let store = minicoding_mcp::approval::FileChoicesStore::new(path);
@@ -51,6 +52,7 @@ pub async fn attach_mcp_tools(
                 workdir,
                 &store,
                 prompter.as_ref(),
+                Some(rt.audit().as_ref()),
             )
             .await
             {
