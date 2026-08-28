@@ -4,6 +4,51 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.8] - 2026-08-28
+
+> 自 v0.3.7 以来的 R7 全面审查（`docs/project-review-20260828-r7.md`）修复。
+> R7 主题：**同类漏洞只堵一个维度的模式仍在延续**（`~/.config/gh`/`gcloud` 修了，
+> `github-copilot`/`docker` 等凭证落点还在）与**文档-实现裂缝**（MCP 工具头注释
+> 声称审计但无实现、features.md H-13 状态过时）。无新增 P0；修复 2 个安全项 +
+> 1 个 Provider 能力声明 + 2 个工具健壮性 + 1 个桌面一致性 + 文档如实披露。
+
+### Security
+
+- **sandbox：HOME 读白名单漏 `~/.config` 下多凭证落点（P2，SEC-R7-1）**——
+  R6 只排除了 `gh`/`gcloud`，但 `github-copilot`（Copilot OAuth token，hosts.json）、
+  `git/credentials`、`docker`（registry auth）、`uv`/`pypoetry`、`aws` 等仍可被
+  沙箱内 shell 读取外泄（同一"仓库即边界"攻击面）。`credential_dir_deny_paths`
+  补全（Linux 展开 + macOS Seatbelt 尾部 deny 自动覆盖）+ 回归测试
+- **mcp：MCP 工具调用结果无审计（P2，SEC-R7-3）**——`McpToolWrapper` 头注释声称
+  "审计落 audit.log"但 execute 不调 `AuditSink`（R6 SEC-R6-10 遗留）。接入
+  `ToolContext.audit`，`kind=tool_result` 标注 `mcp_server`/`mcp_tool`（best-effort
+  不阻塞工具结果）
+- **security.md 披露 MCP 工具无 OS 沙箱（§19.8）**——`McpToolWrapper` 转发远端
+  server 子进程不经 landlock/Seatbelt/Job Object（C-22 对 MCP 工具不成立），
+  明确为架构级已知边界 + 容器内运行建议 + doctor 提示项
+
+### Fixed
+
+- **providers：anthropic capabilities.max_output 与 thinking 上限不一致（P1，PT-R7-1）**——
+  `capabilities` 声明 32K 而 `compute_max_tokens` thinking 路径可达 64K，上游输出
+  token 预算预留不足；声明对齐 `THINKING_MAX_OUTPUT_LIMIT`（64K）
+- **providers：retry 抖动源时钟纳秒区分度不足（P3，PT-R7-3）**——改原子计数器 +
+  splitmix64 搅拌（线程安全、不引 rand 依赖）+ 边界/多样性测试
+- **tools：`web.search` 3xx 一律报错致 DDG 偶发 302 功能脆弱（P2，TL-R7-1）**——
+  改逐跳跟随（上限 5），每跳解析 Location 后过 `validate_url`（拒绝私有/loopback/
+  metadata），与 `web.fetch` S22 逐跳复检同口径
+- **tools：`web.fetch` 响应体上限 10MiB 硬编码（P3，TL-R7-2）**——body 上限改为
+  `max_output_bytes` 派生（下限 256KiB 保解析不塌），上限跟随用户配置
+- **desktop：`save_context_config` 无 revision 防陈旧（P3，ARCH-R7-1）**——与
+  `save_provider_config` 对齐：expected_revision mismatch 返回 StaleWrite，防桌面
+  与 Web/CLI 并发保存互相覆盖；前端传 revision 基准 + 回归测试
+
+### Docs
+
+- `features.md` H-13 状态过时（"后台 executor 未接线"）更正为按装配点披露（SDK/CLI
+  生效、server Noop）；H-08 补 PreCompact/PostCompact 未接线细节；T-08b 披露后台
+  命令无自动超时（C-07 边界）
+
 ## [0.3.7] - 2026-08-28
 
 > 自 v0.3.6（2026-08-27）以来 27 个 commit：R5 遗留修复收尾（五批）+ R6
