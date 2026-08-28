@@ -500,10 +500,15 @@ impl ContextManager for ContextManagerImpl {
         let priming = self.tokenizer.count_messages(&[]);
         let delta_no_priming = delta.saturating_sub(priming);
         Box::pin(async move {
-            self.messages.write().await.push(msg);
-            self.count.fetch_add(1, Ordering::SeqCst);
+            // CTX-3（2026-08-28 R5 收尾）：先更新 token_cache 再 push 消息——
+            // 此前 push 后 fetch_add 间存在锁外窗口：并发 compress 读 token_cache
+            // 含新消息但未计入对应 token，预算系统性低估（超窗风险）。先更新
+            // 缓存再 push 使 compress 看到的 cache ≥ 真实值（方向保守，提前触发
+            // 压缩而非超窗）。
             self.token_cache
                 .fetch_add(delta_no_priming, Ordering::SeqCst);
+            self.count.fetch_add(1, Ordering::SeqCst);
+            self.messages.write().await.push(msg);
             // M-07：消息序号锚点递增（压缩追溯区间推算基准）
             self.append_seq.fetch_add(1, Ordering::SeqCst);
         })
