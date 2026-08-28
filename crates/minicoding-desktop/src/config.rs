@@ -184,12 +184,31 @@ pub fn get_context_config() -> Result<minicoding_core::config::ContextConfig> {
 /// 读取现有完整配置（保留 `provider`/`tools`/`hooks` 等其他段），替换 `[context]` 段，
 /// 原子写入（tmp + rename）。sidecar 启动时 `minicoding serve` 会读取本段生效。
 ///
+/// ARCH-R7-1（2026-08-28 R7 审查）：与 `save_provider_config` 对齐的 revision
+/// 防陈旧写——桌面"设置-上下文"与 Web/CLI 并发保存可互相覆盖（M-10 此前只
+/// 覆盖 provider 段）。`expected_revision` 为 `Some(x)` 时 mismatch 返回
+/// `StaleWrite` 错误文本不覆盖；保存成功后 `revision` 原子自增。`None` 无条件写
+/// （兼容旧调用方）。
+///
 /// # Errors
-/// 配置文件序列化失败、IO 错误时返回错误。
-pub fn save_context_config(context: minicoding_core::config::ContextConfig) -> Result<()> {
+/// 配置文件序列化失败、IO 错误、revision 不匹配时返回错误。
+pub fn save_context_config(
+    context: minicoding_core::config::ContextConfig,
+    expected_revision: Option<u64>,
+) -> Result<()> {
     let mut config = load_config()
         .map_err(|e| anyhow::anyhow!("加载配置失败: {e}"))
         .unwrap_or_default();
+    if let Some(expected) = expected_revision
+        && config.revision != expected
+    {
+        return Err(anyhow::anyhow!(
+            "StaleWrite: 配置修订号不匹配（当前 {}，期望 {}），请刷新后重试",
+            config.revision,
+            expected
+        ));
+    }
+    config.revision = config.revision.saturating_add(1);
     config.context = context;
 
     let config_path = paths::config_path().context("无法确定配置文件路径")?;
@@ -293,6 +312,43 @@ mod tests {
 
         // 用当前 revision 1 写 → 成功，自增到 2
         save_provider_config(provider, Some(1)).expect("当前 revision 写应成功");
+        assert_eq!(load_config().expect("load").revision, 2);
+
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("MINICODING_HOME");
+        }
+    }
+
+    /// ARCH-R7-1：context 段保存同样受 revision 防陈旧（与 provider 段一致）。
+    #[test]
+    fn stale_write_rejected_and_revision_increments_context() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: 持有 ENV_LOCK 保证串行，无并发 set_var 风险。
+        unsafe {
+            std::env::set_var("MINICODING_HOME", tmp.path());
+        }
+
+        let context = minicoding_core::config::ContextConfig::default();
+        // 首次保存 revision 0 → 1
+        save_context_config(context.clone(), Some(0)).expect("首写应成功");
+        assert_eq!(load_config().expect("load").revision, 1);
+
+        // 陈旧 revision 0 再写 → StaleWrite 拒绝
+        let err = save_context_config(context.clone(), Some(0)).expect_err("陈旧写应被拒");
+        assert!(
+            err.to_string().contains("StaleWrite"),
+            "错误应标记 StaleWrite: {err}"
+        );
+        assert_eq!(
+            load_config().expect("load").revision,
+            1,
+            "拒绝后 revision 不变"
+        );
+
+        // 当前 revision 1 写 → 成功，自增到 2
+        save_context_config(context, Some(1)).expect("当前 revision 写应成功");
         assert_eq!(load_config().expect("load").revision, 2);
 
         // SAFETY: 同上。

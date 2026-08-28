@@ -213,10 +213,15 @@ export const useDesktopStore = create<DesktopState>((set, get) => ({
       const revision = await getConfigRevision();
       await saveProviderConfig(provider, revision);
       // [context] 段：turn 超时 / 压缩开关（sidecar 启动时 `minicoding serve` 读取生效）
-      await saveContextConfig({
-        turn_timeout_sec: input.turn_timeout_sec,
-        compress: input.compress,
-      });
+      // ARCH-R7-1：saveProviderConfig 已把 revision 自增，重新锁定基准后再写 context 段
+      const contextRevision = await getConfigRevision();
+      await saveContextConfig(
+        {
+          turn_timeout_sec: input.turn_timeout_sec,
+          compress: input.compress,
+        },
+        contextRevision,
+      );
 
       // API key 单独走 keyring（ollama 无 key 时跳过）
       if (input.apiKey.length > 0) {

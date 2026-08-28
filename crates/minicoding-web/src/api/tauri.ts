@@ -94,9 +94,14 @@ export function getContextConfig(): Promise<ContextConfig> {
   return invoke<ContextConfig>("get_context_config");
 }
 
-/** 保存上下文配置到 `config.toml`（原子写入，保留 provider/tools/hooks 等其他段）。 */
-export function saveContextConfig(context: ContextConfig): Promise<void> {
-  return invoke<void>("save_context_config", { context });
+/** 保存上下文配置到 `config.toml`（原子写入，保留 provider/tools/hooks 等其他段）。
+ * ARCH-R7-1（2026-08-28 R7 审查）：`expected_revision` 与 `saveProviderConfig` 同
+ * 语义——并发客户端已保存（revision 不匹配）则 StaleWrite 拒绝，防互相覆盖。 */
+export function saveContextConfig(
+  context: ContextConfig,
+  expected_revision: number | null = null,
+): Promise<void> {
+  return invoke<void>("save_context_config", { context, expected_revision });
 }
 
 /** 写入 API key 到 OS keyring（与 CLI 共享 entry，C-04）。 */

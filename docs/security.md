@@ -996,3 +996,28 @@ plan.exit 缓存命中改为：命令与预批准 prompt **词法完全相等** 
 ### 19.7 /undo 落审计（S28/C-28）
 
 回滚成功（含恢复/冲突计数）与失败均记 `AuditKind::FileUndone` 审计条目。
+
+### 19.8 MCP 工具沙箱缺口披露（SEC-R7-2，2026-08-28 R7 审查）
+
+**诚实边界**：MCP 远程工具（`mcp__<server>__<tool>`）的执行路径**不接 OS 级沙箱**
+——`McpToolWrapper::execute` 只是把调用转发给远端 server 进程，server 自身经
+`rmcp` 的 transport-child-process 直接 spawn，**不经 landlock/Seatbelt/Job Object**
+（C-22 对 MCP 工具不成立）。这意味着"server 暴露的 shell 类工具"在内核级无第二道
+防线，仅靠应用层权限（C-01 权限链 + C-25 schema 声明映射）兜底。
+
+缓解与现状：
+- 应用层权限链仍生效：MCP 工具按 `side_effect` 走串行 + Ask（未信任 `readOnlyHint`
+  时默认 `Command`），内置黑名单不受影响；
+- MCP 工具调用结果已接入审计（SEC-R7-3，R7 修复，`kind=tool_result` 标注
+  `mcp_server`）；
+- 彻底修复需在 rmcp spawn server 子进程前注入 `SandboxDriver`（架构级改动，列入
+  roadmap）；在落地前，**不信任的 MCP server 应在容器/VM 内运行**，与
+  `external-sandbox` 预设同策略。
+- 工具级建议：`doctor --security` 在启用 MCP 且 server 数量 > 0 时输出该披露提示。
+
+### 19.9 MCP 工具调用审计（SEC-R7-3，2026-08-28 R7 审查）
+
+`McpToolWrapper::execute` 调用结果（成功/失败）落 `audit.log`：`kind=tool_result`、
+`tool=mcp__<server>__<tool>`、`decision=ok|error`、detail 含 `mcp_server`/`mcp_tool`/
+`result_bytes`。此前的"注释声称审计但实现无 AuditSink 调用"裂缝已闭合（R6
+SEC-R6-10 遗留）。

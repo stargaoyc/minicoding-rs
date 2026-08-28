@@ -56,7 +56,7 @@
 | T-06b | `fs.multiedit` | 同文件多次顺序替换（原子性，参考 CC） | FileWrite | M2 | 已实现 |
 | T-07 | `fs.delete` | 删除文件 + Journal 记录 | FileWrite | M2 | 已实现 |
 | T-08 | `shell.run` | 执行命令（超时+截断+SandboxDriver） | Command | M2 | 已实现 |
-| T-08b | `shell.background` | 启动后台命令，返回 shell_id（参考 CC） | Command | M8 | 已实现 |
+| T-08b | `shell.background` | 启动后台命令，返回 shell_id（参考 CC）；后台命令无自动超时（长驻语义），需 `shell.kill` 显式终止或达 store 上限（128 条）被淘汰（C-07 边界披露，R7） | Command | M8 | 已实现 |
 | T-08c | `shell.output` | 读取后台命令累积输出（非阻塞） | None | M8 | 已实现 |
 | T-08d | `shell.kill` | 终止后台命令（killpg 整树 + start_kill；信号终止记退出码 -1） | Command | M8 | 已实现 |
 | T-12a | `ui.ask` | LLM 主动二值提问（经 PermissionPrompter 点对点 + PermissionRequested/Resolved 事件广播；多选项为后续项） | None | M8+ | 已实现（v1） |
@@ -152,12 +152,12 @@
 | H-05 | PreToolUse 拦截/改写 | deny/allow(Ask→Allow)/modify_input | M5 | 已实现 |
 | H-06 | PostToolUse 后处理 | 跑 formatter/linter、改写 result | M5 | 已实现 |
 | H-07 | PermissionRequest 短路 | 自动批准/阻断，跳过 Prompter | M5 | 已实现 |
-| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact 未派发 | M5 | 部分实现（生命周期派发与 `inject_context` 缓冲已接线，PreCompact 事件未接线） |
+| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact 未派发 | M5 | 部分实现（SessionStart/UserPromptSubmit/PreToolUse 注入经 `pending_hook_contexts` 缓冲并入 system 段；PreCompact/PostCompact 事件未接线，压缩管道内无 Hook 触发点） |
 | H-09 | L0 不可覆盖 | Hook 的 allow 对内置黑名单 Deny 无效 | M5 | 已实现 |
 | H-10 | on_hook_error 策略 | continue/deny/fail，超时 kill | M5 | 已实现 |
 | H-11 | 6 个内置示例 Hook | fmt-on-write/auto-approve-tests/block-secrets/git-status-inject/backup-before-compact/test-on-stop | M5 | 已实现 |
 | H-12 | Hook 审计 | allow/deny/modify_input 落 audit.log（source=hook） | M5 | 已实现 |
-| H-13 | asyncRewake 异步唤醒 | PostToolUse/Stop 后台任务完成后唤醒，3 并发上限，超时 kill | M5 | 部分实现（协议就绪，后台 executor 未接线） |
+| H-13 | asyncRewake 异步唤醒 | PostToolUse/Stop 后台任务完成后唤醒，3 并发上限，超时 kill | M5 | 部分实现（协议 + 后台 executor 已接线，`ManagedRewakeScheduler` 经 SDK builder 注入；按装配点：SDK/CLI 生效，server 端仍为 `NoopAsyncRewakeScheduler` 不产生后台任务——R7 更正：此前的"后台 executor 未接线"描述过时） |
 
 ## 8. MCP 集成（Model Context Protocol，参考 Codex/CC）
 

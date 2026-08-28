@@ -280,9 +280,16 @@ fn get_context_config() -> Result<minicoding_core::config::ContextConfig, String
 }
 
 /// `save_context_config`：保存上下文配置到 `config.toml`（原子写入，保留其他段）。
+///
+/// ARCH-R7-1（2026-08-28 R7 审查）：`expected_revision` 与 `save_provider_config`
+/// 同语义——不匹配返回 `StaleWrite` 错误，防桌面"设置-上下文"与 Web/CLI 并发
+/// 保存互相覆盖（M-10 此前只覆盖 provider 段）。`None` 无条件写（兼容旧前端）。
 #[tauri::command]
-fn save_context_config(context: minicoding_core::config::ContextConfig) -> Result<(), String> {
-    config::save_context_config(context).map_err(|e| e.to_string())
+fn save_context_config(
+    context: minicoding_core::config::ContextConfig,
+    expected_revision: Option<u64>,
+) -> Result<(), String> {
+    config::save_context_config(context, expected_revision).map_err(|e| e.to_string())
 }
 
 /// `store_api_key`：写入 API key 到 OS keyring（与 CLI `cred store` 共享 entry）。
