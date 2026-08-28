@@ -28,11 +28,19 @@ impl AuditSink for FileAuditSink {
         Box::pin(async move {
             let line =
                 serde_json::to_string(&rec).map_err(|e| StorageError::Serialize(e.to_string()))?;
+            // ST-11（2026-08-28 R5 收尾）：audit.log 此前依赖 O_APPEND 单写原子性
+            // 无跨进程锁——NFS 等网络 FS 上多进程 append 可交错出半行。加
+            // `{audit}.lock` 阻塞式排他锁（复用 SessionLock），与消息/事件流
+            // 同款跨进程串行化。锁文件与 audit.log 同目录，随日志保留（无
+            // 自动清理；审计日志目录由用户管理）。
+            let lock_path = path.with_extension("lock");
             // tokio::fs::OpenOptions 不支持 mode()，使用 spawn_blocking 调 std
             // 以在 Unix 下原子设置 0600（create 时生效；已存在的宽权限文件
             // 兜底收紧——与 jsonl tighten_existing 同语义，2026-08-25 审查 L1）
             let inner = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                 use std::io::Write;
+                let _lock = crate::lock::SessionLock::acquire_blocking(lock_path)
+                    .map_err(std::io::Error::other)?;
                 let file = open_for_append(&path)?;
                 // tighten_existing 仅 unix 定义（Windows 无 POSIX 权限位）
                 #[cfg(unix)]

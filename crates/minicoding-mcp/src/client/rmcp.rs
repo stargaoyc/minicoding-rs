@@ -423,7 +423,11 @@ impl McpClient for RmcpClient {
             guard.clone_from(&configs);
         }
         Box::pin(async move {
-            // 并发启动各 server（设计 §19.6）；required 失败收集后返回首个错误
+            // 顺序启动各 server（ST-13，2026-08-28 R5 收尾：注释曾声称"并发启动"
+            // 实为串行循环——文档与行为不符）。串行是设计取舍：进程池模式共享
+            // `connections` 写锁，且启动失败的错误收集/required 语义在顺序路径下
+            // 更直观；服务器间存在启动顺序依赖时（如 gateway 依赖 backend）串行
+            // 保证确定性。required 失败收集后返回首个错误。
             let mut required_errors: Vec<McpError> = Vec::new();
             for cfg in configs {
                 if !cfg.enabled {
@@ -750,11 +754,15 @@ fn convert_one(block: &ContentBlock) -> ToolContent {
             }
         }
         ContentBlock::Audio(a) => {
-            let data = base64_decode(&a.data).unwrap_or_else(|| a.data.as_bytes().to_vec());
-            ToolContent::Image {
-                mime: a.mime_type.clone(),
-                data,
-            }
+            // ST-12（2026-08-28 R5 收尾）：Audio 块此前被转成 `ToolContent::Image`
+            // （mime 标签与数据错配，provider 按 image 渲染失败或误报）。多数
+            // LLM 不支持音频输入，转 Text 元数据表示（含 mime 与字节数），
+            // 既不谎报类型也不丢数据。
+            ToolContent::Text(format!(
+                "[audio content: mime={}, bytes={}]",
+                a.mime_type,
+                base64_decode(&a.data).map_or(a.data.len(), |v| v.len())
+            ))
         }
         ContentBlock::Resource(r) => {
             // 嵌入资源转文本表示
