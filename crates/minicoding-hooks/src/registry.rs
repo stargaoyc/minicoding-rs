@@ -10,7 +10,8 @@
 //! 详见 `docs/hooks.md` §5、`docs/modules.md` §5。
 
 use minicoding_core::hooks::{
-    DispatchConfig, DispatchResult, Hook, HookDecision, HookEvent, HookInput, HookRegistry,
+    DispatchConfig, DispatchResult, Hook, HookDecision, HookError, HookEvent, HookInput,
+    HookRegistry,
 };
 use minicoding_core::metrics;
 use minicoding_core::provider::BoxFuture;
@@ -23,10 +24,16 @@ use std::sync::{Arc, Mutex};
 ///
 /// `Runtime` 持有 `Arc<HookRegistryImpl>`（或 `Arc<dyn HookRegistry>`）。
 /// `dispatch` 由 core trait 默认实现提供，串行聚合所有匹配 Hook。
+///
+/// SEC-17（2026-08-28 R5 收尾）：可选注入 `AuditSink`——Hook 协议违规
+/// （ExitCode/Timeout/JSON 解析失败等 `HookError`）落 `audit.log`（AGENTS.md
+/// §5.5 承诺）。未注入时为 `None`（兼容既有调用方与测试，不记审计）。
 #[derive(Default)]
 pub struct HookRegistryImpl {
     /// 全部已注册 Hook（按注册顺序）。`for_event` 时按 matcher 过滤。
     hooks: Mutex<Vec<Arc<dyn Hook>>>,
+    /// Hook 错误审计 sink（SEC-17，可选）。
+    audit: Option<Arc<dyn minicoding_core::storage::AuditSink>>,
 }
 
 impl HookRegistryImpl {
@@ -35,6 +42,7 @@ impl HookRegistryImpl {
     pub fn new() -> Self {
         Self {
             hooks: Mutex::new(Vec::new()),
+            audit: None,
         }
     }
 
@@ -43,7 +51,18 @@ impl HookRegistryImpl {
     pub fn with_hooks(hooks: Vec<Arc<dyn Hook>>) -> Self {
         Self {
             hooks: Mutex::new(hooks),
+            audit: None,
         }
+    }
+
+    /// 注入审计 sink（SEC-17）：Hook 协议违规记 `AuditKind::HookRun`。
+    ///
+    /// 审计记录 best-effort（失败仅 warn，不阻断 Hook 分发——审计是记录性
+    /// 保障，非执行路径的一部分，与 MCP 审批审计同策略）。
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn minicoding_core::storage::AuditSink>) -> Self {
+        self.audit = Some(audit);
+        self
     }
 }
 
@@ -53,6 +72,7 @@ async fn dispatch_hooks(
     hooks: Vec<std::sync::Arc<dyn Hook>>,
     mut input: HookInput,
     config: DispatchConfig,
+    audit: Option<Arc<dyn minicoding_core::storage::AuditSink>>,
 ) -> DispatchResult {
     let event = input.event;
 
@@ -126,12 +146,14 @@ async fn dispatch_hooks(
                     tracing::warn!(hook = %hook_name, error = %e, "hook error, continuing");
                     metrics::record_hook(&hook_name, event_str, "err");
                     metrics::record_error("hook");
+                    record_hook_audit(audit.as_deref(), &hook_name, event_str, &e).await;
                     result.errors.push((hook_name, e));
                 }
                 HookErrorAction::Deny(reason, e) => {
                     tracing::warn!(hook = %hook_name, error = %e, "hook error -> deny");
                     metrics::record_hook(&hook_name, event_str, "deny");
                     metrics::record_error("hook");
+                    record_hook_audit(audit.as_deref(), &hook_name, event_str, &e).await;
                     result.decision = HookDecision::Deny;
                     result.reason = Some(reason);
                     result.errors.push((hook_name, e));
@@ -141,6 +163,7 @@ async fn dispatch_hooks(
                     tracing::error!(hook = %hook_name, error = %e, "hook error -> fail");
                     metrics::record_hook(&hook_name, event_str, "fatal");
                     metrics::record_error("hook");
+                    record_hook_audit(audit.as_deref(), &hook_name, event_str, &e).await;
                     result.fatal_error = Some(e);
                     return result;
                 }
@@ -149,6 +172,32 @@ async fn dispatch_hooks(
     }
 
     result
+}
+
+/// SEC-17：Hook 协议违规记审计（`AuditKind::HookRun`，best-effort）。
+///
+/// 触发场景：Hook 子进程 ExitCode/Timeout/JSON 解析失败等 `HookError`——这些
+/// 是"协议违规"信号（AGENTS.md §5.5 要求记录）。审计失败仅 warn 不阻断分发
+/// （审计是记录性保障，与 MCP 审批审计同策略）。`session` 字段用 `HookInput` 的
+/// session id（如可用）否则占位。
+async fn record_hook_audit(
+    audit: Option<&dyn minicoding_core::storage::AuditSink>,
+    hook_name: &str,
+    event: &str,
+    e: &HookError,
+) {
+    let Some(audit) = audit else { return };
+    let rec = minicoding_core::storage::AuditRecord {
+        ts: time::OffsetDateTime::now_utc(),
+        session: "hook".to_string(),
+        kind: minicoding_core::storage::AuditKind::HookRun,
+        tool: Some(format!("hook__{hook_name}")),
+        decision: Some("error".to_string()),
+        detail: format!("hook `{hook_name}` event={event} protocol error: {e}"),
+    };
+    if let Err(err) = audit.record(rec).await {
+        tracing::warn!(hook = %hook_name, error = %err, "hook audit record failed (best-effort)");
+    }
 }
 
 impl HookRegistry for HookRegistryImpl {
@@ -172,7 +221,8 @@ impl HookRegistry for HookRegistryImpl {
     fn dispatch(&self, input: HookInput, config: DispatchConfig) -> BoxFuture<'_, DispatchResult> {
         let hooks =
             self.for_event_with_tool(input.event, input.tool.as_ref().map(|t| t.name.as_str()));
-        Box::pin(dispatch_hooks(hooks, input, config))
+        let audit = self.audit.clone();
+        Box::pin(dispatch_hooks(hooks, input, config, audit))
     }
 }
 
@@ -368,7 +418,7 @@ mod dispatch_tests {
         ) -> minicoding_core::provider::BoxFuture<'_, DispatchResult> {
             let hooks =
                 self.for_event_with_tool(input.event, input.tool.as_ref().map(|t| t.name.as_str()));
-            Box::pin(dispatch_hooks(hooks, input, config))
+            Box::pin(dispatch_hooks(hooks, input, config, None))
         }
     }
 
@@ -1051,5 +1101,66 @@ mod dispatch_tests {
         let e = HookError::Internal("x".to_string());
         let action = HookErrorAction::from_error(e, "h", &config);
         assert!(matches!(action, HookErrorAction::Fatal(_)));
+    }
+
+    /// 测试用审计 sink（SEC-17）：收集 record 供断言。
+    #[derive(Clone, Default)]
+    struct RecordingAudit(
+        std::sync::Arc<std::sync::Mutex<Vec<minicoding_core::storage::AuditRecord>>>,
+    );
+
+    impl minicoding_core::storage::AuditSink for RecordingAudit {
+        fn record(
+            &self,
+            rec: minicoding_core::storage::AuditRecord,
+        ) -> BoxFuture<'_, Result<(), minicoding_core::model::StorageError>> {
+            let inner = self.0.clone();
+            Box::pin(async move {
+                inner.lock().expect("audit lock").push(rec);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_protocol_error_records_hook_run_audit() {
+        // SEC-17（2026-08-28 R5 收尾）：注入 AuditSink 后 Hook 协议违规
+        // 必须落 AuditKind::HookRun（AGENTS.md §5.5 承诺）；未注入时不记。
+        let audit = RecordingAudit::default();
+        let reg = HookRegistryImpl::new().with_audit(Arc::new(audit.clone()));
+        reg.register(Arc::new(ErrorHook {
+            name: "audit-fail".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            error: HookError::Internal("boom".to_string()),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.errors.len(), 1, "错误应收敛");
+
+        let records = audit.0.lock().expect("audit lock");
+        assert_eq!(records.len(), 1, "应恰有一条 HookRun 审计记录");
+        assert_eq!(
+            records[0].kind,
+            minicoding_core::storage::AuditKind::HookRun
+        );
+        assert!(
+            records[0].detail.contains("audit-fail"),
+            "detail 应含 hook 名: {}",
+            records[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_protocol_error_without_audit_is_noop() {
+        // 未注入 audit（默认/测试注册表）不记审计——兼容既有调用方。
+        let reg = HookRegistryImpl::new();
+        reg.register(Arc::new(ErrorHook {
+            name: "no-audit".to_string(),
+            matcher: HookMatcher::for_events(vec![HookEvent::PreToolUse]),
+            error: HookError::Internal("boom".to_string()),
+        }));
+        let input = HookInput::new(HookEvent::PreToolUse, "s", 1, Utf8PathBuf::from("/tmp"));
+        let result = reg.dispatch(input, DispatchConfig::default()).await;
+        assert_eq!(result.errors.len(), 1);
     }
 }

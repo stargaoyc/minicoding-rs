@@ -553,9 +553,11 @@ fn inner_build_runtime(
             None
         }
     };
-    // SEC-5（R5）：Hook registry 移至 sandbox_pair 就绪后构造（OS 沙箱注入）
+    // SEC-5（R5）：Hook registry 移至 sandbox_pair 就绪后构造（OS 沙箱注入）。
+    // SEC-17（R5 收尾）：注入 audit——Hook 协议违规记 audit.log。
     #[cfg(feature = "hooks")]
-    let hook_registry = build_hook_registry(&config.hooks, sandbox_pair.as_ref());
+    let hook_registry =
+        build_hook_registry(&config.hooks, sandbox_pair.as_ref()).with_audit(audit.clone());
     let child_tokenizer: Arc<dyn Tokenizer> = tokenizer
         .clone()
         .unwrap_or_else(crate::subagent::fallback_tokenizer);

@@ -68,6 +68,9 @@ pub enum NdjsonError {
 ///
 /// 使用 `Box<dyn AsyncWrite + Send + Unpin>` 让生产代码（`Stdout`）与测试代码
 /// （`tokio::io::sink()`）共用同一类型，避免为测试单独抽象。
+/// 单行 NDJSON 上限（FE-8，2026-08-28 R5 收尾）：恶意/异常客户端可发无限长
+/// 单行使 server OOM。256 KiB 覆盖真实请求（含大工具调用参数）。
+const MAX_LINE_BYTES: usize = 256 * 1024;
 type SharedStdout = Arc<Mutex<tokio::io::BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>;
 
 /// 启动 NDJSON server：从 stdin 读 `Command`，向 stdout 写 `EventDto`。
@@ -95,8 +98,33 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(16);
     let reader_stdout = stdout.clone();
     let reader_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        while let Some(line) = lines.next_line().await? {
+        // FE-8（2026-08-28 R5 收尾）：NDJSON 行读取无上限——恶意/异常本地客户端
+        // 可发无限长单行使 server 无限缓冲 OOM。用 `take(MAX_LINE_BYTES + 1)`
+        // 截断读：单行超限即报 FrameTooLarge（fail-closed，不继续解析），与
+        // ACP 的 Content-Length 上限同一防线。
+        let mut reader = BufReader::new(tokio::io::stdin());
+        loop {
+            let mut line = String::new();
+            let n = match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "ndjson: stdin read failed");
+                    break;
+                }
+            };
+            // 超限行：丢弃该行（含残余）并报错
+            if n > MAX_LINE_BYTES {
+                write_command(
+                    &reader_stdout,
+                    0,
+                    &NdjsonCommandKind::CommandError {
+                        message: format!("ndjson line exceeds {MAX_LINE_BYTES} bytes"),
+                    },
+                )
+                .await?;
+                continue;
+            }
             // 空行跳过（编辑器可能发送心跳/空行）
             if line.trim().is_empty() {
                 continue;

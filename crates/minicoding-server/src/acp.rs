@@ -243,6 +243,16 @@ where
     let len = content_length
         .ok_or_else(|| AcpError::Frame("missing Content-Length header".to_string()))?;
 
+    // FE-8（2026-08-28 R5 收尾）：Content-Length 无上限——本地客户端可
+    // 声明任意大 len 使 server 分配巨量内存（OOM）。上限 256 MiB 与
+    // web.fetch 等工具的输出上限一致，覆盖真实请求场景（payload 含 session
+    // 历史可能达数 MB），超出则直接拒绝（fail-closed，不读 body）。
+    if len > 256 * 1024 * 1024 {
+        return Err(AcpError::Frame(format!(
+            "Content-Length {len} exceeds maximum (256 MiB)"
+        )));
+    }
+
     // 2. 读 body
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(AcpError::Io)?;

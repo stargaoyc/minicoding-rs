@@ -98,15 +98,29 @@ impl Tool for McpToolWrapper {
             // JSON Schema 全量校验（2026-08-23 审查遗留#5 升级：jsonschema crate）
             // 此前仅 required 键预检，type/enum/pattern 等约束不生效。
             // 校验失败 → InvalidInput（LLM 可自行修正参数重试）。
-            if let Ok(compiled) = jsonschema::validator_for(&input_schema) {
-                let errors: Vec<String> = compiled
-                    .iter_errors(&input)
-                    .map(|e| format!("  {}: {}", e.instance_path(), e))
-                    .collect();
-                if !errors.is_empty() {
+            //
+            // SEC-18（2026-08-27 R5 审查）：schema 编译失败此前 fail-open 静默跳过
+            // 校验直接转发参数——远端 schema 异常（畸形/超复杂度）时校验防线整体
+            // 旁路。改 fail-closed：编译失败报 InvalidInput（不调用远端），把"无法
+            // 校验"当成"校验不通过"处理，与 C-01 最小权限方向一致。退化代价：
+            // 偶发 schema 编译失败的 server 工具不可用，需 server 侧修复——可预期、
+            // 可诊断（错误信息含编译原因），优于静默转发。
+            match jsonschema::validator_for(&input_schema) {
+                Ok(compiled) => {
+                    let errors: Vec<String> = compiled
+                        .iter_errors(&input)
+                        .map(|e| format!("  {}: {}", e.instance_path(), e))
+                        .collect();
+                    if !errors.is_empty() {
+                        return Err(ToolError::InvalidInput(format!(
+                            "mcp {server}__{tool}: 入参不符合 schema:\n{}",
+                            errors.join("\n")
+                        )));
+                    }
+                }
+                Err(e) => {
                     return Err(ToolError::InvalidInput(format!(
-                        "mcp {server}__{tool}: 入参不符合 schema:\n{}",
-                        errors.join("\n")
+                        "mcp {server}__{tool}: 远端 schema 编译失败（fail-closed，不转发参数）: {e}"
                     )));
                 }
             }

@@ -34,10 +34,18 @@ const AWS_AKIA_PATTERN: &str = r"AKIA[0-9A-Z]{16}";
 /// `Authorization: Bearer xxx` / `Bearer xxx` 头部脱敏。
 const BEARER_PATTERN: &str = r"(?i)(Bearer\s+)([A-Za-z0-9_\-.=:/+]+)";
 
+/// URL userinfo 脱敏（SEC-14，2026-08-28 R5）：`scheme://user:pass@host` 中
+/// userinfo 段的密码是活凭证（`DATABASE_URL=postgres://user:pass@db` 等），
+/// 但键名（`DATABASE_URL`）不含 `SECRET_KEYWORDS` 关键词，字段赋值模式漏检。
+/// 脱敏 userinfo（`user:pass@` → `user:***@`，保留 user 便于识别归属）；
+/// 仅 user:pass 双段形态（单段 user@ 无密码不脱敏——`git@github.com` 等
+/// 常见无凭证形态不误伤）。
+const URL_USERINFO_PATTERN: &str = r"(?i)([a-z][a-z0-9+.-]*://)([^/@:\s]+):([^/@\s]+)(@)";
+
 /// 把敏感字段值替换为 `***`。
 ///
-/// 处理顺序：先脱敏字段赋值（`KEY=value`/`KEY: value`），再脱敏 Bearer token，
-/// 最后脱敏 AWS AKIA 模式。多轮匹配避免相互干扰。
+/// 处理顺序：先脱敏字段赋值（`KEY=value`/`KEY: value`），再脱敏 Bearer token、
+/// URL userinfo，最后脱敏 AWS AKIA 模式。多轮匹配避免相互干扰。
 #[must_use]
 pub fn redact(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -70,7 +78,14 @@ fn redact_line(line: &str) -> String {
         return re.replace_all(line, "${1}***").into_owned();
     }
 
-    // 3. AWS AKIA 模式
+    // 3. URL userinfo（SEC-14）
+    if let Ok(re) = Regex::new(URL_USERINFO_PATTERN)
+        && re.is_match(line)
+    {
+        return re.replace_all(line, "${1}${2}:***${4}").into_owned();
+    }
+
+    // 4. AWS AKIA 模式
     if let Ok(re) = Regex::new(AWS_AKIA_PATTERN)
         && re.is_match(line)
     {
@@ -265,5 +280,23 @@ mod tests {
         assert!(out.contains("API_TOKEN="));
         assert!(out.contains("SECRET_KEY="));
         assert!(!out.contains("aaa") && !out.contains("bbb"));
+    }
+
+    #[test]
+    fn redact_url_userinfo_password() {
+        // SEC-14（2026-08-28 R5）：URL 嵌入凭证——键名 DATABASE_URL 不含
+        // SECRET_KEYWORDS，字段赋值模式漏检；密码必须脱敏
+        let input = "DATABASE_URL=postgres://user:s3cret@db.example.com:5432/app\n";
+        let out = redact(input);
+        assert!(!out.contains("s3cret"), "URL 密码不得保留: {out}");
+        assert!(out.contains("user:***@"), "应保留 user 并脱敏密码: {out}");
+    }
+
+    #[test]
+    fn redact_url_userinfo_keeps_single_user() {
+        // 单段 user@（无密码）形态不误伤：git@github.com 等
+        let input = "GIT_URL=git@github.com:user/repo.git\n";
+        let out = redact(input);
+        assert_eq!(out, input, "无密码的 user@ 形态不应脱敏");
     }
 }

