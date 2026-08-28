@@ -45,6 +45,25 @@ impl SandboxPolicy {
             Self::DangerFullAccess => "danger-full-access",
         }
     }
+
+    /// 按会话 workdir 重锚定策略（FE-R6-1，2026-08-28 R6 审查）。
+    ///
+    /// `WorkspaceWrite` 内嵌的 workdir 决定 OS 层沙箱对子进程的可写根——server
+    /// 启动时的默认策略绑定服务端默认 workdir，会话创建/恢复/工作区切换若覆盖
+    /// 了 workdir 而不同步策略，landlock/Seatbelt 对 `shell.run` 子进程的可写
+    /// 根与应用层路径沙箱（C-03，用会话 workdir）失配：自定义目录会话每次写
+    /// 文件被内核拒绝，且拒绝计数累积误触发 C-30 熔断。其他策略形态不含
+    /// workdir 参数，原样返回。
+    #[must_use]
+    pub fn with_workdir(&self, workdir: &Utf8PathBuf) -> Self {
+        match self {
+            Self::WorkspaceWrite { writable, .. } => Self::WorkspaceWrite {
+                workdir: workdir.clone(),
+                writable: writable.clone(),
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 /// 沙箱驱动 trait（同步、`dyn` 兼容）。
@@ -218,6 +237,33 @@ mod tests {
             SandboxPolicy::DangerFullAccess.preset_tag(),
             "danger-full-access"
         );
+    }
+
+    #[test]
+    fn sandbox_policy_with_workdir_reanchors_workspace_write() {
+        // FE-R6-1（2026-08-28 R6 审查）：自定义 workdir 会话/工作区切换必须
+        // 重锚定 OS 沙箱可写根，否则 landlock/Seatbelt 与 C-03 应用层失配。
+        let p = SandboxPolicy::WorkspaceWrite {
+            workdir: camino::Utf8PathBuf::from("/server/default"),
+            writable: vec![camino::Utf8PathBuf::from("/server/default/tmp")],
+        };
+        let reanchored = p.with_workdir(&camino::Utf8PathBuf::from("/project/custom"));
+        match reanchored {
+            SandboxPolicy::WorkspaceWrite { workdir, writable } => {
+                assert_eq!(workdir, camino::Utf8PathBuf::from("/project/custom"));
+                assert_eq!(writable.len(), 1, "writable 列表应保留");
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+        // 非 WorkspaceWrite 形态原样返回
+        assert!(matches!(
+            SandboxPolicy::ReadOnly.with_workdir(&camino::Utf8PathBuf::from("/x")),
+            SandboxPolicy::ReadOnly
+        ));
+        assert!(matches!(
+            SandboxPolicy::DangerFullAccess.with_workdir(&camino::Utf8PathBuf::from("/x")),
+            SandboxPolicy::DangerFullAccess
+        ));
     }
 
     #[test]

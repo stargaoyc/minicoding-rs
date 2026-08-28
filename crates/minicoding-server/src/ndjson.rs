@@ -45,7 +45,7 @@ use minicoding_core::model::TurnOutcome;
 use minicoding_protocol::command::Command;
 use minicoding_protocol::event::{EventDto, EventKind, NdjsonCommandKind};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 /// NDJSON 适配器错误。
@@ -74,6 +74,15 @@ pub enum NdjsonError {
 const MAX_LINE_BYTES: usize = 256 * 1024;
 type SharedStdout = Arc<Mutex<tokio::io::BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>;
 
+/// 有界行读取：见 [`crate::bounded_io::read_line_bounded`]（ST-R6-2，2026-08-28
+/// R6 审查：R5 FE-8 声称 take 截断但实现未生效，OOM 防护实际不存在）。
+async fn read_line_bounded(
+    reader: &mut tokio::io::BufReader<tokio::io::Stdin>,
+    max: usize,
+) -> std::io::Result<Option<Result<String, ()>>> {
+    crate::bounded_io::read_line_bounded(reader, max).await
+}
+
 /// 启动 NDJSON server：从 stdin 读 `Command`，向 stdout 写 `EventDto`。
 ///
 /// 阻塞当前 task，直到 stdin 关闭（EOF）或发生不可恢复错误。
@@ -99,33 +108,33 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(16);
     let reader_stdout = stdout.clone();
     let reader_task = tokio::spawn(async move {
-        // FE-8（2026-08-28 R5 收尾）：NDJSON 行读取无上限——恶意/异常本地客户端
-        // 可发无限长单行使 server 无限缓冲 OOM。用 `take(MAX_LINE_BYTES + 1)`
-        // 截断读：单行超限即报 FrameTooLarge（fail-closed，不继续解析），与
-        // ACP 的 Content-Length 上限同一防线。
+        // FE-8（2026-08-28 R5 收尾）+ ST-R6-2（2026-08-28 R6 审查）：NDJSON 行
+        // 读取无上限——恶意/异常本地客户端可发无限长单行使 server 无限缓冲 OOM。
+        // R5 注释声称"用 take(MAX+1) 截断读"，但实现是 `read_line` 先全量缓冲
+        // 再判断长度，防护实际未生效。改用 [`read_line_bounded`]：逐块累积，
+        // 超过上限即丢弃该行（含残余）并报 FrameTooLarge（fail-closed）。
         let mut reader = BufReader::new(tokio::io::stdin());
         loop {
-            let mut line = String::new();
-            let n = match reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(n) => n,
+            let line = match read_line_bounded(&mut reader, MAX_LINE_BYTES).await {
+                Ok(Some(Ok(l))) => l,
+                Ok(Some(Err(()))) => {
+                    // 超限行：丢弃（含残余）并报错
+                    write_command(
+                        &reader_stdout,
+                        0,
+                        &NdjsonCommandKind::CommandError {
+                            message: format!("ndjson line exceeds {MAX_LINE_BYTES} bytes"),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                Ok(None) => break,
                 Err(e) => {
                     tracing::warn!(error = %e, "ndjson: stdin read failed");
                     break;
                 }
             };
-            // 超限行：丢弃该行（含残余）并报错
-            if n > MAX_LINE_BYTES {
-                write_command(
-                    &reader_stdout,
-                    0,
-                    &NdjsonCommandKind::CommandError {
-                        message: format!("ndjson line exceeds {MAX_LINE_BYTES} bytes"),
-                    },
-                )
-                .await?;
-                continue;
-            }
             // 空行跳过（编辑器可能发送心跳/空行）
             if line.trim().is_empty() {
                 continue;
@@ -525,8 +534,17 @@ async fn handle_send_user_message(
         tokio::select! {
             biased;
             turn_result = &mut turn_task => {
-                // turn_task 完成：drain 剩余事件（TurnEnd 通常在 turn_task 返回前已发出）
-                while let Ok((seq, kind)) = rx.try_recv() {
+                // FE-R6-2（2026-08-28 R6 审查）：turn 完成后短超时排空尾事件——
+                // Runtime 发 TurnEnd 经 EventBus→sequencer→broadcast 两跳才到
+                // 订阅端，JoinHandle 完成与 send 之间无排序保证；一次性
+                // `try_recv` 会漏掉仍在途中的 TurnEnd（NDJSON 客户端依赖它
+                // 判定轮次结束，丢失即挂起）。
+                let tail = crate::turn_tail::drain_turn_tail(
+                    &mut rx,
+                    std::time::Duration::from_millis(500),
+                )
+                .await;
+                for (seq, kind) in tail {
                     write_event(stdout, seq, &kind).await?;
                 }
                 // 根据 turn 结果发最终事件
@@ -602,7 +620,10 @@ fn build_params_from_config(
     default: &ServerRuntimeParams,
     config: minicoding_protocol::SessionConfig,
 ) -> ServerRuntimeParams {
-    ServerRuntimeParams {
+    let workdir = config
+        .workdir
+        .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from);
+    let mut params = ServerRuntimeParams {
         provider_kind: config
             .provider
             .unwrap_or_else(|| default.provider_kind.clone()),
@@ -610,9 +631,7 @@ fn build_params_from_config(
         api_base: default.api_base.clone(),
         api_key: default.api_key.clone(),
         model: config.model.unwrap_or_else(|| default.model.clone()),
-        workdir: config
-            .workdir
-            .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from),
+        workdir: workdir.clone(),
         system: config.system.or(default.system.clone()),
         permission_mode: config.permission_mode,
         sandbox_policy: default.sandbox_policy.clone(),
@@ -621,7 +640,12 @@ fn build_params_from_config(
         small_model: default.small_model.clone(),
         turn_timeout_sec: default.turn_timeout_sec,
         compress: default.compress,
-    }
+    };
+    // FE-R6-1（2026-08-28 R6 审查）：自定义 workdir 需同步 OS 沙箱策略——
+    // 默认策略内嵌服务端 workdir，不重锚则 landlock/Seatbelt 可写根与应用层
+    // C-03 失配（shell.run 写文件被内核拒绝 + 误触发 C-30 熔断）。
+    params.sandbox_policy = params.sandbox_policy.with_workdir(&workdir);
+    params
 }
 
 #[cfg(test)]

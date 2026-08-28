@@ -94,9 +94,12 @@ impl JsonlEventStore {
 
 /// 读文件最后一行（非空，跳过尾部换行），O(1) 内存（ST-9，2026-08-28 R5 收尾）。
 ///
-/// 实现：seek 到文件尾，反推 8 KiB 窗口内最后一行（覆盖单行 JSON 事件长度）；
-/// 超长行（单行 > 8 KiB）退化到窗口起点的部分行——json 解析会失败并报
-/// Corrupted，与全文读语义一致（事件记录都是小 JSON）。文件不存在/为空返回 `None`。
+/// 实现：seek 到文件尾，反推 8 KiB 窗口内最后一行。**ST-R6-1（2026-08-28 R6
+/// 审查）**：窗口起点若不在行首（最后一行 > 8 KiB 时窗口从行中部开始），片段
+/// 必然非法 JSON——此前直接报 Corrupted，使 `append` 单调性检查恒失败（事件流
+/// 冻结）且 `next_seq_sync` 失败（`--resume`/`--replay` 不可用）。修复：末行
+/// 若跨窗口起点（缓冲区内无换行符且起点非文件头），向前回退窗口再读，直到
+/// 取到完整末行；每次读 ≤ 8 KiB（O(1) 内存）。文件不存在/为空返回 `None`。
 fn read_tail_line(path: &std::path::Path) -> std::io::Result<Option<String>> {
     use std::io::{Read, Seek, SeekFrom};
     const WINDOW: usize = 8 * 1024;
@@ -109,19 +112,31 @@ fn read_tail_line(path: &std::path::Path) -> std::io::Result<Option<String>> {
     if len == 0 {
         return Ok(None);
     }
-    let start = len.saturating_sub(WINDOW as u64);
-    file.seek(SeekFrom::Start(start))?;
-    // 窗口固定 ≤ 8 KiB（WINDOW 常量），usize 在 32-bit 平台也放得下。
-    let mut buf = Vec::with_capacity(WINDOW);
-    file.read_to_end(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf);
-    // 找最后一个非空行
-    for line in text.lines().rev() {
-        if !line.trim().is_empty() {
-            return Ok(Some(line.to_string()));
+    let mut start = len.saturating_sub(WINDOW as u64);
+    loop {
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = Vec::with_capacity(WINDOW);
+        file.read_to_end(&mut buf)?;
+        let text = String::from_utf8_lossy(&buf);
+        // 去尾部空白后找最后一个换行：换行后的内容即最后一行（必然完整，
+        // 因为缓冲区读到 EOF）；无换行说明整块是同一条行的片段——起点不是
+        // 文件头则回退扩展，起点是文件头则整块即末行。
+        let trimmed = text.trim_end();
+        if trimmed.is_empty() {
+            if start == 0 {
+                return Ok(None);
+            }
+            start = start.saturating_sub(WINDOW as u64);
+            continue;
         }
+        if let Some(nl_pos) = trimmed.rfind('\n') {
+            return Ok(Some(trimmed[nl_pos + 1..].to_string()));
+        }
+        if start == 0 {
+            return Ok(Some(trimmed.to_string()));
+        }
+        start = start.saturating_sub(WINDOW as u64);
     }
-    Ok(None)
 }
 
 impl EventStore for JsonlEventStore {
@@ -393,5 +408,47 @@ mod tests {
         let st = storage(&dir);
         let id = "01EMPTY".to_string();
         assert_eq!(st.next_seq_sync(&id).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_tail_line_handles_long_line() {
+        // ST-R6-1（2026-08-28 R6 审查）：单行 > 8 KiB（MessageAppended 持久化
+        // 大工具结果可达 1MiB）——8 KiB 窗口从行中部开始时，回退寻行首而非
+        // 报 Corrupted。此前 R5 ST-9 修复引入回归：尾部窗口截断使 append 单调
+        // 性检查恒失败（事件流冻结）且 next_seq_sync 失败（不可 resume/replay）。
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01LONGLINE".to_string();
+
+        // 20 KiB 事件行（远超 8 KiB 窗口）
+        let long_text = "x".repeat(20_000);
+        st.append(&id, make_record(1, &id, &long_text))
+            .await
+            .unwrap();
+
+        // next_seq_sync 应能正确解析末行 seq=1 + 1 = 2
+        assert_eq!(st.next_seq_sync(&id).unwrap(), 2);
+
+        // 第二条事件（验证 append 单调性检查不因解析失败而冻结）
+        st.append(&id, make_record(2, &id, "short")).await.unwrap();
+
+        let records = st.load(&id).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].seq, 2);
+    }
+
+    #[tokio::test]
+    async fn read_tail_line_handles_last_line_shorter_with_prior_long_line() {
+        // 长行后跟短行（常见模式：大工具结果后跟小事件）
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01MIXED".to_string();
+
+        st.append(&id, make_record(1, &id, &"x".repeat(20_000)))
+            .await
+            .unwrap();
+        st.append(&id, make_record(2, &id, "short")).await.unwrap();
+
+        assert_eq!(st.next_seq_sync(&id).unwrap(), 3);
     }
 }

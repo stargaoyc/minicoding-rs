@@ -179,9 +179,15 @@ impl MinicodingLspServer {
             tokio::select! {
                 biased;
                 turn_result = &mut turn_task => {
-                    // drain 剩余事件（turn 完成后实时通道可能还有未消费的事件）
-                    while let Ok(item) = rx.try_recv() {
-                        let (seq, kind) = item;
+                    // FE-R6-2（2026-08-28 R6 审查）：短超时排空尾事件（含仍在
+                    // 途中的 TurnEnd）——一次性 try_recv 会漏掉两跳后到达的事件
+                    //（LSP 客户端缺 $/progress End 进度通知）。
+                    let tail = crate::turn_tail::drain_turn_tail(
+                        &mut rx,
+                        std::time::Duration::from_millis(500),
+                    )
+                    .await;
+                    for (seq, kind) in tail {
                         forward_event(&client, &conv_id, &progress_token, seq, &kind).await;
                     }
                     return match turn_result {

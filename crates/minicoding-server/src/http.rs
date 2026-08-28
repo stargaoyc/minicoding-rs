@@ -582,6 +582,11 @@ async fn create_session(
         turn_timeout_sec: body.turn_timeout_sec.unwrap_or(default.turn_timeout_sec),
         compress: body.compress.unwrap_or(default.compress),
     };
+    // FE-R6-1（2026-08-28 R6 审查）：自定义 workdir 会话必须同步重锚定 OS 沙箱
+    // 策略——默认策略内嵌服务端 workdir，不重锚则 landlock/Seatbelt 对
+    // shell.run 子进程的可写根与应用层 C-03 失配（Web/Desktop 主路径故障：
+    // 每次写文件被内核拒绝 + 沙箱拒绝计数误触发 C-30 熔断）。
+    params.sandbox_policy = params.sandbox_policy.with_workdir(&params.workdir);
     // S20/C-04：api_key 字段接受但忽略——凭证由 server 持有，不经前端传入
     if body.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
         tracing::warn!("CreateSessionBody.api_key ignored (S20/C-04: credentials are server-held)");

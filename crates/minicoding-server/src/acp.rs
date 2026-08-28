@@ -46,7 +46,7 @@ use minicoding_core::policy::Decision;
 use minicoding_protocol::event::{EventDto, EventKind};
 use minicoding_protocol::jsonrpc::{Error as RpcError, Id, Notification, Response, Version};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 /// ACP 适配器错误。
@@ -209,17 +209,24 @@ where
     R: AsyncReadExt + Unpin,
 {
     // 1. 读 headers 直到空行
+    const MAX_HEADER_LINE: usize = 64 * 1024;
     let mut content_length: Option<usize> = None;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            // EOF
-            return Err(AcpError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "stdin EOF while reading headers",
-            )));
-        }
+        let line = match crate::bounded_io::read_line_bounded(reader, MAX_HEADER_LINE).await {
+            Ok(Some(Ok(l))) => l,
+            Ok(Some(Err(()))) => {
+                return Err(AcpError::Frame(format!(
+                    "header line exceeds {MAX_HEADER_LINE} bytes"
+                )));
+            }
+            Ok(None) => {
+                return Err(AcpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stdin EOF while reading headers",
+                )));
+            }
+            Err(e) => return Err(AcpError::Io(e)),
+        };
         // 去除尾部 \r\n
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
@@ -446,19 +453,20 @@ async fn handle_new_conversation(
         serde_json::from_value(params)?
     };
     let default = mgr.default_params().clone();
+    let workdir = p
+        .workdir
+        .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from);
     let params = ServerRuntimeParams {
         provider_kind: p.provider.unwrap_or(default.provider_kind),
         provider_name: default.provider_name,
         api_base: default.api_base,
         api_key: default.api_key,
         model: p.model.unwrap_or(default.model),
-        workdir: p
-            .workdir
-            .map(camino::Utf8PathBuf::from)
-            .unwrap_or(default.workdir),
+        workdir: workdir.clone(),
         system: p.system.or(default.system),
         permission_mode: p.permission_mode.unwrap_or(default.permission_mode),
-        sandbox_policy: default.sandbox_policy,
+        // FE-R6-1（2026-08-28 R6 审查）：自定义 workdir 需同步 OS 沙箱策略
+        sandbox_policy: default.sandbox_policy.with_workdir(&workdir),
         timeout_sec: default.timeout_sec,
         max_retries: default.max_retries,
         small_model: default.small_model,
@@ -555,9 +563,14 @@ async fn handle_prompt(
         tokio::select! {
             biased;
             turn_result = &mut turn_task => {
-                // drain 剩余事件
-                while let Ok(item) = rx.try_recv() {
-                    let (seq, kind) = item;
+                // FE-R6-2（2026-08-28 R6 审查）：短超时排空尾事件（含仍在途中
+                // 的 TurnEnd）——一次性 try_recv 会漏掉两跳后到达的事件。
+                let tail = crate::turn_tail::drain_turn_tail(
+                    &mut rx,
+                    std::time::Duration::from_millis(500),
+                )
+                .await;
+                for (seq, kind) in tail {
                     forward_event_as_update(stdout, &conv_id, seq, &kind).await?;
                 }
                 // 写最终响应

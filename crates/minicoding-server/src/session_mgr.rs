@@ -122,6 +122,15 @@ impl ServerSession {
             let mut cursor = self.cursor.lock().await;
             cursor.push(json)
         };
+        // FE-R6-3（2026-08-28 R6 审查）：durable recovery 激活——`durable_seq`
+        // 此前仅在 `seed_cursor_from_runtime`（恢复时）设置一次，新会话为 0、
+        // 运行中不随持久化推进，`classify_replay` 对 evict 后的事件一律判
+        // `Unrecoverable` → 长会话断线重连退化为全量 RehydrateRequired
+        // （design.md §25.5 的 EventStore 重放路径实际不可达）。这里随 push
+        // 同步推进：`Runtime::durable_seq` 是最近一次成功持久化的 seq，订阅端
+        // 的 `after_seq ≤ durable_seq` 即可走 `EventStore::load_after` 恢复。
+        let durable = self.runtime.durable_seq().await;
+        self.cursor.lock().await.set_durable(durable);
         // 先入 buffer 后广播：订阅端收到 (seq, kind) 时重放路径必已可见该 seq
         let _ = self.sequenced_tx.send((seq, kind));
         seq
@@ -656,6 +665,10 @@ impl SessionManager {
         // 2. 构造 Runtime（预加载会话；workdir 覆盖为会话原工作目录）
         let mut params = self.default_params.clone();
         params.workdir = session.workdir.clone();
+        // FE-R6-1（2026-08-28 R6 审查）：恢复会话同样重锚定 OS 沙箱策略——
+        // 默认策略内嵌服务端 workdir，跨机器/多目录会话恢复时 landlock 可写根
+        // 与应用层 C-03 失配。
+        params.sandbox_policy = params.sandbox_policy.with_workdir(&params.workdir);
         let pending: PendingPermissions = Arc::new(TokioMutex::new(HashMap::new()));
         let prompter: Arc<dyn minicoding_core::policy::PermissionPrompter> = Arc::new(
             ServerPrompter::new(pending.clone(), self.permission_timeout),
