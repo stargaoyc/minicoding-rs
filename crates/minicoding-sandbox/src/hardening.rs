@@ -220,6 +220,9 @@ pub fn home_read_allow_paths_without_credentials() -> Vec<PathBuf> {
 /// 算法：对每个 allow 路径，若其下无任何 deny 路径 → 原样保留；若存在 → 展开
 /// 为直接子项，跳过等于 deny 路径的子项、递归下钻仍覆盖 deny 的子项。结果不含
 /// 任何覆盖凭证路径的规则。
+// 仅 Linux 的 `home_read_allow_paths_without_credentials` 消费（macOS 用 Seatbelt
+// 尾部 deny，不展开）——非 Linux 平台标注 allow 防 dead_code（CI 跨平台 -D warnings）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn subtract_denied(allowed: Vec<PathBuf>, denied: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for a in allowed {
