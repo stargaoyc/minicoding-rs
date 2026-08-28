@@ -4,7 +4,7 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
-## [unreleased]
+## [0.3.7] - 2026-08-28
 
 > 自 v0.3.6（2026-08-27）以来 27 个 commit：R5 遗留修复收尾（五批）+ R6
 > 全面审查（`docs/project-review-20260828-r6.md`）修复。R6 主题：**修复自身
