@@ -234,7 +234,10 @@ impl LlmProvider for OpenAiProvider {
             supports_vision: false,
             supports_streaming: true,
             supports_json_mode: true,
-            context_window: 128_000,
+            // PT-R7-2（2026-08-28 R8 审查）：context_window 按模型前缀探测，避免
+            // 高估小窗口模型（压缩触发过晚 → 真实 400）。已知小窗口模型收敛，
+            // 其余保持 128K 保守默认（gpt-4o/o 系列实际 ≥128K，低估方向安全）。
+            context_window: model_context_window(&self.model),
             max_output: 4_096,
         }
     }
@@ -514,6 +517,25 @@ fn uses_max_completion_tokens(model: &str) -> bool {
     ["o1", "o3", "o4", "gpt-5"]
         .iter()
         .any(|prefix| lower.starts_with(prefix))
+}
+
+/// 按模型前缀估算上下文窗口（PT-R7-2，2026-08-28 R8 审查）。
+///
+/// 目的：避免**高估**小窗口模型的 `context_window`——高估使压缩触发过晚，真实
+/// 请求 400 超窗（`LlmError::ContextLength` 紧急压缩兜底，rt.rs PT4-3）。
+/// 已知小窗口模型收敛；其余保持 128K 保守默认（低估方向安全：压缩提前不越界）。
+fn model_context_window(model: &str) -> usize {
+    let lower = model.to_ascii_lowercase();
+    if lower.starts_with("deepseek") {
+        // DeepSeek V3/R1 系列 64K
+        64_000
+    } else if lower.starts_with("qwen") && lower.contains("32b") {
+        // Qwen 本地 32B 常见 32K 部署
+        32_768
+    } else {
+        // gpt-4o / gpt-4.1 / o1/o3/o4 / gpt-5 等实际 ≥128K，保守取 128K
+        128_000
+    }
 }
 
 /// 解析 `OpenAI` `usage` 对象为 [`Usage`]。
@@ -1038,6 +1060,17 @@ mod tests {
         for m in ["gpt-4", "gpt-4o", "gpt-3.5-turbo", "deepseek-chat", "o2-x"] {
             assert!(!uses_max_completion_tokens(m), "{m} 不应识别为推理系模型");
         }
+    }
+
+    #[test]
+    fn model_context_window_conservative() {
+        // PT-R7-2：小窗口模型收敛（不高估 → 压缩不过晚），其余保守 128K
+        assert_eq!(model_context_window("deepseek-chat"), 64_000);
+        assert_eq!(model_context_window("DeepSeek-R1"), 64_000);
+        assert_eq!(model_context_window("qwen2.5-32b-instruct"), 32_768);
+        assert_eq!(model_context_window("gpt-4o"), 128_000);
+        assert_eq!(model_context_window("o3"), 128_000);
+        assert_eq!(model_context_window("gpt-5"), 128_000);
     }
 
     #[test]

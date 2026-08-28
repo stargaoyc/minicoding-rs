@@ -634,13 +634,58 @@ impl Runtime {
                     // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
                     // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。
                     req.messages = super::repair::repair_request_messages(req.messages);
-                    let (assistant_msg, llm_stop_reason, llm_usage) =
-                        match self.stream_llm(req).await
-                        {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            metrics::record_error("llm");
-                            return Ok(TurnOutcome::Failed(e.into()));
+                    // PT4-3（2026-08-28 R8 审查）：`ContextLength` 紧急压缩联动——
+                    // LlmError::ContextLength（真实 400 超窗）此前只回灌 LLM 自修正
+                    // （compress 永不触发）。改为：首次命中触发一次 `ctx.compress()`
+                    // + 重建请求 + 重试一次；再失败才回灌（防循环）。
+                    let mut emergency_compressed = false;
+                    let (assistant_msg, llm_stop_reason, llm_usage) = loop {
+                        match self.stream_llm(req).await {
+                            Ok(msg) => break msg,
+                            Err(e)
+                                if !emergency_compressed
+                                    && matches!(&e, crate::model::LlmError::ContextLength(_)) =>
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "LLM 400 上下文超长：紧急压缩后重试一次"
+                                );
+                                emergency_compressed = true;
+                                if self.ctx.force_compress().await.is_err() {
+                                    metrics::record_error("context");
+                                    return Ok(TurnOutcome::Failed(e.into()));
+                                }
+                                match self
+                                    .ctx
+                                    .build_chat_request(&self.tools, &config_snapshot)
+                                    .await
+                                {
+                                    Ok(new_req) => req = new_req,
+                                    Err(ce) => {
+                                        metrics::record_error("context");
+                                        return Ok(TurnOutcome::Failed(ce));
+                                    }
+                                }
+                                // 与正常路径一致：Hook 注入上下文并入 system 头部
+                                {
+                                    let drained: Vec<String> = self
+                                        .pending_hook_contexts
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .drain(..)
+                                        .collect();
+                                    for c in drained.iter().rev() {
+                                        req.system.insert_str(
+                                            0,
+                                            &format!("<hook_context>\n{c}\n</hook_context>\n"),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                metrics::record_error("llm");
+                                return Ok(TurnOutcome::Failed(e.into()));
+                            }
                         }
                     };
 

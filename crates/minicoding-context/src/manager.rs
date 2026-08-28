@@ -746,6 +746,12 @@ impl ContextManager for ContextManagerImpl {
     fn message_count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
+
+    /// PT4-3（2026-08-28 R8 审查）：`force_compress` 走完整压缩管道 + 熔断/降级链
+    /// （与 `compress()` 同实现——`compress` 已 `pub async fn`，trait 方法包装转发）。
+    fn force_compress(&self) -> BoxFuture<'_, Result<(), RuntimeError>> {
+        Box::pin(async move { self.compress().await })
+    }
 }
 
 #[cfg(test)]
