@@ -10,6 +10,9 @@ use minicoding_core::tool::{RenderIntent, Tool};
 /// `DuckDuckGo` HTML 搜索端点（无需 API key）。
 const DDG_HTML_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
+/// 重定向逐跳跟随上限（TL-R7-1，2026-08-28 R7 审查）。
+const MAX_REDIRECTS: usize = 5;
+
 /// `web.search` 工具。
 pub struct WebSearch {
     schema: ToolSchema,
@@ -83,9 +86,12 @@ impl Tool for WebSearch {
                 .map_or(5, |n| n as usize);
 
             // 1. HTTP POST（DDG HTML 端点用 POST 表单）：连接/读取超时 + 整体
-            //    ctx.timeout 兜底。PTM-5（2026-08-26 R3 审查）：禁用自动重定向
-            // ——与 web.fetch 同款防线：DDG 开放重定向/劫持可把请求带向内网
-            // 元数据地址，自动跟随会绕过 SSRF 校验；3xx 一律报错。
+            //    ctx.timeout 兜底。禁用自动重定向、手动逐跳跟随（TL-R7-1，
+            //    2026-08-28 R7 审查）：此前 3xx 一律报错——DDG 实际部署偶发 302
+            //    使功能脆弱；且开放重定向可把请求带向内网/元数据地址，自动跟随
+            //    会绕过 SSRF 校验。逐跳跟随（上限 5）：每跳解析 Location 后
+            //    先过 `validate_url`（拒绝私有/loopback/metadata），再发起下一跳，
+            //    与 `web.fetch` 的 S22 逐跳复检同口径。
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(timeout)
@@ -93,17 +99,45 @@ impl Tool for WebSearch {
                 .build()
                 .map_err(|e| ToolError::Exec(format!("HTTP client 构建失败: {e}")))?;
 
-            let resp = tokio::time::timeout(
-                timeout,
-                client
-                    .post(DDG_HTML_ENDPOINT)
-                    .form(&[("q", query.as_str())])
-                    .header("User-Agent", "minicoding/0.1")
-                    .send(),
-            )
-            .await
-            .map_err(|_| ToolError::Exec(format!("搜索请求超时（>{}s）", timeout.as_secs())))?
-            .map_err(|e| ToolError::Exec(format!("搜索请求失败: {e}")))?;
+            let mut current = DDG_HTML_ENDPOINT.to_string();
+            let resp = {
+                let mut hops = 0usize;
+                loop {
+                    let r = tokio::time::timeout(
+                        timeout,
+                        client
+                            .post(&current)
+                            .form(&[("q", query.as_str())])
+                            .header("User-Agent", "minicoding/0.1")
+                            .send(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ToolError::Exec(format!("搜索请求超时（>{}s）", timeout.as_secs()))
+                    })?
+                    .map_err(|e| ToolError::Exec(format!("搜索请求失败: {e}")))?;
+                    if !r.status().is_redirection() {
+                        break r;
+                    }
+                    hops += 1;
+                    if hops > MAX_REDIRECTS {
+                        return Err(ToolError::Exec(format!(
+                            "搜索重定向超过 {MAX_REDIRECTS} 跳上限"
+                        )));
+                    }
+                    let Some(next) = r
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                    else {
+                        return Err(ToolError::Exec("搜索重定向缺少 Location 头".into()));
+                    };
+                    let next = super::fetch::join_redirect_url(&current, next)?;
+                    // 每跳 SSRF 复检（TL-R7-1）：拒绝内网/元数据/loopback 目标
+                    super::ssrf::validate_url(&next).await?;
+                    current = next;
+                }
+            };
 
             if !resp.status().is_success() {
                 return Err(ToolError::Exec(format!("HTTP {}", resp.status())));

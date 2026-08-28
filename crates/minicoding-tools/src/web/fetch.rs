@@ -87,20 +87,20 @@ impl Tool for WebFetch {
     }
 }
 
-/// 响应体读取上限（T-6，2026-08-25 审查）：超过即停止读取并标注截断。
-/// 此前 `resp.text()` 无界缓冲，异常/恶意大响应可直接 OOM。
-const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// 响应体读取上限下限（TL-R7-2，2026-08-28 R7 审查）。
+///
+/// body 需经 HTML→Markdown 转换后才截断到输出预算——若直接把 body 上限压到
+/// `ctx.max_output_bytes`（配置可小至 KB 级），HTML 页连解析都读不完。
+/// body 上限取 `max_output_bytes.max(MIN_BODY_CAP_BYTES)`：既让上限跟随用户
+/// 配置（此前 10MiB 硬编码不可配），又保证小输出配置下解析不塌。
+const MIN_BODY_CAP_BYTES: usize = 256 * 1024;
 
 /// 流式读取响应体并限制最大字节数（T-6，2026-08-25 审查）。
 ///
-/// 用 `bytes_stream` 逐 chunk 累积，达到 [`MAX_BODY_BYTES`] 即停止消费
-/// （丢弃剩余连接），返回 `(body, 是否被截断)`；截断标记与下游
-/// `truncate_output`（`ctx.max_output_bytes`）的输出级截断衔接。
-pub(crate) async fn read_body_capped(resp: reqwest::Response) -> Result<(String, bool), ToolError> {
-    read_body_capped_with_limit(resp, MAX_BODY_BYTES).await
-}
-
-/// 同 [`read_body_capped`] 但上限由调用方给定（`web.search` 复用，PTM-5）。
+/// 用 `bytes_stream` 逐 chunk 累积，达到上限即停止消费（丢弃剩余连接），返回
+/// `(body, 是否被截断)`；截断标记与下游 `truncate_output`（`ctx.max_output_bytes`）
+/// 的输出级截断衔接。上限由调用方给定（`web.fetch`/`web.search` 各自按
+/// `ctx.max_output_bytes` 派生，TL-R7-2 起可配置）。
 pub(crate) async fn read_body_capped_with_limit(
     resp: reqwest::Response,
     max_bytes: usize,
@@ -204,7 +204,8 @@ async fn fetch_and_convert(url: &str, max_bytes: usize) -> Result<ToolResult, To
         .unwrap_or("")
         .to_string();
 
-    let (body, body_capped) = read_body_capped(resp).await?;
+    let (body, body_capped) =
+        read_body_capped_with_limit(resp, max_bytes.max(MIN_BODY_CAP_BYTES)).await?;
 
     // HTML → Markdown（仅 HTML 内容；其他类型直接返回文本）
     let markdown = if content_type.contains("text/html") {
@@ -275,7 +276,9 @@ fn pin_decision(host: &str, resolved_ips: &[IpAddr]) -> Result<IpAddr, ToolError
 /// TL-R6-1（2026-08-28 R6 审查）：scheme 判定大小写不敏感（RFC 7230 scheme
 /// 为大小写不敏感 token）——`Location: HTTPS://a.com/x` 此前被误判为相对
 /// 路径拼到 origin 前缀后产出畸形 URL 且直连失败。
-fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
+///
+/// `pub(crate)`：`web.search` 逐跳跟随重定向复用（TL-R7-1，2026-08-28 R7 审查）。
+pub(crate) fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
     if location
         .get(..7)
         .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
@@ -687,10 +690,12 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_body_capped_at_limit_with_metadata() {
-        // T-6（2026-08-25 审查）：响应体超过 10MiB 硬上限 → 停止读取、
-        // metadata.truncated 标注、内容不超过上限（输出上限给足以隔离变量）。
+        // T-6（2026-08-25 审查）+ TL-R7-2（2026-08-28 R7 审查）：响应体超过
+        // body 上限（= max_output_bytes 派生的 `max_bytes.max(MIN_BODY_CAP)`）
+        // → 停止读取、metadata.truncated 标注。上限跟随 max_bytes（不再硬编码
+        // 10MiB），此处用小 max_bytes 隔离触发 body 级截断。
         let server = MockServer::start().await;
-        let body = "B".repeat(MAX_BODY_BYTES + 1024);
+        let body = "B".repeat(2 * 1024 * 1024); // 2MiB > 256KiB 下限
         Mock::given(method("GET"))
             .and(path("/huge"))
             .respond_with(
@@ -700,17 +705,18 @@ mod tests {
             .await;
 
         let url = format!("{}/huge", server.uri());
-        // 输出上限放大到 64 MiB：确保触发的是响应体级截断而非输出级截断
-        let result = fetch_and_convert(&url, 64 * 1024 * 1024)
+        // 输出预算 1MiB：body 上限 = max(1MiB, 256KiB) = 1MiB < 2MiB，
+        // 触发 body 级截断（text/plain 不经转换，body 即输出，且输出预算与
+        // body 上限对齐，隔离变量）
+        let result = fetch_and_convert(&url, 1024 * 1024)
             .await
             .expect("fetch should succeed");
         assert!(result.metadata.truncated, "超限应标注 truncated");
         match &result.content {
             ToolContent::Text(t) => {
                 assert!(
-                    t.len() <= MAX_BODY_BYTES,
-                    "响应体应被限制在 {} 字节内: {}",
-                    MAX_BODY_BYTES,
+                    t.len() <= 1024 * 1024 + 1024,
+                    "响应体应被限制在 body 上限内: {}",
                     t.len()
                 );
                 assert!(t.starts_with('B'));
