@@ -13,7 +13,7 @@
 //! 文件读取失败（不存在/无权限）静默跳过，不阻塞压缩流程。
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use minicoding_core::model::{Message, Role};
 use minicoding_core::provider::Tokenizer;
@@ -158,16 +158,49 @@ pub async fn inject_post_compact(
 }
 
 /// 按 token 数截断文本（保留前 `max_tokens` 个 token 对应的字符）。
-/// 组件级 workdir 包含判定（CTX-7）：拒绝 `..` 段与 workdir 外路径。
+/// 组件级 workdir 包含判定（CTX-7，2026-08-28 R5 收尾）：拒绝 `..` 段；
+/// 且两侧先做词法规范化（消解 workdir 自身的 `..`——调用方传入非规范化
+/// workdir 时裸组件前缀比较会失配）。与 `memory::loader` 的
+/// `resolve_lexical` 修复同模式。
 fn path_within_workdir(path: &Path, workdir: &Path) -> bool {
     for comp in path.components() {
         if matches!(comp, std::path::Component::ParentDir) {
             return false;
         }
     }
+    // 词法消解 workdir 的 `.`/`..` 段（path 侧已保证无 `..`，`.` 无害）
+    let norm_workdir = normalize_lexical_workdir(workdir);
     let p: Vec<_> = path.components().collect();
-    let w: Vec<_> = workdir.components().collect();
+    let w: Vec<_> = norm_workdir.components().collect();
     p.len() >= w.len() && p[..w.len()] == w[..]
+}
+
+/// 词法规范化 workdir（消解 `.`/`..` 段，不触碰文件系统、不解 symlink）。
+fn normalize_lexical_workdir(workdir: &Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut has_root = false;
+    for comp in workdir.components() {
+        match comp {
+            // CurDir/Prefix 忽略（不改变路径结构；Prefix 仅 Windows 前缀）
+            std::path::Component::CurDir | std::path::Component::Prefix(_) => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::Normal(s) => parts.push(s.to_os_string()),
+            std::path::Component::RootDir => {
+                parts.clear();
+                has_root = true;
+            }
+        }
+    }
+    let mut out = PathBuf::new();
+    if has_root {
+        out.push("/");
+    }
+    for p in parts {
+        out.push(p);
+    }
+    out
 }
 
 fn truncate_to_tokens(text: &str, max_tokens: usize, tokenizer: &dyn Tokenizer) -> String {
