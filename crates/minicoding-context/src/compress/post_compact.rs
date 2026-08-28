@@ -176,13 +176,19 @@ fn path_within_workdir(path: &Path, workdir: &Path) -> bool {
 }
 
 /// 词法规范化 workdir（消解 `.`/`..` 段，不触碰文件系统、不解 symlink）。
+///
+/// 跨平台：Windows `Prefix` 组件（如 `C:\`）保持原样，`RootDir` 清空后
+/// 重建前缀——与 `memory::loader::resolve_lexical` 对称。
 fn normalize_lexical_workdir(workdir: &Path) -> PathBuf {
+    let mut prefix: Option<std::ffi::OsString> = None;
     let mut parts: Vec<std::ffi::OsString> = Vec::new();
     let mut has_root = false;
     for comp in workdir.components() {
         match comp {
-            // CurDir/Prefix 忽略（不改变路径结构；Prefix 仅 Windows 前缀）
-            std::path::Component::CurDir | std::path::Component::Prefix(_) => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(p) => {
+                prefix = Some(p.as_os_str().to_os_string());
+            }
             std::path::Component::ParentDir => {
                 parts.pop();
             }
@@ -194,6 +200,9 @@ fn normalize_lexical_workdir(workdir: &Path) -> PathBuf {
         }
     }
     let mut out = PathBuf::new();
+    if let Some(p) = prefix {
+        out.push(p);
+    }
     if has_root {
         out.push("/");
     }
