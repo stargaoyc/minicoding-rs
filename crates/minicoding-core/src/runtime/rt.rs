@@ -426,6 +426,10 @@ impl Runtime {
     /// `SessionSummarizer` 生成摘要（降级链：主 provider → 备用 → 启发式兜底，
     /// C-29 永不失败）→ `Storage::update_summary` 落盘。
     ///
+    /// 返回 `Ok(Some(summary))` 表示成功生成并落盘；`Ok(None)` 表示 no-op
+    /// （未注入 summarizer 或会话无消息）—— `/summary` 命令与 TUI 展示需要
+    /// 拿回摘要文本，CLI 退出路径忽略返回值。
+    ///
     /// 摘要的**消费方**仅会话列表展示
     /// （`Storage::list_sessions` 的 `summary` 字段，server 侧 `session_mgr` 用）——
     /// "跨会话恢复"（新会话 system 段注入 `session_context` 块，见 rules.md §5
@@ -434,19 +438,19 @@ impl Runtime {
     /// 误注入会把无关项目上下文带入新会话——修复列为设计决策项，不在此
     /// 半实现（避免行为惊吓）。
     ///
-    /// `session_summarizer` 未注入或会话无消息时为 no-op。摘要失败仅记 `warn`
-    /// 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
+    /// `session_summarizer` 未注入或会话无消息时为 no-op（返回 `Ok(None)`）。
+    /// 摘要失败仅记 `warn` 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
     ///
     /// # Errors
     /// 仅当 `Storage::update_summary` 失败时返回 `RuntimeError::Storage`；
     /// 摘要生成本身永不失败（启发式兜底，C-29）。
-    pub async fn summarize_session(&self) -> Result<(), RuntimeError> {
+    pub async fn summarize_session(&self) -> Result<Option<String>, RuntimeError> {
         let Some(summarizer) = &self.session_summarizer else {
-            return Ok(());
+            return Ok(None);
         };
         let snap = self.ctx.snapshot().await;
         if snap.messages.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let summary = match summarizer.summarize(&snap.messages).await {
             Ok(s) => s,
@@ -457,7 +461,7 @@ impl Runtime {
                     session = %self.session.id,
                     "会话摘要生成失败（理论不可达，C-29 兜底应保证成功）"
                 );
-                return Ok(());
+                return Ok(None);
             }
         };
         if let Err(e) = self
@@ -477,7 +481,7 @@ impl Runtime {
             summary_chars = summary.chars().count(),
             "会话摘要已落盘"
         );
-        Ok(())
+        Ok(Some(summary))
     }
 
     /// 驱动单轮对话（用户输入 → 最终回复或失败）。
@@ -634,13 +638,58 @@ impl Runtime {
                     // tool_use/tool_result 配对 → 严格 provider 400 死局。幂等
                     // 纯函数，仅作用于本次请求副本，不回写 storage/ctx。
                     req.messages = super::repair::repair_request_messages(req.messages);
-                    let (assistant_msg, llm_stop_reason, llm_usage) =
-                        match self.stream_llm(req).await
-                        {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            metrics::record_error("llm");
-                            return Ok(TurnOutcome::Failed(e.into()));
+                    // `ContextLength` 紧急压缩联动——
+                    // LlmError::ContextLength（真实 400 超窗）此前只回灌 LLM 自修正
+                    // （compress 永不触发）。改为：首次命中触发一次 `ctx.compress()`
+                    // + 重建请求 + 重试一次；再失败才回灌（防循环）。
+                    let mut emergency_compressed = false;
+                    let (assistant_msg, llm_stop_reason, llm_usage) = loop {
+                        match self.stream_llm(req).await {
+                            Ok(msg) => break msg,
+                            Err(e)
+                                if !emergency_compressed
+                                    && matches!(&e, crate::model::LlmError::ContextLength(_)) =>
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    "LLM 400 上下文超长：紧急压缩后重试一次"
+                                );
+                                emergency_compressed = true;
+                                if self.ctx.force_compress().await.is_err() {
+                                    metrics::record_error("context");
+                                    return Ok(TurnOutcome::Failed(e.into()));
+                                }
+                                match self
+                                    .ctx
+                                    .build_chat_request(&self.tools, &config_snapshot)
+                                    .await
+                                {
+                                    Ok(new_req) => req = new_req,
+                                    Err(ce) => {
+                                        metrics::record_error("context");
+                                        return Ok(TurnOutcome::Failed(ce));
+                                    }
+                                }
+                                // 与正常路径一致：Hook 注入上下文并入 system 头部
+                                {
+                                    let drained: Vec<String> = self
+                                        .pending_hook_contexts
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .drain(..)
+                                        .collect();
+                                    for c in drained.iter().rev() {
+                                        req.system.insert_str(
+                                            0,
+                                            &format!("<hook_context>\n{c}\n</hook_context>\n"),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                metrics::record_error("llm");
+                                return Ok(TurnOutcome::Failed(e.into()));
+                            }
                         }
                     };
 
@@ -1193,81 +1242,55 @@ impl Runtime {
                 .get(&c.name)
                 .is_some_and(|t| t.side_effect() == SideEffect::None)
         };
-        let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
-            calls.iter().partition(|c| readonly_of(c));
 
-        // 顺序感知调度：仅当原始顺序中**所有只读调用
-        // 都位于副作用调用之前**时，"先并行读、再串行写"才与 LLM 意图一致。
-        // 一旦存在 写→读 相邻依赖（如 `shell.run` 生成文件后 `fs.read` 读取），
-        // 分桶会让 read 先于 write 执行读到旧数据——退化为全串行保序执行，
-        // 结果正确性优先于并行收益。结果仍按原始顺序回填，两种路径一致。
-        let reads_all_before_effects = {
-            let mut seen_effect = false;
-            let mut ok = true;
-            for c in calls {
-                if !readonly_of(c) {
-                    seen_effect = true;
-                } else if seen_effect {
-                    ok = false;
-                    break;
-                }
-            }
-            ok
-        };
-
+        //  波次调度：
+        // 按 LLM 原始调用序扫描，把**相邻的只读调用**聚为"读块"整体并行执行，
+        // 副作用调用保持严格串行。严格优于旧逻辑：
+        //   - 旧逻辑仅在"全部只读位于全部副作用之前"时并行读，混合顺序
+        //     （写→读→读→写→读）退化为全串行；
+        //   - 新逻辑把任意位置的相邻读并行化（读块与前后副作用按原始序隔离），
+        //     且**不引入启发式依赖判定**——顺序由原始调用序保证，无 DAG 误判
+        //     风险（启发式 DAG 对 shell.run 等 opaque 工具的路径依赖无法覆盖，
+        //     误判"独立"会在真实文件系统上造成数据竞争，C-11 序错误不可检测）。
+        //   只读块内部并行上限仍受 `tools.parallel_reads` 约束（0 = 串行）。
+        //   结果最终按原始顺序统一回填（sort），两条路径一致。
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
-        if reads_all_before_effects {
-            results.extend(self.run_readonly_bucket(&readonly, &ctx).await?);
-            // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
-            for call in &side_effect {
-                let call_side_effect = self.tool_side_effect(&call.name);
-                // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
-                // 用 `.instrument` 而非跨 await 持有
-                // `enter()` guard——多线程 runtime 下 future 会被 worker 迁移，
-                // 线程局部 span 上下文在迁移后失真（与并行路径同理）。
-                let span = tracing::debug_span!(
-                    "tool_call",
-                    session.id = %ctx.session_id,
-                    tool.name = %call.name,
-                    tool.side_effect = ?call_side_effect,
-                    tool.parallel = false,
-                    call_id = %call.id,
-                    otel.name = span_name::TOOL_CALL,
-                );
-                results.push(
-                    self.execute_side_effect_call(call, &ctx)
-                        .instrument(span)
-                        .await?,
-                );
+        let mut pending_reads: Vec<&ToolCall> = Vec::new();
+        for call in calls {
+            if readonly_of(call) {
+                pending_reads.push(call);
+                continue;
             }
-        } else {
-            tracing::debug!(
-                total = calls.len(),
-                "read-after-write ordering detected in batch; executing strictly sequentially"
+            // 遇到副作用调用：先并行执行已累积的读块（读块内只读、相互独立），
+            // 再串行执行副作用（含权限 + Hook）。读块在副作用**之后**于原始序
+            // 中出现时同样聚合并行——被写文件已由前序副作用完成，序正确。
+            if !pending_reads.is_empty() {
+                results.extend(self.run_readonly_bucket(&pending_reads, &ctx).await?);
+                pending_reads.clear();
+            }
+            let call_side_effect = self.tool_side_effect(&call.name);
+            // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
+            // 用 `.instrument` 而非跨 await 持有
+            // `enter()` guard——多线程 runtime 下 future 会被 worker 迁移，
+            // 线程局部 span 上下文在迁移后失真（与并行路径同理）。
+            let span = tracing::debug_span!(
+                "tool_call",
+                session.id = %ctx.session_id,
+                tool.name = %call.name,
+                tool.side_effect = ?call_side_effect,
+                tool.parallel = false,
+                call_id = %call.id,
+                otel.name = span_name::TOOL_CALL,
             );
-            for call in calls {
-                if readonly_of(call) {
-                    // 单元素只读桶：复用并行路径（保序回退下逐个执行）
-                    let one: [&ToolCall; 1] = [call];
-                    results.extend(self.run_readonly_bucket(&one, &ctx).await?);
-                } else {
-                    let call_side_effect = self.tool_side_effect(&call.name);
-                    let span = tracing::debug_span!(
-                        "tool_call",
-                        session.id = %ctx.session_id,
-                        tool.name = %call.name,
-                        tool.side_effect = ?call_side_effect,
-                        tool.parallel = false,
-                        call_id = %call.id,
-                        otel.name = span_name::TOOL_CALL,
-                    );
-                    results.push(
-                        self.execute_side_effect_call(call, &ctx)
-                            .instrument(span)
-                            .await?,
-                    );
-                }
-            }
+            results.push(
+                self.execute_side_effect_call(call, &ctx)
+                    .instrument(span)
+                    .await?,
+            );
+        }
+        // 尾部只读块
+        if !pending_reads.is_empty() {
+            results.extend(self.run_readonly_bucket(&pending_reads, &ctx).await?);
         }
 
         // 按 LLM 原始顺序回填，保证 tool_result 与 tool_calls 一一对应
