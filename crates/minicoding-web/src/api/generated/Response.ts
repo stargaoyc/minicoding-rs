@@ -6,5 +6,9 @@ import type { Version } from "./Version";
 
 /**
  * JSON-RPC 响应。
+ *
+ * JSON-RPC 2.0 规范：响应必须且只能含 `result` 或 `error` 二者之一。
+ * FE-R6-3（2026-08-28 R6 审查）：此前派生 Deserialize 接受 result/error
+ * 同缺或同在的非法形态——自定义反序列化校验，非法形态报错（fail-closed）。
  */
 export type Response = { jsonrpc: Version; id: Id; result: JsonValue | null; error: Error | null };
