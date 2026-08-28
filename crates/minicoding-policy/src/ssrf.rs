@@ -89,6 +89,13 @@ pub fn check_url(url: &str, opts: SsrfOptions) -> Result<(), SsrfError> {
 
 /// 校验主机名（域名或 IP 字面量）。
 ///
+/// # DNS 重绑定边界（SEC-12，2026-08-28 R5 收尾）
+///
+/// check 与 connect 各自解析域名——攻击者可让两次解析返回不同 IP（重绑定），
+/// 绕过本校验（首查公网 IP 通过、二次解析指向内网）。属文档化的已知边界
+/// （规划 M5+ 接入 IP pinning，见 `security.md` §5）；`minicoding-tools::web`
+/// 侧已有解析-连接 IP pinning 兜底（A2）。
+///
 /// # Errors
 /// - `SsrfError::Unresolvable`：域名 DNS 解析失败；
 /// - 其他 `SsrfError`：命中对应黑名单段。

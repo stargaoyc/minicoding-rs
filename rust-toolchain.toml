@@ -2,5 +2,11 @@
 # 上触发 rustc ICE——"unexpected rigid alias in layout_of after normalization"
 # （波及全 workspace 的 clippy/test；本地 f7d782a3b(08-19) 正常；2026-08-19 dated 清单在 TUNA 镜像缺失，故用 08-18）。
 # rustup 对本文件优先于默认工具链，CI 与本地统一。上游修复后更新此日期即可。
+#
+# ENG-2（2026-08-28 R5 收尾，如实披露）：`rust-version = "1.99"` 是 MSRV 声明
+# （Rust 2024 edition 最低要求），实际构建固定 nightly——两者不矛盾但需说明：
+# 项目使用 `let chains` 等 2024 edition 语法，1.99 在钉版时刻仍处 nightly/beta，
+# 故用 nightly 保证 CI/本地一致可复现。stable 1.99 发布后应切换
+# `channel = "stable"`（届时同步删除本注释）。
 [toolchain]
 channel = "nightly-2026-08-18"
