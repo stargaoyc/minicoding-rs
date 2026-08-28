@@ -396,14 +396,15 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
                 } else {
                     cur_dir.join(&target)
                 };
-                // CT4-3：包含约束（组件级，防 `..` 逃逸；与 journal S18 同款语义）
-                if !path_within(&target_path, base_dir) {
-                    out.push_str(IMPORT_SKIP_OUTSIDE);
-                    out.push('\n');
-                    continue;
-                }
-                // SEC-R6-1：canonicalize 消解 symlink 后二次包含判定。目标
-                // 存在但越界 → outside；不存在 → unreadable（既有行为）。
+                // CT4-3 + SEC-R6-1（R6 修正，2026-08-28）：包含约束统一经
+                // `canonicalize_within`——内部对 target 与 base **两侧**都
+                // canonicalize（消解 symlink 与 `..`）后做逐组件前缀比较。
+                // 此前"先词法 `path_within`（target vs base 原始串）再
+                // canonicalize"在 macOS/Windows 上失灵：递归 `inner_dir`
+                // 已是 canonical 路径（macOS `/tmp`→`/private/tmp`），与
+                // 原始（非 canonical）`base_dir` 词法前缀失配，**合法**的
+                // 递归 import 被误判 `OUTSIDE`。统一 canonical 比较后跨平台
+                // 一致；目标存在但越界 → outside；不存在 → unreadable。
                 let Some(resolved) = canonicalize_within(&target_path, base_dir) else {
                     if target_path.exists() {
                         out.push_str(IMPORT_SKIP_OUTSIDE);
@@ -477,11 +478,10 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                 } else {
                     cur_dir.join(&target)
                 };
-                if !path_within(&target_path, base_dir) {
-                    out.push_str(IMPORT_SKIP_OUTSIDE);
-                    out.push('\n');
-                    continue;
-                }
+                // CT4-3 + SEC-R6-1（R6 修正，2026-08-28）：同同步版——统一经
+                // `canonicalize_within`（两侧 canonicalize 后前缀比较），
+                // 消除 macOS/Windows 上 canonical 递归 inner_dir 与原始
+                // base_dir 词法失配导致的合法 import 误判 OUTSIDE。
                 let Some(resolved) = canonicalize_within(&target_path, base_dir) else {
                     if target_path.exists() {
                         out.push_str(IMPORT_SKIP_OUTSIDE);
@@ -1022,5 +1022,63 @@ mod tests {
         assert!(out.contains(format!("content{}", MAX_IMPORTS - 1).as_str()));
         assert!(!out.contains(format!("content{MAX_IMPORTS}").as_str()));
         assert!(out.contains(IMPORT_SKIP_LIMIT), "超限应插入 skip 标注");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_imports_work_when_base_dir_is_symlink() {
+        // SEC-R6-1 R6 修正（2026-08-28）：macOS/Windows CI 回归场景——base_dir
+        // 经 symlink 引用（如 macOS `/tmp`→`/private/tmp`、Windows 部分 Junction），
+        // 递归 inner_dir 是 canonical 路径而 base_dir 是原始（非 canonical）串。
+        // 此前"词法 path_within 预检"把两者前缀比较失配，合法递归 import
+        // 误判 `IMPORT_SKIP_OUTSIDE`（import_cycle/depth 测试在 mac/win 失败）。
+        // 统一 canonicalize_within 后基线一致。
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).expect("create real");
+        // 别名 symlink 指向 real 目录（模拟 macOS /tmp → /private/tmp）
+        let alias = tmp.path().join("alias");
+        symlink(&real, &alias).expect("create alias symlink");
+
+        // 仓库文件放在 real 下，但以 alias 作为 base_dir（与真实场景"raw base"一致）
+        std::fs::write(real.join("AGENTS.md"), "A\n@import b.md").expect("write agents");
+        std::fs::write(real.join("b.md"), "B\n@import c.md").expect("write b");
+        std::fs::write(real.join("c.md"), "C content").expect("write c");
+
+        let alias_path = Utf8PathBuf::from_path_buf(alias).unwrap();
+        let real_path = Utf8PathBuf::from_path_buf(real.clone()).unwrap();
+        let mut visited = HashSet::new();
+        visited.insert(canonical_key(&real_path.join("AGENTS.md")));
+        let mut remaining = MAX_IMPORTS;
+        let out = expand_imports_sync(
+            &std::fs::read_to_string(real.join("AGENTS.md")).expect("read agents"),
+            &real_path,
+            0,
+            &mut visited,
+            &alias_path,
+            &mut remaining,
+        );
+        assert!(
+            out.contains('A') && out.contains('B') && out.contains("C content"),
+            "symlink base 下递归 import 必须全部展开（不得误判越界）: {out}"
+        );
+        assert!(
+            !out.contains(IMPORT_SKIP_OUTSIDE),
+            "不得误标 OUTSIDE: {out}"
+        );
+        // 反向环检测仍生效：base_dir 为 alias 时引用回 AGENTS.md 应判环
+        let mut visited3 = HashSet::new();
+        visited3.insert(canonical_key(&real_path.join("AGENTS.md")));
+        let mut remaining3 = MAX_IMPORTS;
+        let cyc = expand_imports_sync(
+            "@import AGENTS.md\n",
+            &real_path,
+            0,
+            &mut visited3,
+            &alias_path,
+            &mut remaining3,
+        );
+        assert!(cyc.contains(IMPORT_SKIP_CYCLE), "环引用仍应检测: {cyc}");
     }
 }
