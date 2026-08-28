@@ -51,8 +51,6 @@ pub struct CompressResult {
     pub truncated_count: usize,
     /// L2 是否降级到启发式兜底（C-29 降级链，见 `fallback.rs`）。
     pub fallback_used: bool,
-    /// C-05：压缩前的消息备份（`backup_before_compress=true` 时填充）。
-    pub backup: Option<Vec<Message>>,
     /// M-07（R-02）：L3/L4 丢弃消息的序号区间 `(from_seq, to_seq)`（消息序号锚点）。
     pub dropped_range: Option<(u64, u64)>,
     /// M-07（R-02）：被替代/被丢弃消息的总 token 数（L2 的记入摘要消息 metadata，
@@ -80,9 +78,6 @@ fn seq_of(i: usize, total: usize, anchor_seq: u64) -> u64 {
 /// `budget.compact_threshold()` 以下，降了则提前返回。L2 需要 `provider`，
 /// 为 `None` 时跳过 L2（L1→L3→L4 仍按序执行）。
 ///
-/// `backup_before_compress = true` 时（C-05），压缩前 clone 原始消息到
-/// `CompressResult.backup`，供调试/回放分析。
-///
 /// # Errors
 /// L2 摘要走降级链（§3.8），启发式兜底恒成功，故 LLM 失败不传播。仅当降级链
 /// 终端也失败时返回 `RuntimeError`（理论不可达）。
@@ -91,17 +86,11 @@ pub async fn compress_pipeline(
     tokenizer: &dyn Tokenizer,
     budget: &TokenBudget,
     provider: Option<&dyn LlmProvider>,
-    backup_before_compress: bool,
     anchor_seq: Option<u64>,
     summarize_config: &SummarizeConfig,
 ) -> Result<CompressResult, RuntimeError> {
     let mut result = CompressResult::default();
     let threshold = budget.compact_threshold();
-
-    // C-05：压缩前备份原始消息（可选，调试用）
-    if backup_before_compress {
-        result.backup = Some(messages.clone());
-    }
 
     // L1: 工具结果裁剪（同步）
     {
@@ -280,7 +269,6 @@ mod tests {
             &tokenizer,
             &budget,
             None,
-            false,
             None,
             &SummarizeConfig::default(),
         )
@@ -304,6 +292,7 @@ mod tests {
             context_window: 10_000,
             reserved_output: 100,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // 9000 字符 > 8415 threshold，触发压缩
         let big = "x".repeat(9_000);
@@ -316,7 +305,6 @@ mod tests {
             &tokenizer,
             &budget,
             None,
-            false,
             None,
             &SummarizeConfig::default(),
         )
@@ -343,6 +331,7 @@ mod tests {
             context_window: 6_000,
             reserved_output: 100,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // 30 条 × 200 字符 = 6000 tokens > 5015
         let mut msgs: Vec<Message> = (0..30)
@@ -357,7 +346,6 @@ mod tests {
             &tokenizer,
             &budget,
             None,
-            false,
             Some(30),
             &SummarizeConfig::default(),
         )
@@ -395,6 +383,7 @@ mod tests {
             context_window: 200,
             reserved_output: 0,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // 30 条 × 10 字符 = 300 > 170
         // L3: keep 20 → 200 > 170，仍超阈值
@@ -411,7 +400,6 @@ mod tests {
             &tokenizer,
             &budget,
             None,
-            false,
             Some(30),
             &SummarizeConfig::default(),
         )
@@ -452,6 +440,7 @@ mod tests {
             context_window: 6_000,
             reserved_output: 100,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // 10 条 × 600 字符 = 6000 > 5015
         let mut msgs: Vec<Message> = (0..10)
@@ -466,7 +455,6 @@ mod tests {
             &tokenizer,
             &budget,
             Some(&provider),
-            false,
             Some(10),
             &SummarizeConfig::default(),
         )

@@ -73,6 +73,7 @@ fn bench_compress(c: &mut Criterion) {
         context_window: 6_000,
         reserved_output: 100,
         safety_margin: 0,
+        ratio: 0.85,
     };
     let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime for bench");
 
@@ -89,7 +90,6 @@ fn bench_compress(c: &mut Criterion) {
                             black_box(&tokenizer),
                             black_box(&budget),
                             None,
-                            false,
                             None,
                             &minicoding_context::SummarizeConfig::default(),
                         )

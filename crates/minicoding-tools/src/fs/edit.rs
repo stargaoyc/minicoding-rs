@@ -126,7 +126,8 @@ impl Tool for FsEdit {
                 content.replacen(&args.old_string, &args.new_string, 1)
             };
             let after_bytes = new_content.as_bytes().to_vec();
-            tokio::fs::write(&path, new_content.as_bytes())
+            // TL-R6-5（2026-08-28 R6 审查）：原子写（tmp + rename）
+            crate::util::atomic_write(&path, new_content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
 

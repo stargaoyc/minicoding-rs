@@ -180,6 +180,15 @@ impl ContextManagerImpl {
         self
     }
 
+    /// 链式设置压缩触发比例（CTX-R6-7，2026-08-28 R6 审查）：由
+    /// `config.context.budget_ratio` 驱动——此前 `TokenBudget` 硬编码 0.85，
+    /// 配置字段零消费（死配置）。`with_ratio` 内部 clamp 到 [0.1, 1.0]。
+    #[must_use]
+    pub fn with_budget_ratio(mut self, ratio: f64) -> Self {
+        self.budget = self.budget.with_ratio(ratio);
+        self
+    }
+
     /// 链式注入 Prompt 管道与 context 模板（启用动态 system prompt 构建）。
     ///
     /// 注入后 `build_chat_request` 优先调 `pipeline.build(&ctx)` 生成 system prompt，
@@ -291,7 +300,7 @@ impl ContextManagerImpl {
             compress.tokens_after = tracing::field::Empty,
         )
     )]
-    pub async fn compress(&self, backup_before_compress: bool) -> Result<(), RuntimeError> {
+    pub async fn compress(&self) -> Result<(), RuntimeError> {
         let state_keep = StateKeep::snapshot(&self.system_prompt);
         let provider_ref = self.provider.as_deref();
 
@@ -311,7 +320,6 @@ impl ContextManagerImpl {
                 self.tokenizer.as_ref(),
                 &self.budget,
                 provider_ref,
-                backup_before_compress,
                 anchor_seq,
                 &self.summarize_config,
             )
@@ -533,7 +541,6 @@ impl ContextManager for ContextManagerImpl {
         let tool_schemas = tools.schemas();
         let model = config.provider.model.clone();
         let compress_enabled = config.context.compress;
-        let backup_before_compress = config.context.backup_before_compress;
         let predictive_enabled = config.context.predictive_compact_enabled;
         let predictive_baseline = config.context.predictive_baseline_growth_tokens;
         let post_compact_cfg = PostCompactConfig {
@@ -610,7 +617,7 @@ impl ContextManager for ContextManagerImpl {
                         });
                     }
                 } // 熔断器锁释放
-                self.compress(backup_before_compress).await?;
+                self.compress().await?;
                 true
             } else {
                 false
@@ -974,7 +981,7 @@ mod tests {
         assert!(tokens_before > threshold);
 
         // compress 应成功（L2 跳过，L3 rolling 足以降至阈值下）
-        mgr.compress(false)
+        mgr.compress()
             .await
             .expect("无 provider 时 compress 应成功");
 
@@ -1005,7 +1012,7 @@ mod tests {
         let tokens_before = mgr.token_count();
         assert!(tokens_before > TokenBudget::new(6_000).compact_threshold());
 
-        mgr.compress(false).await.expect("compress 应成功");
+        mgr.compress().await.expect("compress 应成功");
 
         let tokens_after = mgr.token_count();
         assert!(
@@ -1102,7 +1109,7 @@ mod tests {
         }
         assert!(mgr.token_count() > TokenBudget::new(6_000).compact_threshold());
 
-        mgr.compress(false).await.expect("compress 应成功");
+        mgr.compress().await.expect("compress 应成功");
 
         let records = audit.0.lock().expect("poisoned").clone();
         assert_eq!(records.len(), 1, "应落一条 Compress 审计");
@@ -1147,10 +1154,10 @@ mod tests {
         );
 
         // 第一次 compress：consecutive_oversize=1，is_thrashing=false，不熔断
-        mgr.compress(false).await.expect("第一次 compress 不应熔断");
+        mgr.compress().await.expect("第一次 compress 不应熔断");
 
         // 第二次 compress：consecutive_oversize=2，is_thrashing=true，熔断
-        let res = mgr.compress(false).await;
+        let res = mgr.compress().await;
         assert!(
             matches!(res, Err(RuntimeError::BudgetExceeded { .. })),
             "第二次 compress 应触发 thrash 熔断: {res:?}"
@@ -1166,8 +1173,8 @@ mod tests {
         mgr.append(Message::system_text("x".repeat(1_000))).await;
 
         // 触发 thrash：连续两次 compress（第二次返回 Err）
-        let _ = mgr.compress(false).await;
-        let _ = mgr.compress(false).await;
+        let _ = mgr.compress().await;
+        let _ = mgr.compress().await;
 
         let tools = ToolRegistry::new();
         let config = RuntimeConfig::default();
@@ -1305,27 +1312,5 @@ mod tests {
         mgr.append(Message::user_text("fifth")).await;
         assert_eq!(mgr.message_count(), 3);
         assert_eq!(mgr.token_count(), 30);
-    }
-
-    // === 场景 19：compress with backup_before_compress=true 不影响 token_count ===
-
-    #[tokio::test]
-    async fn compress_with_backup_preserves_token_count() {
-        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
-        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
-        for _ in 0..50 {
-            mgr.append(Message::user_text("012345678901234567890123456789"))
-                .await;
-        }
-        let tokens_before = mgr.token_count();
-
-        // backup=true 不影响压缩行为，仅保留备份供调试
-        mgr.compress(true).await.expect("compress 应成功");
-
-        let tokens_after = mgr.token_count();
-        assert!(
-            tokens_after < tokens_before,
-            "backup 不应影响压缩: before={tokens_before}, after={tokens_after}"
-        );
     }
 }

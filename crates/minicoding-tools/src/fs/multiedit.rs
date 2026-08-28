@@ -137,8 +137,8 @@ impl Tool for FsMultiEdit {
                 content = content.replacen(&edit.old_string, &edit.new_string, 1);
             }
 
-            // 全部替换成功，原子写回
-            tokio::fs::write(&path, content.as_bytes())
+            // 全部替换成功，原子写回（TL-R6-5：tmp + rename，崩溃不截断）
+            crate::util::atomic_write(&path, content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
 

@@ -61,6 +61,12 @@ pub fn save_provider_config(
         ));
     }
     config.revision = config.revision.saturating_add(1);
+    // ARCH-R6-2（2026-08-28 R6 审查）：前端传入即剥离 api_key——doc comment 声称
+    // "不写入 api_key 明文"但此前直接 `config.provider = provider`，前端若传
+    // key 则明文落 config.toml（C-04 相悖；http.rs 侧已有剥离，desktop 无）。
+    // 真实凭证经 `store_api_key` 写 OS keyring。
+    let mut provider = provider;
+    provider.api_key.clear();
     config.provider = provider;
 
     let config_path = paths::config_path().context("无法确定配置文件路径")?;

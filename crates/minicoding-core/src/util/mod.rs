@@ -98,14 +98,11 @@ fn normalize_directive_line(line: &str) -> String {
     let mut out = String::with_capacity(trimmed.len());
     let mut prev_space = false;
     for c in trimmed.chars() {
-        // 零宽/格式控制字符（Unicode `Cf` 类：ZWNJ/ZWJ/BOM/软连字符等）
-        if c.is_control() && !c.is_whitespace() {
-            continue;
-        }
-        if matches!(
-            c,
-            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
-        ) {
+        // SEC-R6-7（2026-08-28 R6 审查）：剥离所有 Unicode `Cf`（Format）类
+        // 字符——此前仅硬编码 5 个零宽字符（ZWNJ/ZWJ/BOM/软连字符），`\u{2060}`
+        // WORD JOINER 等约 160 个 `Cf` 类成员可插入指令词中绕过祈使检测
+        // （`A\u{2060}lways use sudo` 写进 auto.md，C-27 降级通道被架空）。
+        if is_format_control(c) {
             continue;
         }
         if c.is_whitespace() {
@@ -119,6 +116,43 @@ fn normalize_directive_line(line: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// 是否为 Unicode `General_Category = Format (Cf)` 字符。
+///
+/// 范围按 Unicode 15.0 的 `General_Category=Format` 属性整理（无需依赖
+/// unicode-general-category crate，保持 core 轻量；范围集稳定，Unicode 新版本
+/// 追加仅影响极端新字符）。`Cf` 类字符不打印、非空白，用于文本格式标记
+/// （零宽连接/隔离、BOM、软连字符、不可见运算符等）——攻击者插入指令词中
+/// 可绕过词法检测。
+#[must_use]
+fn is_format_control(c: char) -> bool {
+    // 区间表（起点闭、终点闭；单点用 [x,x]）——Unicode 15.0 General_Category=Format
+    const RANGES: &[(u32, u32)] = &[
+        (0x00AD, 0x00AD), // SOFT HYPHEN
+        (0x0600, 0x0605), // ARABIC NUMBER SIGN..MARK
+        (0x061C, 0x061C), // ARABIC LETTER MARK
+        (0x06DD, 0x06DD), // ARABIC END OF AYAH
+        (0x070F, 0x070F), // SYRIAC ABBREVIATION MARK
+        (0x0890, 0x0891), // ARABIC POUND/PLUS MARK
+        (0x08E2, 0x08E2), // ARABIC DISPUTED END OF AYAH
+        (0x180E, 0x180E), // MONGOLIAN VOWEL SEPARATOR
+        (0x200B, 0x200F), // ZWSP..RLM
+        (0x202A, 0x202E), // LRE..RLRO
+        (0x2060, 0x2064), // WORD JOINER..INVISIBLE PLUS
+        (0x2066, 0x206F), // LRI..NNBSP(部分 Cf)
+        (0xFEFF, 0xFEFF), // BOM / ZWNBSP
+        (0xFFF9, 0xFFFB), // INTERLINEAR ANNOTATION..
+        (0x110BD, 0x110BD),
+        (0x110CD, 0x110CD),
+        (0x13430, 0x13438),
+        (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A),
+        (0xE0001, 0xE0001),
+        (0xE0020, 0xE007F),
+    ];
+    let cp = u32::from(c);
+    RANGES.iter().any(|&(lo, hi)| cp >= lo && cp <= hi)
 }
 
 /// 迭代剥离行首 Markdown 修饰：无序列表符（`-`/`*`/`+`）、引用（`>`）、

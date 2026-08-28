@@ -128,17 +128,38 @@ impl ChoicesStore for FileChoicesStore {
             .ok_or_else(|| McpError::Config("mcp_choices.toml has no parent dir".into()))?;
         std::fs::create_dir_all(parent)
             .map_err(|e| McpError::Config(format!("create mcp_choices dir failed: {e}")))?;
-        // 原子写：临时文件 + rename
-        let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text.as_bytes())
-            .map_err(|e| McpError::Config(format!("write mcp_choices.toml.tmp failed: {e}")))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| McpError::Config(format!("rename mcp_choices.toml failed: {e}")))?;
-        // 设置 0600 权限（best effort，失败不阻塞）
-        #[cfg(unix)]
+        // SEC-R6-8（2026-08-28 R6 审查）：原子写 + 0600 从创建起生效——
+        // 此前 `std::fs::write`（默认 0644）→ rename → 事后 chmod 0600，
+        // rename 与 chmod 间存在 0644 窗口，崩溃即永久残留宽权限（R5 SEC-16
+        // 只修了审计侧，本子项遗漏）；且无 fsync。用 `mode(0o600)` 创建 tmp
+        //（rename 保留 tmp 权限，无窗口），写后 fsync + 父目录 fsync。
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            use std::io::Write;
+            let tmp = self.path.with_extension("toml.tmp");
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut file = opts
+                .open(&tmp)
+                .map_err(|e| McpError::Config(format!("write mcp_choices.toml.tmp failed: {e}")))?;
+            file.write_all(text.as_bytes())
+                .map_err(|e| McpError::Config(format!("write mcp_choices.toml.tmp failed: {e}")))?;
+            file.sync_all()
+                .map_err(|e| McpError::Config(format!("fsync mcp_choices.toml.tmp failed: {e}")))?;
+            drop(file);
+            std::fs::rename(&tmp, &self.path)
+                .map_err(|e| McpError::Config(format!("rename mcp_choices.toml failed: {e}")))?;
+            // 父目录 fsync（rename 持久化）
+            #[cfg(unix)]
+            {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
         }
         Ok(())
     }

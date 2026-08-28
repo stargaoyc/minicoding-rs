@@ -93,11 +93,6 @@ pub struct ContextConfig {
     /// `false` 时 `build_chat_request` 跳过压缩直通（见 `docs/design.md` §3.3、
     /// AGENTS.md C-18 上下文经济软约束）。配置项 `[context] compress = false`。
     pub compress: bool,
-    /// C-05：压缩前是否保留消息备份（默认 `false`，可选调试功能）。
-    ///
-    /// `true` 时 `compress_pipeline` 在压缩前 clone 原始消息到 `CompressResult.backup`，
-    /// 供调试/回放分析。生产环境默认关闭以减少内存开销。
-    pub backup_before_compress: bool,
     /// C-08：预测性压缩（默认 `false`）。
     ///
     /// `true` 时根据历史 turn token 增长估算，在超出窗口前提前 compact，
@@ -141,7 +136,6 @@ impl Default for ContextConfig {
             max_tool_iters: 50,
             turn_timeout_sec: 600,
             compress: true,
-            backup_before_compress: false,
             predictive_compact_enabled: false,
             predictive_baseline_growth_tokens: 15_000,
             post_compact_max_files: 5,

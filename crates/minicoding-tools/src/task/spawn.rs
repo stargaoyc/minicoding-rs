@@ -212,10 +212,12 @@ impl Tool for TaskSpawn {
     fn execute(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let runner = self.runner.clone();
         let plan_controller = self.plan_controller.clone();
+        // TL-R6-3：子代理摘要截断上限（async 块外捕获，闭包 move）
+        let max_out = ctx.max_output_bytes;
         Box::pin(async move {
             // T-4 深度防御（2026-08-25 审查）：所属 spec 禁止再生子 Agent 时，
             // 工具层直接拒绝（is_error=true 的错误结果），不依赖 runner 移除工具。
@@ -276,12 +278,20 @@ impl Tool for TaskSpawn {
                 .await
                 .map_err(|e| ToolError::Exec(format!("subagent spawn failed: {e}")))?;
 
-            Ok(ToolResult::ok_json(json!({
-                "summary": result.summary,
+            // TL-R6-3（2026-08-28 R6 审查）：子代理摘要直入父 Agent 上下文——
+            // 此前无截断，子代理可产出任意长度摘要挤占父代理全部上下文预算
+            //（C-07 资源上限）。与 `fs.read`/`shell.run` 等读工具同口径截断。
+            let (summary, truncated) = crate::util::truncate_output(result.summary, max_out);
+            let mut json = json!({
+                "summary": summary,
                 "artifacts": result.artifacts,
                 "token_used": result.token_used,
                 "completed": result.completed,
-            })))
+            });
+            if truncated {
+                json["summary_truncated"] = json!(true);
+            }
+            Ok(ToolResult::ok_json(json))
         })
     }
 

@@ -318,14 +318,19 @@ async fn dispatch_command(
             }
             let session = mgr.create_session(Some(params))?;
             let session_id = session.session_id().clone();
-            write_event(
-                stdout,
-                0,
-                &EventKind::SessionCreated {
-                    id: session_id.clone(),
-                },
-            )
-            .await?;
+            // FE-R6-2（2026-08-28 R6 审查）：此前此处手动发 `seq=0` 的
+            // SessionCreated，首次 turn 初始化事件流时 Runtime 又经 sequencer
+            // 发 `seq=1` 的 SessionCreated——客户端收到双份（序列号空间也不一致）。
+            // 改为创建即初始化事件流（触发 Runtime 的 SessionCreated 事件），
+            // 订阅并转发真实 seq 事件，消除合成 seq=0 与运行期 seq=1 的重复。
+            session.runtime.init_event_stream().await.map_err(|e| {
+                NdjsonError::Session(SessionManagerError::BuildFailed(e.to_string()))
+            })?;
+            let mut rx = session.subscribe_sequenced();
+            // 转发初始化期间发出的 SessionCreated（含任何前置事件）
+            while let Ok((seq, kind)) = rx.try_recv() {
+                write_event(stdout, seq, &kind).await?;
+            }
             tracing::info!(session_id = %session_id, "NDJSON: session created");
             Ok(())
         }

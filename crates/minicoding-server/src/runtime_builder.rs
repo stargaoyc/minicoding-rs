@@ -21,7 +21,7 @@
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::ContextManagerImpl;
-use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
+use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig};
 use minicoding_core::memory::SessionSummarizer;
 use minicoding_core::model::Session;
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
@@ -221,13 +221,13 @@ pub fn build_runtime(
                             config.context.compress_breaker_cooldown_sec,
                         ),
                     })
-                    .with_summarize_config(
-                        minicoding_context::SummarizeConfig {
-                            ratio: config.context.summarize_ratio,
-                            max_summary_tokens: config.context.summarize_max_tokens,
-                            llm_timeout_secs: config.context.summarize_timeout_secs,
-                        },
-                    ),
+                    .with_summarize_config(minicoding_context::SummarizeConfig {
+                        ratio: config.context.summarize_ratio,
+                        max_summary_tokens: config.context.summarize_max_tokens,
+                        llm_timeout_secs: config.context.summarize_timeout_secs,
+                    })
+                    // CTX-R6-7：压缩触发比例接线（此前 config.budget_ratio 零消费）
+                    .with_budget_ratio(f64::from(config.context.budget_ratio)),
                 )
             }
             Err(e) => {
@@ -272,10 +272,9 @@ pub fn build_runtime(
         Some(main_provider.clone()),
     ));
 
-    // 11. 组装 RuntimeBuilder
-    let config_hash_val = config_hash(&config);
-    let _ = config_hash_val; // Session::new 内部生成 ULID，config_hash 用于 resume 校验
-
+    // 11. 组装 RuntimeBuilder（ARCH-R6-1：移除死代码——本地 `config_hash` 计算
+    //     曾以 `let _` 丢弃，config_hash 已由 core `RuntimeBuilder::config` 内部
+    //     计算并用于 `Session::new`，此处是冗余计算）
     let mut builder = RuntimeBuilder::new()
         .provider(main_provider)
         .context(ctx)

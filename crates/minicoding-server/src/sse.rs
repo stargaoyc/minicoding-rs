@@ -159,7 +159,15 @@ pub fn sse_stream(
 pub fn sse_live(session: Arc<ServerSession>) -> ReceiverStream<Result<String, Infallible>> {
     let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
 
+    // FE-R6-1（2026-08-28 R6 审查）：首次连接路径此前未计入订阅者计数——
+    // 开着 Web 标签页"从未断线"的会话仍可被空闲驱逐（FE-17 修复只覆盖了
+    // sse_stream 重连路径）。与 sse_stream 同款 guard。
+    session
+        .sse_subscribers
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     tokio::spawn(async move {
+        let _decrement = SubscriberGuard(session.clone());
         let live_rx = session.subscribe_sequenced();
         forward_live_events(session, tx, live_rx, 0).await;
     });

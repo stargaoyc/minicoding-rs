@@ -59,6 +59,15 @@ impl ToolRegistry {
                  schemas() 已统一改写为 Tool::name() 兜底"
             );
         }
+        // ARCH-R6-5（2026-08-28 R6 审查）：同名覆盖必须告警——MCP warm_up 刷新
+        // 时工具名不变但 schema 变化、或注册顺序依赖冲突，此前 `HashMap::insert`
+        // 静默覆盖，排障困难。
+        if self.tools.contains_key(&name) {
+            tracing::warn!(
+                tool.name = %name,
+                "重复注册同名工具（覆盖旧实现）——MCP 刷新/扩展冲突排查入口"
+            );
+        }
         self.tools.insert(name, tool);
     }
 

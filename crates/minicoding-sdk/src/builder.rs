@@ -390,7 +390,9 @@ fn inner_build_runtime(
                 ratio: config.context.summarize_ratio,
                 max_summary_tokens: config.context.summarize_max_tokens,
                 llm_timeout_secs: config.context.summarize_timeout_secs,
-            });
+            })
+            // CTX-R6-7：压缩触发比例接线（此前 config.budget_ratio 零消费）
+            .with_budget_ratio(f64::from(config.context.budget_ratio));
             // M-07（R-02）：注入压缩审计 sink
             mgr.set_audit(audit.clone());
             #[cfg(feature = "extensions")]

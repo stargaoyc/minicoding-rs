@@ -104,6 +104,12 @@ impl Tool for FsGlob {
                         Ok(p) => p.to_string_lossy().to_string(),
                         Err(_) => entry.path().to_string_lossy().to_string(),
                     };
+                    // TL-R6-4（2026-08-28 R6 审查）：globset 匹配用 `/` 分隔符，
+                    // 而 `strip_prefix` 在 Windows 产出 `\`——此前匹配恒失败
+                    //（测试用 `replace('\\', "/")` 绕过了问题，源头未修）。
+                    // 统一归一化为 `/`（Unix 文件名含 `\` 的极端场景下 glob 语义
+                    // 也以 `/` 为准，此归一化无害）。
+                    let rel = rel.replace('\\', "/");
                     if matcher.is_match(&rel) {
                         matched_paths.push(rel);
                     }

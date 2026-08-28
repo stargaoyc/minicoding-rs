@@ -93,7 +93,11 @@ pub struct Notification {
 }
 
 /// JSON-RPC 响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// JSON-RPC 2.0 规范：响应必须且只能含 `result` 或 `error` 二者之一。
+/// FE-R6-3（2026-08-28 R6 审查）：此前派生 Deserialize 接受 result/error
+/// 同缺或同在的非法形态——自定义反序列化校验，非法形态报错（fail-closed）。
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(
     feature = "ts",
@@ -106,6 +110,39 @@ pub struct Response {
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
+}
+
+impl<'de> Deserialize<'de> for Response {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        #[derive(Deserialize)]
+        struct Raw {
+            jsonrpc: Version,
+            id: Id,
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<Error>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        match (raw.result, raw.error) {
+            (Some(_), Some(_)) => Err(D::Error::custom(
+                "JSON-RPC Response 不得同时含 result 与 error",
+            )),
+            (None, None) => Err(D::Error::custom(
+                "JSON-RPC Response 必须含 result 或 error 之一",
+            )),
+            (result, error) => Ok(Response {
+                jsonrpc: raw.jsonrpc,
+                id: raw.id,
+                result,
+                error,
+            }),
+        }
+    }
 }
 
 impl Response {
@@ -251,5 +288,31 @@ mod tests {
     fn version_rejects_non_2_0() {
         let result: Result<Version, _> = serde_json::from_str("\"1.0\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn response_rejects_both_result_and_error() {
+        // FE-R6-3（2026-08-28 R6 审查）：JSON-RPC 2.0 要求 result/error 二选一，
+        // 二者同在是非法形态——此前派生反序列化接受，解析错误路径的响应
+        // 会静默取其一，掩盖协议错误。
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true},"error":{"code":-1,"message":"x"}}"#;
+        let result: Result<Response, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "result+error 同在必须拒绝");
+    }
+
+    #[test]
+    fn response_rejects_neither_result_nor_error() {
+        let json = r#"{"jsonrpc":"2.0","id":1}"#;
+        let result: Result<Response, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "result+error 同缺必须拒绝");
+    }
+
+    #[test]
+    fn response_accepts_valid_shapes() {
+        let ok_json = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+        assert!(serde_json::from_str::<Response>(ok_json).is_ok());
+        let err_json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"nope"}}"#;
+        assert!(serde_json::from_str::<Response>(err_json).is_ok());
     }
 }

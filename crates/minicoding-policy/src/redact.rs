@@ -31,6 +31,14 @@ const SECRET_KEYWORDS: &[&str] = &[
 /// AWS access key id 前缀（用于兜底匹配无明显字段名的密钥）。
 const AWS_AKIA_PATTERN: &str = r"AKIA[0-9A-Z]{16}";
 
+/// 已知凭证前缀（TL-R6-8，2026-08-28 R6 审查）：OpenAI 密钥（`sk-` 开头）、
+/// GitHub 令牌（`ghp_` / `github_pat_` 开头）、Slack 令牌（`xoxb-` 开头）。
+/// `shell.background` 与 `shell.output` 走 `minicoding_policy::redact`，此前
+/// 不含这些前缀——后台命令输出 GitHub 令牌等原样回灌 LLM/前端（前台
+/// `shell.run` 的本地 `redact_secrets` 已覆盖，两套规则不同步）。补前缀脱敏：
+/// 命中即整体替换为 `***`。
+const CREDENTIAL_PREFIX_PATTERN: &str = r"(?i)(sk-[A-Za-z0-9]{8,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xoxb-[A-Za-z0-9-]{8,})";
+
 /// `Authorization: Bearer xxx` / `Bearer xxx` 头部脱敏。
 const BEARER_PATTERN: &str = r"(?i)(Bearer\s+)([A-Za-z0-9_\-.=:/+]+)";
 
@@ -40,7 +48,13 @@ const BEARER_PATTERN: &str = r"(?i)(Bearer\s+)([A-Za-z0-9_\-.=:/+]+)";
 /// 脱敏 userinfo（`user:pass@` → `user:***@`，保留 user 便于识别归属）；
 /// 仅 user:pass 双段形态（单段 user@ 无密码不脱敏——`git@github.com` 等
 /// 常见无凭证形态不误伤）。
-const URL_USERINFO_PATTERN: &str = r"(?i)([a-z][a-z0-9+.-]*://)([^/@:\s]+):([^/@\s]+)(@)";
+///
+/// SEC-R6-6（2026-08-28 R6 审查）：密码字符集原为 `[^/@\s]+`——密码含 `@`
+/// 或 `/` 时（`postgres://user:pass@word@host/db`）只脱敏到第一个 `@`，剩余
+/// 段裸露。放宽为 `[^:\s]+`（贪心匹配 + 回溯到 authority 内**最后一个** `@`）：
+/// 密码可含 `@`/`/`，整段 userinfo 一并脱敏。仍排除 `:`（端口分隔，避免
+/// 吞入 host:port）与空白（避免跨 token）。
+const URL_USERINFO_PATTERN: &str = r"(?i)([a-z][a-z0-9+.-]*://)([^/@:\s]+):([^:\s]+)(@)";
 
 /// 把敏感字段值替换为 `***`。
 ///
@@ -87,6 +101,13 @@ fn redact_line(line: &str) -> String {
 
     // 4. AWS AKIA 模式
     if let Ok(re) = Regex::new(AWS_AKIA_PATTERN)
+        && re.is_match(line)
+    {
+        return re.replace_all(line, "***").into_owned();
+    }
+
+    // 5. 已知凭证前缀（TL-R6-8）：sk-/ghp_/github_pat_/xoxb-
+    if let Ok(re) = Regex::new(CREDENTIAL_PREFIX_PATTERN)
         && re.is_match(line)
     {
         return re.replace_all(line, "***").into_owned();
@@ -298,5 +319,53 @@ mod tests {
         let input = "GIT_URL=git@github.com:user/repo.git\n";
         let out = redact(input);
         assert_eq!(out, input, "无密码的 user@ 形态不应脱敏");
+    }
+
+    #[test]
+    fn redact_url_userinfo_password_with_at() {
+        // SEC-R6-6（2026-08-28 R6 审查）：密码含 `@` 时此前只脱敏到第一个 `@`，
+        // `word@host` 段裸露。放宽密码字符集后整段 userinfo 脱敏。
+        let input = "DATABASE_URL=postgres://user:pass@word@db.example.com/app\n";
+        let out = redact(input);
+        assert!(!out.contains("pass@word"), "含 @ 的密码不得保留: {out}");
+        assert!(out.contains("user:***@"), "应保留 user 并脱敏: {out}");
+        assert!(out.contains("db.example.com"), "host 应保留: {out}");
+    }
+
+    #[test]
+    fn redact_url_userinfo_password_with_slash() {
+        // 密码含 `/`（URL 内嵌凭证常见编码形态）同样整体脱敏
+        let input = "DB_URL=postgres://admin:p/ss@host:5432/x\n";
+        let out = redact(input);
+        assert!(!out.contains("p/ss"), "含 / 的密码不得保留: {out}");
+        assert!(out.contains("admin:***@"), "应保留 user 并脱敏: {out}");
+    }
+
+    #[test]
+    fn redact_known_credential_prefixes() {
+        // TL-R6-8（2026-08-28 R6 审查）：sk-/ghp_/github_pat_/xoxb- 前缀凭证
+        // 在 policy::redact 路径（shell.background/output、fs.read）必须脱敏——
+        // 此前仅 shell.run 的本地 redact_secrets 覆盖，两套规则不同步。
+        for (input, secret) in [
+            (
+                "ghp_abcdef1234567890abcdef1234\n",
+                "ghp_abcdef1234567890abcdef1234",
+            ),
+            (
+                "token: sk-abcdefghijklmnopqrstuvwx\n",
+                "sk-abcdefghijklmnopqrstuvwx",
+            ),
+            ("auth=xoxb-1234-5678-9012\n", "xoxb-1234-5678-9012"),
+            (
+                "github_pat_11ABC_DEFghijklmnopqrstuvwxyz\n",
+                "github_pat_11ABC_DEFghijklmnopqrstuvwxyz",
+            ),
+        ] {
+            let out = redact(input);
+            assert!(!out.contains(secret), "前缀凭证不得保留: {out}");
+        }
+        // 前后文保留：普通日志行不被误伤
+        let ctx = redact("build ok at /tmp/x\n");
+        assert_eq!(ctx, "build ok at /tmp/x\n");
     }
 }

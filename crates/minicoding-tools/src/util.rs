@@ -70,6 +70,41 @@ pub fn truncate_output(text: String, max_bytes: usize) -> (String, bool) {
     (result, true)
 }
 
+/// 原子写文件（TL-R6-5，2026-08-28 R6 审查）。
+///
+/// 先写同目录临时文件 + `fsync`，再 `rename` 覆盖目标（同文件系统原子）——
+/// `tokio::fs::write` 直接覆盖在崩溃/断电时使文件处于截断状态，破坏数据
+/// 完整性且与 journal undo 语义冲突（undo 需 after 内容完整可见）。
+///
+/// 已存在目标文件时保留其权限（如可执行位）；临时文件残留由上层清理。
+///
+/// # Errors
+/// 临时文件写入、fsync、rename 或权限拷贝失败时返回 IO 错误。
+pub async fn atomic_write(path: &camino::Utf8PathBuf, content: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    // 同目录临时文件（rename 需同文件系统才原子）
+    let tmp = path.with_extension("minicoding.tmp");
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o644); // tokio 原生支持 unix mode
+    let mut file = opts.open(&tmp).await?;
+    file.write_all(content).await?;
+    file.sync_all().await?;
+    drop(file);
+    // 保留已存在目标的权限（覆盖脚本/可执行文件时）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = tokio::fs::metadata(path.as_std_path()).await {
+            let mode = meta.permissions().mode() & 0o777;
+            let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
+        }
+    }
+    tokio::fs::rename(&tmp, path.as_std_path()).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]

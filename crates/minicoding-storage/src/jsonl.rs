@@ -128,6 +128,12 @@ impl JsonlStorage {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            // ST-8/ST-R6-4（2026-08-28 R5/R6）：跳过 `{session}.events.jsonl` 事件
+            // 流文件——同步扫描路径此前未跳过（async 路径已修），误解析产生
+            // warn 噪音 + IO 浪费。
+            if stem.ends_with(".events") {
+                continue;
+            }
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -171,13 +177,21 @@ impl JsonlStorage {
             });
         }
         let metas = index.to_metas();
-        // 缓存 + 落盘（best effort）
+        // ST-R6-2（2026-08-28 R6 审查）：扫描回退路径经 `mutate_index` 落盘——
+        // 此前直接 `index.save`（tmp+rename 无跨进程锁），并发 append 的
+        // `mutate_index` 更新可被覆盖（last-rename-wins 丢条目）。锁内合并：
+        // 磁盘索引 + 扫描结果并集（`add` 按 session_id upsert，扫描数据优先）。
+        if let Err(e) = self.mutate_index(|idx| {
+            for entry in index.list().iter().cloned() {
+                idx.add(entry);
+            }
+        }) {
+            tracing::warn!("failed to persist session index: {e}");
+        }
+        // 内存缓存（扫描结果为准，进程内读路径一致）
         {
             let mut guard = self.lock_index();
             *guard = Some(index.clone());
-        }
-        if let Err(e) = index.save(&self.index_path()) {
-            tracing::warn!("failed to persist session index: {e}");
         }
         Ok(metas)
     }
@@ -190,13 +204,18 @@ impl JsonlStorage {
     /// 文件删除失败（除 `NotFound`）时返回错误。
     pub fn delete_session_sync(&self, session: &SessionId) -> Result<(), StorageError> {
         let path = self.session_path(session);
+        let lock_path = self.base_dir.join(format!("{session}.lock"));
+        // ST-R6-3（2026-08-28 R6 审查）：同步删除与 async `delete` 对齐取会话
+        // 排他锁——此前无锁删除：并发 append 进程仍持旧锁文件 fd 写已 unlink
+        // 的 inode，随后 `update_index_on_append` 把会话写回索引，产生幽灵索引
+        // 项（索引/文件不一致）。持锁删文件 + 移除索引 + 清理锁文件。
+        let _guard = crate::lock::SessionLock::acquire_blocking(&lock_path)?;
         match std::fs::remove_file(path.as_std_path()) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
         self.remove_from_index(session);
-        let lock_path = self.base_dir.join(format!("{session}.lock"));
         let _ = std::fs::remove_file(lock_path.as_std_path());
         Ok(())
     }

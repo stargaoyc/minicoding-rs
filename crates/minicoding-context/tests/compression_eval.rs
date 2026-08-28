@@ -226,6 +226,7 @@ fn main_budget() -> TokenBudget {
         context_window: 20_000,
         reserved_output: 100,
         safety_margin: 0,
+        ratio: 0.85,
     }
 }
 
@@ -244,7 +245,6 @@ async fn run_main_pipeline(
         &tokenizer,
         &budget,
         Some(&provider),
-        false,
         Some(anchor),
         &SummarizeConfig::default(),
     )
@@ -433,7 +433,6 @@ async fn run_deterministic_once() -> (minicoding_context::CompressResult, Vec<St
         &tokenizer,
         &budget,
         Some(&provider),
-        false,
         Some(60),
         &summarize_cfg,
     )
@@ -468,6 +467,7 @@ async fn smoke_l1_clip_reachable_alone() {
         context_window: 10_000,
         reserved_output: 100,
         safety_margin: 0,
+        ratio: 0.85,
     };
     let mut msgs = vec![Message {
         id: ulid::Ulid::new().to_string(),
@@ -489,7 +489,6 @@ async fn smoke_l1_clip_reachable_alone() {
         &tokenizer,
         &budget,
         Some(&provider),
-        false,
         None,
         &SummarizeConfig::default(),
     )
@@ -510,6 +509,7 @@ async fn smoke_l2_summarize_reachable() {
         context_window: 6_000,
         reserved_output: 100,
         safety_margin: 0,
+        ratio: 0.85,
     };
     let mut msgs: Vec<Message> = (0..10)
         .map(|i| Message::user_text(format!("user message {i} {}", "x".repeat(570))))
@@ -520,7 +520,6 @@ async fn smoke_l2_summarize_reachable() {
         &tokenizer,
         &budget,
         Some(&provider),
-        false,
         Some(10),
         &SummarizeConfig::default(),
     )
@@ -545,6 +544,7 @@ async fn smoke_l3_rolling_reachable() {
         context_window: 6_000,
         reserved_output: 100,
         safety_margin: 0,
+        ratio: 0.85,
     };
     let mut msgs: Vec<Message> = (0..30)
         .map(|_| Message::user_text("x".repeat(200)))
@@ -554,7 +554,6 @@ async fn smoke_l3_rolling_reachable() {
         &tokenizer,
         &budget,
         None,
-        false,
         Some(30),
         &SummarizeConfig::default(),
     )
@@ -576,6 +575,7 @@ async fn smoke_l4_hard_truncate_reachable() {
         context_window: 200,
         reserved_output: 0,
         safety_margin: 0,
+        ratio: 0.85,
     };
     let mut msgs: Vec<Message> = (0..30).map(|_| Message::user_text("0123456789")).collect();
     let result = compress_pipeline(
@@ -583,7 +583,6 @@ async fn smoke_l4_hard_truncate_reachable() {
         &tokenizer,
         &budget,
         None,
-        false,
         Some(30),
         &SummarizeConfig::default(),
     )

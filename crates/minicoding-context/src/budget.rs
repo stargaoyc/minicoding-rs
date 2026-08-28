@@ -17,17 +17,28 @@ pub struct TokenBudget {
     pub reserved_output: usize,
     /// 安全余量（默认 1024），防止计数误差越界。
     pub safety_margin: usize,
+    /// 压缩触发比例（CTX-R6-7，2026-08-28 R6 审查：此前硬编码 0.85，
+    /// `config.budget_ratio` 字段零消费——改为可配置，默认 0.85 保持原行为）。
+    pub ratio: f64,
 }
 
 impl TokenBudget {
-    /// 创建指定上下文窗口的预算，预留输出 4096、安全余量 1024。
+    /// 创建指定上下文窗口的预算，预留输出 4096、安全余量 1024、触发比例 0.85。
     #[must_use]
     pub fn new(context_window: usize) -> Self {
         Self {
             context_window,
             reserved_output: 4096,
             safety_margin: 1024,
+            ratio: 0.85,
         }
+    }
+
+    /// 设置压缩触发比例（builder，CTX-R6-7：由 `config.budget_ratio` 驱动）。
+    #[must_use]
+    pub fn with_ratio(mut self, ratio: f64) -> Self {
+        self.ratio = ratio.clamp(0.1, 1.0);
+        self
     }
 
     /// 可用预算 = 窗口 − 预留输出 − 安全余量。
@@ -40,18 +51,18 @@ impl TokenBudget {
             .saturating_sub(self.safety_margin)
     }
 
-    /// 压缩触发阈值 = 可用预算 × 0.85（见 `docs/design.md` §3.3）。
+    /// 压缩触发阈值 = 可用预算 × `ratio`（默认 0.85，见 `docs/design.md` §3.3）。
     ///
     /// 当 `token_count` 超过此阈值时触发压缩管道。
     #[must_use]
-    // 上下文窗口远小于 f64 尾数精度，且结果恒非负；按 design.md §3.4 用 0.85 系数。
+    // 上下文窗口远小于 f64 尾数精度，且结果恒非负；按 design.md §3.4 用比例系数。
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
     pub fn compact_threshold(&self) -> usize {
-        (self.usable() as f64 * 0.85) as usize
+        (self.usable() as f64 * self.ratio) as usize
     }
 }
 
