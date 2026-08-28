@@ -59,25 +59,21 @@ impl JsonlEventStore {
 
     /// 同步返回下一个可分配的 seq（= 当前最大 seq + 1，空会话返回 1）。
     ///
-    /// 实现为全文 `read_to_string` 后取最后一条非空行（非 O(1) 内存——注释曾
-    /// 称"O(1) 内存/O(N) IO 反向扫描"，与实现矛盾已修正，2026-08-23 审查 §10）。
-    /// 仅 Runtime 启动时调用一次，性能不敏感；如需 O(1) 可改 seek 到文件尾。
+    /// ST-9/ST-10（2026-08-28 R5 收尾）：改 seek 读文件尾块（O(1) 内存），
+    /// 替代全文 `read_to_string`（此前长会话 append 每次全读——平方级 IO）；
+    /// 且调用方须持 `{session}.lock` 再调本方法（ST-10 曾无锁读尾部，并发进程
+    /// 可撞 seq；本方法不自行加锁，由 append/启动路径在锁内调用）。
     ///
     /// # Errors
     /// 读取失败时返回 `StorageError`。
     pub fn next_seq_sync(&self, session: &SessionId) -> Result<u64, StorageError> {
         let path = self.session_path(session);
-        let content = match std::fs::read_to_string(path.as_std_path()) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(1),
-            Err(e) => return Err(e.into()),
-        };
-        // 取最后一行非空行
-        let last_line = content.lines().rev().find(|l| !l.trim().is_empty());
-        let Some(line) = last_line else {
+        let tail = read_tail_line(path.as_std_path())
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+        let Some(line) = tail else {
             return Ok(1);
         };
-        let record: EventRecord = serde_json::from_str(line)
+        let record: EventRecord = serde_json::from_str(&line)
             .map_err(|e| StorageError::Corrupted(format!("last event line: {e}")))?;
         Ok(record.seq + 1)
     }
@@ -94,6 +90,38 @@ impl JsonlEventStore {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// 读文件最后一行（非空，跳过尾部换行），O(1) 内存（ST-9，2026-08-28 R5 收尾）。
+///
+/// 实现：seek 到文件尾，反推 8 KiB 窗口内最后一行（覆盖单行 JSON 事件长度）；
+/// 超长行（单行 > 8 KiB）退化到窗口起点的部分行——json 解析会失败并报
+/// Corrupted，与全文读语义一致（事件记录都是小 JSON）。文件不存在/为空返回 `None`。
+fn read_tail_line(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: usize = 8 * 1024;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(None);
+    }
+    let start = len.saturating_sub(WINDOW as u64);
+    file.seek(SeekFrom::Start(start))?;
+    // 窗口固定 ≤ 8 KiB（WINDOW 常量），usize 在 32-bit 平台也放得下。
+    let mut buf = Vec::with_capacity(WINDOW);
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    // 找最后一个非空行
+    for line in text.lines().rev() {
+        if !line.trim().is_empty() {
+            return Ok(Some(line.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 impl EventStore for JsonlEventStore {
@@ -121,16 +149,14 @@ impl EventStore for JsonlEventStore {
             // Runtime 的内存计数器）在**本进程**锁内分配，但两个独立进程同时
             // resume 同一会话时各自从文件尾播种计数器，会产出重复 seq——
             // load_after/SSE cursor 去重随之失效。锁内校验"新 seq 必须 > 文件
-            // 尾 seq"，冲突 fail-closed 报错（事件文件低频追加，尾部读取成本可接受；
-            // 若未来成为热点可改 seek 读尾块）。
+            // 尾 seq"，冲突 fail-closed 报错。
+            // ST-9（2026-08-28 R5 收尾）：尾部读取改 seek 8 KiB 窗口（O(1) 内存），
+            // 替代全文 read_to_string——长会话事件文件 append 每次全读为平方级 IO。
             {
-                let content = match tokio::fs::read_to_string(&path).await {
-                    Ok(c) => c,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                    Err(e) => return Err(e.into()),
-                };
-                if let Some(last) = content.lines().rev().find(|l| !l.trim().is_empty()) {
-                    let last_record: EventRecord = serde_json::from_str(last)
+                let tail = read_tail_line(path.as_std_path())
+                    .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+                if let Some(last) = tail {
+                    let last_record: EventRecord = serde_json::from_str(&last)
                         .map_err(|e| StorageError::Corrupted(format!("last event line: {e}")))?;
                     if record.seq <= last_record.seq {
                         return Err(StorageError::Corrupted(format!(

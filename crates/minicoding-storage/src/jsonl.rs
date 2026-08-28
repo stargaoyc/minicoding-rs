@@ -401,6 +401,11 @@ impl JsonlStorage {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            // ST-8（2026-08-28 R5 收尾）：跳过 `{session}.events.jsonl` 事件流文件
+            // （纯事件文件，不含消息行；误解析产生 warn 噪音 + IO 浪费）。
+            if stem.ends_with(".events") {
+                continue;
+            }
             let content = match tokio::fs::read_to_string(&path).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -660,6 +665,10 @@ impl Storage for JsonlStorage {
         let lock_path = self.base_dir.join(format!("{session}.lock"));
         let session_id = session.clone();
         Box::pin(async move {
+            // ST-7（2026-08-28 R5 收尾）：删除前取会话排他锁（阻塞式）——并发
+            // append 若在删除窗口内重建文件会产生孤儿会话。持锁删文件 + 移除
+            // 索引后释放。
+            let _guard = crate::lock::SessionLock::acquire_blocking(&lock_path);
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
