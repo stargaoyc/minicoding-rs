@@ -22,7 +22,26 @@ impl JsonlSnapshotStore {
     #[must_use]
     pub fn new(base_dir: Utf8PathBuf) -> Self {
         let _ = std::fs::create_dir_all(base_dir.as_std_path());
+        // ST-R6-2（2026-08-28 R8 审查）：启动时清理崩溃残留的 tmp 文件——
+        // `save` 的 tmp 写入与 `rename` 之间进程崩溃会留下
+        // `{session}.snapshot.json.tmp-{pid}-{n}` 垃圾（此前永不清理）。tmp
+        // 文件恒非合法 snapshot（final 在 `{session}.snapshot.json`），删除安全。
+        Self::cleanup_stale_tmp(&base_dir);
         Self { base_dir }
+    }
+
+    /// 清理本 store 的 tmp 残留（崩溃孤儿）。best-effort：读目录/删除失败忽略。
+    fn cleanup_stale_tmp(base_dir: &Utf8PathBuf) {
+        let Ok(entries) = std::fs::read_dir(base_dir.as_std_path()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // 匹配 `{session}.snapshot.json.tmp-{pid}-{n}` 形态（避免误删别的文件）
+            if name.contains(".snapshot.json.tmp-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     fn snapshot_path(&self, session: &SessionId) -> Utf8PathBuf {
@@ -299,5 +318,31 @@ mod tests {
         let tmp: Utf8PathBuf = path.with_extension("json.tmp");
         assert!(!tmp.exists());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn new_cleans_up_stale_tmp_files() {
+        // ST-R6-2：崩溃残留的 tmp 文件在 store 构造时被清理。
+        let dir = tempdir().unwrap();
+        let base: Utf8PathBuf = dir.path().to_path_buf().try_into().unwrap();
+        // 伪造两个崩溃残留 tmp（不同 pid/计数）
+        std::fs::write(base.join("01A.snapshot.json.tmp-111-0"), "partial").unwrap();
+        std::fs::write(base.join("01B.snapshot.json.tmp-222-3"), "partial").unwrap();
+        // 非 tmp 文件不受影响
+        std::fs::write(base.join("01C.snapshot.json"), "{}").unwrap();
+
+        let _st = JsonlSnapshotStore::new(base.clone());
+        assert!(
+            !base.join("01A.snapshot.json.tmp-111-0").exists(),
+            "tmp 应被清理"
+        );
+        assert!(
+            !base.join("01B.snapshot.json.tmp-222-3").exists(),
+            "tmp 应被清理"
+        );
+        assert!(
+            base.join("01C.snapshot.json").exists(),
+            "合法 snapshot 应保留"
+        );
     }
 }

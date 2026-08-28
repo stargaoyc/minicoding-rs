@@ -19,6 +19,33 @@ pub struct JsonlEventStore {
     base_dir: Utf8PathBuf,
 }
 
+/// 逐行解析事件流（ST-R6-3，2026-08-28 R8 审查）：单行损坏**跳过**而非整流
+/// `Corrupted`——与消息流（`jsonl.rs` skip-bad-line）对齐，单条坏行不使
+/// `--resume`/`--replay`/SSE durable recovery 整体不可用（坏行可能是崩溃尾部
+/// 半写）。返回 `(records, skipped)`，坏行打 `warn` 记录行号。
+fn parse_events(content: &str) -> (Vec<EventRecord>, usize) {
+    let mut records = Vec::new();
+    let mut skipped = 0usize;
+    for (idx, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<EventRecord>(line) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                skipped += 1;
+                tracing::warn!(
+                    event_line = idx + 1,
+                    error = %e,
+                    "skip corrupted event line（事件流部分损坏，跳过）"
+                );
+            }
+        }
+    }
+    (records, skipped)
+}
+
 impl JsonlEventStore {
     /// 创建事件存储实例，若 `base_dir` 不存在则创建。
     #[must_use]
@@ -35,8 +62,9 @@ impl JsonlEventStore {
     /// 同语义）。
     ///
     /// # Errors
-    /// - `StorageError::Io`：读取失败（除 `NotFound`）；
-    /// - `StorageError::Corrupted`：事件行 JSON 解析失败。
+    /// - `StorageError::Io`：读取失败（除 `NotFound`）。
+    ///
+    /// 单行损坏跳过（ST-R6-3），不再整流失败——与消息流 skip-bad-line 对齐。
     pub fn load_events_sync(&self, session: &SessionId) -> Result<Vec<EventRecord>, StorageError> {
         let path = self.session_path(session);
         let content = match std::fs::read_to_string(path.as_std_path()) {
@@ -44,16 +72,7 @@ impl JsonlEventStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
-        let mut records = Vec::new();
-        for (idx, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let record: EventRecord = serde_json::from_str(line)
-                .map_err(|e| StorageError::Corrupted(format!("event line {}: {e}", idx + 1)))?;
-            records.push(record);
-        }
+        let (records, _skipped) = parse_events(&content);
         Ok(records)
     }
 
@@ -211,16 +230,7 @@ impl EventStore for JsonlEventStore {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let mut records = Vec::new();
-            for (idx, line) in content.lines().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let record: EventRecord = serde_json::from_str(line)
-                    .map_err(|e| StorageError::Corrupted(format!("event line {}: {e}", idx + 1)))?;
-                records.push(record);
-            }
+            let (records, _skipped) = parse_events(&content);
             Ok(records)
         })
     }
@@ -239,18 +249,9 @@ impl EventStore for JsonlEventStore {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let mut records = Vec::new();
-            for (idx, line) in content.lines().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let record: EventRecord = serde_json::from_str(line)
-                    .map_err(|e| StorageError::Corrupted(format!("event line {}: {e}", idx + 1)))?;
-                if record.seq > after_seq {
-                    records.push(record);
-                }
-            }
+            let (records, _skipped) = parse_events(&content);
+            let records: Vec<EventRecord> =
+                records.into_iter().filter(|r| r.seq > after_seq).collect();
             // 按 seq 升序（文件本身已是升序，无需排序）
             Ok(records)
         })
@@ -258,7 +259,19 @@ impl EventStore for JsonlEventStore {
 
     fn next_seq(&self, session: &SessionId) -> BoxFuture<'_, Result<u64, StorageError>> {
         let session = session.clone();
-        Box::pin(async move { self.next_seq_sync(&session) })
+        let lock_path = self.base_dir.join(format!("{session}.lock"));
+        Box::pin(async move {
+            // ST-10（2026-08-28 R8 审查）：方法内自行持会话锁——此前仅注释要求
+            // 调用方持锁，实际全部调用方（Runtime 启动播种 seq）均未持锁，两个
+            // 进程同时 resume 同一会话可各自读到同一尾 seq、分配重复 seq。锁内
+            // 读尾，跨进程 next_seq 串行化。
+            let _lock = tokio::task::spawn_blocking(move || {
+                crate::lock::SessionLock::acquire_blocking(lock_path)
+            })
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
+            self.next_seq_sync(&session)
+        })
     }
 
     fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
@@ -360,20 +373,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupted_line_returns_error() {
+    async fn corrupted_line_skipped_not_whole_stream() {
+        // ST-R6-3：单行损坏跳过（与消息流 skip-bad-line 对齐），不再整流 Corrupted
+        // ——单条坏行不使 resume/replay/SSE durable recovery 整体不可用。
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let id = "01CORRUPT".to_string();
         let path = st.session_path(&id);
 
-        // 写入合法行 + 损坏行
-        st.append(&id, make_record(1, &id, "ok")).await.unwrap();
-        tokio::fs::write(&path, "not-json\n").await.unwrap();
+        // 合法行 + 损坏行 + 合法行
+        st.append(&id, make_record(1, &id, "ok1")).await.unwrap();
+        st.append(&id, make_record(3, &id, "ok3")).await.unwrap();
+        let existing = std::fs::read_to_string(path.as_std_path()).unwrap();
+        let content = format!("{existing}not-json\n");
+        std::fs::write(path.as_std_path(), content).unwrap();
 
-        let result = st.load(&id).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, StorageError::Corrupted(_)));
+        let records = st.load(&id).await.unwrap();
+        assert_eq!(records.len(), 2, "坏行应被跳过，其余保留");
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 3);
+
+        // load_after 同样跳过坏行
+        let after = st.load_after(&id, 1).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].seq, 3);
+
+        // 同步路径同样跳过
+        let sync = st.load_events_sync(&id).unwrap();
+        assert_eq!(sync.len(), 2);
     }
 
     #[test]
