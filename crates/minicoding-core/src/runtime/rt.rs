@@ -1193,81 +1193,55 @@ impl Runtime {
                 .get(&c.name)
                 .is_some_and(|t| t.side_effect() == SideEffect::None)
         };
-        let (readonly, side_effect): (Vec<&ToolCall>, Vec<&ToolCall>) =
-            calls.iter().partition(|c| readonly_of(c));
 
-        // 顺序感知调度（2026-08-25 审查 A-P1）：仅当原始顺序中**所有只读调用
-        // 都位于副作用调用之前**时，"先并行读、再串行写"才与 LLM 意图一致。
-        // 一旦存在 写→读 相邻依赖（如 `shell.run` 生成文件后 `fs.read` 读取），
-        // 分桶会让 read 先于 write 执行读到旧数据——退化为全串行保序执行，
-        // 结果正确性优先于并行收益。结果仍按原始顺序回填，两种路径一致。
-        let reads_all_before_effects = {
-            let mut seen_effect = false;
-            let mut ok = true;
-            for c in calls {
-                if !readonly_of(c) {
-                    seen_effect = true;
-                } else if seen_effect {
-                    ok = false;
-                    break;
-                }
-            }
-            ok
-        };
-
+        // R8 波次调度（2026-08-28 R8 审查，替代 A-P1 的"全读在前才并行"判定）：
+        // 按 LLM 原始调用序扫描，把**相邻的只读调用**聚为"读块"整体并行执行，
+        // 副作用调用保持严格串行。严格优于旧逻辑：
+        //   - 旧逻辑仅在"全部只读位于全部副作用之前"时并行读，混合顺序
+        //     （写→读→读→写→读）退化为全串行；
+        //   - 新逻辑把任意位置的相邻读并行化（读块与前后副作用按原始序隔离），
+        //     且**不引入启发式依赖判定**——顺序由原始调用序保证，无 DAG 误判
+        //     风险（启发式 DAG 对 shell.run 等 opaque 工具的路径依赖无法覆盖，
+        //     误判"独立"会在真实文件系统上造成数据竞争，C-11 序错误不可检测）。
+        //   只读块内部并行上限仍受 `tools.parallel_reads` 约束（0 = 串行）。
+        //   结果最终按原始顺序统一回填（sort），两条路径一致。
         let mut results: Vec<(ToolCallId, ToolResult)> = Vec::with_capacity(calls.len());
-        if reads_all_before_effects {
-            results.extend(self.run_readonly_bucket(&readonly, &ctx).await?);
-            // 有副作用：严格串行，每个工具先过权限（见 execute_side_effect_call）
-            for call in &side_effect {
-                let call_side_effect = self.tool_side_effect(&call.name);
-                // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
-                // RT-7（2026-08-26 R3 审查）：用 `.instrument` 而非跨 await 持有
-                // `enter()` guard——多线程 runtime 下 future 会被 worker 迁移，
-                // 线程局部 span 上下文在迁移后失真（与并行路径 CORE-4 同理）。
-                let span = tracing::debug_span!(
-                    "tool_call",
-                    session.id = %ctx.session_id,
-                    tool.name = %call.name,
-                    tool.side_effect = ?call_side_effect,
-                    tool.parallel = false,
-                    call_id = %call.id,
-                    otel.name = span_name::TOOL_CALL,
-                );
-                results.push(
-                    self.execute_side_effect_call(call, &ctx)
-                        .instrument(span)
-                        .await?,
-                );
+        let mut pending_reads: Vec<&ToolCall> = Vec::new();
+        for call in calls {
+            if readonly_of(call) {
+                pending_reads.push(call);
+                continue;
             }
-        } else {
-            tracing::debug!(
-                total = calls.len(),
-                "read-after-write ordering detected in batch; executing strictly sequentially"
+            // 遇到副作用调用：先并行执行已累积的读块（读块内只读、相互独立），
+            // 再串行执行副作用（含权限 + Hook）。读块在副作用**之后**于原始序
+            // 中出现时同样聚合并行——被写文件已由前序副作用完成，序正确。
+            if !pending_reads.is_empty() {
+                results.extend(self.run_readonly_bucket(&pending_reads, &ctx).await?);
+                pending_reads.clear();
+            }
+            let call_side_effect = self.tool_side_effect(&call.name);
+            // `tool_call` span（design.md §15.1）：副作用桶串行执行，包裹权限检查 + dispatch。
+            // RT-7（2026-08-26 R3 审查）：用 `.instrument` 而非跨 await 持有
+            // `enter()` guard——多线程 runtime 下 future 会被 worker 迁移，
+            // 线程局部 span 上下文在迁移后失真（与并行路径 CORE-4 同理）。
+            let span = tracing::debug_span!(
+                "tool_call",
+                session.id = %ctx.session_id,
+                tool.name = %call.name,
+                tool.side_effect = ?call_side_effect,
+                tool.parallel = false,
+                call_id = %call.id,
+                otel.name = span_name::TOOL_CALL,
             );
-            for call in calls {
-                if readonly_of(call) {
-                    // 单元素只读桶：复用并行路径（保序回退下逐个执行）
-                    let one: [&ToolCall; 1] = [call];
-                    results.extend(self.run_readonly_bucket(&one, &ctx).await?);
-                } else {
-                    let call_side_effect = self.tool_side_effect(&call.name);
-                    let span = tracing::debug_span!(
-                        "tool_call",
-                        session.id = %ctx.session_id,
-                        tool.name = %call.name,
-                        tool.side_effect = ?call_side_effect,
-                        tool.parallel = false,
-                        call_id = %call.id,
-                        otel.name = span_name::TOOL_CALL,
-                    );
-                    results.push(
-                        self.execute_side_effect_call(call, &ctx)
-                            .instrument(span)
-                            .await?,
-                    );
-                }
-            }
+            results.push(
+                self.execute_side_effect_call(call, &ctx)
+                    .instrument(span)
+                    .await?,
+            );
+        }
+        // 尾部只读块
+        if !pending_reads.is_empty() {
+            results.extend(self.run_readonly_bucket(&pending_reads, &ctx).await?);
         }
 
         // 按 LLM 原始顺序回填，保证 tool_result 与 tool_calls 一一对应
