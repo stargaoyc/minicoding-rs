@@ -174,7 +174,14 @@ pub fn home_read_allow_paths() -> Vec<PathBuf> {
 
 /// 白名单内的凭证高危落点（SEC-11）：对已允许的 `~/.config`/`~/.cargo` 子树
 /// 内的活凭证文件/目录做尾部显式 deny（Seatbelt 最后匹配规则优先，
-/// Linux landlock 侧 deny 规则优先级见 `linux.rs`）。
+/// Linux landlock 侧经 [`home_read_allow_paths_without_credentials`] 展开排除）。
+///
+/// SEC-R7-1（2026-08-28 R7 审查）：`~/.config` 整体在 allow 白名单（Linux 展开
+/// 后保留 `gh`/`gcloud` 之外的其余子项）——R6 只排除了 `gh`/`gcloud`，但
+/// `github-copilot`（Copilot OAuth token，`hosts.json`）、`git/credentials`、
+/// `docker`（registry auth）、`uv`/`pypoetry`（Python 包索引 token）、`aws`
+/// 均为同一"仓库即边界"凭证通道。补全 deny 列表后 Linux 展开与 macOS 尾部
+/// deny 自动覆盖。
 ///
 /// 仅返回实际存在的条目（避免 profile 内引用不存在路径）。
 // 仅 macOS Seatbelt profile 消费（Linux 侧用 `home_read_allow_paths_without_credentials`
@@ -189,11 +196,21 @@ pub fn credential_dir_deny_paths() -> Vec<PathBuf> {
         return Vec::new();
     };
     let candidates = [
+        // 顶层凭证目录（不在 allow 白名单内，防御性双保险）
         home.join(".ssh"),
         home.join(".aws"),
         home.join(".gnupg"),
+        home.join(".docker"),
+        // `~/.config` 子树内的活凭证落点（SEC-11 + SEC-R7-1）
         home.join(".config/gh"),
         home.join(".config/gcloud"),
+        home.join(".config/github-copilot"),
+        home.join(".config/git/credentials"),
+        home.join(".config/docker"),
+        home.join(".config/uv"),
+        home.join(".config/pypoetry"),
+        home.join(".config/aws"),
+        // `~/.cargo` 子树内的 crates.io 令牌
         home.join(".cargo/credentials"),
     ];
     candidates.into_iter().filter(|p| p.exists()).collect()
@@ -267,29 +284,46 @@ mod tests {
     fn subtract_denied_excludes_credential_subtrees() {
         // SEC-R6-2（2026-08-28 R6 审查）：landlock path_beneath 的 allow 覆盖
         // 子路径——含凭证落点的顶层目录必须展开为安全子项而非原样放行。
+        // SEC-R7-1（2026-08-28 R7 审查）：扩展覆盖 github-copilot/docker 等
+        // `~/.config` 下的补充凭证落点。
         let tmp = TempDir::new().unwrap();
         // 顶层目录 ~/.config，含安全子项与凭证子项
         let config = tmp.path().join(".config");
-        for sub in ["git", "gh", "gcloud", "fish"] {
+        for sub in ["git", "gh", "gcloud", "github-copilot", "docker", "fish"] {
             std::fs::create_dir_all(config.join(sub)).unwrap();
         }
+        // `~/.config/git/credentials`（嵌套凭证文件，须递归下钻排除）；
+        // `~/.config/git/config`（git 配置文件，非凭证，应保留）
+        std::fs::create_dir_all(config.join("git")).unwrap();
+        std::fs::write(config.join("git/credentials"), "token").unwrap();
+        std::fs::write(config.join("git/config"), "[user]\n\tname = test").unwrap();
         // ~/.cargo 下含 credentials 文件与 registry 目录
         let cargo = tmp.path().join(".cargo");
         std::fs::create_dir_all(cargo.join("registry")).unwrap();
         std::fs::write(cargo.join("credentials"), "token").unwrap();
 
-        let (gh, gcloud, credentials) = (
+        let (gh, gcloud, copilot, docker, git_creds, credentials) = (
             config.join("gh"),
             config.join("gcloud"),
+            config.join("github-copilot"),
+            config.join("docker"),
+            config.join("git").join("credentials"),
             cargo.join("credentials"),
         );
-        let denied = vec![gh.clone(), gcloud.clone(), credentials.clone()];
+        let denied = vec![
+            gh.clone(),
+            gcloud.clone(),
+            copilot.clone(),
+            docker.clone(),
+            git_creds.clone(),
+            credentials.clone(),
+        ];
         let allowed = vec![config.clone(), cargo.clone()];
         let out = subtract_denied(allowed, &denied);
 
         // 凭证路径必须整体缺席（组件级 PathBuf 相等比较，兼容 Windows `\` 分隔符，
         // 避免按 `/` 后缀断言在 Windows 下失败）
-        for cred in [&gh, &gcloud, &credentials] {
+        for cred in [&gh, &gcloud, &copilot, &docker, &git_creds, &credentials] {
             assert!(
                 !out.iter().any(|p| p == cred),
                 "凭证路径不得出现在展开结果: {out:?}"
@@ -297,12 +331,12 @@ mod tests {
         }
         // 安全子项保留
         assert!(
-            out.iter().any(|p| p == &config.join("git")),
-            "安全子项 .config/git 应保留: {out:?}"
-        );
-        assert!(
             out.iter().any(|p| p == &config.join("fish")),
             "安全子项 .config/fish 应保留: {out:?}"
+        );
+        assert!(
+            out.iter().any(|p| p == &config.join("git").join("config")),
+            "git 目录的安全子项 .config/git/config 应保留: {out:?}"
         );
         assert!(
             out.iter().any(|p| p == &cargo.join("registry")),

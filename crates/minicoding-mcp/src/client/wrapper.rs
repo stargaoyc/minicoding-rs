@@ -88,12 +88,18 @@ impl Tool for McpToolWrapper {
     fn execute(
         &self,
         input: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> BoxFuture<'_, Result<ToolResult, ToolError>> {
         let client = self.client.clone();
         let server = self.server.clone();
         let tool = self.tool.clone();
         let input_schema = self.schema.input_schema.clone();
+        // SEC-R7-3（2026-08-28 R7 审查）：MCP 工具调用结果此前无审计记录——
+        // 模块头注释声称"审计落 audit.log 标注 mcp_server"但 execute 不调
+        // `AuditSink`（ToolContext.audit 被 `_ctx` 忽略）。副作用 MCP 工具
+        // （或任何 MCP 工具）的调用结果是安全取证的关键路径，补齐审计。
+        let audit = ctx.audit.clone();
+        let session_id = ctx.session_id.clone();
         Box::pin(async move {
             // JSON Schema 全量校验（2026-08-23 审查遗留#5 升级：jsonschema crate）
             // 此前仅 required 键预检，type/enum/pattern 等约束不生效。
@@ -134,7 +140,7 @@ impl Tool for McpToolWrapper {
                 otel.name = "mcp.call",
             );
             let _enter = span.enter();
-            match client.call(&server, &tool, input.clone()).await {
+            let result = match client.call(&server, &tool, input.clone()).await {
                 Ok(r) => Ok(r),
                 // CT4-4（R4）：仅连接级错误启动重启——业务错误（`ToolNotFound`、
                 // `CallFailed` 含 Schema 不匹配/参数错等）不触发全池重建，
@@ -153,7 +159,33 @@ impl Tool for McpToolWrapper {
                     }
                 }
                 Err(e) => Err(ToolError::Exec(format!("mcp {server}__{tool}: {e}"))),
+            };
+            // SEC-R7-3：调用结果（成功/失败）落 `audit.log`，标注 mcp_server/tool，
+            // 与内置工具 `kind=tool_result` 同格式（best-effort，不阻塞工具结果）。
+            if let Some(audit) = audit {
+                use minicoding_core::storage::{AuditKind, AuditRecord};
+                let (is_error, bytes) = match &result {
+                    Ok(r) => (r.is_error, r.metadata.bytes),
+                    Err(e) => (true, e.to_string().len()),
+                };
+                let rec = AuditRecord {
+                    ts: time::OffsetDateTime::now_utc(),
+                    session: session_id,
+                    kind: AuditKind::ToolResult,
+                    tool: Some(format!("mcp__{server}__{tool}")),
+                    decision: Some(if is_error { "error" } else { "ok" }.to_string()),
+                    detail: serde_json::json!({
+                        "mcp_server": server,
+                        "mcp_tool": tool,
+                        "result_bytes": bytes,
+                    })
+                    .to_string(),
+                };
+                if let Err(e) = audit.record(rec).await {
+                    tracing::warn!(error = %e, "mcp tool audit record failed (best-effort)");
+                }
             }
+            result
         })
     }
 }
