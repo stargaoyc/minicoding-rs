@@ -278,37 +278,35 @@ mod tests {
         std::fs::create_dir_all(cargo.join("registry")).unwrap();
         std::fs::write(cargo.join("credentials"), "token").unwrap();
 
-        let denied = vec![
+        let (gh, gcloud, credentials) = (
             config.join("gh"),
             config.join("gcloud"),
             cargo.join("credentials"),
-        ];
-        let allowed = vec![config, cargo];
+        );
+        let denied = vec![gh.clone(), gcloud.clone(), credentials.clone()];
+        let allowed = vec![config.clone(), cargo.clone()];
         let out = subtract_denied(allowed, &denied);
 
-        let out_str: Vec<String> = out
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        // 凭证路径必须整体缺席
-        assert!(
-            out_str
-                .iter()
-                .all(|p| !p.contains("gh") && !p.contains("gcloud") && !p.contains("credentials")),
-            "凭证路径不得出现在展开结果: {out_str:?}"
-        );
+        // 凭证路径必须整体缺席（组件级 PathBuf 相等比较，兼容 Windows `\` 分隔符，
+        // 避免按 `/` 后缀断言在 Windows 下失败）
+        for cred in [&gh, &gcloud, &credentials] {
+            assert!(
+                !out.iter().any(|p| p == cred),
+                "凭证路径不得出现在展开结果: {out:?}"
+            );
+        }
         // 安全子项保留
         assert!(
-            out_str.iter().any(|p| p.ends_with(".config/git")),
-            "安全子项 .config/git 应保留: {out_str:?}"
+            out.iter().any(|p| p == &config.join("git")),
+            "安全子项 .config/git 应保留: {out:?}"
         );
         assert!(
-            out_str.iter().any(|p| p.ends_with(".config/fish")),
-            "安全子项 .config/fish 应保留: {out_str:?}"
+            out.iter().any(|p| p == &config.join("fish")),
+            "安全子项 .config/fish 应保留: {out:?}"
         );
         assert!(
-            out_str.iter().any(|p| p.ends_with(".cargo/registry")),
-            "安全子项 .cargo/registry 应保留: {out_str:?}"
+            out.iter().any(|p| p == &cargo.join("registry")),
+            "安全子项 .cargo/registry 应保留: {out:?}"
         );
     }
 
