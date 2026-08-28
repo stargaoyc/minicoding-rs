@@ -153,8 +153,9 @@ fn kill_process_group(pid: u32, hook_name: &str) {
         "hook 超时：已 killpg 清理整个进程组（含孙进程）"
     );
 }
-#[cfg(not(unix))]
-fn kill_process_group(_pid: u32, _hook_name: &str) {}
+// 非 Unix 平台无进程组概念，kill_process_group 不在 Windows 上定义
+// （调用点位于 #[cfg(unix)] 内，Windows 不编译该分支，不存在死代码）。
+// setup_process_group 的 Windows 版本因无条件调用而保留。
 
 async fn run_script_hook(
     name: &str,
