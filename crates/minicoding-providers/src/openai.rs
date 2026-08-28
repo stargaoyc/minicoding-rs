@@ -431,6 +431,10 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
             // R4（PT4-2）：`delta.refusal` 非空 = 内容过滤拒绝（拒绝内容含于
             // `refusal` 字段，`content` 为空）——此前完全不解析，与
             // `finish_reason="content_filter"` 同呈现为正常结束。
+            // PT-R6-4（2026-08-28 R6 审查）：同一 chunk 可能同时带 `refusal`
+            // 与 `finish_reason="content_filter"`——此前推两个 `Stop(Filtered)`，
+            // 消费端对首个 Stop 终止后可能错过后面的 Usage delta。合并为单次
+            // Stop：refusal 优先（内容更具体），finish_reason 分支跳过。
             if let Some(refusal) = delta.get("refusal").and_then(Value::as_str)
                 && !refusal.is_empty()
             {
@@ -474,8 +478,16 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
                 }
             }
         }
+        // PT-R6-4：refusal 已推 Filtered 的 chunk，其 `finish_reason` 若为
+        // `content_filter` 不再重复推 Stop（双 Stop 修复）。
+        let refusal_pushed = choice
+            .get("delta")
+            .and_then(|d| d.get("refusal"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
             && !reason.is_empty()
+            && !(refusal_pushed && reason == "content_filter")
         {
             deltas.push(Delta::Stop(map_stop_reason(reason)));
         }
@@ -505,10 +517,22 @@ fn uses_max_completion_tokens(model: &str) -> bool {
 }
 
 /// 解析 `OpenAI` `usage` 对象为 [`Usage`]。
+///
+/// PT-R6-1（2026-08-28 R6 审查）：推理模型（o1/o3/o4/gpt-5）的
+/// `completion_tokens_details.reasoning_tokens` 计入计费 output——此前只读
+/// `completion_tokens`，推理模型输出 token 系统性低估 30-80%，压缩触发时机
+/// 与预算判定错误。折叠进 `output_tokens`（保持 `Usage` API 不变）：
+/// 计费口径 = 正文 + 推理 token。
 fn parse_usage(usage: &Value) -> Usage {
+    let completion = usize_from_json(usage.get("completion_tokens"));
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(usize_from_option)
+        .unwrap_or(0);
     Usage {
         input_tokens: usize_from_json(usage.get("prompt_tokens")),
-        output_tokens: usize_from_json(usage.get("completion_tokens")),
+        output_tokens: completion.saturating_add(reasoning),
         cache_read: usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -686,6 +710,70 @@ mod tests {
         let deltas = parse_chunk(&chunk);
         assert_eq!(deltas.len(), 1);
         assert!(matches!(&deltas[0], Delta::Usage(_)));
+    }
+
+    #[test]
+    fn parse_usage_folds_reasoning_tokens_into_output() {
+        // PT-R6-1（2026-08-28 R6 审查）：o1/o3/o4 推理模型的 reasoning_tokens
+        // 计入计费 output——此前未解析，推理模型输出 token 系统性低估。
+        let chunk = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "completion_tokens_details": {"reasoning_tokens": 30}
+            }
+        });
+        let deltas = parse_chunk(&chunk);
+        match &deltas[0] {
+            Delta::Usage(u) => assert_eq!(u.output_tokens, 50, "正文 20 + 推理 30"),
+            other => panic!("期望 Usage，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usage_without_reasoning_details_unchanged() {
+        let chunk = json!({"usage": {"prompt_tokens": 1, "completion_tokens": 2}});
+        let deltas = parse_chunk(&chunk);
+        match &deltas[0] {
+            Delta::Usage(u) => assert_eq!(u.output_tokens, 2),
+            other => panic!("期望 Usage，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_chunk_refusal_and_content_filter_emit_single_stop() {
+        // PT-R6-4（2026-08-28 R6 审查）：refusal + finish_reason=content_filter
+        // 同一 chunk 只推一个 Filtered Stop——此前双 Stop 使消费端错过 Usage。
+        let chunk = json!({
+            "choices": [{
+                "delta": {"refusal": "content policy"},
+                "finish_reason": "content_filter"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let deltas = parse_chunk(&chunk);
+        let stops = deltas
+            .iter()
+            .filter(|d| matches!(d, Delta::Stop(StopReason::Filtered { .. })))
+            .count();
+        assert_eq!(stops, 1, "Filtered Stop 只能出现一次: {deltas:?}");
+        assert!(
+            deltas.iter().any(|d| matches!(d, Delta::Usage(_))),
+            "Usage delta 必须保留: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn parse_chunk_content_filter_without_refusal_still_stops() {
+        let chunk = json!({
+            "choices": [{"delta": {}, "finish_reason": "content_filter"}]
+        });
+        let deltas = parse_chunk(&chunk);
+        assert!(matches!(
+            &deltas[0],
+            Delta::Stop(StopReason::Filtered { .. })
+        ));
     }
 
     #[test]

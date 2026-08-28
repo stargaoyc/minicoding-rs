@@ -307,7 +307,13 @@ fn build_ruleset(policy: &SandboxPolicy) -> Result<landlock::RulesetCreated, San
     // 整体只读放行，沙箱内命令可读取 `~/.ssh`、`~/.aws`、`~/.gnupg` 等全部用户
     // 凭证并复制进可写的 workdir。收敛为白名单后凭证目录不再可读；代价是
     // 白名单外的私有工具链在沙箱内不可见——此类场景走 external-sandbox 兜底。
-    let home_allow = crate::hardening::home_read_allow_paths();
+    //
+    // SEC-R6-2（2026-08-28 R6 审查）：`home_read_allow_paths_without_credentials`
+    // 展开白名单排除 `~/.config/gh`/`~/.config/gcloud`/`~/.cargo/credentials`
+    // 等活凭证落点——landlock crate 0.4.x 无 deny 规则支持，`path_beneath` 的
+    // allow 会覆盖子路径，此前 Linux 侧 `~/.config` 白名单连带放行凭证目录
+    // （`credential_dir_deny_paths` 仅 macOS Seatbelt 消费）。
+    let home_allow = crate::hardening::home_read_allow_paths_without_credentials();
     if !home_allow.is_empty() {
         tracing::info!(
             paths = ?home_allow,

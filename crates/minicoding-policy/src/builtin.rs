@@ -235,12 +235,17 @@ fn is_blacklisted(tool: &str, input: &Value) -> bool {
         // S5：VCS 元数据写入（.git/hooks/pre-commit 植入等）无合法用例，硬 Deny
         "fs.write" | "fs.edit" => extract_path(input).is_some_and(in_vcs_metadata),
         // S5：shell 旁路——写约束文件 / 写 VCS 元数据（rm AGENTS.md、> .git/hooks/x 等）
-        "shell.run" => shell_hits_blacklist(input),
+        "shell.run" | "shell.background" => shell_hits_blacklist(input),
         _ => false,
     }
 }
 
-/// S5/C-23：shell.run 命令是否以受保护目标为**写对象**。
+/// S5/C-23：shell.run/shell.background 命令是否以受保护目标为**写对象**。
+///
+/// SEC-R6-4（2026-08-28 R6 审查）：`shell.background` 此前不经本检查——后台
+/// 执行 `rm AGENTS.md` / `echo > .git/hooks/x` 可绕过 C-02 黑名单（LLM 可让
+/// 后台任务改写指令层后主进程继续）。background 与 run 共用同一执行环境，
+/// 词法判定逻辑一致，仅入口工具名不同。
 ///
 /// 词法近似判定（诚实边界：base64|sh 等变形不在黑名单能力内，由沙箱与用户审批兜底）：
 /// - 破坏性动词（`rm`/`mv` 第一目的/`truncate`/`dd`/`sed -i`/`unlink`）后随
@@ -1428,6 +1433,23 @@ mod tests {
         for cmd in ["cat AGENTS.md", "head -5 CLAUDE.md", "grep foo AGENTS.md"] {
             let input = serde_json::json!({ "command": cmd });
             assert!(!is_blacklisted("shell.run", &input), "{cmd} 读操作不应拦截");
+        }
+    }
+
+    #[test]
+    fn shell_background_blacklisted_for_project_doc_write() {
+        // SEC-R6-4（2026-08-28 R6 审查）：`shell.background` 必须与 `shell.run`
+        // 共享同一黑名单——后台执行 rm AGENTS.md 同样可绕过 C-02。
+        for cmd in [
+            "rm AGENTS.md",
+            "echo x >> CLAUDE.md",
+            "echo injected>AGENTS.md",
+        ] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.background", &input),
+                "{cmd} 在 background 下应命中黑名单"
+            );
         }
     }
 

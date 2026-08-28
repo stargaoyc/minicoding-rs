@@ -271,8 +271,18 @@ fn pin_decision(host: &str, resolved_ips: &[IpAddr]) -> Result<IpAddr, ToolError
 /// ——此前一律拼到 origin 根，`https://a.com/b/c` 上的 `Location: d/e` 会错误
 /// 跳到 `https://a.com/d/e`（应为 `/b/d/e`）。以 `..`/`.` 开头的段同样按
 /// 规则消解；`//host/path` 形态按协议相对处理保留 authority。
+///
+/// TL-R6-1（2026-08-28 R6 审查）：scheme 判定大小写不敏感（RFC 7230 scheme
+/// 为大小写不敏感 token）——`Location: HTTPS://a.com/x` 此前被误判为相对
+/// 路径拼到 origin 前缀后产出畸形 URL 且直连失败。
 fn join_redirect_url(base: &str, location: &str) -> Result<String, ToolError> {
-    if location.starts_with("http://") || location.starts_with("https://") {
+    if location
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+        || location
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+    {
         return Ok(location.to_string());
     }
     // 相对路径：取 base 的 scheme+authority 前缀拼接
@@ -366,6 +376,24 @@ mod redirect_tests {
     #[test]
     fn invalid_base_rejected() {
         assert!(join_redirect_url("not-a-url", "/z").is_err());
+    }
+
+    #[test]
+    fn uppercase_scheme_location_treated_as_absolute() {
+        // TL-R6-1（2026-08-28 R6 审查）：RFC 7230 scheme 大小写不敏感——
+        // `HTTPS://`/`HTTP://` 此前被误判为相对路径拼到 origin 前缀。
+        assert_eq!(
+            join_redirect_url("https://a.com/x", "HTTPS://b.com/y").expect("upper https"),
+            "HTTPS://b.com/y"
+        );
+        assert_eq!(
+            join_redirect_url("http://a.com/x", "HTTP://b.com/y").expect("upper http"),
+            "HTTP://b.com/y"
+        );
+        assert_eq!(
+            join_redirect_url("https://a.com/x", "HtTpS://b.com/y").expect("mixed case"),
+            "HtTpS://b.com/y"
+        );
     }
 }
 

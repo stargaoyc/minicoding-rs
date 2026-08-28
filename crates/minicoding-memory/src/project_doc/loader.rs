@@ -44,6 +44,11 @@ const IMPORT_SKIP_DEPTH: &str = "<!-- import skipped: depth -->";
 const IMPORT_SKIP_CYCLE: &str = "<!-- import skipped: cycle -->";
 /// CT4-3（R4）：`@import` 目标越出 `base_dir`（绝对路径 / `..` 逃逸）跳过标注。
 const IMPORT_SKIP_OUTSIDE: &str = "<!-- import skipped: outside base dir -->";
+/// SEC-R6-9（2026-08-28 R6 审查）：单次加载 `@import` 总数上限——恶意仓库
+/// 可写数千行 import 灌爆 I/O 与上下文，超限跳过标注。
+const IMPORT_SKIP_LIMIT: &str = "<!-- import skipped: import limit -->";
+/// 单次 `load`/`load_sync` 允许的 `@import` 展开总数（SEC-R6-9）。
+const MAX_IMPORTS: usize = 64;
 /// @import 目标缺失/不可读跳过标注。
 fn import_skip_unreadable(path: &Utf8Path) -> String {
     format!("<!-- import skipped: not found ({path}) -->")
@@ -83,6 +88,25 @@ fn path_within(dir: &Utf8Path, base: &Utf8Path) -> bool {
     let d: Vec<_> = norm_dir.components().collect();
     let b: Vec<_> = norm_base.components().collect();
     d.len() >= b.len() && d[..b.len()] == b[..]
+}
+
+/// canonicalize 消解 symlink 后的组件级包含判定（SEC-R6-1，2026-08-28 R6 审查）。
+///
+/// R5 的 SEC-1 修复只堵了 `..` 词法逃逸：`resolve_lexical` 明确"不触碰文件系统、
+/// 不解 symlink"，而读取方 `read_to_string` 跟随 symlink——恶意仓库提交的符号
+/// 链接（`subdir/link -> /etc/`）指向仓库外时，词法包含判定通过、实际读取
+/// 任意本机文件并展开进 `<project_doc>` 外发。读取前必须 canonicalize 消解
+/// symlink 后再做组件级前缀比较（与 `path_sandbox::resolve_under` 同口径）。
+///
+/// 返回 `Some(规范化后的目标)`（读取用规范化路径，消除二次跟随窗口）；
+/// 目标不存在、不可规范化或越界时返回 `None`（调用方按 unreadable/outside
+/// 分别标注，fail-closed）。
+fn canonicalize_within(target: &Utf8Path, base_dir: &Utf8Path) -> Option<Utf8PathBuf> {
+    let canon_target = std::fs::canonicalize(target.as_std_path()).ok()?;
+    let canon_target = Utf8PathBuf::from_path_buf(canon_target).ok()?;
+    let canon_base = std::fs::canonicalize(base_dir.as_std_path()).ok()?;
+    let canon_base = Utf8PathBuf::from_path_buf(canon_base).ok()?;
+    path_within(&canon_target, &canon_base).then_some(canon_target)
 }
 
 /// 词法规范化路径（SEC-1）：消解 `.`/`..` 段，不触碰文件系统、不解 symlink。
@@ -245,8 +269,15 @@ impl ProjectDocLoaderImpl {
                     let mut visited = HashSet::new();
                     visited.insert(canonical_key(global_path));
                     let global_dir = global_path.parent().unwrap_or_else(|| Utf8Path::new("."));
-                    let expanded =
-                        expand_imports_sync(&content, global_dir, 0, &mut visited, global_dir);
+                    let mut remaining = MAX_IMPORTS;
+                    let expanded = expand_imports_sync(
+                        &content,
+                        global_dir,
+                        0,
+                        &mut visited,
+                        global_dir,
+                        &mut remaining,
+                    );
                     push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
                 }
                 // 全局层不可读不阻塞项目层加载（best effort）。
@@ -267,12 +298,14 @@ impl ProjectDocLoaderImpl {
             };
             let mut visited = HashSet::new();
             visited.insert(canonical_key(&path));
+            let mut remaining = MAX_IMPORTS;
             let expanded = expand_imports_sync(
                 &content,
                 path.parent().unwrap_or_else(|| Utf8Path::new(".")),
                 0,
                 &mut visited,
                 &self.repo_root,
+                &mut remaining,
             );
             push_part(
                 &mut parts,
@@ -328,12 +361,17 @@ fn merge_parts(parts: &[String], max_bytes: usize) -> String {
 /// （组件级包含，拒绝 `..` 逃逸与任意绝对路径）。此前 `@import /home/u/.aws/
 /// credentials` 这类恶意仓库指令可把任意本机文件展开进 `<project_doc>` 随
 /// system prompt 外发（数据外泄通道；`post_compact` 已有同款检查，`@import` 缺位）。
+///
+/// SEC-R6-1（R6）：词法包含判定之外，读取前 canonicalize 消解 symlink 二次
+/// 包含判定——仓库内符号链接指向仓库外文件时词法判定通过但读取落在外部。
+/// SEC-R6-9（R6）：`remaining` 为剩余 import 展开预算，归零即停止展开。
 pub fn expand_imports_sync<S: std::hash::BuildHasher>(
     content: &str,
     cur_dir: &Utf8Path,
     depth: usize,
     visited: &mut HashSet<String, S>,
     base_dir: &Utf8Path,
+    remaining: &mut usize,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -345,6 +383,11 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
             Some(target) => {
                 if depth >= MAX_IMPORT_DEPTH {
                     out.push_str(IMPORT_SKIP_DEPTH);
+                    out.push('\n');
+                    continue;
+                }
+                if *remaining == 0 {
+                    out.push_str(IMPORT_SKIP_LIMIT);
                     out.push('\n');
                     continue;
                 }
@@ -359,24 +402,37 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
                     out.push('\n');
                     continue;
                 }
-                let key = canonical_key(&target_path);
+                // SEC-R6-1：canonicalize 消解 symlink 后二次包含判定。目标
+                // 存在但越界 → outside；不存在 → unreadable（既有行为）。
+                let Some(resolved) = canonicalize_within(&target_path, base_dir) else {
+                    if target_path.exists() {
+                        out.push_str(IMPORT_SKIP_OUTSIDE);
+                    } else {
+                        out.push_str(&import_skip_unreadable(&target_path));
+                    }
+                    out.push('\n');
+                    continue;
+                };
+                let key = canonical_key(&resolved);
                 if !visited.insert(key) {
                     out.push_str(IMPORT_SKIP_CYCLE);
                     out.push('\n');
                     continue;
                 }
-                if let Ok(inner) = std::fs::read_to_string(&target_path) {
-                    let inner_dir = target_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                *remaining -= 1;
+                if let Ok(inner) = std::fs::read_to_string(&resolved) {
+                    let inner_dir = resolved.parent().unwrap_or_else(|| Utf8Path::new("."));
                     out.push_str(&expand_imports_sync(
                         inner.trim_end(),
                         inner_dir,
                         depth + 1,
                         visited,
                         base_dir,
+                        remaining,
                     ));
                     out.push('\n');
                 } else {
-                    out.push_str(&import_skip_unreadable(&target_path));
+                    out.push_str(&import_skip_unreadable(&resolved));
                     out.push('\n');
                 }
             }
@@ -389,13 +445,14 @@ pub fn expand_imports_sync<S: std::hash::BuildHasher>(
 ///
 /// 环/深度判定与标注格式与 [`expand_imports_sync`] 完全一致——两版必须同步演化，
 /// 否则启动期（sync）与会话内（async）加载结果漂移。`base_dir` 包含约束同
-/// 同步版（CT4-3）。
+/// 同步版（CT4-3）；SEC-R6-1 symlink 二次判定与 SEC-R6-9 条数上限同同步版。
 async fn expand_imports_async<S: std::hash::BuildHasher>(
     content: &str,
     cur_dir: &Utf8Path,
     depth: usize,
     visited: &mut HashSet<String, S>,
     base_dir: &Utf8Path,
+    remaining: &mut usize,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -410,6 +467,11 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                     out.push('\n');
                     continue;
                 }
+                if *remaining == 0 {
+                    out.push_str(IMPORT_SKIP_LIMIT);
+                    out.push('\n');
+                    continue;
+                }
                 let target_path = if Utf8Path::new(&target).is_absolute() {
                     Utf8PathBuf::from(&target)
                 } else {
@@ -420,14 +482,24 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                     out.push('\n');
                     continue;
                 }
-                let key = canonical_key(&target_path);
+                let Some(resolved) = canonicalize_within(&target_path, base_dir) else {
+                    if target_path.exists() {
+                        out.push_str(IMPORT_SKIP_OUTSIDE);
+                    } else {
+                        out.push_str(&import_skip_unreadable(&target_path));
+                    }
+                    out.push('\n');
+                    continue;
+                };
+                let key = canonical_key(&resolved);
                 if !visited.insert(key) {
                     out.push_str(IMPORT_SKIP_CYCLE);
                     out.push('\n');
                     continue;
                 }
-                if let Ok(inner) = fs::read_to_string(&target_path).await {
-                    let inner_dir = target_path.parent().unwrap_or_else(|| Utf8Path::new("."));
+                *remaining -= 1;
+                if let Ok(inner) = fs::read_to_string(&resolved).await {
+                    let inner_dir = resolved.parent().unwrap_or_else(|| Utf8Path::new("."));
                     // 递归 async fn 需显式 boxing（E0733）。
                     let expanded = Box::pin(expand_imports_async(
                         inner.trim_end(),
@@ -435,12 +507,13 @@ async fn expand_imports_async<S: std::hash::BuildHasher>(
                         depth + 1,
                         visited,
                         base_dir,
+                        remaining,
                     ))
                     .await;
                     out.push_str(&expanded);
                     out.push('\n');
                 } else {
-                    out.push_str(&import_skip_unreadable(&target_path));
+                    out.push_str(&import_skip_unreadable(&resolved));
                     out.push('\n');
                 }
             }
@@ -466,9 +539,16 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                         let mut visited = HashSet::new();
                         visited.insert(canonical_key(global_path));
                         let global_dir = global_path.parent().unwrap_or_else(|| Utf8Path::new("."));
-                        let expanded =
-                            expand_imports_async(&content, global_dir, 0, &mut visited, global_dir)
-                                .await;
+                        let mut remaining = MAX_IMPORTS;
+                        let expanded = expand_imports_async(
+                            &content,
+                            global_dir,
+                            0,
+                            &mut visited,
+                            global_dir,
+                            &mut remaining,
+                        )
+                        .await;
                         push_part(&mut parts, &expanded, "<global>", self.repo_root.as_str());
                     }
                     Err(e) => {
@@ -493,12 +573,14 @@ impl ProjectDocLoader for ProjectDocLoaderImpl {
                 };
                 let mut visited = HashSet::new();
                 visited.insert(canonical_key(&path));
+                let mut remaining = MAX_IMPORTS;
                 let expanded = expand_imports_async(
                     &content,
                     path.parent().unwrap_or_else(|| Utf8Path::new(".")),
                     0,
                     &mut visited,
                     &self.repo_root,
+                    &mut remaining,
                 )
                 .await;
                 push_part(
@@ -792,12 +874,14 @@ mod tests {
         let mut visited = HashSet::new();
         visited.insert(canonical_key(&inner));
         let base = Utf8PathBuf::from_path_buf(sub.parent().unwrap().to_path_buf()).unwrap();
+        let mut remaining = MAX_IMPORTS;
         let out = expand_imports_sync(
             "@import sibling.md",
             inner.parent().unwrap(),
             0,
             &mut visited,
             &base,
+            &mut remaining,
         );
         assert!(
             out.contains("sibling content"),
@@ -817,12 +901,14 @@ mod tests {
 
         // 绝对路径越界（secret 在 root 之外）
         let mut visited = HashSet::new();
+        let mut remaining = MAX_IMPORTS;
         let out = expand_imports_sync(
             &format!("@import {}", secret.to_string_lossy()),
             &root,
             0,
             &mut visited,
             &root,
+            &mut remaining,
         );
         assert!(
             !out.contains("TOP-SECRET"),
@@ -832,7 +918,15 @@ mod tests {
 
         // `..` 相对逃逸（secret 位于 root 的父级之外）
         let mut visited = HashSet::new();
-        let out2 = expand_imports_sync("@import ../secret.txt", &root, 0, &mut visited, &root);
+        let mut remaining = MAX_IMPORTS;
+        let out2 = expand_imports_sync(
+            "@import ../secret.txt",
+            &root,
+            0,
+            &mut visited,
+            &root,
+            &mut remaining,
+        );
         assert!(
             !out2.contains("TOP-SECRET"),
             ".. 逃逸不得越出 base_dir: {out2}"
@@ -855,17 +949,78 @@ mod tests {
         std::fs::write(&secret_path, "TOP-SECRET-REAL-FILE").expect("write secret");
 
         let mut visited = HashSet::new();
+        let mut remaining = MAX_IMPORTS;
         let out = expand_imports_sync(
             "@import ../../secret.txt",
             &base.join("deep"),
             0,
             &mut visited,
             &base,
+            &mut remaining,
         );
         assert!(
             !out.contains("TOP-SECRET-REAL-FILE"),
             "`..` 逃逸指向真实越界文件必须被拦截: {out}"
         );
         assert!(out.contains(IMPORT_SKIP_OUTSIDE), "越界应插入 skip 标注");
+    }
+
+    #[test]
+    fn import_symlink_escape_is_blocked() {
+        // SEC-R6-1（2026-08-28 R6 审查）：回归测试——仓库内符号链接指向仓库外
+        // 文件时，词法包含判定通过但读取跟随 symlink 落在外部。`resolve_lexical`
+        // 明确"不解 symlink"，必须 canonicalize 二次判定才能封堵。R5 的 SEC-1
+        // 只堵了 `..` 逃逸，symlink 维度遗漏（同一"仓库即边界"攻击面）。
+        #[cfg(unix)]
+        {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let base = Utf8PathBuf::from_path_buf(tmp.path().join("repo")).unwrap();
+            std::fs::create_dir_all(base.join("subdir")).expect("create repo/subdir");
+            let secret_path = tmp.path().join("secret.txt");
+            std::fs::write(&secret_path, "TOP-SECRET-SYMLINK").expect("write secret");
+            // 恶意仓库提交的符号链接：subdir/link -> tmp 目录（secret 所在处）
+            std::os::unix::fs::symlink(tmp.path(), base.join("subdir").join("link"))
+                .expect("create symlink");
+
+            let mut visited = HashSet::new();
+            let mut remaining = MAX_IMPORTS;
+            let out = expand_imports_sync(
+                "@import subdir/link/secret.txt",
+                &base,
+                0,
+                &mut visited,
+                &base,
+                &mut remaining,
+            );
+            assert!(
+                !out.contains("TOP-SECRET-SYMLINK"),
+                "symlink 逃逸必须被拦截: {out}"
+            );
+            assert!(out.contains(IMPORT_SKIP_OUTSIDE), "越界应插入 skip 标注");
+        }
+    }
+
+    #[test]
+    fn import_limit_enforced() {
+        // SEC-R6-9（2026-08-28 R6 审查）：单次展开 import 总数上限——恶意仓库
+        // 可写数千行 @import 灌爆 I/O 与上下文，超限后跳过标注。
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        for i in 0..MAX_IMPORTS + 8 {
+            std::fs::write(base.join(format!("f{i}.md")), format!("content{i}")).expect("write");
+        }
+        let mut lines = String::new();
+        for i in 0..MAX_IMPORTS + 8 {
+            use std::fmt::Write as _;
+            writeln!(lines, "@import f{i}.md").expect("write line");
+        }
+        let mut visited = HashSet::new();
+        let mut remaining = MAX_IMPORTS;
+        let out = expand_imports_sync(&lines, &base, 0, &mut visited, &base, &mut remaining);
+        // 前 MAX_IMPORTS 条展开、其后跳过
+        assert!(out.contains("content0"));
+        assert!(out.contains(format!("content{}", MAX_IMPORTS - 1).as_str()));
+        assert!(!out.contains(format!("content{MAX_IMPORTS}").as_str()));
+        assert!(out.contains(IMPORT_SKIP_LIMIT), "超限应插入 skip 标注");
     }
 }

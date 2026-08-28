@@ -133,9 +133,11 @@ fn env_or_home(env_key: &str, default_rel: &str, home: Option<&Path>) -> Option<
 /// （见 `linux.rs` 的 `build_ruleset` 与 `macos.rs` 的 `build_profile`）。
 ///
 /// SEC-11（2026-08-27 R5 审查，如实记录）：白名单内 `~/.config`（gh/gcloud 凭证
-/// 落点）与 `~/.cargo`（crates.io 令牌 `credentials` 落点）仍属低概率凭证通道——
-/// macOS 侧以 profile 尾部显式 deny 覆盖（`credential_dir_deny_paths`），
-/// Linux landlock 侧依赖 ABI 5+ deny 规则优先级（见 `linux.rs`）。
+/// 落点）与 `~/.cargo`（crates.io 令牌 `credentials` 落点）属凭证通道——macOS
+/// 侧以 profile 尾部显式 deny 覆盖（`credential_dir_deny_paths`），Linux 侧经
+/// [`home_read_allow_paths_without_credentials`] 展开白名单排除（SEC-R6-2，
+/// 2026-08-28 R6 修复；此前注释声称"依赖 ABI 5+ deny 规则"，但 landlock crate
+/// 0.4.x 不支持 deny 规则、`linux.rs` 亦未添加，属声明-实现裂缝）。
 // 仅 linux/macos 的 sandbox 驱动消费（windows 用 Job Object），非 linux/macos
 // 平台标注 allow 防 dead_code（与 credential_dir_deny_paths 同模式）。
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
@@ -175,8 +177,8 @@ pub fn home_read_allow_paths() -> Vec<PathBuf> {
 /// Linux landlock 侧 deny 规则优先级见 `linux.rs`）。
 ///
 /// 仅返回实际存在的条目（避免 profile 内引用不存在路径）。
-// 仅 macOS Seatbelt profile 消费（Linux 侧 landlock deny 规则未启用该列表，
-// 故非 mac 平台标注 allow 防 dead_code——mac 编译时正常使用）。
+// 仅 macOS Seatbelt profile 消费（Linux 侧用 `home_read_allow_paths_without_credentials`
+// 展开白名单，非 mac 平台标注 allow 防 dead_code——mac 编译时正常使用）。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[must_use]
 pub fn credential_dir_deny_paths() -> Vec<PathBuf> {
@@ -197,6 +199,55 @@ pub fn credential_dir_deny_paths() -> Vec<PathBuf> {
     candidates.into_iter().filter(|p| p.exists()).collect()
 }
 
+/// Linux landlock 侧的 HOME 读白名单（SEC-R6-2，2026-08-28 R6 审查）。
+///
+/// 用途：`home_read_allow_paths` 供 macOS Seatbelt（可叠加尾部 deny 规则）与
+/// 通用场景；landlock `path_beneath` allow 规则**覆盖其下全部子路径**，且
+/// landlock crate 0.4.x 不支持 ABI5+ 的 deny 规则——`~/.config` 的 allow 会连带
+/// 放行 `~/.config/gh` 等凭证落点。因此 Linux 侧把含凭证子路径的顶层目录
+/// 展开为其**安全直接子项**（不含 `credential_dir_deny_paths` 中的凭证路径），
+/// 逐级下钻直到不再覆盖任何 deny 路径。
+///
+/// 展开失败（目录不可读）时该目录整体不放行（fail-closed，凭证优先）。
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn home_read_allow_paths_without_credentials() -> Vec<PathBuf> {
+    subtract_denied(home_read_allow_paths(), &credential_dir_deny_paths())
+}
+
+/// 从 allow 集合中剔除覆盖 `denied` 中任一凭证路径的条目。
+///
+/// 算法：对每个 allow 路径，若其下无任何 deny 路径 → 原样保留；若存在 → 展开
+/// 为直接子项，跳过等于 deny 路径的子项、递归下钻仍覆盖 deny 的子项。结果不含
+/// 任何覆盖凭证路径的规则。
+fn subtract_denied(allowed: Vec<PathBuf>, denied: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for a in allowed {
+        let under: Vec<&PathBuf> = denied.iter().filter(|d| d.starts_with(&a)).collect();
+        if under.is_empty() {
+            out.push(a);
+            continue;
+        }
+        let mut children: Vec<PathBuf> = std::fs::read_dir(&a)
+            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        children.sort();
+        for c in children {
+            if under.iter().any(|d| d.as_path() == c.as_path()) {
+                // 子项本身是凭证路径 → 整体跳过
+                continue;
+            }
+            if under.iter().any(|d| d.starts_with(&c)) {
+                // 凭证路径在该子项之下 → 递归下钻
+                out.extend(subtract_denied(vec![c], denied));
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::pedantic)]
@@ -208,6 +259,66 @@ mod tests {
     /// （home_read_allow_paths 为 linux cfg），非 linux target 下不编译。
     #[cfg(target_os = "linux")]
     static ENV_SERIAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn subtract_denied_excludes_credential_subtrees() {
+        // SEC-R6-2（2026-08-28 R6 审查）：landlock path_beneath 的 allow 覆盖
+        // 子路径——含凭证落点的顶层目录必须展开为安全子项而非原样放行。
+        let tmp = TempDir::new().unwrap();
+        // 顶层目录 ~/.config，含安全子项与凭证子项
+        let config = tmp.path().join(".config");
+        for sub in ["git", "gh", "gcloud", "fish"] {
+            std::fs::create_dir_all(config.join(sub)).unwrap();
+        }
+        // ~/.cargo 下含 credentials 文件与 registry 目录
+        let cargo = tmp.path().join(".cargo");
+        std::fs::create_dir_all(cargo.join("registry")).unwrap();
+        std::fs::write(cargo.join("credentials"), "token").unwrap();
+
+        let denied = vec![
+            config.join("gh"),
+            config.join("gcloud"),
+            cargo.join("credentials"),
+        ];
+        let allowed = vec![config, cargo];
+        let out = subtract_denied(allowed, &denied);
+
+        let out_str: Vec<String> = out
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        // 凭证路径必须整体缺席
+        assert!(
+            out_str
+                .iter()
+                .all(|p| !p.contains("gh") && !p.contains("gcloud") && !p.contains("credentials")),
+            "凭证路径不得出现在展开结果: {out_str:?}"
+        );
+        // 安全子项保留
+        assert!(
+            out_str.iter().any(|p| p.ends_with(".config/git")),
+            "安全子项 .config/git 应保留: {out_str:?}"
+        );
+        assert!(
+            out_str.iter().any(|p| p.ends_with(".config/fish")),
+            "安全子项 .config/fish 应保留: {out_str:?}"
+        );
+        assert!(
+            out_str.iter().any(|p| p.ends_with(".cargo/registry")),
+            "安全子项 .cargo/registry 应保留: {out_str:?}"
+        );
+    }
+
+    #[test]
+    fn subtract_denied_keeps_clean_paths() {
+        // 不含凭证子路径的 allow 原样保留
+        let tmp = TempDir::new().unwrap();
+        let clean = tmp.path().join(".cache");
+        std::fs::create_dir_all(&clean).unwrap();
+        let denied = vec![tmp.path().join(".ssh")];
+        let out = subtract_denied(vec![clean.clone()], &denied);
+        assert_eq!(out, vec![clean]);
+    }
 
     #[test]
     fn vcs_dirs_returns_existing() {

@@ -15,35 +15,37 @@ use tokio::process::Command;
 /// 规则（保守词法校验）：`--- `/`+++ `/`diff --git ` 行提取目标；`/dev/null`
 /// （新增/删除文件的空端）放行；其余目标剥 `a/`、`b/` 前缀后必须为相对路径
 /// 且不含 `..` 组件与引号包裹。
+///
+/// TL-R6-2（2026-08-28 R6 审查）：`diff --git a/x b/y` 行此前未校验——git
+/// 以该行为准，攻击者可把 `---`/`+++` 行放合法路径、`diff --git` 行放 `../`
+/// 越界路径绕过防线。现在对 `diff --git` 行的 `a/` 与 `b/` 两侧目标同样校验。
 fn validate_patch_paths(patch: &str) -> Result<(), ToolError> {
     let mut bad: Option<String> = None;
     'outer: for line in patch.lines() {
         let target = if let Some(rest) = line.strip_prefix("--- ") {
             Some(rest.trim())
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            Some(rest.trim())
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            // diff --git a/x b/y：两侧都须在校验内
+            let mut parts = rest.split_whitespace().take(2).map(str::trim);
+            let (a, b) = (parts.next(), parts.next());
+            // 递归复用单侧校验（a/ 与 b/ 前缀各自剥离）
+            let a_ok = a.is_some_and(patch_side_target_valid);
+            let b_ok = b.is_some_and(patch_side_target_valid);
+            if !a_ok || !b_ok {
+                bad = Some(rest.to_string());
+                break 'outer;
+            }
+            continue;
         } else {
-            line.strip_prefix("+++ ").map(str::trim)
+            continue;
         };
         let Some(raw) = target else { continue };
         // 时间戳后缀（"--- a/x\t2024-01-01"）截断
         let raw = raw.split('\t').next().unwrap_or(raw);
-        // 引号包裹路径（含特殊字符时 git 会加引号）一律拒绝——保守处理
-        if raw.starts_with('"') {
+        if !patch_side_target_valid(raw) {
             bad = Some(raw.to_string());
-            break;
-        }
-        if raw == "/dev/null" {
-            continue;
-        }
-        let rel = raw
-            .strip_prefix("a/")
-            .or_else(|| raw.strip_prefix("b/"))
-            .unwrap_or(raw);
-        if rel.starts_with('/')
-            || rel.split('/').any(|seg| seg == "..")
-            || rel.contains('\\')
-            || rel.is_empty()
-        {
-            bad = Some(rel.to_string());
             break 'outer;
         }
     }
@@ -53,6 +55,26 @@ fn validate_patch_paths(patch: &str) -> Result<(), ToolError> {
         ))),
         None => Ok(()),
     }
+}
+
+/// 单侧 patch 目标路径合法性：`/dev/null` 放行；引号包裹、绝对路径、`..`、
+/// 反斜杠、空串一律拒绝。
+fn patch_side_target_valid(raw: &str) -> bool {
+    // 引号包裹路径（含特殊字符时 git 会加引号）一律拒绝——保守处理
+    if raw.starts_with('"') {
+        return false;
+    }
+    if raw == "/dev/null" {
+        return true;
+    }
+    let rel = raw
+        .strip_prefix("a/")
+        .or_else(|| raw.strip_prefix("b/"))
+        .unwrap_or(raw);
+    !(rel.starts_with('/')
+        || rel.split('/').any(|seg| seg == "..")
+        || rel.contains('\\')
+        || rel.is_empty())
 }
 
 /// `git.apply` 工具。
@@ -239,6 +261,50 @@ mod tests {
     fn patch_with_devnull_and_relative_targets_accepted() {
         // 新增文件：--- 端为 /dev/null，+++ 端为相对路径 → 放行
         let patch = "--- /dev/null\n+++ b/new_file.txt\n@@ -0,0 +1 @@\n+hello\n";
+        assert!(validate_patch_paths(patch).is_ok());
+    }
+
+    #[test]
+    fn patch_with_escaping_diff_git_line_rejected() {
+        // TL-R6-2（2026-08-28 R6 审查）：git 以 `diff --git` 行为准——攻击者
+        // 可把 ---/+++ 行放合法路径、diff --git 行放 ../ 越界路径绕过校验。
+        let patch = "\
+diff --git a/../etc/passwd b/../etc/passwd
+--- a/etc/passwd
++++ b/etc/passwd
+@@ -1 +1 @@
+-root:x:0:0:root:/root:/bin/bash
+-root2:x:0:0:root:/root:/bin/bash
+";
+        assert!(
+            validate_patch_paths(patch).is_err(),
+            "diff --git 行越界必须拒绝"
+        );
+    }
+
+    #[test]
+    fn patch_with_absolute_diff_git_line_rejected() {
+        let patch = "\
+diff --git a//etc/passwd b//etc/passwd
+--- a/etc/passwd
++++ b/etc/passwd
+@@ -1 +1 @@
+-a
+-b
+";
+        assert!(validate_patch_paths(patch).is_err(), "绝对路径必须拒绝");
+    }
+
+    #[test]
+    fn patch_with_normal_diff_git_line_accepted() {
+        let patch = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1 +1 @@
+-old
+-new
+";
         assert!(validate_patch_paths(patch).is_ok());
     }
 
