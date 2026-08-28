@@ -3,6 +3,17 @@
 //! seq 分配 / `EventStore` 追加 / `durable_seq` 推进 / 周期 snapshot 的完整
 //! 持久化闭环。`persist_event` 的 best-effort 语义（失败仅 warn）与消息主链路
 //! "`storage.append` → `ctx.append` → `persist_event` → `events.emit`" 不变量在此收口。
+//!
+//! ## 消息/事件双写对账（ST-4 决策记录，2026-08-28 R5 收尾）
+//!
+//! 消息日志（`Storage`，人读）与事件流（`EventStore`，溯源）**双写无对账**：
+//! 瞬时 IO 失败只影响事件流（best-effort），resume（读消息日志）与 replay
+//! （读事件流）可能产出不同内容且无校验。取舍：引入对账需在每次 append 后
+//! 比对两侧（双写主链路的额外 IO/复杂度），而单写者的 `seq` 严格单调（ST-1
+//! 修复后无缺口）+ 消息日志为权威人读源——分歧仅在事件流落盘失败的极短窗口
+//! 出现，`--replay` 面向审计/回放场景，接受此差异（以事件流为准，缺的事件
+//! 由 `persist_event` 失败日志可追踪）。若未来需要强一致，在 `init_event_stream`
+//! 增加"消息数 vs 事件数"启动对账（列入 roadmap）。
 
 use super::Event;
 use super::rt::Runtime;
