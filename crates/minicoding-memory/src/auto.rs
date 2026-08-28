@@ -90,6 +90,11 @@ pub struct AutoMemory {
     cached_entries: Mutex<Option<Vec<AutoEntry>>>,
     /// 缓存的索引文件 mtime。
     cached_mtime: Mutex<Option<OffsetDateTime>>,
+    /// 缓存的索引文件字节数（CTX-R6-10，2026-08-28 R8 审查）：mtime 在粗粒度
+    /// 文件系统（FAT/网络盘 1-2s 粒度）上跨进程重写可能同值，叠加 size 使
+    /// 误命中需"同大小 + 同 mtime"的刻意竞态，实际消除跨进程粗粒度 stale。
+    /// 热路径仍是 stat（零内容读取），不牺牲"零 IO/分词"缓存语义。
+    cached_size: Mutex<Option<u64>>,
     /// save 串行化锁（2026-08-25 审查 MM-5）：正文与索引分两次 rename，并发
     /// save 交错可产生"正文 A + 索引 B"错配。与 `long_term.rs::save_lock` 同构
     /// 采用 `tokio::sync::Mutex`——临界区为全程异步 IO（两次 write + rename），
@@ -116,6 +121,7 @@ impl AutoMemory {
             index_path: dir.join(AUTO_INDEX_FILE),
             cached_entries: Mutex::new(None),
             cached_mtime: Mutex::new(None),
+            cached_size: Mutex::new(None),
             save_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -125,12 +131,15 @@ impl AutoMemory {
     /// 文件不存在时返回空 `Vec`。
     #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_LOAD, memory.type = "auto"))]
     async fn load_entries(&self) -> Result<Vec<AutoEntry>, MemoryError> {
-        let current = self.current_mtime().await?;
+        let current = self.current_mtime_and_size().await?;
 
-        // mtime 命中且缓存存在：直接复用。
+        // mtime + size 命中且缓存存在：直接复用（CTX-R6-10 补 size 校验）。
         {
             let cached_mtime = lock(&self.cached_mtime);
-            if current == *cached_mtime
+            let cached_size = lock(&self.cached_size);
+            if current
+                .as_ref()
+                .is_some_and(|(t, s)| Some(*t) == *cached_mtime && Some(*s) == *cached_size)
                 && let Some(entries) = lock(&self.cached_entries).clone()
             {
                 return Ok(entries);
@@ -138,9 +147,10 @@ impl AutoMemory {
         }
 
         // 文件不存在：空条目。
-        let Some(current) = current else {
+        let Some((current_mtime, _)) = current else {
             *lock(&self.cached_entries) = Some(Vec::new());
             *lock(&self.cached_mtime) = None;
+            *lock(&self.cached_size) = None;
             return Ok(Vec::new());
         };
 
@@ -150,7 +160,8 @@ impl AutoMemory {
             .map_err(|e| MemoryError::Serialize(format!("auto index parse: {e}")))?;
 
         *lock(&self.cached_entries) = Some(entries.clone());
-        *lock(&self.cached_mtime) = Some(current);
+        *lock(&self.cached_mtime) = Some(current_mtime);
+        *lock(&self.cached_size) = Some(bytes.len() as u64);
         Ok(entries)
     }
 
@@ -256,19 +267,20 @@ impl AutoMemory {
         fs::rename(&md_tmp, &self.path).await?;
 
         // 刷新缓存。
-        let mtime = self
-            .current_mtime()
+        let (mtime, size) = self
+            .current_mtime_and_size()
             .await?
-            .unwrap_or_else(OffsetDateTime::now_utc);
+            .unwrap_or((OffsetDateTime::now_utc(), 0));
         *lock(&self.cached_entries) = Some(entries.to_vec());
         *lock(&self.cached_mtime) = Some(mtime);
+        *lock(&self.cached_size) = Some(size);
         Ok(())
     }
 
-    /// 读取索引文件 mtime；不存在返回 `None`。
-    async fn current_mtime(&self) -> Result<Option<OffsetDateTime>, MemoryError> {
+    /// 读取索引文件 mtime + 字节数；不存在返回 `None`（CTX-R6-10）。
+    async fn current_mtime_and_size(&self) -> Result<Option<(OffsetDateTime, u64)>, MemoryError> {
         match fs::metadata(&self.index_path).await {
-            Ok(md) => Ok(Some(OffsetDateTime::from(md.modified()?))),
+            Ok(md) => Ok(Some((OffsetDateTime::from(md.modified()?), md.len()))),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err.into()),
         }

@@ -159,18 +159,22 @@ pub async fn inject_post_compact(
         // 按 token 截断
         let truncated = truncate_to_tokens(&content, config.max_tokens_per_file, tokenizer);
         let section_tokens = tokenizer.count(&truncated);
+        // CTX-R6-9（2026-08-28 R8 审查）：`--- {path} ---` 头部也计入预算——
+        // 此前只计内容 token，注入头随文件数线性累积、实际请求可超窗（与
+        // CTX-R6-8 同属"预算数学漏项"族）。
+        let header_tokens = tokenizer.count(&format!("--- {path_str} ---\n"));
 
-        if total_tokens + section_tokens > config.token_budget {
+        if total_tokens + section_tokens + header_tokens > config.token_budget {
             tracing::debug!(
                 file = %path_str,
-                tokens = section_tokens,
+                tokens = section_tokens + header_tokens,
                 budget_remaining = config.token_budget.saturating_sub(total_tokens),
                 "post-compact: token 预算用尽，停止注入"
             );
             break;
         }
 
-        total_tokens += section_tokens;
+        total_tokens += section_tokens + header_tokens;
         sections.push(format!("--- {path_str} ---\n{truncated}"));
     }
 

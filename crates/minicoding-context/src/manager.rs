@@ -576,9 +576,16 @@ impl ContextManager for ContextManagerImpl {
             let effective_tokens = current_tokens + fixed_overhead;
 
             // C-08：预测性压缩——当前未超阈值但预测下一 turn 会超时提前压缩
+            // CTX-R6-8：与 reactive 判据同口径，计入 fixed_overhead
             let need_predictive = predictive_enabled && effective_tokens <= threshold && {
                 let tracker = self.predictive_tracker.lock().await;
-                should_predict_compact(current_tokens, threshold, &tracker, predictive_baseline)
+                should_predict_compact(
+                    current_tokens,
+                    threshold,
+                    fixed_overhead,
+                    &tracker,
+                    predictive_baseline,
+                )
             };
 
             // 检查是否触发压缩阈值（缓存计数，无需加锁）；超阈值先压缩再读消息，

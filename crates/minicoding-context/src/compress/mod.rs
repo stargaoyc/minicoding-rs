@@ -92,10 +92,16 @@ pub async fn compress_pipeline(
     let mut result = CompressResult::default();
     let threshold = budget.compact_threshold();
 
-    // L1: 工具结果裁剪（同步）
+    // L1: 工具结果裁剪（同步；CTX-R6-11：最大优先 + 预算内即停）
     {
         let _span = tracing::info_span!("compress", level = "L1").entered();
-        clip::clip_tool_results(messages, &ClipConfig::default(), &mut result);
+        clip::clip_tool_results(
+            messages,
+            &ClipConfig::default(),
+            tokenizer,
+            threshold,
+            &mut result,
+        );
     }
     if token_count(messages, tokenizer) <= threshold {
         return Ok(result);

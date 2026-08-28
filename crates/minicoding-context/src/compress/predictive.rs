@@ -90,9 +90,14 @@ impl Default for PredictiveTracker {
 /// 根据历史 token 增长趋势估算下一 turn 的 token 总量，若预估超出
 /// `compact_threshold` 则返回 `true`。
 ///
+/// CTX-R6-8（2026-08-28 R8 审查）：计入 `fixed_overhead`（system prompt + tool
+/// schemas）——此前只比 `current + growth` 与裸阈值，固定开销大时预测时序落后
+/// 于 reactive（压缩判据与 `build_chat_request` 的 `effective_tokens` 口径不一致）。
+///
 /// # 参数
-/// - `current_tokens`：当前 token 总量
+/// - `current_tokens`：当前 messages token 总量
 /// - `compact_threshold`：压缩阈值（`budget.compact_threshold()`）
+/// - `fixed_overhead`：system prompt + tool schemas 固定 token 开销
 /// - `tracker`：预测性压缩追踪器
 /// - `baseline_growth`：历史不足时的基线增长量（`predictive_baseline_growth_tokens`）
 ///
@@ -102,11 +107,15 @@ impl Default for PredictiveTracker {
 pub fn should_predict_compact(
     current_tokens: usize,
     compact_threshold: usize,
+    fixed_overhead: usize,
     tracker: &PredictiveTracker,
     baseline_growth: usize,
 ) -> bool {
     let growth = tracker.avg_growth().unwrap_or(baseline_growth);
-    let predicted = current_tokens.saturating_add(growth);
+    // 与 reactive 判据同口径：effective = messages + 固定开销
+    let predicted = current_tokens
+        .saturating_add(growth)
+        .saturating_add(fixed_overhead);
     predicted > compact_threshold
 }
 
@@ -160,8 +169,8 @@ mod tests {
         let mut tracker = PredictiveTracker::new();
         tracker.record_turn(100);
         tracker.record_turn(200);
-        // current=200, growth=100, predicted=300 < 1000
-        assert!(!should_predict_compact(200, 1000, &tracker, 15000));
+        // current=200, growth=100, fixed=0, predicted=300 < 1000
+        assert!(!should_predict_compact(200, 1000, 0, &tracker, 15000));
     }
 
     #[test]
@@ -169,19 +178,31 @@ mod tests {
         let mut tracker = PredictiveTracker::new();
         tracker.record_turn(800);
         tracker.record_turn(900);
-        // current=900, growth=100, predicted=1000 == 1000, NOT > 1000
-        assert!(!should_predict_compact(900, 1000, &tracker, 15000));
-        // current=950, growth=100, predicted=1050 > 1000
-        assert!(should_predict_compact(950, 1000, &tracker, 15000));
+        // current=900, growth=100, fixed=0, predicted=1000 == 1000, NOT > 1000
+        assert!(!should_predict_compact(900, 1000, 0, &tracker, 15000));
+        // current=950, growth=100, fixed=0, predicted=1050 > 1000
+        assert!(should_predict_compact(950, 1000, 0, &tracker, 15000));
     }
 
     #[test]
     fn should_predict_uses_baseline_when_history_insufficient() {
         let tracker = PredictiveTracker::new();
-        // 无历史 → baseline=500, current=600, predicted=1100 > 1000
-        assert!(should_predict_compact(600, 1000, &tracker, 500));
-        // baseline=100, current=800, predicted=900 < 1000
-        assert!(!should_predict_compact(800, 1000, &tracker, 100));
+        // 无历史 → baseline=500, current=600, fixed=0, predicted=1100 > 1000
+        assert!(should_predict_compact(600, 1000, 0, &tracker, 500));
+        // baseline=100, current=800, fixed=0, predicted=900 < 1000
+        assert!(!should_predict_compact(800, 1000, 0, &tracker, 100));
+    }
+
+    #[test]
+    fn should_predict_accounts_for_fixed_overhead() {
+        // CTX-R6-8：固定开销计入预测——reactive 判据（effective_tokens）同口径。
+        let mut tracker = PredictiveTracker::new();
+        tracker.record_turn(100);
+        tracker.record_turn(200);
+        // current=200, growth=100, fixed=800 → predicted=1100 > 1000
+        assert!(should_predict_compact(200, 1000, 800, &tracker, 15000));
+        // 无固定开销 → predicted=300 < 1000
+        assert!(!should_predict_compact(200, 1000, 0, &tracker, 15000));
     }
 
     #[test]
