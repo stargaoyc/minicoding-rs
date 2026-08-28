@@ -20,7 +20,7 @@ import {
   useSwitchWorkspace,
 } from "../../hooks/useWorkspace";
 import { useUIStore } from "../../stores/ui";
-import { cn } from "../../lib/utils";
+import { cn, displayPath } from "../../lib/utils";
 import type { WorkspaceListEntry, WorkspaceFileChange } from "../../api/generated";
 
 /**
@@ -103,9 +103,9 @@ function WorkspaceBody({ sessionId }: { sessionId: string }) {
         <div className="flex items-center gap-1 px-1">
           <span
             className="flex-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]"
-            title={root.path}
+            title={displayPath(root.path)}
           >
-            {root.path}
+            {displayPath(root.path)}
           </span>
           <Button
             variant="ghost"
@@ -390,7 +390,8 @@ function ChangeBadge({ kind }: { kind: string }) {
 }
 
 function fileShortName(c: WorkspaceFileChange): string {
-  const path = c.kind === "deleted" || c.kind === "created" ? c.path : c.path;
+  // 显示层清理：Windows `\\?\` 前缀 + 反斜杠 → 取最后一段
+  const path = displayPath(c.path);
   return path.split("/").pop() ?? path;
 }
 

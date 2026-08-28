@@ -14,3 +14,21 @@ afterEach(() => {
   cleanup();
 });
 afterAll(() => server.close());
+
+// jsdom 不实现 `window.matchMedia`——`stores/ui.ts` 初始化主题时调用
+//（`useChat.test.tsx` 引入 useUIStore 触发），需显式 stub。
+if (typeof window !== "undefined" && !window.matchMedia) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+}

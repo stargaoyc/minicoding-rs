@@ -1,7 +1,17 @@
 import { create } from "zustand";
 
+import type { PermissionMode } from "../api/generated";
+
 /** 主题类型（W-05 暗色/亮色切换）。 */
 type Theme = "dark" | "light";
+
+/** 权限模式选项（4 个常用模式，与 NewSessionDialog 对齐）。 */
+export const PERMISSION_MODE_OPTIONS: { key: PermissionMode; label: string }[] = [
+  { key: "default", label: "默认" },
+  { key: "accept_edits", label: "编辑自动" },
+  { key: "plan", label: "规划" },
+  { key: "bypass_permissions", label: "全自动" },
+];
 
 /** UI 全局状态（客户端状态，不进 TanStack Query，见 AGENTS.md §8.5）。 */
 interface UIState {
@@ -19,6 +29,8 @@ interface UIState {
   previewPath: string | null;
   /** 预览面板是否展开。 */
   previewOpen: boolean;
+  /** 当前会话的权限模式（由 SSE `permission_mode_changed` 更新，默认 default）。 */
+  permissionMode: PermissionMode;
   setActiveSession: (id: string | null) => void;
   toggleTaskPanel: () => void;
   toggleSidebar: () => void;
@@ -26,6 +38,7 @@ interface UIState {
   setTheme: (theme: Theme) => void;
   setSettingsOpen: (open: boolean) => void;
   setPreview: (path: string | null, open?: boolean) => void;
+  setPermissionMode: (mode: PermissionMode) => void;
 }
 
 /** 从 localStorage 读取初始主题（默认暗色）。 */
@@ -53,11 +66,13 @@ export const useUIStore = create<UIState>((set) => ({
   settingsOpen: false,
   previewPath: null,
   previewOpen: false,
+  permissionMode: "default",
   setActiveSession: (id) => set({ activeSessionId: id }),
   toggleTaskPanel: () => set((s) => ({ taskPanelOpen: !s.taskPanelOpen })),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setPreview: (path, open) => set(() => ({ previewPath: path, previewOpen: open ?? path != null })),
+  setPermissionMode: (mode) => set({ permissionMode: mode }),
   setTheme: (theme) => {
     applyTheme(theme);
     if (typeof window !== "undefined") {
