@@ -105,6 +105,8 @@ crossterm = "0.29"
 # seccomp 系统调用过滤（仅 minicoding-sandbox 引入，feature gate `seccomp`；
 # 链接系统 libseccomp C 库，默认不开避免 CI/发行版需要头文件）
 libseccomp = "0.4"
+# Unix 系统编程（SEC-15：Hook 超时 `killpg` 杀进程组；minicoding-sandbox 也使用）
+libc = "0.2"
 
 # 文件与代码处理（见 tech-stack.md §5）
 globset = "0.4"

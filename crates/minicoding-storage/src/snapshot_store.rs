@@ -29,12 +29,28 @@ impl JsonlSnapshotStore {
         self.base_dir.join(format!("{session}.snapshot.json"))
     }
 
+    /// 唯一 tmp 路径（ST-3，2026-08-28 R5 收尾）：固定 `{session}.snapshot.json.tmp`
+    /// 跨进程并发写会互相截断/rename 交错（A 写一半 B truncate，A rename 把 B 的
+    /// 半写文件搬走）。加 pid + 单调计数使每个写者用独立 tmp 文件，rename 仍是
+    /// 同文件系统原子操作。
+    fn tmp_path(&self, session: &SessionId) -> Utf8PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.base_dir.join(format!(
+            "{session}.snapshot.json.tmp-{}-{n}",
+            std::process::id()
+        ))
+    }
+
     /// 同步加载 snapshot（`--replay` 启动期用，与 `JsonlStorage::load_messages_sync`
     /// 同语义）。
     ///
+    /// ST-3（2026-08-28 R5 收尾）：Corrupted 不再向上抛 `RuntimeError::Storage`
+    /// 阻断启动——snapshot 只是恢复加速缓存（消息主数据在 `.jsonl` 事件流），
+    /// 损坏时回退 `None` 走事件重放（warn 记录），与"缓存可重建"语义一致。
+    ///
     /// # Errors
-    /// - `StorageError::Io`：读取失败（除 `NotFound`）；
-    /// - `StorageError::Corrupted`：JSON 解析失败。
+    /// - `StorageError::Io`：读取失败（除 `NotFound`）。
     pub fn load_sync(&self, session: &SessionId) -> Result<Option<SessionSnapshot>, StorageError> {
         let path = self.snapshot_path(session);
         let content = match std::fs::read_to_string(path.as_std_path()) {
@@ -42,9 +58,17 @@ impl JsonlSnapshotStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let snapshot: SessionSnapshot = serde_json::from_str(&content)
-            .map_err(|e| StorageError::Corrupted(format!("snapshot: {e}")))?;
-        Ok(Some(snapshot))
+        match serde_json::from_str::<SessionSnapshot>(&content) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(e) => {
+                tracing::warn!(
+                    session = %session,
+                    error = %e,
+                    "snapshot 损坏，回退 None（事件重放兜底）"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// 同步保存 snapshot（覆盖旧）。
@@ -54,7 +78,7 @@ impl JsonlSnapshotStore {
     /// - `StorageError::Serialize`：序列化失败。
     pub fn save_sync(&self, snapshot: &SessionSnapshot) -> Result<(), StorageError> {
         let path = self.snapshot_path(&snapshot.session_id);
-        let tmp: Utf8PathBuf = path.with_extension("json.tmp");
+        let tmp: Utf8PathBuf = self.tmp_path(&snapshot.session_id);
         let json = serde_json::to_string_pretty(snapshot)
             .map_err(|e| StorageError::Serialize(e.to_string()))?;
         {
@@ -108,7 +132,7 @@ impl SnapshotStore for JsonlSnapshotStore {
         Box::pin(async move {
             // 异步路径：直接 tokio::fs 写入，原子 rename 保证崩溃安全。
             let path = self.snapshot_path(&snapshot.session_id);
-            let tmp: Utf8PathBuf = path.with_extension("json.tmp");
+            let tmp: Utf8PathBuf = self.tmp_path(&snapshot.session_id);
             let json = serde_json::to_string_pretty(&snapshot)
                 .map_err(|e| StorageError::Serialize(e.to_string()))?;
             let mut aopts = tokio::fs::OpenOptions::new();
@@ -120,6 +144,10 @@ impl SnapshotStore for JsonlSnapshotStore {
             file.sync_all().await?;
             drop(file);
             tokio::fs::rename(&tmp, &path).await?;
+            // ST-3：父目录 fsync 补齐（async 路径此前遗漏，sync 路径已有）
+            if let Some(parent) = path.parent() {
+                let _ = tokio::fs::File::open(parent).await?.sync_all().await;
+            }
             Ok(())
         })
     }
@@ -209,14 +237,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupted_snapshot_returns_error() {
+    async fn corrupted_snapshot_degrades_to_none() {
+        // ST-3（2026-08-28 R5 收尾）：损坏的 snapshot 不再抛 Corrupted 阻断启动，
+        // 回退 None 走事件重放兜底（warn 记录）。
         let dir = tempdir().unwrap();
         let st = storage(&dir);
         let id = "01CORRUPT".to_string();
         let path = st.snapshot_path(&id);
         tokio::fs::write(&path, "not-json").await.unwrap();
         let result = st.load(&id).await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Ok(None)),
+            "损坏 snapshot 应回退 None，实际 {result:?}"
+        );
+    }
+
+    #[test]
+    fn corrupted_snapshot_sync_degrades_to_none() {
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01CORRUPTSYNC".to_string();
+        let path = st.snapshot_path(&id);
+        std::fs::write(path.as_std_path(), "not-json").unwrap();
+        let result = st.load_sync(&id);
+        assert!(matches!(result, Ok(None)));
     }
 
     #[test]

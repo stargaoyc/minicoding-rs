@@ -125,6 +125,37 @@ impl Hook for ScriptHook {
 }
 
 /// 执行 `ScriptHook` 子进程（核心实现）。
+/// SEC-15（2026-08-28 R5 收尾）：为子进程创建新进程组（Unix pgid）。
+///
+/// 超时时 `kill_on_drop` 只杀直接子进程，子进程启动的孙进程（如 `make`
+/// 衍生的编译进程）成为孤儿继续运行。`process_group(0)` 让子进程成为新
+/// 进程组 leader（PID=PGID），超时分支 [`kill_process_group`] 杀整个组。
+/// 非 Unix 平台跳过（Windows Job Object 已处理进程树）。
+#[cfg(unix)]
+fn setup_process_group(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+#[cfg(not(unix))]
+fn setup_process_group(_command: &mut tokio::process::Command) {}
+
+/// SEC-15：`killpg` 杀整个进程组（含孙进程），避免超时后孤儿进程残留。
+#[cfg(unix)]
+fn kill_process_group(pid: u32, hook_name: &str) {
+    // SAFETY: killpg 是标准 POSIX 信号原语；负 pid 指向进程组。
+    // 进程组由 `setup_process_group` 创建（pgid = 子进程 pid）。
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+    tracing::debug!(
+        hook = %hook_name,
+        pid,
+        "hook 超时：已 killpg 清理整个进程组（含孙进程）"
+    );
+}
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32, _hook_name: &str) {}
+
 async fn run_script_hook(
     name: &str,
     command_template: &str,
@@ -176,6 +207,8 @@ async fn run_script_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // SEC-15（2026-08-28 R5 收尾）：新进程组 + 超时 killpg（见 helper）。
+    setup_process_group(&mut command);
     for env_name in ENV_WHITELIST {
         if let Ok(value) = std::env::var(env_name) {
             command.env(env_name, value);
@@ -209,6 +242,9 @@ async fn run_script_hook(
     });
 
     // 6. 等待子进程退出（带超时）。`wait_with_output` 并发读 stdout/stderr 到 EOF。
+    //    先取 PID：超时分支需 `killpg(-pid)` 杀整个进程组（SEC-15）。
+    #[cfg(unix)]
+    let child_pid = child.id();
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
@@ -219,7 +255,14 @@ async fn run_script_hook(
             )));
         }
         Err(_) => {
-            // 超时：`child` 被 drop（`wait_with_output` future drop）→ `kill_on_drop` 杀进程。
+            // 超时：`child` 被 drop（`wait_with_output` future drop）→ `kill_on_drop`
+            // 杀直接子进程；孙进程（进程组内）由 `kill_process_group` 一并清理
+            // （SEC-15，此前仅 kill_on_drop 杀直接子进程，`make` 等派生的孙进程
+            // 成孤儿）。
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                kill_process_group(pid, name);
+            }
             let _ = stdin_task.await;
             return Err(HookError::Timeout {
                 name: name.to_string(),

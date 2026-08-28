@@ -18,6 +18,10 @@ thiserror = { workspace = true }
 # 审计记录时间戳（SEC-17：Hook 协议违规记 audit.log 需 ts 字段）
 time = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# SEC-15（2026-08-28 R5 收尾）：超时杀孙进程——`killpg` 杀整个进程组
+libc = { workspace = true }
+
 [dev-dependencies]
 # A8 架构守卫：复用 core 的 manifest 断言
 minicoding-core = { workspace = true, features = ["test-util"] }

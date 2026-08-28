@@ -297,14 +297,38 @@ impl JsonlStorage {
         })
     }
 
+    /// 跨进程安全的 index 修改（ST-2，2026-08-28 R5 收尾）。
+    ///
+    /// 此前 `update_index_on_append`/`remove_from_index`/`update_summary_sync`
+    /// 都是"缓存内修改 → `save`（tmp+rename）"，无跨进程锁——双进程不同会话
+    /// 同时写 `index.json` 时 last-rename-wins 静默丢条目。本方法在
+    /// `{base_dir}/index.lock`（阻塞式排他锁）内执行：**重新从磁盘加载**（拿到
+    /// 其他进程最新写入）→ 应用修改 → 落盘 → 更新内存缓存。`index.lock` 与
+    /// 会话锁同目录，随 `delete` 清理。
+    ///
+    /// `f` 接收可变的 `SessionIndex`，返回 `T`。锁经 `SessionLock` RAII 释放。
+    ///
+    /// # Errors
+    /// 加锁失败 / 磁盘加载 / 落盘失败时返回 `StorageError`。
+    fn mutate_index<T>(&self, f: impl FnOnce(&mut SessionIndex) -> T) -> Result<T, StorageError> {
+        use crate::lock::SessionLock;
+        // 阻塞式跨进程锁（热路径低竞争：index 更新仅在消息追加/删除/摘要变更时）。
+        let lock = SessionLock::acquire_blocking(self.base_dir.join("index.lock"))?;
+        // 锁内重新从磁盘加载——合并其他进程的最新写入，避免 last-rename-wins。
+        let mut index = SessionIndex::load(&self.index_path()).unwrap_or_default();
+        let out = f(&mut index);
+        index.save(&self.index_path())?;
+        // 更新内存缓存（读路径走缓存，保持一致性）。
+        let mut guard = self.lock_index();
+        *guard = Some(index);
+        drop(guard);
+        drop(lock);
+        Ok(out)
+    }
+
     /// 追加消息后更新索引（best effort）。失败仅记日志，不影响主路径。
     fn update_index_on_append(&self, session_id: &str, msg: &Message) {
-        let result = (|| -> Result<(), StorageError> {
-            let mut guard = self.lock_index();
-            if guard.is_none() {
-                let idx = SessionIndex::load(&self.index_path())?;
-                *guard = Some(idx);
-            }
+        let result = self.mutate_index(|idx| {
             let now = OffsetDateTime::now_utc();
             let summary = if matches!(msg.role, Role::User) {
                 let text = msg.text();
@@ -316,15 +340,8 @@ impl JsonlStorage {
             } else {
                 None
             };
-            let Some(idx) = guard.as_mut() else {
-                return Ok(());
-            };
             idx.upsert_on_append(session_id, summary, now);
-            let idx = idx.clone();
-            drop(guard);
-            idx.save(&self.index_path())?;
-            Ok(())
-        })();
+        });
         if let Err(e) = result {
             tracing::warn!("failed to update session index on append: {e}");
         }
@@ -332,21 +349,9 @@ impl JsonlStorage {
 
     /// 删除会话后从索引移除（best effort）。
     fn remove_from_index(&self, session_id: &str) {
-        let result = (|| -> Result<(), StorageError> {
-            let mut guard = self.lock_index();
-            if guard.is_none() {
-                let idx = SessionIndex::load(&self.index_path())?;
-                *guard = Some(idx);
-            }
-            let Some(idx) = guard.as_mut() else {
-                return Ok(());
-            };
+        let result = self.mutate_index(|idx| {
             idx.remove(session_id);
-            let idx = idx.clone();
-            drop(guard);
-            idx.save(&self.index_path())?;
-            Ok(())
-        })();
+        });
         if let Err(e) = result {
             tracing::warn!("failed to remove session from index: {e}");
         }
@@ -364,27 +369,18 @@ impl JsonlStorage {
         session_id: &SessionId,
         summary: &str,
     ) -> Result<(), StorageError> {
-        let mut guard = self.lock_index();
-        if guard.is_none() {
-            let idx = SessionIndex::load(&self.index_path())?;
-            *guard = Some(idx);
-        }
-        let Some(idx) = guard.as_mut() else {
-            return Ok(());
-        };
-        // 会话不在索引中：静默忽略（best effort）
-        if idx.get(session_id.as_str()).is_none() {
-            tracing::warn!(
-                session = %session_id,
-                "update_summary: session not in index, skipping (call append first)"
-            );
-            return Ok(());
-        }
-        idx.update_summary(session_id.as_str(), summary.to_string());
-        let idx = idx.clone();
-        drop(guard);
-        idx.save(&self.index_path())?;
-        Ok(())
+        // ST-2：跨进程锁内 load-modify-save（复用 mutate_index）。
+        self.mutate_index(|idx| {
+            // 会话不在索引中：静默忽略（best effort）
+            if idx.get(session_id.as_str()).is_none() {
+                tracing::warn!(
+                    session = %session_id,
+                    "update_summary: session not in index, skipping (call append first)"
+                );
+                return;
+            }
+            idx.update_summary(session_id.as_str(), summary.to_string());
+        })
     }
 
     /// 从目录扫描构建索引（索引文件不存在时的回退路径）。
