@@ -289,12 +289,19 @@ pub async fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SessionInfo> {
 
     // 保存 child 句柄到 managed state：`CommandChild` 无 Drop 清理，退出时
     // 由 `RunEvent::Exit` → `kill_sidecar` 显式终止（防孤儿进程）。
+    // FE-6（2026-08-28 R5 收尾）：覆盖前如果已有旧 child，先 kill（旧 sidecar
+    // 含独立 token 的 HTTP server 成孤儿进程）。
     {
         let state = app.state::<SidecarProcess>();
-        *state
+        let mut guard = state
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(old) = guard.take() {
+            log::info!("检测到旧 sidecar 进程，正在终止...");
+            let _ = old.kill();
+        }
+        *guard = Some(child);
     }
 
     let port = tokio::time::timeout(SIDECAR_TIMEOUT, async {

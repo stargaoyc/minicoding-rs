@@ -19,7 +19,8 @@
 //!
 //! ## seq 语义
 //!
-//! - 流式事件（`SendUserMessage` 期间）：`seq` 单调递增（1, 2, 3, ...），客户端用于检测丢失；
+//! - 流式事件（`SendUserMessage` 期间）：`seq` 来自会话级 cursor（`subscribe_sequenced`），
+//!   与 SSE/ACP/LSP 共享同一 seq 空间——跨协议切换/重连游标一致（FE-9，2026-08-28 R5）；
 //! - 非流式响应（`SessionCreated`/`SessionsListed`/...）：`seq=0`（非流式事件，不参与 cursor）；
 //! - `CommandError`：`seq=0`。
 //!
@@ -484,9 +485,12 @@ async fn handle_send_user_message(
         .await
         .map_err(|_| NdjsonError::SessionNotFound(session_id.clone()))?;
 
-    // 先订阅 EventBus，避免 spawn turn task 后错过早期事件
-    let runtime = session.runtime.clone();
-    let mut rx = runtime.events().subscribe();
+    // 先订阅带 seq 的会话级事件流（FE-9，2026-08-28 R5 收尾）：此前 NDJSON
+    // 自造每 turn seq=1..n，与 SSE/ACP/LSP 的会话级 cursor seq 空间不一致——
+    // 跨协议切换/重连破坏游标语义。改走 `subscribe_sequenced`（seq 由会话
+    // 常驻 sequencer 单一分配），与其余协议对齐。避免 spawn turn task 后错过
+    // 早期事件（先订阅后 spawn）。
+    let mut rx = session.subscribe_sequenced();
 
     // 后台 task 执行 send_message_boxed（持有 turn_lock，串行化）
     let mgr_clone = mgr.clone();
@@ -499,15 +503,13 @@ async fn handle_send_user_message(
     // 转发事件，直到 turn_task 完成；turn 期间继续消费 stdin 命令
     // （`ResolvePermission` 唤醒权限等待、`Cancel` 中断 turn），
     // 否则客户端无法在 turn 进行中应答权限（死锁）。
-    let mut seq: u64 = 0;
     loop {
         tokio::select! {
             biased;
             turn_result = &mut turn_task => {
                 // turn_task 完成：drain 剩余事件（TurnEnd 通常在 turn_task 返回前已发出）
-                while let Ok(event) = rx.try_recv() {
-                    seq += 1;
-                    write_event(stdout, seq, &EventKind::from(&event)).await?;
+                while let Ok((seq, kind)) = rx.try_recv() {
+                    write_event(stdout, seq, &kind).await?;
                 }
                 // 根据 turn 结果发最终事件
                 match turn_result {
@@ -544,9 +546,8 @@ async fn handle_send_user_message(
             }
             event_result = rx.recv() => {
                 match event_result {
-                    Ok(event) => {
-                        seq += 1;
-                        write_event(stdout, seq, &EventKind::from(&event)).await?;
+                    Ok((seq, kind)) => {
+                        write_event(stdout, seq, &kind).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // 消费慢导致丢事件——E-14（2026-08-26 R3 审查落地）：

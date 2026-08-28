@@ -101,6 +101,10 @@ struct MinicodingLspServer {
     prompter: LspPrompter,
     /// 当前会话（LSP 端通常单会话，惰性创建）。
     session: TokioMutex<Option<Arc<ServerSession>>>,
+    /// turn 互斥（FE-7，2026-08-28 R5 收尾）：并发 `executeCommand` 各自订阅
+    /// 全会话事件转发会产出双份 token/进度通知。串行化 turn 执行（LSP 一次
+    /// 一个 code action 是标准语义），避免重复订阅。
+    turn_gate: TokioMutex<()>,
 }
 
 impl MinicodingLspServer {
@@ -111,6 +115,7 @@ impl MinicodingLspServer {
             mgr,
             prompter,
             session: TokioMutex::new(None),
+            turn_gate: TokioMutex::new(()),
         }
     }
 
@@ -150,6 +155,9 @@ impl MinicodingLspServer {
     /// # Errors
     /// turn 执行失败、session 不存在、task panic 时返回错误描述。
     async fn run_turn(&self, text: String) -> Result<(), String> {
+        // FE-7：turn 互斥——并发 executeCommand 若各自订阅全会话事件会双份转发
+        // token/进度；串行化后单订阅者单转发（锁在 turn 期间持有）。
+        let _gate = self.turn_gate.lock().await;
         let session = self.get_or_create_session().await?;
         let session_id = session.session_id().clone();
 
