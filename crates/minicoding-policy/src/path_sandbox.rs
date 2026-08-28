@@ -34,6 +34,14 @@ pub enum PathSandboxError {
 ///
 /// 这是文件副作用执行前的第一道防线（C-03），应在任何文件 IO 之前调用。
 ///
+/// # TOCTOU 边界（SEC-13，2026-08-28 R5 收尾）
+///
+/// 本函数是 check-then-use 语义：规范化校验通过后，到实际文件 IO 之间存在
+/// 竞态窗口（恶意进程可在此期间替换路径/symlink）。Linux/macOS 有 OS 沙箱
+/// （landlock/Seatbelt）在**使用**时二次强制 C-03；**Windows 无 OS 兜底**——
+/// Job Object 不做文件系统隔离，此窗口是 Windows 上唯一防线，风险如实披露
+/// （见 `security.md` §12.4）。
+///
 /// # Errors
 ///
 /// - [`PathSandboxError::NotFound`]：`workdir` 不存在或不可规范化，或输入路径

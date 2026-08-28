@@ -801,6 +801,16 @@ Windows 沙箱实现成熟度低于 macOS/Linux（与 Codex 一致）。初期�
 | M4+ | 受限令牌 + DACL（如上表） |
 | 长期 | 评估 AppContainer / Windows Sandbox API 集成 |
 
+**诚实边界（SEC-9/SEC-10，2026-08-28 R5 收尾）**：
+
+- **仅进程级遏制**：Job Object 只约束进程生命周期 + UI 限制，**无文件系统/网络/内存
+  限制**——沙箱化 `shell.run` 子进程可写任意路径（builtin 黑名单注释自认
+  `cargo build > ~/.ssh/authorized_keys` 在 Windows 上真实发生）。`is_hardened()=false`
+  如实上报，应用层路径沙箱（C-03）是 Windows 上主要防线，TOCTOU 窗口无 OS 兜底（SEC-13）；
+- **并发 spawn 竞态残留**：`apply`→`post_spawn` 的策略关联经 FIFO 队列按序消费，交错
+  场景下最坏为"A 拿到 B 的策略"而非裸奔；彻底消除需扩展 `SandboxDriver` trait
+  关联句柄（列入 roadmap）。
+
 `doctor --security` 在 Windows 上如实报告 `SandboxDriver::is_hardened()` 状态，降级时打 `warn` 并建议 WSL2。
 
 ---
