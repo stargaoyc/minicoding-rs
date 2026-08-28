@@ -288,7 +288,25 @@ async fn dispatch_command(
 ) -> Result<(), NdjsonError> {
     match cmd {
         Command::CreateSession { config } => {
-            let params = build_params_from_config(mgr.default_params(), config);
+            // FE-12/13（2026-08-28 R5 收尾）：与 HTTP 路径对齐——CreateSession
+            // 预校验 workdir 存在 + 规范化（canonicalize），否则相对路径隐式绑定
+            // server CWD、目录不存在首个 turn 才报错。
+            let mut params = build_params_from_config(mgr.default_params(), config);
+            if !params.workdir.as_str().trim().is_empty() {
+                let canonical =
+                    std::fs::canonicalize(params.workdir.as_std_path()).map_err(|e| {
+                        NdjsonError::Session(SessionManagerError::BuildFailed(format!(
+                            "工作目录不存在或不可访问：{}（{e}）",
+                            params.workdir
+                        )))
+                    })?;
+                params.workdir = camino::Utf8PathBuf::from_path_buf(canonical).map_err(|_| {
+                    NdjsonError::Session(SessionManagerError::BuildFailed(format!(
+                        "工作目录非 UTF-8：{}",
+                        params.workdir
+                    )))
+                })?;
+            }
             let session = mgr.create_session(Some(params))?;
             let session_id = session.session_id().clone();
             write_event(

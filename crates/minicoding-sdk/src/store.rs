@@ -45,7 +45,10 @@ impl Storage for InMemoryStorage {
         let session = session.clone();
         let msg = msg.clone();
         Box::pin(async move {
-            let mut guard = self.sessions.lock().expect("mutex poisoned");
+            let mut guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.entry(session).or_default().push(msg);
             Ok(())
         })
@@ -54,7 +57,10 @@ impl Storage for InMemoryStorage {
     fn load(&self, session: &SessionId) -> BoxFuture<'_, Result<Vec<Message>, StorageError>> {
         let session = session.clone();
         Box::pin(async move {
-            let guard = self.sessions.lock().expect("mutex poisoned");
+            let guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .get(&session)
                 .cloned()
@@ -64,7 +70,10 @@ impl Storage for InMemoryStorage {
 
     fn list_sessions(&self) -> BoxFuture<'_, Result<Vec<SessionListItem>, StorageError>> {
         Box::pin(async move {
-            let guard = self.sessions.lock().expect("mutex poisoned");
+            let guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let metas = guard
                 .iter()
                 .map(|(id, msgs)| {
@@ -90,7 +99,10 @@ impl Storage for InMemoryStorage {
     fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
         let session = session.clone();
         Box::pin(async move {
-            let mut guard = self.sessions.lock().expect("mutex poisoned");
+            let mut guard = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.remove(&session);
             Ok(())
         })
