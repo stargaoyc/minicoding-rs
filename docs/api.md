@@ -144,6 +144,14 @@ pub enum SandboxPolicy {
     /// 完全访问：无限制（仅 full-access 预设，需显式确认）。
     DangerFullAccess,
 }
+```
+
+`WorkspaceWrite` 内嵌的 `workdir` 决定 OS 层沙箱对子进程的可写根。会话创建/
+恢复/工作区切换覆盖 workdir 时，必须同步重锚定策略——`SandboxPolicy::with_workdir`
+返回按新 workdir 重建的 `WorkspaceWrite`（保留 `writable` 列表，其余形态原样
+返回）。这是 server 多目录会话与 `workspace.switch` 的 OS 沙箱一致性保证
+（FE-R6-1，2026-08-28 R6 审查；此前默认策略内嵌服务端 workdir，自定义目录
+会话 landlock/Seatbelt 可写根与应用层 C-03 失配）。
 
 /// 审批模式（决定"何时需要人工确认"，见 security.md §2.6）。
 pub enum ApprovalMode {

@@ -619,13 +619,16 @@ CI 与发行包构建的零外部依赖承诺。开启后同一 `pre_exec` 胶�
 生效集经 `tracing::info` 打印（可观测、可审计）。
 
 - 凭证目录（`.ssh`/`.aws`/`.gnupg`）不在白名单内，**不可读**——刻意不含 `$HOME` 本身；
-- **诚实边界（SEC-11，2026-08-28 R5 收尾）**：白名单内 `~/.config`（gh/gcloud 凭证落点）、
-  `~/.cargo`（crates.io `credentials` 令牌）等**仍属低概率凭证通道**——"凭证目录不可读"
-  是强声明，实际为"`$HOME` 不整体放行 + 高概率凭证目录不在白名单"。macOS Seatbelt
-  侧以 profile 尾部显式 deny 覆盖白名单内高危落点（`credential_dir_deny_paths`）；
-  Linux landlock 侧依赖 ABI 5+ deny 规则优先级（当前 landlock crate 版本未暴露，
-  残留通道由应用层 `fs.read` 敏感文件清单兜底，见 `minicoding-tools` fs::read
-  `SENSITIVE_FILE_NAMES`）；
+- **诚实边界（SEC-11，2026-08-28 R5 收尾 + SEC-R6-2，2026-08-28 R6 修复）**：
+  白名单内 `~/.config`（gh/gcloud 凭证落点）、`~/.cargo`（crates.io `credentials`
+  令牌）等曾是凭证通道——macOS Seatbelt 侧以 profile 尾部显式 deny 覆盖
+  （`credential_dir_deny_paths`）；Linux landlock 侧此前注释声称"依赖 ABI 5+
+  deny 规则"，但 landlock crate 0.4.x 未暴露 deny 规则、`linux.rs` 亦未添加
+  （声明-实现裂缝）。R6 修复：`home_read_allow_paths_without_credentials` 把
+  含凭证落点的顶层目录**展开为安全直接子项**（递归下钻排除 `~/.config/gh`、
+  `~/.config/gcloud`、`~/.cargo/credentials`），landlock `path_beneath` 不再
+  覆盖凭证路径；应用层 `fs.read` 敏感文件清单（`minicoding-tools` fs::read
+  `SENSITIVE_FILE_NAMES`）仍为第二道兜底；
 - 代价是白名单外的私有工具链在沙箱内不可见，此类场景走 `external-sandbox`
   兜底（声明依赖外层隔离，§8.1）；macOS Seatbelt 同款白名单 + 尾部 deny。
 

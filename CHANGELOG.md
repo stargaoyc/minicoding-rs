@@ -4,6 +4,101 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [unreleased]
+
+> 自 v0.3.6（2026-08-27）以来 27 个 commit：R5 遗留修复收尾（五批）+ R6
+> 全面审查（`docs/project-review-20260828-r6.md`）修复。R6 主题：**修复自身
+> 引入的回归**（read_tail_line 8KiB 截断）、**同类漏洞只堵一个维度**（@import
+> `..` 修了 symlink 还在、macOS 凭证目录修了 Linux 还在）与**声明未生效**
+> （NDJSON take 截断、durable recovery 死代码）。
+
+### Security
+
+- **memory：`@import` symlink 逃逸（P0，SEC-R6-1）**——R5 的 SEC-1 修复只堵了
+  `..` 词法逃逸；`resolve_lexical` 明确"不解 symlink"，仓库内符号链接指向
+  外部文件时词法判定通过、读取跟随链接落在外部（克隆恶意仓库即中招，任意
+  文件读取外发）。读取前 `canonicalize` 消解 symlink 二次包含判定 + 回归测试；
+  另补 `@import` 总数上限（MAX_IMPORTS=64，防恶意仓库灌爆 I/O 与上下文）
+- **sandbox：Linux landlock 凭证目录可读（P0，SEC-R6-2）**——`credential_dir_deny_paths`
+  仅 macOS Seatbelt 消费，Linux 侧 `~/.config` 白名单连带放行 `~/.config/gh`、
+  `~/.cargo/credentials` 等活凭证。新增 `home_read_allow_paths_without_credentials`
+  展开白名单排除凭证子路径（landlock crate 0.4.x 无 deny 规则）+ 回归测试
+- **policy：`shell.background` 绕过命令黑名单（P1，SEC-R6-4）**——后台执行
+  `rm AGENTS.md` 等此前不经 `shell_hits_blacklist`（C-02 旁路）；现与
+  `shell.run` 共享黑名单 + 回归测试
+- **policy：Unicode Cf 类格式字符绕过指令检测（P2，SEC-R6-7）**——此前仅剥离
+  5 个硬编码零宽字符，`\u{2060}` WORD JOINER 等约 160 个 Cf 类成员可插入
+  指令词绕过祈使检测（C-27 降级通道被架空）；改为类别级完整剥离 + 回归测试
+- **policy：redact URL userinfo 密码含 `@`/`/` 脱敏不全（P2，SEC-R6-6）**——
+  密码字符集放宽到回溯最后一个 `@`，整段 userinfo 一并脱敏 + 回归测试
+- **policy：凭证前缀脱敏（P2，TL-R6-8）**——`sk-`/`ghp_`/`github_pat_`/`xoxb-`
+  前缀并入 `policy::redact`（shell.background/output 路径此前漏检）+ 回归测试
+- **mcp：`mcp_choices.toml` 0644 窗口（P2，SEC-R6-8）**——`mode(0o600)` 从
+  创建起生效（消除 rename/chmod 窗口）+ 父目录 fsync
+
+### Fixed
+
+- **storage：`read_tail_line` 8KiB 尾部窗口截断回归（P1，ST-R6-1）**——R5
+  ST-9 修复引入：事件文件最后一行 > 8KiB（MessageAppended 持久化大工具结果）
+  时窗口从行中部开始 → 非法 JSON → append 恒失败（事件流冻结）+ `--resume`/
+  `--replay` 不可恢复。改为向前回退寻行首取完整末行 + 回归测试
+- **server：自定义 workdir 会话 OS 沙箱策略失配（P1，FE-R6-1）**——默认
+  `WorkspaceWrite` 内嵌服务端 workdir，自定义目录会话 landlock/Seatbelt 可写根
+  与应用层 C-03 失配（shell.run 写文件被内核拒绝 + C-30 误熔断）。
+  新增 `SandboxPolicy::with_workdir` 重锚定，create/restore/NDJSON/ACP 接入
+- **server：turn 收尾事件竞态（P1，FE-R6-2）**——`TurnEnd` 经 EventBus→sequencer
+  两跳才到订阅端，一次性 `try_recv` 会漏掉仍在途中的尾事件（NDJSON 客户端
+  挂起）。新增 `drain_turn_tail` 短超时排空，LSP/ACP/NDJSON 接入
+- **server：FE-8 防护声明未生效（P1，FE-R6-4）**——NDJSON 注释声称 `take(MAX+1)`
+  截断但实现是 `read_line` 全量缓冲（OOM 防护实际不存在）、ACP header 行无上限。
+  新增 `bounded_io::read_line_bounded` 逐块累积真实截断，两者共用 + 边界测试
+- **server：durable recovery 死代码（P1，FE-R6-3）**——`EventCursor.durable_seq`
+  生产代码零调用，长会话断线重连退化为全量重拉；`push_event` 同步
+  `runtime.durable_seq()` 激活 EventStore 重放路径
+- **providers：OpenAI reasoning_tokens 未解析（P1，PT-R6-1）**——o1/o3/o4
+  推理 token 不计入 output，token 统计低估 30-80% 影响压缩判定；折叠进
+  `output_tokens`（计费口径）+ 回归测试
+- **providers：refusal + content_filter 双 Stop（P2，PT-R6-4）**——同 chunk
+  只推一个 Filtered Stop，消费端不错过 Usage delta + 回归测试
+- **tools：git.diff 越界路径漏检（P1，TL-R6-2）**——patch 的 `diff --git`
+  行此前未校验（git 以该行为准），`../` 越界可绕过 `---`/`+++` 校验；现校验
+  两侧目标 + 回归测试
+- **tools：web.fetch 重定向 scheme 大小写敏感（P1，TL-R6-1）**——`HTTPS://`
+  被误判相对路径；RFC 7230 scheme 大小写不敏感 + 回归测试
+- **context：post_compact symlink TOCTOU（P1，CTX-R6-1）**——读取前
+  canonicalize 二次包含判定（与 @import 同口径）+ 回归测试
+- **context：append token 缓存锁外竞态（P2，CTX-R6-2）**——增量更新移入写锁
+  与 push 原子化，compress 的 store 不再吞掉新消息增量
+- **context：启发式会话摘要无上限（P2，CTX-R6-3）**——总字节上限 8KiB +
+  截断标注（长会话此前可产出数百 KB 摘要写入 index.json）
+- **context：restore 重置 append_seq（P2，CTX-R6-4）**——/clear 后压缩追溯
+  区间 seq 锚点失准；L2 摘要排除 pinned（CTX-R6-5，与 L3/L4 语义一致）；
+  `is_sticky` 实现（error tool_result ×1.5 权重保护此前恒 false）
+- **context：`budget_ratio` 接线 + `backup` 死字段移除（P3，CTX-R6-7）**——
+  `TokenBudget.ratio` 可配置（此前硬编码 0.85）；移除 `CompressResult.backup`
+  与 `backup_before_compress` 配置（write-only 从未读取）
+- **tools：task.spawn 子代理摘要截断（P2，TL-R6-3）**；**fs.glob Windows 分隔符**
+  （P2，TL-R6-4）；**fs.write/edit/multiedit 原子写**（P2，TL-R6-5，tmp+rename
+  崩溃不截断）；**ToolRegistry 同名重复注册告警**（P2，ARCH-R6-5）
+- **storage：同步路径旁路补齐**——扫描回退经 mutate_index 落盘（ST-R6-2，
+  消除 last-rename-wins 丢条目）、`delete_session_sync` 取会话锁（ST-R6-3）、
+  `list_sessions_sync` 跳过 `.events.jsonl`（ST-R6-4）
+- **protocol：jsonrpc Response 形态校验（P2，FE-R6-3）**——result/error 同缺
+  或同在拒绝（JSON-RPC 2.0 二选一）
+- **server：NDJSON CreateSession 双 SessionCreated（P2，FE-R6-2）**——创建即
+  init_event_stream 订阅转发真实 seq，移除合成 seq=0；**sse_live 计入订阅者
+  计数**（P2，FE-R6-1，空闲驱逐不再误杀首次连接标签页）
+- **desktop：save_provider_config 剥离 api_key（P2，ARCH-R6-2）**；**server
+  config_hash_val 死代码移除**（P3，ARCH-R6-1）
+- **storage/event：会话事件流 append/load 路径跨平台 fsync 修复**；**context：
+  CTX-7 词法规范化保留 Windows 盘符前缀**
+
+### CI / 构建
+
+- **windows-target-check：cargo-xwin 接入（R5 遗留）**——aws-lc-sys 需 MSVC
+  SDK 头文件，Linux 交叉编译 MSVC target 用 cargo-xwin 自管理 CC/AR
+- **hooks/desktop：Windows dead_code + clippy 修复**
+
 ## [0.3.6] - 2026-08-27
 
 > 本版本为 `docs/project-review-20260827-r5.md` 第五轮全面审查修复版：
