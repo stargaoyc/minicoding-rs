@@ -71,6 +71,17 @@ fn format_rehydrate(session_id: &str, last_known_seq: u64, current_seq: u64) -> 
     format!("id: {current_seq}\ndata: {payload}\n\n")
 }
 
+/// FE-17：SSE 订阅者 guard，Drop 时递减会话的活动计数。
+struct SubscriberGuard(Arc<ServerSession>);
+
+impl Drop for SubscriberGuard {
+    fn drop(&mut self) {
+        self.0
+            .sse_subscribers
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// 构造 SSE 流。
 ///
 /// 1. 从 `session.replay_after(last_seq)` 重放历史事件（若 `last_seq` 已 evict，
@@ -87,7 +98,19 @@ pub fn sse_stream(
 ) -> ReceiverStream<Result<String, Infallible>> {
     let (tx, rx) = mpsc::channel::<Result<String, Infallible>>(64);
 
+    // FE-17（2026-08-28 R5 收尾）：活动订阅者计数——空闲驱逐据此跳过该会话。
+    // task 结束时（流关闭/客户端断开）递减归零。计数增减在 task 边界内完成，
+    // 避免流被 drop 后计数残留。
+    session
+        .sse_subscribers
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_sub = session.clone();
+    let _ = &session;
+
     tokio::spawn(async move {
+        // 确保无论何种退出路径（replay 失败/客户端断开/正常结束）都递减计数
+        let _decrement = SubscriberGuard(session_sub.clone());
+
         // 0. **先订阅实时通道再重放**：重放快照与订阅之间到达的事件不会丢失
         //    （重复的由下方 seq 去重剔除）。
         let live_rx = session.subscribe_sequenced();

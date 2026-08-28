@@ -749,6 +749,13 @@ async fn send_message(
     Path(session_id): Path<String>,
     Json(body): Json<SendMessageBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), HttpError> {
+    // FE-15（2026-08-28 R5 收尾）：text 非空校验——空消息无意义且浪费 token。
+    if body.text.trim().is_empty() {
+        return Err(HttpError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            message: "消息内容不能为空".to_string(),
+        });
+    }
     // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）
     let mgr = state.mgr.clone();
     let sid = session_id.clone();
@@ -780,10 +787,14 @@ async fn send_message(
 /// 仅从活跃会话表移除并关闭其事件通道；磁盘上的会话文件（消息日志/事件流）
 /// 保留（数据不可逆删除须独立审计设计，见 roadmap）。此前
 /// `SessionManager::delete` 为死代码，无任何 HTTP 入口。
+/// FE-16（2026-08-28 R5 收尾）：删除前先取消 in-flight turn（evict 路径有
+/// `try_lock` 跳过，DELETE 无此检查——正在运行的 turn 被删除后 token 发往已销毁
+/// 的通道导致岔路错误）。
 async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
+    let _ = state.mgr.cancel(&session_id).await;
     let removed = state.mgr.delete(&session_id);
     Ok(Json(serde_json::json!({ "deleted": removed })))
 }

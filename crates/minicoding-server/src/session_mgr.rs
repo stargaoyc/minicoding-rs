@@ -77,6 +77,9 @@ pub struct ServerSession {
     /// `StdMutex` 因仅做 `Vec` 查/改（无 async 上下文）。任务权威源是
     /// `TaskStore`（tools crate），此字段只用于 HTTP 查询返回。
     pub task_state: StdMutex<Vec<Task>>,
+    /// SSE 活动订阅者计数（FE-17，2026-08-28 R5 收尾）：空闲驱逐跳过
+    /// 有订阅者的会话（开着 Web 标签页的会话不应被驱逐）。
+    pub sse_subscribers: std::sync::atomic::AtomicUsize,
 }
 
 impl ServerSession {
@@ -93,6 +96,7 @@ impl ServerSession {
             pending_permissions: pending,
             turn_lock: TokioMutex::new(()),
             task_state: StdMutex::new(Vec::new()),
+            sse_subscribers: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -300,16 +304,22 @@ impl SessionManager {
         }
         let mut evicted = 0usize;
         for id in &candidates {
-            let busy = {
+            // FE-17：有活动 SSE 订阅者（Web 标签页开着）的会话不驱逐——即便
+            // 空闲超时。订阅者断开后计数归零，下次驱逐窗口正常处理。
+            let (busy, has_subscriber) = {
                 let sessions = self
                     .sessions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                sessions
-                    .get(id)
-                    .is_some_and(|s| s.turn_lock.try_lock().is_err())
+                let s = sessions.get(id);
+                (
+                    s.is_some_and(|s| s.turn_lock.try_lock().is_err()),
+                    s.is_some_and(|s| {
+                        s.sse_subscribers.load(std::sync::atomic::Ordering::Relaxed) > 0
+                    }),
+                )
             };
-            if busy {
+            if busy || has_subscriber {
                 continue;
             }
             if self.delete(id) {
