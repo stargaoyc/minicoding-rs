@@ -53,6 +53,8 @@ pub struct LongTermMemory {
 
 /// CTX-10（2026-08-26 R3 审查）：0600 私有写（对齐 audit/persist 的
 /// `fs_private::write_private` 语义；tokio 异步版）。
+/// 2026-08-28 CI 修复：追加 `sync_all`——此前无 fsync，rename 后数据未落盘
+/// 时 `save_updates_index_with_hash` 测试读 index 为空（高负载下偶现）。
 async fn write_private_async(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut opts = tokio::fs::OpenOptions::new();
@@ -61,7 +63,8 @@ async fn write_private_async(path: &std::path::Path, bytes: &[u8]) -> std::io::R
     #[cfg(unix)]
     opts.mode(0o600);
     let mut f = opts.open(path).await?;
-    f.write_all(bytes).await
+    f.write_all(bytes).await?;
+    f.sync_all().await
 }
 
 impl LongTermMemory {

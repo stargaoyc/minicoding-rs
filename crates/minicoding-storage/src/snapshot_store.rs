@@ -144,9 +144,14 @@ impl SnapshotStore for JsonlSnapshotStore {
             file.sync_all().await?;
             drop(file);
             tokio::fs::rename(&tmp, &path).await?;
-            // ST-3：父目录 fsync 补齐（async 路径此前遗漏，sync 路径已有）
-            if let Some(parent) = path.parent() {
-                let _ = tokio::fs::File::open(parent).await?.sync_all().await;
+            // ST-3：父目录 fsync 补齐（async 路径此前遗漏，sync 路径已有）。
+            // Windows 上以 File 打开目录会 Access denied（需 FILE_FLAG_BACKUP_SEMANTICS），
+            // 与 sync 路径同为 best-effort——成功才 sync，失败忽略。
+            #[cfg(unix)]
+            if let Some(parent) = path.parent()
+                && let Ok(dir) = tokio::fs::File::open(parent).await
+            {
+                let _ = dir.sync_all().await;
             }
             Ok(())
         })
