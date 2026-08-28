@@ -4,25 +4,23 @@
 //! 恒用 `ServerPrompter`（HTTP 权限交互）；不依赖 `minicoding-cli`（依赖方向：
 //! cli → server，不可反向）。
 //!
-//! 与 CLI builder 的差异（ARCH-2，2026-08-28 R5 收尾：如实披露能力落差，
-//! 供前端/用户预期管理）：
+//! 与 CLI builder 的差异（ARCH-2，2026-08-28 R8 更新：能力矩阵已收拢——
+//! AGENTS.md 注入与 git/web/memory/ui.ask 工具已接线，与 CLI 对齐）：
 //! - 无 `SessionLoadMode`（server 端每个 session 新建或由客户端指定 id 恢复）；
 //! - 无 `ReplayPolicy`（server 端不处理 `--replay`）；
-//! - **无 Hook registry**（Hook 未接线；Web/Desktop 会话无 Hooks 能力）；
-//! - **无 AGENTS.md/项目文档注入**（`project_doc` 未接线，Web/Desktop 用户
-//!   看不到项目指令层——与 CLI/TUI 行为显著不同）；
-//! - **工具集受限**：仅注册 readonly+write+shell+task 四组，`git.*`/`web.*`/
-//!   `memory.*`/`ui.ask` 缺失（HTTP/Web 场景按需补充，见 `runtime_builder.rs`
-//!   工具注册段）；
-//! - **无 `AutoMemory` 记忆注入**、无配置热更新（S-22）；
-//! - `task.spawn` 走 `InProcessSubagentRunner`（无 worktree 隔离）；
+//! - **无 Hook registry / asyncRewake**（Hook 未接线；Web/Desktop 会话无 Hooks
+//!   能力——需引入 minicoding-hooks + config 透传，见 roadmap 双轨 builder 合并）；
+//! - **无 `AutoMemory` 记忆注入**（`memory.write` 的 auto 落内存实现，不注入
+//!   system 段）、无配置热更新（S-22）；
+//! - `task.spawn` 走 `NoopSubagentRunner`（`InProcessSubagentRunner` 在 SDK 层，
+//!   server 依赖方向不可引用；见 roadmap 立项）；
 //! - prompter 恒为 `ServerPrompter`（外部注入，不由 builder 构造）。
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::ContextManagerImpl;
 use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig};
-use minicoding_core::memory::SessionSummarizer;
+use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::Session;
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
 use minicoding_core::provider::LlmProvider;
@@ -30,7 +28,10 @@ use minicoding_core::runtime::{Runtime, RuntimeBuilder};
 use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
-use minicoding_memory::SessionSummarizerImpl;
+use minicoding_memory::{
+    LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl, find_repo_root,
+    inject_project_doc_sync,
+};
 use minicoding_policy::BuiltinPolicy;
 use minicoding_providers::{
     ANTHROPIC_PROVIDER_ID, AnthropicProvider, OLLAMA_DEFAULT_API_BASE, OLLAMA_PROVIDER_ID,
@@ -39,7 +40,8 @@ use minicoding_providers::{
 };
 use minicoding_storage::{FileAuditSink, JsonlStorage};
 use minicoding_tools::{
-    register_readonly_tools, register_shell_tools, register_task_tools, register_write_tools,
+    register_git_tools, register_memory_tools, register_readonly_tools, register_shell_tools,
+    register_task_tools, register_ui_tools, register_web_tools, register_write_tools,
 };
 use std::sync::Arc;
 
@@ -192,9 +194,27 @@ pub fn build_runtime(
         .clone()
         .map_or_else(|| main_provider.clone(), |p| p);
 
-    // 4. 构造 system prompt
+    // 4. 构造 system prompt（R8：#12 能力矩阵收拢——AGENTS.md 项目指令层注入，
+    //    与 CLI/TUI 一致，C-05 包裹 `<project_doc>` 边界；best effort 不阻塞启动）
     let system_prompt =
         system.unwrap_or_else(|| "You are minicoding, a terminal AI coding assistant.".to_string());
+    let system_prompt = {
+        let repo_root = find_repo_root(&workdir).unwrap_or_else(|| workdir.clone());
+        let loader = ProjectDocLoaderImpl::new(repo_root, workdir.clone());
+        match loader.load_sync() {
+            Ok(doc) => match inject_project_doc_sync(&system_prompt, &doc) {
+                Ok(injected) => injected,
+                Err(e) => {
+                    tracing::warn!("server 注入项目文档失败: {e}");
+                    system_prompt
+                }
+            },
+            Err(e) => {
+                tracing::warn!("server 加载项目文档失败: {e}");
+                system_prompt
+            }
+        }
+    };
 
     // 5. 构造 context manager（ContextManagerImpl + TiktokenTokenizer + 4 级压缩）
     //    L2 摘要 provider 用 small（如有）降本，回退到主 provider（与 CLI 一致）。
@@ -249,13 +269,20 @@ pub fn build_runtime(
     let snapshot_store: Arc<dyn minicoding_core::storage::SnapshotStore> =
         Arc::new(minicoding_storage::JsonlSnapshotStore::new(sessions_dir));
 
-    // 7. 构造 tool registry（readonly + write + shell + task）
+    // 7. 构造 tool registry（R8：#12 能力矩阵收拢——补齐 git/web/memory/ui.ask，
+    //    与 CLI 对齐；此前 Web/Desktop 用户无这些工具）
     let event_bus = minicoding_core::runtime::EventBus::new();
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
     register_write_tools(&mut tools);
     register_shell_tools(&mut tools);
     register_task_tools(&mut tools, Some(event_bus.clone()));
+    register_git_tools(&mut tools);
+    register_web_tools(&mut tools);
+    register_ui_tools(&mut tools);
+    // memory.write：long_term 走 MemoryStore（C-23 经 Ask 权限），auto 默认内存实现
+    let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
+    register_memory_tools(&mut tools, long_term_store);
 
     // 8. 构造权限策略 + 交互器
     let policy: Arc<dyn PermissionPolicy> = Arc::new(BuiltinPolicy::new());

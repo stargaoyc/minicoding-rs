@@ -21,7 +21,7 @@ path = "src/main.rs"
 minicoding-core = { workspace = true }
 minicoding-protocol = { workspace = true }
 minicoding-policy = { workspace = true }
-minicoding-tools = { workspace = true }
+minicoding-tools = { workspace = true, features = ["web"] }
 minicoding-context = { workspace = true }
 minicoding-storage = { workspace = true }
 minicoding-providers = { workspace = true }
