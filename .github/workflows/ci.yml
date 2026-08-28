@@ -204,12 +204,17 @@ jobs:
   #
   # 2026-08-27 发布修复（ENG-11 回补）：扩到全 workspace 后 reqwest→rustls→
   # ring/aws-lc-sys 进入 windows 依赖闭包，ubuntu 交叉编译 MSVC target 需 MSVC
-  # 工具链（ring 拒 GNU 编译器、cc crate 找 lib.exe）。装 LLVM 交叉工具链
-  # （clang-cl 编译 + llvm-lib 归档替代 lib.exe）+ nasm（aws-lc-sys x86_64 汇编）。
+  # 工具链（ring 拒 GNU 编译器、cc crate 找 lib.exe）。装 LLVM（clang-cl 编译 +
+  # llvm-lib 归档替代 lib.exe）+ nasm（aws-lc-sys x86_64 汇编）。
+  #
+  # 2026-08-28 二次修复：ring 已可编译，但 aws-lc-sys 需真实 MSVC Windows SDK
+  # 头文件（windows.h/stdlib.h），clang-cl 在 ubuntu 找不到——引入 cargo-xwin
+  # （下载 MSVC CRT + Windows SDK 头文件，为 clang-cl 交叉编译 MSVC target 配置
+  # INCLUDE/LIB，rust 生态标准方案）。cargo-xwin 自管理 CC/AR，不再手动设环境变量。
   windows-target-check:
     name: cargo check (x86_64-pc-windows-msvc)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
@@ -217,25 +222,23 @@ jobs:
           toolchain: nightly-2026-08-18
       - name: Add Windows MSVC target
         run: rustup target add x86_64-pc-windows-msvc
-      - name: Install MSVC cross-toolchain (clang-cl + llvm-lib + nasm)
+      - name: Install LLVM cross-toolchain (clang-cl + llvm-lib + nasm)
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm clang lld nasm
           # clang-cl/llvm-lib 在 /usr/lib/llvm-*/bin（不在默认 PATH）
           llvm_bin="$(ls -d /usr/lib/llvm-*/bin | head -1)"
           echo "$llvm_bin" >> "$GITHUB_PATH"
-          # cc crate 按 MSVC 惯例找 lib.exe（归档器）——llvm-lib 兼容 .lib 格式
-          sudo ln -sf "$llvm_bin/llvm-lib" /usr/local/bin/lib.exe
-          echo "CC_x86_64_pc_windows_msvc=clang-cl" >> "$GITHUB_ENV"
-          echo "AR_x86_64_pc_windows_msvc=llvm-lib" >> "$GITHUB_ENV"
+      - name: Install cargo-xwin (MSVC CRT/SDK headers for Linux cross-compile)
+        run: cargo install cargo-xwin --locked
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check --target x86_64-pc-windows-msvc (--all-targets 含测试)
+      - name: cargo xwin check --target x86_64-pc-windows-msvc (--all-targets 含测试)
         # --all-targets 必须含：cfg(test) 下的平台分支错误（如 ENV_SERIAL_LOCK
         # 未门控）只有编译测试目标才暴露（v0.3.4 第三次发布失败教训）
         # ENG-11（2026-08-26 R3 审查）：扩到除 desktop/web 外全部 workspace 成员——
         # 此前仅 6 个 crate，mcp/providers/sdk/server 等的平台分支错误只能等
         # push 后原生 runner 暴露
-        run: cargo check --all-targets --target x86_64-pc-windows-msvc --workspace --exclude minicoding-desktop
+        run: cargo xwin check --all-targets --target x86_64-pc-windows-msvc --workspace --exclude minicoding-desktop
 
   # M-14/R-10：前端单测基建（Vitest + MSW，AGENTS.md §8.8）。
   # oxlint/oxfmt/tsc/vitest/vite build 与 Rust 侧 fmt/clippy/test 门禁对齐；
