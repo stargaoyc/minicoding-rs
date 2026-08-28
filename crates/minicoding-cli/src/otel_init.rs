@@ -41,7 +41,10 @@ pub fn init_tracing(verbose: bool) -> Option<TracingGuard> {
 /// 仅安装 `tracing_subscriber::fmt` layer，输出到 stderr。
 /// 重复调用安全（`try_init` 失败仅因重复初始化，吞掉错误）。
 fn init_fmt_only(verbose: bool) {
-    let filter = if verbose { "debug" } else { "warn" };
+    // FE-14（2026-08-28 R5 收尾）：CLI 默认 `warn`，server/TUI 默认 `info`——
+    // 形态间可观测性不一致。统一为 `info`（交互式 CLI 正常操作应有可见反馈）；
+    // `--verbose` → debug 不变。
+    let filter = if verbose { "debug" } else { "info" };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

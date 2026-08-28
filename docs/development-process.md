@@ -214,7 +214,7 @@
 
 **范围**：新增 `crates/minicoding-web/`（React 19.2 + TypeScript 7.0 + Vite 8.1 + React Compiler，独立 `package.json`）与 `crates/minicoding-desktop/`（Tauri 2.x 壳）；前端核心能力（多会话面板、流式 token 渲染、工具调用面板、权限确认弹窗、任务面板、压缩/熔断可视化、Hook 日志、主题切换、响应式布局）；`minicoding-server` 增强（静态资源托管 `--web`、CORS `--cors-origin`、SSE cursor 恢复）；桌面端特性（系统托盘、全局快捷键、OS keyring 凭证、自动更新）；全 Rust 工具链（oxlint/oxfmt/Vite Rolldown/Tailwind v4 Oxide）。
 
-**交付物**：`minicoding serve --http` 启动后浏览器访问能完整对话/工具调用/权限确认；Tauri 桌面应用在 macOS/Windows/Linux 三平台可构建，体积 < 15MB；前端 Lighthouse 性能评分 ≥ 90；oxlint + oxfmt + tsc 全绿；凭证经 OS keyring 存储不出现在前端代码/日志/网络请求中。
+**交付物**：`minicoding serve --bind 127.0.0.1:8080` 启动后浏览器访问能完整对话/工具调用/权限确认；Tauri 桌面应用在 macOS/Windows/Linux 三平台可构建，体积 < 15MB；前端 Lighthouse 性能评分 ≥ 90；oxlint + oxfmt + tsc 全绿；凭证经 OS keyring 存储不出现在前端代码/日志/网络请求中。
 
 **验收标准**：Web 前端可对话/工具调用/权限确认、三平台桌面应用可构建、Lighthouse ≥ 90、全 Rust 工具链构建。详见 [`m9-design.md`](./m9-design.md)。
 

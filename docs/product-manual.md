@@ -665,7 +665,7 @@ minicoding serve \
 minicoding-server --cors-origin https://coding.example.com
 ```
 
-> 未指定 `--cors-origin` 时默认允许任意来源（`*`，仅开发用）。生产部署务必指定实际来源。
+> 未指定 `--cors-origin` 时默认仅允许本机来源（`localhost`/`127.0.0.1`/`[::1]`，任意端口）。生产部署请指定实际来源。
 
 ### 5.5 浏览器访问
 

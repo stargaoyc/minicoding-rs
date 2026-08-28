@@ -6,7 +6,7 @@
 //!
 //! ## 设计要点
 //!
-//! - **sidecar 管理**：Tauri 启动 `minicoding-server --http --bind 127.0.0.1:0`（随机端口），
+//! - **sidecar 管理**：Tauri 启动 `minicoding-server --bind 127.0.0.1:0`（随机端口），
 //!   读取 stdout 获取实际监听端口，注入前端；
 //! - **IPC 桥接**：前端通过 Tauri `invoke('start_session')` 获取 sidecar 端口，后续通信
 //!   走 HTTP/SSE（同源，无 CORS 问题）；

@@ -907,6 +907,12 @@ minicoding-extension-sdk/src/
 - **协议**：HTTP/SSE JSON-RPC 2.0（见 `design.md` §24），前端不引入新协议；
 - **类型同步**：`minicoding-protocol` 的 Rust DTO 通过 `ts-rs` 或 `specta` 生成 TypeScript 类型 + Zod schema，避免手写双份；
 - **CORS**：`minicoding serve --cors-origin` 配置允许的前端来源（默认仅 `http://localhost:*`）；
+- **能力差异声明（DOC-3/ARCH-2，2026-08-28 R5 收尾）**：server 端 Runtime 装配
+  与 CLI/TUI 存在落差（见 `minicoding-server/src/runtime_builder.rs` 模块注释）——
+  Web/Desktop 会话无 AGENTS.md 项目文档注入、无 Hook 注册表、无
+  `git.*`/`web.*`/`memory.*`/`ui.ask` 工具、无 AutoMemory 注入与配置热更新；
+  仅 readonly+write+shell+task 工具组 + `ServerPrompter` 权限交互。"四形态共享
+  Runtime"指协议与聚合根复用，**能力面不相等**，前端按此预期设计；
 - **工作区（W-11）**：`/sessions/{id}/workspace*` 5 个端点（见 `design.md` §26.9、`docs/api.md` §9.2）；桌面端额外经 Tauri `open_workspace_file` 命令打开系统编辑器（`main.rs`，见 §19）；新建会话可选目录（`POST /sessions` 携 `workdir`，桌面端原生目录选择器）。
 
 ---
@@ -917,7 +923,7 @@ minicoding-extension-sdk/src/
 
 ### 19.1 职责
 
-- 启动 `minicoding-server` 作为 sidecar 进程（`--http --bind 127.0.0.1:0` 随机端口）；
+- 启动 `minicoding-server` 作为 sidecar 进程（`--bind 127.0.0.1:0` 随机端口）；
 - Tauri WebView 加载 `minicoding-web` 的 `dist/`；
 - 提供 OS 集成：系统托盘、全局快捷键、自动更新（Tauri updater 签名校验）；
 - 凭证存储复用 OS keyring（与 CLI `cred.rs` 共享 `KEYRING_SERVICE = "minicoding"`，C-04）。

@@ -431,7 +431,7 @@ pnpm run dev
 
 ```bash
 # 项目根目录
-cargo run -p minicoding-cli -- serve --http --bind 127.0.0.1:8080
+cargo run -p minicoding-cli -- serve --bind 127.0.0.1:8080
 ```
 
 Vite 配置（`vite.config.ts`）已内置代理，避免开发期 CORS 问题：
@@ -467,7 +467,6 @@ pnpm run build
 # 单二进制部署：后端 + 前端静态资源
 cargo build --release -p minicoding-cli --features serve
 ./target/release/minicoding serve \
-    --http \
     --bind 0.0.0.0:8080 \
     --web ./crates/minicoding-web/dist \
     --cors-origin "https://your-domain.com"
@@ -1218,7 +1217,7 @@ COPY --from=builder /app/target/release/minicoding-server /usr/local/bin/
 
 EXPOSE 8080
 ENTRYPOINT ["minicoding"]
-CMD ["serve", "--http", "--bind", "0.0.0.0:8080", "--preset", "external-sandbox"]
+CMD ["serve", "--bind", "0.0.0.0:8080", "--preset", "external-sandbox"]
 ```
 
 ### 14.3 构建与运行

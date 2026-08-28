@@ -3338,6 +3338,7 @@ name = "minicoding-hooks"
 version = "0.3.6"
 dependencies = [
  "camino",
+ "libc",
  "minicoding-core",
  "serde",
  "serde_json",

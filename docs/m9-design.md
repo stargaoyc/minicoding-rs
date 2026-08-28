@@ -59,7 +59,7 @@
 │                                                              │
 │  ┌──────────────────┐    HTTPS    ┌───────────────────────┐ │
 │  │  Browser          │ ──────────► │  minicoding-server    │ │
-│  │  (React 19.2 SPA) │ ◄────────── │  --http --web ./dist  │ │
+│  │  (React 19.2 SPA) │ ◄────────── │  --bind 127.0.0.1:8080 --web ./dist  │ │
 │  │                   │    SSE      │  --cors-origin ...    │ │
 │  └──────────────────┘             └───────────┬───────────┘ │
 │                                                │             │
@@ -376,7 +376,7 @@ async fn start_sidecar(app: tauri::AppHandle) -> Result<u16, String> {
         .map_err(|e| e.to_string())?;
 
     let (mut rx, _child) = sidecar
-        .args(["--http", "--bind", "127.0.0.1:0"])
+        .args(["--bind", "127.0.0.1:0"])
         .spawn()
         .map_err(|e| e.to_string())?;
 
@@ -584,7 +584,7 @@ cargo tauri dev   # Tauri + Vite dev
 cargo tauri build # → .dmg / .msi / .AppImage
 
 # 静态资源托管（单二进制部署）
-minicoding serve --http --web ./crates/minicoding-web/dist
+minicoding serve --bind 127.0.0.1:8080 --web ./crates/minicoding-web/dist
 ```
 
 ### 8.3 CI 集成
@@ -711,7 +711,7 @@ export const mockServer = setupServer(
 
 ## 附录 B：验收清单
 
-- [ ] `minicoding serve --http --web ./dist` 启动后，浏览器能完整对话/工具调用/权限确认
+- [ ] `minicoding serve --bind 127.0.0.1:8080 --web ./dist` 启动后，浏览器能完整对话/工具调用/权限确认
 - [ ] Tauri 桌面应用在 macOS/Windows/Linux 三平台可构建，体积 < 15MB
 - [ ] 前端 Lighthouse Performance ≥ 90
 - [ ] oxlint + tsc 全绿

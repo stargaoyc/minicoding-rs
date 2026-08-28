@@ -1965,13 +1965,13 @@ Web 模式下浏览器跨域请求 `minicoding-server`，需服务端配置 CORS
 
 ```bash
 # 允许特定来源
-minicoding serve --http --cors-origin http://localhost:3000
+minicoding serve --bind 127.0.0.1:8080 --cors-origin http://localhost:3000
 
 # 允许多个来源
-minicoding serve --http --cors-origin http://localhost:3000,http://localhost:5173
+minicoding serve --bind 127.0.0.1:8080 --cors-origin http://localhost:3000,http://localhost:5173
 
 # 允许所有来源（仅开发环境，生产禁用）
-minicoding serve --http --cors-origin "*"
+minicoding serve --bind 127.0.0.1:8080 --cors-origin "*"
 ```
 
 **或配置文件**：

@@ -4,11 +4,18 @@
 //! 恒用 `ServerPrompter`（HTTP 权限交互）；不依赖 `minicoding-cli`（依赖方向：
 //! cli → server，不可反向）。
 //!
-//! 与 CLI builder 的差异：
+//! 与 CLI builder 的差异（ARCH-2，2026-08-28 R5 收尾：如实披露能力落差，
+//! 供前端/用户预期管理）：
 //! - 无 `SessionLoadMode`（server 端每个 session 新建或由客户端指定 id 恢复）；
 //! - 无 `ReplayPolicy`（server 端不处理 `--replay`）；
-//! - 无 Hook registry（Hook 未接线；Journal 已注入——FE-14，2026-08-25 R2
-//!   审查修正此前"无 Hook/Journal"的失实文档）；
+//! - **无 Hook registry**（Hook 未接线；Web/Desktop 会话无 Hooks 能力）；
+//! - **无 AGENTS.md/项目文档注入**（`project_doc` 未接线，Web/Desktop 用户
+//!   看不到项目指令层——与 CLI/TUI 行为显著不同）；
+//! - **工具集受限**：仅注册 readonly+write+shell+task 四组，`git.*`/`web.*`/
+//!   `memory.*`/`ui.ask` 缺失（HTTP/Web 场景按需补充，见 `runtime_builder.rs`
+//!   工具注册段）；
+//! - **无 `AutoMemory` 记忆注入**、无配置热更新（S-22）；
+//! - `task.spawn` 走 `InProcessSubagentRunner`（无 worktree 隔离）；
 //! - prompter 恒为 `ServerPrompter`（外部注入，不由 builder 构造）。
 
 use anyhow::{Context, Result};

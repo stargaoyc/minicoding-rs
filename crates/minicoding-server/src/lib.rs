@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! POST   /sessions                          → CreateSession
-//! POST   /sessions/{id}/messages            → SendUserMessage（阻塞至 turn 完成）
+//! POST   /sessions/{id}/messages            → SendUserMessage（202 Accepted，turn 异步执行，结果经 SSE 推送）
 //! POST   /sessions/{id}/cancel              → Cancel
 //! POST   /sessions/{id}/undo                → Undo（若 journal 可用）
 //! GET    /sessions                          → ListSessions
