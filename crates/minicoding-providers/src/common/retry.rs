@@ -17,6 +17,7 @@
 //! [`LlmError::Timeout`]（可重试）。不限定流式产出总时长（流可长时间产出 token）。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use minicoding_core::model::LlmError;
@@ -25,6 +26,25 @@ use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer,
 };
 use tracing::{debug, warn};
+
+/// 抖动 PRNG 状态（PT-R7-3，2026-08-28 R7 审查）。
+///
+/// 此前抖动源取 `SystemTime::now()` 时钟纳秒 `% 41`——同一时间片内并发实例
+/// 区分度不足（thundering herd 抖动退化）。改原子计数器 + splitmix64 搅拌：
+/// 每次 `fetch_add` 取得互不相同的种子，搅拌后分布均匀；线程安全、非阻塞、
+/// 不引入 `rand` 依赖（退避场景无需密码学随机性）。
+static JITTER_STATE: AtomicU64 = AtomicU64::new(0);
+
+/// 计算退避抖动因子（80..120%）。
+fn jitter_percent() -> u64 {
+    let mut z = JITTER_STATE.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    // splitmix64 最终搅拌：保证相邻取值（同一调用点快速连续取号）分布均匀
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // 80..120%（整数运算避免浮点）：z % 41 ∈ [0, 40]
+    80 + (z % 41)
+}
 
 /// 重试配置。
 #[derive(Debug, Clone)]
@@ -85,19 +105,14 @@ impl RetryProvider {
     ///
     /// 指数退避：`initial * 2^attempt`，上限 `max_backoff_ms`；叠加 ±20% 抖动
     /// （2026-08-23 审查 §5-P2）：多实例同时被 429 后若按同一节拍重试会形成
-    /// thundering herd。抖动源取时钟纳秒——退避场景无需密码学随机性，
-    /// 不为此引入 `rand` 依赖。
+    /// thundering herd。抖动源 PT-R7-3 起为原子计数器 + splitmix64（见模块顶部）。
     fn backoff(&self, attempt: u32) -> Duration {
         let raw = self
             .config
             .initial_backoff_ms
             .saturating_mul(2u64.saturating_pow(attempt));
         let capped = raw.min(self.config.max_backoff_ms);
-        // 抖动因子 80..120%（整数运算避免浮点）：nanos % 41 ∈ [0, 40]
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let percent = u64::from(80 + (nanos % 41));
+        let percent = jitter_percent();
         Duration::from_millis(capped.saturating_mul(percent) / 100)
     }
 
@@ -389,5 +404,18 @@ mod tests {
         assert_eq!(provider.capabilities().context_window, 4096);
         let n = provider.count_tokens(&[Message::user_text("hello")]).await;
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn jitter_percent_stays_within_80_120() {
+        // PT-R7-3：抖动因子必须落在 80..120 区间；连续取值分布不同（原子计数器
+        // 递增保证相邻调用种子互异，搅拌后近似均匀）。
+        for _ in 0..1000 {
+            let p = jitter_percent();
+            assert!((80..=120).contains(&p), "抖动因子越界: {p}");
+        }
+        // 相邻取值应产生多种不同结果（seed 递增 + 搅拌），至少出现 >1 种
+        let distinct: std::collections::HashSet<u64> = (0..64).map(|_| jitter_percent()).collect();
+        assert!(distinct.len() > 1, "抖动取值应有多样性: {distinct:?}");
     }
 }

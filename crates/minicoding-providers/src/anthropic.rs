@@ -241,8 +241,12 @@ impl LlmProvider for AnthropicProvider {
             supports_json_mode: false,
             // Claude 3.5 Sonnet 200K 上下文窗口
             context_window: 200_000,
-            // PTM-14：与 MAX_OUTPUT_LIMIT 同步（8192 过时）
-            max_output: 32_768,
+            // PTM-14：与 MAX_OUTPUT_LIMIT 同步（8192 过时）。
+            // PT-R7-1（2026-08-28 R7 审查）：与 `THINKING_MAX_OUTPUT_LIMIT`（64K）
+            // 对齐——`compute_max_tokens` 的 thinking 路径实际产出可达 64K，此前
+            // 声明 32K 使上游输出 token 预算预留不足（能力声明与实现上限不一致）。
+            // 输出预算宁多勿少（声明的 max_output 只影响预留，不限制真实产出）。
+            max_output: THINKING_MAX_OUTPUT_LIMIT,
         }
     }
 
