@@ -3,7 +3,7 @@
 //! 权重公式：`w = base(role) * recency * sticky * manual_pin`。
 //! 权重越低越先被压缩/丢弃；`base(system) = 1.0` 保证系统消息永不压缩。
 
-use minicoding_core::model::{Message, Role};
+use minicoding_core::model::{ContentBlock, Message, Role};
 
 /// 计算单条消息的权重 `w ∈ [0, 1+]`。
 ///
@@ -38,14 +38,16 @@ pub fn message_weight(msg: &Message, index: usize, total: usize) -> f64 {
 
 /// 消息是否为 sticky（含错误标记或未提交变更标记）。
 ///
-/// 当前 `MessageMeta` 无错误/未提交变更字段：
-/// - 错误信息位于 `ContentBlock::ToolResult::is_error`，但 design.md §3.2 的 sticky
-///   语义需"未提交变更"标记，该标记由 M5 Hook 注入（见 `docs/hooks.md`）。
-/// - 故暂返回 `false`，待 M5 Hook 接入后在 meta 扩展字段并填充。
+/// CTX-R6-5（2026-08-28 R6 审查）：此前恒 `false`——design.md §3.2 的
+/// "错误/未提交变更 ×1.5 权重保护"完全未生效。当前实现：错误标记来自
+/// `ContentBlock::ToolResult::is_error`（工具执行失败的消息受保护，避免
+/// 摘要/裁剪丢弃失败现场）；未提交变更标记由 M5 Hook 注入（见 `docs/hooks.md`，
+/// meta 扩展字段后填充——Hook 未接入前此维度仍为空）。
 #[must_use]
-fn is_sticky(_msg: &Message) -> bool {
-    // TODO(M5): Hook 接入后读取 meta 中的未提交变更/错误聚合标记。
-    false
+fn is_sticky(msg: &Message) -> bool {
+    msg.content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
 }
 
 /// 消息是否被用户 pin（压缩时不裁剪）。
@@ -98,6 +100,34 @@ mod tests {
         let w_normal = message_weight(&normal, 3, 4);
         let w_pinned = message_weight(&pinned, 3, 4);
         assert!((w_pinned - w_normal * 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn error_tool_result_is_sticky() {
+        // CTX-R6-5（2026-08-28 R6 审查）：工具失败消息 sticky ×1.5——此前
+        // is_sticky 恒 false，design §3.2 的错误权重保护完全未生效。
+        use minicoding_core::model::{ContentBlock, ToolCallId, ToolContent, ToolResultMeta};
+        let mut err_msg = Message::user_text("errored");
+        err_msg.content = vec![ContentBlock::ToolResult {
+            call_id: ToolCallId::new(),
+            content: ToolContent::Text("boom".to_string()),
+            is_error: true,
+            metadata: ToolResultMeta::default(),
+        }];
+        let ok_msg = Message::user_text("ok");
+        let w_err = message_weight(&err_msg, 3, 4);
+        let w_ok = message_weight(&ok_msg, 3, 4);
+        assert!((w_err - w_ok * 1.5).abs() < f64::EPSILON);
+        // 非错误 tool result 不 sticky
+        let mut tool_ok = Message::user_text("tool ok");
+        tool_ok.content = vec![ContentBlock::ToolResult {
+            call_id: ToolCallId::new(),
+            content: ToolContent::Text("ok".to_string()),
+            is_error: false,
+            metadata: ToolResultMeta::default(),
+        }];
+        let w_tool_ok = message_weight(&tool_ok, 3, 4);
+        assert!((w_tool_ok - w_ok).abs() < f64::EPSILON);
     }
 
     #[test]

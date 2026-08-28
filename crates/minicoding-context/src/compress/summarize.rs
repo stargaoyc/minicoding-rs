@@ -70,10 +70,13 @@ pub async fn summarize_old_messages(
     }
 
     // 计算非 system 消息的权重，选最低的 N 条
+    // CTX-R6-5（2026-08-28 R6 审查）：pinned 消息必须豁免——L3/L4 均已排除
+    // pinned（rolling.rs:41 / hard_truncate.rs:51），L2 此前只排除 System，
+    // pinned 消息权重 ×2.0 仍可能被大批低权重消息超越而遭摘要替换，语义不一致。
     let mut weighted: Vec<(usize, f64)> = messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role != Role::System)
+        .filter(|(_, m)| m.role != Role::System && !m.metadata.pinned)
         .map(|(i, m)| (i, message_weight(m, i, total)))
         .collect();
 

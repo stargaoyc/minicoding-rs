@@ -99,6 +99,18 @@ pub async fn inject_post_compact(
     let mut sections = Vec::new();
     let mut total_tokens = 0usize;
 
+    // CTX-R6-1（2026-08-28 R6 审查）：workdir 规范化基准——词法判定不 resolve
+    // symlink，读取前 canonicalize 消解链接后必须仍落在 workdir 内（与
+    // `path_sandbox::resolve_under` 同口径），读取用规范化路径消除二次跟随
+    // 窗口。workdir 不可规范化时整体跳过注入（fail-closed）。
+    let Ok(canon_workdir) = tokio::fs::canonicalize(workdir).await else {
+        tracing::debug!(
+            workdir = %workdir.display(),
+            "post-compact: workdir 不可规范化，跳过注入"
+        );
+        return system_prompt.to_string();
+    };
+
     for path_str in file_paths {
         // CTX-7（2026-08-25 R2 审查）：注入路径必须落在 workdir 内——绝对路径
         // 此前直接读取，TOCTOU 窗口内被换成 symlink 可把任意文件内容回灌进
@@ -115,13 +127,28 @@ pub async fn inject_post_compact(
             );
             continue;
         }
-        let full_path = joined;
+        // CTX-R6-1：canonicalize 消解 symlink 后二次包含判定——workdir 内
+        // symlink 指向外部时词法判定通过但读取落在外部（数据外泄通道）。
+        let Ok(canonical) = tokio::fs::canonicalize(&joined).await else {
+            tracing::debug!(
+                file = %path_str,
+                "post-compact: 跳过不可规范化路径（不存在或不可访问）"
+            );
+            continue;
+        };
+        if !canonical.starts_with(&canon_workdir) {
+            tracing::debug!(
+                file = %path_str,
+                "post-compact: symlink 逃逸到 workdir 外，跳过"
+            );
+            continue;
+        }
 
-        let content = match tokio::fs::read_to_string(&full_path).await {
+        let content = match tokio::fs::read_to_string(&canonical).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!(
-                    file = %full_path.display(),
+                    file = %canonical.display(),
                     error = %e,
                     "post-compact: 跳过不可读文件"
                 );
@@ -359,6 +386,33 @@ mod tests {
         assert!(result.contains("<post_compact_context>"));
         assert!(result.contains("fn main() {}"));
         assert!(result.contains("test.rs"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inject_post_compact_blocks_symlink_escape() {
+        // CTX-R6-1（2026-08-28 R6 审查）：workdir 内 symlink 指向外部文件——
+        // 词法包含判定通过但 canonicalize 后落在 workdir 外，必须跳过
+        //（与 @import symlink 逃逸同模式的数据外泄通道）。
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().join("repo");
+        std::fs::create_dir_all(&workdir).expect("create workdir");
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "TOP-SECRET-POSTCOMPACT").expect("write secret");
+        symlink(&secret, workdir.join("link.txt")).expect("create symlink");
+
+        let tokenizer = CharTokenizer;
+        let config = PostCompactConfig::default();
+        let result = inject_post_compact(
+            "system",
+            &["link.txt".to_string()],
+            &config,
+            &tokenizer,
+            &workdir,
+        )
+        .await;
+        assert_eq!(result, "system", "symlink 逃逸内容不得注入 system 段");
     }
 
     #[test]

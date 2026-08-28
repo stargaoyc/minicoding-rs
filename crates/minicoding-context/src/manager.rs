@@ -505,10 +505,18 @@ impl ContextManager for ContextManagerImpl {
             // 含新消息但未计入对应 token，预算系统性低估（超窗风险）。先更新
             // 缓存再 push 使 compress 看到的 cache ≥ 真实值（方向保守，提前触发
             // 压缩而非超窗）。
+            //
+            // CTX-R6-2（2026-08-28 R6 审查）：增量更新必须与 push 一起在写锁内
+            // 原子完成——R5 修复后 fetch_add 仍在锁外，compress 的全量重算
+            // （`store` 覆盖缓存，见 compact/restore 路径）可插在 fetch_add 与
+            // push 之间：cache 被覆盖为"不含新消息"的旧值 → push 后缓存比真实
+            // 值少一条消息的 token（低估方向，可致超窗）。移入写锁后与 push
+            // 串行，compress 的 store 不可能吞掉本消息的增量。
+            let mut guard = self.messages.write().await;
             self.token_cache
                 .fetch_add(delta_no_priming, Ordering::SeqCst);
             self.count.fetch_add(1, Ordering::SeqCst);
-            self.messages.write().await.push(msg);
+            guard.push(msg);
             // M-07：消息序号锚点递增（压缩追溯区间推算基准）
             self.append_seq.fetch_add(1, Ordering::SeqCst);
         })
@@ -709,6 +717,11 @@ impl ContextManager for ContextManagerImpl {
             *guard = snap.messages;
             self.count.store(new_count, Ordering::SeqCst);
             self.token_cache.store(new_tokens, Ordering::SeqCst);
+            // CTX-R6-4（2026-08-28 R6 审查）：重置消息序号锚点——`/clear` 走
+            // restore（空快照）后 append_seq 若继续递增，压缩追溯区间（按
+            // append_seq 推算）产生天文序号，审计日志的 CompressedRange 与
+            // 事件流 seq 失准。锚点与消息数对齐（0-based：下一条 append 得 0）。
+            self.append_seq.store(0, Ordering::SeqCst);
         })
     }
 

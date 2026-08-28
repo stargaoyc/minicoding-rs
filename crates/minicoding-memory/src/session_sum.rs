@@ -22,6 +22,11 @@ use minicoding_core::provider::{BoxFuture, ChatRequest, Delta, GenerationParams,
 /// 启发式兜底取每条消息首 N 字符（会话摘要规格：100，区别于 context compress 的 200）。
 const HEURISTIC_CHARS_PER_MSG: usize = 100;
 
+/// 启发式兜底摘要总字节上限（CTX-R6-3，2026-08-28 R6 审查）——长会话（数千条
+/// 消息）此前可产出数百 KB 摘要写入 `index.json`，`list_sessions` 全量加载该
+/// 文件（内存/IO 风险）。超限按消息序截断并标注。
+const HEURISTIC_MAX_BYTES: usize = 8 * 1024;
+
 /// LLM 摘要调用超时（秒）。
 const SUMMARY_TIMEOUT_SECS: u64 = 30;
 
@@ -195,18 +200,42 @@ async fn call_llm_summary(provider: &dyn LlmProvider, input: &str) -> Result<Str
 ///
 /// 不调 LLM，纯本地字符串操作，**必成功**。仅纳入 user/assistant 消息
 /// （system/tool 消息对跨会话恢复无意义）。
+///
+/// CTX-R6-3（2026-08-28 R6 审查）：总长受 [`HEURISTIC_MAX_BYTES`] 上限约束——
+/// 此前长会话（数千条消息）可产出数百 KB 摘要写入 `index.json`，该文件每次
+/// `list_sessions` 全量加载。超限按消息序截断并标注 `... [truncated N messages]`。
 #[must_use]
 fn heuristic_summary(messages: &[Message]) -> String {
-    let parts: Vec<String> = messages
+    let prefix = "[heuristic fallback] ";
+    let mut out = String::with_capacity(prefix.len() + 256);
+    out.push_str(prefix);
+    let total_relevant = messages
         .iter()
         .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-        .map(|m| {
-            let text = m.text();
-            let truncated: String = text.chars().take(HEURISTIC_CHARS_PER_MSG).collect();
-            format!("[{}] {truncated}", role_label(&m.role))
-        })
-        .collect();
-    format!("[heuristic fallback] {}", parts.join("; "))
+        .count();
+    let mut included = 0usize;
+    for m in messages {
+        if !matches!(m.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        let text = m.text();
+        let truncated: String = text.chars().take(HEURISTIC_CHARS_PER_MSG).collect();
+        let part = format!("[{}] {truncated}", role_label(&m.role));
+        if out.len() + part.len() + 2 > HEURISTIC_MAX_BYTES {
+            let skipped = total_relevant.saturating_sub(included);
+            if skipped > 0 {
+                use std::fmt::Write as _;
+                write!(out, "... [truncated {skipped} messages]").expect("write summary tail");
+            }
+            return out;
+        }
+        if included > 0 {
+            out.push_str("; ");
+        }
+        out.push_str(&part);
+        included += 1;
+    }
+    out
 }
 
 /// 角色标签（用于摘要输入与启发式输出渲染）。
@@ -427,5 +456,27 @@ mod tests {
         let empty: Vec<Message> = Vec::new();
         let summary = heuristic_summary(&empty);
         assert_eq!(summary, "[heuristic fallback] ");
+    }
+
+    #[test]
+    fn heuristic_summary_respects_total_byte_cap() {
+        // CTX-R6-3（2026-08-28 R6 审查）：长会话启发式摘要必须有总字节上限——
+        // 此前数千条消息可产出数百 KB 摘要写入 index.json，list_sessions 全量
+        // 加载大文件。
+        let msgs: Vec<Message> = (0..2000)
+            .map(|i| Message::user_text(format!("message number {i} with some content")))
+            .collect();
+        let summary = heuristic_summary(&msgs);
+        assert!(
+            summary.len() <= HEURISTIC_MAX_BYTES + 64,
+            "摘要超上限: {} bytes",
+            summary.len()
+        );
+        assert!(summary.contains("truncated"), "超限应标注截断: {summary}");
+        // 超限标注后长度不再增长
+        assert!(
+            !summary.contains("message number 1999"),
+            "不应包含最后一条消息"
+        );
     }
 }
