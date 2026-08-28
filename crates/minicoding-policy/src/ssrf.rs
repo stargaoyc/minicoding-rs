@@ -96,6 +96,13 @@ pub fn check_url(url: &str, opts: SsrfOptions) -> Result<(), SsrfError> {
 /// （规划 M5+ 接入 IP pinning，见 `security.md` §5）；`minicoding-tools::web`
 /// 侧已有解析-连接 IP pinning 兜底（A2）。
 ///
+/// # 同步 DNS 语义（SEC-R6-3，2026-08-28 R6 审查）
+///
+/// 本函数是同步 API——域名解析用 `ToSocketAddrs`（阻塞 DNS）。**生产路径
+/// 不使用本函数**：`minicoding-tools::web` 走 `validate_url_resolved`
+/// （`tokio::net::lookup_host` 异步解析 + IP pinning）。外部调用方在 async
+/// 上下文使用本函数时应在 `spawn_blocking` 中执行，避免阻塞 tokio worker。
+///
 /// # Errors
 /// - `SsrfError::Unresolvable`：域名 DNS 解析失败；
 /// - 其他 `SsrfError`：命中对应黑名单段。
