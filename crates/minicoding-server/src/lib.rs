@@ -37,6 +37,7 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 pub mod acp;
+pub(crate) mod bounded_io;
 pub mod http;
 #[cfg(feature = "lsp")]
 pub mod lsp;
@@ -50,6 +51,7 @@ pub mod session_mgr;
 pub mod sse;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod turn_tail;
 pub mod workspace;
 
 pub use acp::{AcpError, serve_acp};

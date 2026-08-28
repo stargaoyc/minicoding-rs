@@ -106,7 +106,9 @@ impl Tool for FsWrite {
             let before = tokio::fs::read(&path).await.ok();
 
             let after = args.content.clone().into_bytes();
-            tokio::fs::write(&path, args.content.as_bytes())
+            // 原子写（tmp + rename）——
+            // 直接 `tokio::fs::write` 覆盖在崩溃时文件截断，破坏数据完整性。
+            crate::util::atomic_write(&path, args.content.as_bytes())
                 .await
                 .map_err(ToolError::Io)?;
 

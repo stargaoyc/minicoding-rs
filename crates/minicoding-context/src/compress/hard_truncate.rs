@@ -129,6 +129,7 @@ mod tests {
             context_window: 10_000,
             reserved_output: 100,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // threshold = (10000-100-0)*0.85 = 8415
         // 2000 条 * 7 chars = 14000 > 8415
@@ -150,6 +151,7 @@ mod tests {
             context_window: 100,
             reserved_output: 0,
             safety_margin: 0,
+            ratio: 0.85,
         };
         // threshold = 100 * 0.85 = 85
         let mut msgs: Vec<Message> = vec![Message::system_text("system")]; // 6 chars
@@ -219,6 +221,7 @@ mod tests {
                 context_window: case.context_window,
                 reserved_output: case.reserved_output,
                 safety_margin: case.safety_margin,
+                ratio: 0.85,
             };
             let mut msgs: Vec<Message> = case
                 .lens
@@ -270,6 +273,7 @@ mod tests {
             context_window: 12,
             reserved_output: 0,
             safety_margin: 0,
+            ratio: 0.85,
         };
         let caller = Message {
             id: ulid::Ulid::new().to_string(),
@@ -336,6 +340,7 @@ mod tests {
             context_window: 13,
             reserved_output: 0,
             safety_margin: 0,
+            ratio: 0.85,
         }; // threshold = 11（floor(13*0.85)）；6+4=10≤11 < 6+11=17
         // 但还要保证总长触发：6+4+7+4=21 > 11 ✓
         let caller = Message {
