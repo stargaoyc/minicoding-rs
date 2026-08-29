@@ -24,6 +24,8 @@ pub enum SlashCommand {
     Undo { steps: usize },
     /// `/plan`：切换 Plan 模式（CLI 另支持 `on|off|status` 子命令，由前端自行扩展）。
     PlanToggle,
+    /// `/summary`：生成并展示会话摘要（R8：TUI/CLI 支持，走 `Runtime::summarize_session`）。
+    Summary,
     /// 未识别的斜杠命令，携带命令名（`"/"` 单独输入时为空串）。
     Unknown(String),
 }
@@ -41,6 +43,7 @@ impl fmt::Display for SlashCommand {
             Self::Clear => f.write_str("/clear"),
             Self::Undo { steps } => write!(f, "/undo {steps}"),
             Self::PlanToggle => f.write_str("/plan"),
+            Self::Summary => f.write_str("/summary"),
             Self::Unknown(name) => write!(f, "/{name}"),
         }
     }
@@ -76,6 +79,7 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             Some(SlashCommand::Undo { steps })
         }
         Some("plan") => Some(SlashCommand::PlanToggle),
+        Some("summary") => Some(SlashCommand::Summary),
         Some(name) => Some(SlashCommand::Unknown(name.to_owned())),
     }
 }

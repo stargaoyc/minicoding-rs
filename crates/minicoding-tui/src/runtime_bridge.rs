@@ -41,6 +41,9 @@ pub enum UiCommand {
     /// 切换到指定会话（T-M7-2）：bridge 取消当前 turn 后回 `AppEvent::SwitchSession`，
     /// 由 main.rs 重建 Runtime（`SessionLoadMode::Resume`）实现真正的切换。
     SwitchSession(String),
+    /// 生成会话摘要（R8）：bridge 调 `Runtime::summarize_session`，回传
+    /// `AppEvent::Summary`。
+    Summary,
     /// 退出 TUI（终止后台 task）。
     Exit,
 }
@@ -141,6 +144,25 @@ pub fn spawn_runtime_bridge(
                             rt.cancel_token().cancel();
                             if rt_tx.send(AppEvent::SwitchSession(id)).await.is_err() {
                                 break; // UI 端关闭
+                            }
+                        }
+                        UiCommand::Summary => {
+                            let result = rt.summarize_session().await;
+                            match result {
+                                Ok(summary) => {
+                                    if rt_tx.send(AppEvent::Summary(summary)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    if rt_tx
+                                        .send(AppEvent::Summary(Some(format!("摘要生成失败: {e}"))))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
                             }
                         }
                         UiCommand::Exit => break,

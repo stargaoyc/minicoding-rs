@@ -426,6 +426,10 @@ impl Runtime {
     /// `SessionSummarizer` 生成摘要（降级链：主 provider → 备用 → 启发式兜底，
     /// C-29 永不失败）→ `Storage::update_summary` 落盘。
     ///
+    /// 返回 `Ok(Some(summary))` 表示成功生成并落盘；`Ok(None)` 表示 no-op
+    /// （未注入 summarizer 或会话无消息）——R8 `/summary` 命令与 TUI 展示需要
+    /// 拿回摘要文本，CLI 退出路径忽略返回值。
+    ///
     /// CTX-5（2026-08-27 R5 审查，如实记录）：摘要的**消费方**仅会话列表展示
     /// （`Storage::list_sessions` 的 `summary` 字段，server 侧 `session_mgr` 用）——
     /// "跨会话恢复"（新会话 system 段注入 `session_context` 块，见 rules.md §5
@@ -434,19 +438,19 @@ impl Runtime {
     /// 误注入会把无关项目上下文带入新会话——修复列为设计决策项，不在此
     /// 半实现（避免行为惊吓）。
     ///
-    /// `session_summarizer` 未注入或会话无消息时为 no-op。摘要失败仅记 `warn`
-    /// 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
+    /// `session_summarizer` 未注入或会话无消息时为 no-op（返回 `Ok(None)`）。
+    /// 摘要失败仅记 `warn` 日志，不阻塞会话退出（best effort，与会话生命周期解耦）。
     ///
     /// # Errors
     /// 仅当 `Storage::update_summary` 失败时返回 `RuntimeError::Storage`；
     /// 摘要生成本身永不失败（启发式兜底，C-29）。
-    pub async fn summarize_session(&self) -> Result<(), RuntimeError> {
+    pub async fn summarize_session(&self) -> Result<Option<String>, RuntimeError> {
         let Some(summarizer) = &self.session_summarizer else {
-            return Ok(());
+            return Ok(None);
         };
         let snap = self.ctx.snapshot().await;
         if snap.messages.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let summary = match summarizer.summarize(&snap.messages).await {
             Ok(s) => s,
@@ -457,7 +461,7 @@ impl Runtime {
                     session = %self.session.id,
                     "会话摘要生成失败（理论不可达，C-29 兜底应保证成功）"
                 );
-                return Ok(());
+                return Ok(None);
             }
         };
         if let Err(e) = self
@@ -477,7 +481,7 @@ impl Runtime {
             summary_chars = summary.chars().count(),
             "会话摘要已落盘"
         );
-        Ok(())
+        Ok(Some(summary))
     }
 
     /// 驱动单轮对话（用户输入 → 最终回复或失败）。

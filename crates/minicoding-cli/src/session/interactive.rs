@@ -72,6 +72,7 @@ pub async fn run_interactive_session(rt: &Runtime) -> i32 {
     run_interactive_inner(rt, None).await
 }
 
+#[allow(clippy::too_many_lines)] // REPL 循环线性展开，拆分降低可读性
 async fn run_interactive_inner(rt: &Runtime, memory_slot: Option<MemoryQuerySlot>) -> i32 {
     let mut rl = match Editor::<AtFileHelper, DefaultHistory>::new() {
         Ok(mut rl) => {
@@ -165,6 +166,17 @@ async fn run_interactive_inner(rt: &Runtime, memory_slot: Option<MemoryQuerySlot
                 // `/plan` 已在上方原生处理，parser 的 PlanToggle 分支不可达；
                 // 显式展开以应对 parser 未来扩展
                 Some(SlashCommand::PlanToggle) => handle_plan_command(rt, None).await,
+                // R8：/summary 生成并展示会话摘要（跨会话恢复的写入侧）
+                Some(SlashCommand::Summary) => match rt.summarize_session().await {
+                    Ok(Some(summary)) => {
+                        anstream::eprintln!("{GREEN}会话摘要已生成并落盘：{GREEN:#}");
+                        anstream::eprintln!("{DIM}{summary}{DIM:#}");
+                    }
+                    Ok(None) => {
+                        anstream::eprintln!("{DIM}会话无消息或摘要未注入，无摘要可生成{DIM:#}");
+                    }
+                    Err(e) => anstream::eprintln!("{RED}会话摘要生成失败: {e}{RED:#}"),
+                },
                 None => {}
             }
             continue;
@@ -188,6 +200,7 @@ async fn run_interactive_inner(rt: &Runtime, memory_slot: Option<MemoryQuerySlot
     // CTX-4（2026-08-26 R3 审查）：会话退出前生成摘要——`SessionSummarizer`
     // 在 Runtime 构造时已注入，但此前无任何调用方，index.json.summary 恒为
     // None（特性"建成未通车"）。best-effort：失败不影响正常退出。
+    // R8：返回 `Ok(Some(summary))` 供 `/summary` 命令展示；退出路径忽略内容。
     if let Err(e) = rt.summarize_session().await {
         tracing::warn!(error = %e, "session summary generation failed (best-effort)");
     }

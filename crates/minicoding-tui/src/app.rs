@@ -313,6 +313,23 @@ impl App {
                 self.pending_switch = Some(id);
                 self.should_exit = true;
             }
+            AppEvent::Summary(summary) => {
+                // R8：/summary 结果渲染为 System 行
+                match summary {
+                    Some(text) if !text.is_empty() => {
+                        for line in text.lines() {
+                            self.lines.push(ChatLine::System(line.to_string()));
+                        }
+                        self.status_msg = "摘要已生成".to_string();
+                    }
+                    _ => {
+                        self.lines.push(ChatLine::System(
+                            "会话无消息或摘要未注入，无摘要可生成".to_string(),
+                        ));
+                        self.status_msg = "摘要不可用".to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -661,6 +678,12 @@ impl App {
                     "当前版本 TUI 暂不支持 {cmd}：UI 进程未持有 Runtime 查询通道"
                 )));
                 self.status_msg = "暂不支持".to_string();
+            }
+            SlashCommand::Summary => {
+                // R8：/summary 经 bridge 调 Runtime::summarize_session，结果经
+                // AppEvent::Summary 回传渲染（跨会话恢复的写入侧）。
+                let _ = self.ui_tx.try_send(UiCommand::Summary);
+                self.status_msg = "生成摘要中…".to_string();
             }
         }
     }

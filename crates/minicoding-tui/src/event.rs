@@ -28,4 +28,7 @@ pub enum AppEvent {
     /// 切换会话请求（T-M7-2）：用户在侧栏选中并按 Enter，bridge 取消当前 turn
     /// 后回传此事件，main.rs 重建 Runtime（`SessionLoadMode::Resume`）实现切换。
     SwitchSession(String),
+    /// `/summary` 结果（R8）：bridge 调 `Runtime::summarize_session` 后回传
+    /// 摘要文本（`None` = 无消息/未注入 summarizer），UI 渲染为 System 行。
+    Summary(Option<String>),
 }
