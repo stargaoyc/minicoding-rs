@@ -43,11 +43,14 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// 解析 `Last-Event-ID` header 为 seq。
+///
+/// 返回 `None` 表示 header 缺失或**畸形**（非数字）。R8 FE-14：畸形值此前
+/// 回退 `0` 触发全量重放——历史 `permission_requested` 事件重放会让前端弹窗
+/// pid 错乱（与首次连接 `sse_live` 想避免的场景同源）。畸形 header 视为
+/// "无 cursor"，由调用方走 `sse_live`（只推新事件）。
 #[must_use]
-pub fn parse_last_event_id(header: Option<&str>) -> u64 {
-    header
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+pub fn parse_last_event_id(header: Option<&str>) -> Option<u64> {
+    header?.trim().parse::<u64>().ok()
 }
 
 /// 构造单条 SSE 事件块（`id:`/`data:` + 空行终止符）。

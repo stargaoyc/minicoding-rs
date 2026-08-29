@@ -58,10 +58,20 @@ const URL_USERINFO_PATTERN: &str = r"(?i)([a-z][a-z0-9+.-]*://)([^/@:\s]+):([^:\
 
 /// 把敏感字段值替换为 `***`。
 ///
-/// 处理顺序：先脱敏字段赋值（`KEY=value`/`KEY: value`），再脱敏 Bearer token、
-/// URL userinfo，最后脱敏 AWS AKIA 模式。多轮匹配避免相互干扰。
+/// 处理顺序：先整块脱敏 PEM 私钥（多行，R8 SEC-4），再逐行脱敏字段赋值
+/// （`KEY=value`/`KEY: value`）、Bearer token、URL userinfo、AWS AKIA 模式。
+/// 多轮匹配避免相互干扰。
 #[must_use]
 pub fn redact(input: &str) -> String {
+    // R8 SEC-4 修复：PEM 私钥块是多行凭证（`-----BEGIN X PRIVATE KEY-----` 起
+    // 至 `-----END X PRIVATE KEY-----`），逐行脱敏无法命中——base64 载荷行无
+    // KEY=value/Bearer/AKIA 形态。整块脱敏：保留头尾 marker（可辨识），
+    // 载荷 base64 全部替换为 `***`。
+    if PEM_BLOCK.is_match(input) {
+        return PEM_BLOCK
+            .replace_all(input, "${marker}\n***\n${marker_end}")
+            .into_owned();
+    }
     let mut out = String::with_capacity(input.len());
 
     for line in input.lines() {
@@ -74,6 +84,17 @@ pub fn redact(input: &str) -> String {
     }
     out
 }
+
+/// PEM 私钥块（多行凭证，R8 SEC-4）：`-----BEGIN [A-Z ]*PRIVATE KEY-----` 起
+/// 至 `-----END [A-Z ]*PRIVATE KEY-----`（RSA/EC/OPENSSH 等变体）。`(?s)` 跨行
+/// 匹配；marker 命名捕获供替换保留头尾。
+static PEM_BLOCK: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    // `(?s).*?` 跨行非贪心匹配载荷（`[^]` 语法在 regex crate 不合法）
+    Regex::new(
+        r"(?s)(?P<marker>-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----).*?(?P<marker_end>-----END [A-Z0-9 ]*PRIVATE KEY-----)",
+    )
+    .expect("PEM block regex is valid")
+});
 
 /// 脱敏单行：识别 `KEY=value`/`KEY: value` 模式后整体替换值。
 fn redact_line(line: &str) -> String {
@@ -339,6 +360,31 @@ mod tests {
         let out = redact(input);
         assert!(!out.contains("p/ss"), "含 / 的密码不得保留: {out}");
         assert!(out.contains("admin:***@"), "应保留 user 并脱敏: {out}");
+    }
+
+    #[test]
+    fn redact_pem_private_key_block() {
+        // R8 SEC-4：PEM 私钥是多行凭证——逐行脱敏漏检 base64 载荷。
+        // 头尾 marker 保留（可辨识），载荷整体替换为 ***。
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7D+Y\nsuper-secret-base64\n-----END RSA PRIVATE KEY-----\n";
+        let out = redact(pem);
+        assert!(out.contains("-----BEGIN RSA PRIVATE KEY-----"), "{out}");
+        assert!(out.contains("-----END RSA PRIVATE KEY-----"), "{out}");
+        assert!(
+            !out.contains("MIIEowIBAAKCAQEA7D+Y"),
+            "base64 载荷不得保留: {out}"
+        );
+        assert!(!out.contains("super-secret"), "载荷不得保留: {out}");
+        assert!(out.contains("***"), "应整体替换为 ***: {out}");
+    }
+
+    #[test]
+    fn redact_openssh_private_key_block() {
+        // OPENSSH 变体同样命中
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nYWJjZGVmMTIzNDU2Cg==\n-----END OPENSSH PRIVATE KEY-----\n";
+        let out = redact(pem);
+        assert!(!out.contains("YWJjZGVmMTIzNDU2"), "{out}");
+        assert!(out.contains("OPENSSH PRIVATE KEY"), "{out}");
     }
 
     #[test]

@@ -43,6 +43,11 @@ pub struct OllamaProvider {
     model: String,
     client: reqwest::Client,
     tokenizer: Arc<TiktokenTokenizer>,
+    /// 构造时读取的 `OLLAMA_KEEP_ALIVE`（模型驻留，PTM-10）。
+    /// R8 PR-4 修复：构造时固定读取——运行期改 env 行为不一致。
+    keep_alive: Option<String>,
+    /// 构造时读取的 `OLLAMA_NUM_CTX`（显式上下文，PT4-9）。
+    num_ctx: Option<usize>,
 }
 
 impl std::fmt::Debug for OllamaProvider {
@@ -91,12 +96,23 @@ impl OllamaProvider {
             .read_timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::Network(e.to_string()))?;
+        // R8 PR-4：构造时固定读取 Ollama 环境变量（运行期改 env 行为不一致，
+        // 且每请求读 env 无法在测试中隔离）。
+        let keep_alive = std::env::var("OLLAMA_KEEP_ALIVE")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let num_ctx = std::env::var("OLLAMA_NUM_CTX")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .filter(|n| *n > 0);
         Ok(Self {
             display_name,
             api_base: api_base.into(),
             model: model_str,
             client,
             tokenizer: Arc::new(tokenizer),
+            keep_alive,
+            num_ctx,
         })
     }
 
@@ -127,9 +143,8 @@ impl OllamaProvider {
         // PTM-10（2026-08-26 R3 审查）：模型驻留时间——不设时默认 5 分钟卸载，
         // 交互间隔稍长即冷启动（数秒级重复加载）。`OLLAMA_KEEP_ALIVE` 可覆盖
         // （如 `30m`/`-1` 常驻；Go duration 语法由 Ollama 侧解析）。
-        if let Ok(ka) = std::env::var("OLLAMA_KEEP_ALIVE")
-            && !ka.trim().is_empty()
-        {
+        // R8 PR-4：改用构造时快照（`self.keep_alive`），不再每请求读 env。
+        if let Some(ka) = &self.keep_alive {
             body["keep_alive"] = json!(ka);
         }
 
@@ -174,10 +189,8 @@ impl OllamaProvider {
         // 恒插默认 8192，请求 options 优先级高于 Modelfile 默认值，用户在
         // Modelfile 配的 32K 上下文被静默压回 8192 造成截断；未设置时交给
         // Modelfile/模型默认（不干预）。
-        if let Ok(raw) = std::env::var("OLLAMA_NUM_CTX")
-            && let Ok(num_ctx) = raw.parse::<usize>()
-            && num_ctx > 0
-        {
+        // R8 PR-4：改用构造时快照（`self.num_ctx`），不再每请求读 env。
+        if let Some(num_ctx) = self.num_ctx {
             options.insert("num_ctx".to_string(), json!(num_ctx));
         }
         if !options.is_empty() {
@@ -979,6 +992,7 @@ mod tests {
     #[test]
     fn num_ctx_sent_only_when_env_set() {
         // PT4-9：环境变量显式设置时才下发 num_ctx。
+        // R8 PR-4：env 在构造时快照，每场景需新建 provider。
         // static Mutex 串行化 env 读写测试（并行跑会互相污染 OLLAMA_NUM_CTX）
         let _guard = ENV_LOCK
             .lock()
@@ -990,10 +1004,10 @@ mod tests {
         let body = provider.build_request_body(&basic_req());
         unsafe { std::env::remove_var("OLLAMA_NUM_CTX") };
         assert_eq!(body["options"]["num_ctx"], json!(32_768));
-        // 非法值（=0/非数字）不下发
-        unsafe { std::env::set_var("OLLAMA_NUM_CTX", "0") };
-        let body2 = provider.build_request_body(&basic_req());
-        unsafe { std::env::remove_var("OLLAMA_NUM_CTX") };
+        // 非法值（=0/非数字）不下发：构造新 provider（此时 env 已清除）
+        let provider2 =
+            OllamaProvider::new("http://localhost:11434", "llama3").expect("构造 provider");
+        let body2 = provider2.build_request_body(&basic_req());
         assert!(body2.get("options").is_none() || body2["options"].get("num_ctx").is_none());
     }
 

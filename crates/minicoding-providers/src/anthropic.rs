@@ -126,7 +126,16 @@ impl AnthropicProvider {
                 && let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut())
                 && let Some(last_block) = arr.last_mut()
             {
-                last_block["cache_control"] = json!({ "type": "ephemeral" });
+                // R8 PR-3 修复：最后一块是 `tool_result` 时**不放**断点——其内容
+                // 每轮随工具输出变化，断点永不命中缓存（浪费一个断点位）。
+                // 只对文本/工具调用等稳定前缀打断点。
+                let is_tool_result = last_block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t == "tool_result");
+                if !is_tool_result {
+                    last_block["cache_control"] = json!({ "type": "ephemeral" });
+                }
             }
         }
 

@@ -40,6 +40,8 @@ export function useMessages(sessionId: string | null) {
 
 export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
+  // R8 FE-15：乐观消息 id 唯一性计数器（跨会话单调，防同毫秒双发冲突）。
+  const optimisticSeq = useRef(0);
   return useMutation({
     // 遗留#4：POST /messages 改 202 Accepted——结果走 SSE，不消费响应体。
     // 2026-08-25 审查 F-202residue：后端已删除残留的空 stop_reason/final_text，
@@ -51,8 +53,10 @@ export function useSendMessage(sessionId: string | null) {
       // 取消进行中的 refetch，避免覆盖乐观更新
       await qc.cancelQueries({ queryKey: ["messages", sessionId] });
       const prev = qc.getQueryData<Message[]>(["messages", sessionId]);
+      // R8 FE-15：`optimistic-${Date.now()}` 同毫秒双发会 key 冲突（乐观占位
+      // 被 message_appended 剥除时按 id 前缀过滤）——追加单调计数保证唯一。
       const optimistic: Message = {
-        id: `optimistic-${Date.now()}`,
+        id: `optimistic-${Date.now()}-${optimisticSeq.current++}`,
         role: "user",
         content: [{ type: "text", text }],
         tool_calls: [],
