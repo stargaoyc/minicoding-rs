@@ -55,12 +55,17 @@ export function useServerConfig() {
 }
 
 /** 运行时切换会话权限模式（`POST /sessions/{id}/permission-mode`）。
- * 成功同步 UI store；失败抛错由调用方 toast 展示。 */
+ * 成功同步 UI store；失败抛错由调用方 toast 展示。
+ * `confirmDanger`：升级到 `bypass_permissions` 需 C-22 二次确认（R8 FE-2）。 */
 export function useSetPermissionMode() {
   const qc = useQueryClient();
   return useCallback(
-    async (sessionId: string, mode: import("../api/generated").PermissionMode) => {
-      await setPermissionMode(sessionId, mode);
+    async (
+      sessionId: string,
+      mode: import("../api/generated").PermissionMode,
+      confirmDanger?: boolean,
+    ) => {
+      await setPermissionMode(sessionId, mode, confirmDanger);
       void qc.invalidateQueries({ queryKey: ["sessions"] });
     },
     [qc],

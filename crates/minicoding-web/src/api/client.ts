@@ -124,6 +124,9 @@ export interface CreateSessionBody {
   preset?: "auto" | "read-only" | "external-sandbox" | "full-access";
   /** Plan 模式（C-25：先写 plan.md 拆分任务，批准后执行，仅只读工具可用）。 */
   plan_mode?: boolean;
+  /** C-22 二次确认：高危预设（full-access/external-sandbox）或 bypass_permissions
+   * 必须携带 `confirm_danger: true`（UI 红色警告确认后回传）。 */
+  confirm_danger?: boolean;
   /** LLM 请求超时（秒，覆盖 server 默认 120）。 */
   timeout_sec?: number;
   /** LLM 请求最大重试（覆盖 server 默认 3，C-13）。 */
@@ -217,14 +220,16 @@ export function undoSession(sessionId: string, steps = 1): Promise<UndoResponse>
   });
 }
 
-/** FE-6：`POST /sessions/{id}/permission-mode` — 运行中切换权限模式。 */
+/** FE-6：`POST /sessions/{id}/permission-mode` — 运行中切换权限模式。
+ * `confirm_danger`：升级到 bypass_permissions 需 C-22 二次确认（UI 红色警告后回传）。 */
 export function setPermissionMode(
   sessionId: string,
   mode: import("./generated").PermissionMode,
+  confirmDanger?: boolean,
 ): Promise<{ ok: boolean; mode: import("./generated").PermissionMode }> {
   return http(`/sessions/${sessionId}/permission-mode`, {
     method: "POST",
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, ...(confirmDanger !== undefined ? { confirm_danger: confirmDanger } : {}) }),
   });
 }
 

@@ -58,7 +58,7 @@ export function NewSessionDialog({
   creating: boolean;
   /** 创建失败的错误信息（非 null 时红色显示，对话框保持打开供重试）。 */
   error: string | null;
-  onConfirm: (workdir: string | undefined, mode: SessionModeKey) => void;
+  onConfirm: (workdir: string | undefined, mode: SessionModeKey, dangerConfirmed?: boolean) => void;
   onClose: () => void;
 }) {
   const [workdir, setWorkdir] = useState("");
@@ -84,7 +84,9 @@ export function NewSessionDialog({
 
   const handleConfirm = () => {
     const trimmed = workdir.trim();
-    onConfirm(trimmed ? trimmed : undefined, mode);
+    // R8 FE-1：full-access 需把红色警告勾选状态（ackDanger）一并回传，
+    // 后端 C-22 校验要求 confirm_danger: true 才放行
+    onConfirm(trimmed ? trimmed : undefined, mode, dangerMode ? ackDanger : false);
   };
 
   const dangerMode = mode === "full_access";

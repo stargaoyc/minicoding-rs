@@ -191,28 +191,28 @@ impl Tool for ShellRun {
                 .ok_or_else(|| ToolError::Exec("stderr 管道丢失".into()))?;
             let stdout_task = tokio::spawn(async move { read_capped(&mut stdout_pipe, cap).await });
             let stderr_task = tokio::spawn(async move { read_capped(&mut stderr_pipe, cap).await });
+            // R8 TL-1：`Child::id()` 在 `wait()` 完成后返回 None——须在 wait 前
+            // 捕获 pid，供 killpg 清理后台持管孙进程（见 `kill_process_tree`）。
+            let child_pid = child.id();
 
             // C-07/S9：超时后先 killpg 整树再 start_kill 兜底。
             // 不用 wait_with_output（消耗所有权）：保留 child 句柄以便取 pid 杀组。
             let status = if let Ok(r) = tokio::time::timeout(timeout, child.wait()).await {
                 r.map_err(ToolError::Io)?
             } else {
-                #[cfg(unix)]
-                if let Some(pid) = child.id() {
-                    // 子进程是组长（setpgid(0,0)），pgid == pid
-                    let _ = tokio::task::spawn_blocking(move || unsafe {
-                        libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL)
-                    })
-                    .await;
-                }
+                kill_process_tree(child_pid).await;
                 let _ = child.start_kill();
-                // 等 pipe 读任务收尾（SIGKILL 后管道 EOF）
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
+                // 等 pipe 读任务收尾（SIGKILL 后管道 EOF；setsid 逃逸由
+                // drain_pipes 的宽限+强杀兜底，见 R8 TL-1）
+                let _ = drain_pipes(stdout_task, child_pid).await;
+                let _ = drain_pipes(stderr_task, child_pid).await;
                 return Err(ToolError::Timeout(timeout));
             };
-            let out_bytes = stdout_task.await.unwrap_or_default();
-            let err_bytes = stderr_task.await.unwrap_or_default();
+            // R8 TL-1 修复：子进程已退出，但后台孙进程（如 `setsid sleep &`）
+            // 可能仍持管道写端致 `read` 永不 EOF（C-07 永久挂起）。宽限排空 +
+            // 超时强杀兜底后收割已读部分。
+            let out_bytes = drain_pipes(stdout_task, child_pid).await;
+            let err_bytes = drain_pipes(stderr_task, child_pid).await;
 
             let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
             let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
@@ -302,6 +302,48 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: &mut R, cap: usize) -> 
     }
     buf
 }
+
+/// 子进程退出后管道排空宽限（R8 TL-1 修复）。
+///
+/// 后台孙进程（如 `sh -c 'setsid sleep 100 & echo done'`）可持管道写端不关，
+/// `read` 永不 EOF——无宽限则 `drain_pipes` 永久挂起（C-07 资源不可耗尽）。
+/// 正常命令管道随子进程退出立即 EOF，本宽限不增加常规延迟。
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(3);
+
+/// 收割管道读取任务：先给 [`PIPE_DRAIN_GRACE`] 排空；超时（后台进程持管）
+/// 则 killpg 整树强杀强制关闭写端，再等待任务返回已读部分。
+async fn drain_pipes(
+    mut task: tokio::task::JoinHandle<std::vec::Vec<u8>>,
+    child_pid: Option<u32>,
+) -> std::vec::Vec<u8> {
+    match tokio::time::timeout(PIPE_DRAIN_GRACE, &mut task).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => Vec::new(),
+        Err(_) => {
+            kill_process_tree(child_pid).await;
+            task.await.unwrap_or_default()
+        }
+    }
+}
+
+/// Unix：killpg 整树强杀——子进程 spawn 前经 `setpgid(0,0)` 自成组长，
+/// `pgid == pid`，向整组发 SIGKILL 可清理后台孙进程。
+#[cfg(unix)]
+async fn kill_process_tree(child_pid: Option<u32>) {
+    if let Some(pid) = child_pid {
+        // SAFETY: killpg 仅向进程组发信号，不触碰子进程内存；pgid==pid
+        // 由 pre_exec 内 setpgid(0,0) 保证；pid 来自 tokio Child（存在性已验证）。
+        let _ = tokio::task::spawn_blocking(move || unsafe {
+            libc::killpg(i32::try_from(pid).unwrap_or(-1), libc::SIGKILL)
+        })
+        .await;
+    }
+}
+
+/// Windows：无 killpg 语义；由 Job Object `KILL_ON_JOB_CLOSE` 与
+/// `kill_on_drop`/`start_kill` 兜底（R8 文档化残余：孙进程清理异步）。
+#[cfg(not(unix))]
+async fn kill_process_tree(_child_pid: Option<u32>) {}
 
 /// S19/C-04：shell 输出中的常见凭证形态脱敏（PTM-14：值边界精确替换）。
 ///
@@ -417,19 +459,29 @@ fn redact_line_precise(line: &str, sensitive_keys: &[&str], key_prefixes: &[&str
         return line.to_string();
     }
     edits.sort_unstable();
-    edits.dedup_by(|a, b| a.0 <= b.1 && b.0 <= a.1); // 合并重叠区段（保守取并集）
+    let merged = merge_edits(edits);
     let mut out = String::with_capacity(line.len());
     let mut cursor = 0usize;
-    for (start, end) in edits {
-        if start < cursor {
-            continue; // 与已合并区段重叠
-        }
+    for (start, end) in merged {
         out.push_str(&line[cursor..start]);
         out.push_str("***");
         cursor = end;
     }
     out.push_str(&line[cursor..]);
     out
+}
+
+/// R8 TL-2：重叠区段并集合并（原 `dedup_by` 丢弃后区间，后区间延伸超出前区间
+/// 时超出部分漏脱敏）。输入需已按起点排序；重叠区间取覆盖范围最大端。
+fn merge_edits(edits: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(edits.len());
+    for (start, end) in edits {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -760,5 +812,66 @@ mod tests {
         use super::redact_secrets;
         let input = "plain log line\ntokens=42 count\nno secrets here";
         assert_eq!(redact_secrets(input), input, "普通行不应改动");
+    }
+
+    // ===== R8 TL-2：重叠区段并集合并 =====
+
+    #[test]
+    fn merge_edits_takes_union_of_overlapping_ranges() {
+        // 后区间延伸超出前区间（修复前 dedup_by 丢弃后区间 → 延伸部分泄漏）
+        assert_eq!(super::merge_edits(vec![(5, 15), (10, 20)]), vec![(5, 20)]);
+        // 相邻相接合并
+        assert_eq!(
+            super::merge_edits(vec![(0, 5), (5, 8), (12, 20)]),
+            vec![(0, 8), (12, 20)]
+        );
+        // 不相交保持
+        assert_eq!(
+            super::merge_edits(vec![(0, 3), (4, 6)]),
+            vec![(0, 3), (4, 6)]
+        );
+    }
+
+    #[test]
+    fn redact_quoted_value_with_prefix_fully_redacts() {
+        use super::redact_line_precise;
+        let out = redact_line_precise("export TOKEN=\"sk-abcdefghijklmnop\"", &["token"], &["sk-"]);
+        assert_eq!(out, "export TOKEN=***", "{out}");
+    }
+
+    // ===== R8 TL-1：后台进程持管道不挂起（C-07） =====
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_holding_pipe_does_not_hang() {
+        let (_tmp, workdir) = make_workdir();
+        let ctx = ToolContext::new(workdir, "test".to_string());
+        let tool = ShellRun::new();
+        let started = std::time::Instant::now();
+        // 子进程（sh）秒退，但后台 `sleep 30` 持 stdout 写端不关——
+        // 修复前 stdout_task.await 永久挂起；修复后宽限+杀树兜底返回
+        let result = tool
+            .execute(json!({"command": "sleep 30 & echo done"}), &ctx)
+            .await
+            .expect("run ok");
+        assert!(
+            text_of(&result).contains("done"),
+            "前台输出应已捕获: {}",
+            text_of(&result)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "后台持管不应阻塞工具返回，实际耗时 {:?}",
+            started.elapsed()
+        );
+        // 后台进程组应已被 killpg 清理（短等待让信号生效）
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("ps -eo pid,cmd | grep 'sleep 30' | grep -v grep | wc -l")
+            .output()
+            .expect("ps");
+        let count = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(count, "0", "后台持管进程应被清理，实际残留 {count}");
     }
 }

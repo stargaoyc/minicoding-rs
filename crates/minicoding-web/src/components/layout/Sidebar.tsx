@@ -23,7 +23,11 @@ export function Sidebar() {
     useUIStore();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
 
-  const handleNewSession = (workdir?: string, mode: SessionModeKey = "accept_edits") => {
+  const handleNewSession = (
+    workdir?: string,
+    mode: SessionModeKey = "accept_edits",
+    dangerConfirmed = false,
+  ) => {
     // Web 模式：从 localStorage 读取 provider 配置注入会话创建请求
     // Tauri 模式：sidecar 启动时已读 config.toml，无需注入
     let body: CreateSessionBody | undefined;
@@ -47,7 +51,9 @@ export function Sidebar() {
     } else if (mode === "plan") {
       body = { ...body, plan_mode: true };
     } else if (mode === "full_access") {
-      body = { ...body, preset: "full-access" };
+      // R8 FE-1 修复：C-22 二次确认贯通——此前只发 preset 不带 confirm_danger，
+      // 后端强制校验恒 400，Web/Desktop 上"全自动·沙箱外"永远创建失败。
+      body = { ...body, preset: "full-access", confirm_danger: dangerConfirmed };
     }
     if (workdir) {
       body = { ...body, workdir };
@@ -235,9 +241,16 @@ function PermissionModeSwitcher({ sessionId }: { sessionId: string | null }) {
 
   const handleClick = async (mode: PermissionMode) => {
     if (mode === permissionMode || switching) return;
+    // R8 FE-2：切换到 bypass_permissions 需 C-22 二次确认（红色警告弹窗）
+    if (mode === "bypass_permissions") {
+      const confirmed = window.confirm(
+        "⚠ 全自动模式：所有副作用免弹窗自动放行，沙箱被绕过。\n\n请仅在受信隔离容器内启用。确认切换？",
+      );
+      if (!confirmed) return;
+    }
     setSwitching(true);
     try {
-      await setMode(sessionId, mode);
+      await setMode(sessionId, mode, mode === "bypass_permissions" ? true : undefined);
       // 乐观同步（后端成功回传前先高亮；SSE permission_mode_changed 会再次同步）
       setPermissionMode(mode);
     } catch (e) {

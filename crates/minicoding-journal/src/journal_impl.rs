@@ -349,18 +349,29 @@ async fn verify_current_matches(
     }
 }
 
-/// 拒绝恢复目标为符号链接（SEC-8，见 `restore_file` 内注释）。
+/// 拒绝恢复路径中**任何**组件为符号链接（SEC-8 升级，2026-08-29 R8 审查）。
 ///
-/// 文件不存在视为通过（`Deleted` 变体的恢复路径）；存在且是 symlink 则拒绝。
+/// 原实现仅检查末段（`symlink_metadata` 不跟随末段链接，见 `restore_file` 内注释）；
+/// 中段目录若为指向外部的符号链接（如 `workdir/link/secret.txt`，`link`→`~/.ssh`），
+/// 恢复写会穿透中段链接出界（C-03/C-28 逃逸）。逐组件检查每个前缀，任一组件是
+/// 符号链接即拒绝。某前缀不存在时后续更深组件必不存在（无 symlink 风险），提前
+/// 返回通过（对应 `Deleted` 变体的"文件不存在"幂等恢复路径）。
 async fn ensure_not_symlink(path: &camino::Utf8PathBuf) -> Result<(), JournalError> {
-    match fs::symlink_metadata(path.as_std_path()).await {
-        Ok(md) if md.file_type().is_symlink() => Err(JournalError::PathEscaped(format!(
-            "{path} is a symbolic link; refusing to restore through it"
-        ))),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(JournalError::Io(e)),
+    let mut prefix = camino::Utf8PathBuf::new();
+    for comp in path.components() {
+        prefix.push(comp.as_str());
+        match fs::symlink_metadata(prefix.as_std_path()).await {
+            Ok(md) if md.file_type().is_symlink() => {
+                return Err(JournalError::PathEscaped(format!(
+                    "{prefix} is a symbolic link; refusing to restore through it"
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(JournalError::Io(e)),
+        }
     }
+    Ok(())
 }
 
 /// 校验恢复路径不越界（C-03/C-28）。
@@ -896,6 +907,69 @@ mod tests {
         // 文件未被覆盖
         let cur = fs::read(file.as_std_path()).await.unwrap();
         assert_eq!(cur, b"recreated");
+    }
+
+    // === R8 SEC-1：中段目录符号链接逃逸（C-03/C-28）===
+
+    #[tokio::test]
+    async fn undo_rejects_mid_path_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let outside = Utf8PathBuf::from_path_buf(tmp.path().join("outside")).unwrap();
+        fs::create_dir_all(outside.as_std_path()).await.unwrap();
+        // 在 journal 工作目录内建指向外部目录的符号链接
+        let workdir = Utf8PathBuf::from_path_buf(tmp.path().join("workdir")).unwrap();
+        fs::create_dir_all(workdir.as_std_path()).await.unwrap();
+        let link = workdir.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.as_std_path(), link.as_std_path()).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.as_std_path(), link.as_std_path()).unwrap();
+
+        let victim = link.join("secret.txt");
+        fs::write(victim.as_std_path(), b"new").await.unwrap();
+        let j = FileChangeJournal::new(Some(workdir.clone()));
+        j.record(entry(
+            "op1",
+            vec![FileChange::Written {
+                path: victim.clone(),
+                before: Some(b"old".to_vec()),
+                after: b"new".to_vec(),
+            }],
+        ))
+        .await
+        .unwrap();
+        let report = j.undo(1).await.unwrap();
+        // 中段 symlink 必须拒绝恢复，且 entry 保留可重试
+        assert_eq!(report.undone_entries, 0);
+        assert_eq!(report.failed_files.len(), 1);
+        assert!(!j.is_empty(), "失败 entry 回推账本可重试");
+        // 外部文件未被穿透修改（仍为 new）
+        let cur = fs::read(victim.as_std_path()).await.unwrap();
+        assert_eq!(cur, b"new");
+    }
+
+    #[tokio::test]
+    async fn ensure_not_symlink_rejects_any_component() {
+        let tmp = TempDir::new().unwrap();
+        let outside = Utf8PathBuf::from_path_buf(tmp.path().join("out")).unwrap();
+        fs::create_dir_all(outside.as_std_path()).await.unwrap();
+        let link = Utf8PathBuf::from_path_buf(tmp.path().join("link")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.as_std_path(), link.as_std_path()).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.as_std_path(), link.as_std_path()).unwrap();
+
+        // 末段是 symlink：拒绝
+        let res = ensure_not_symlink(&link).await;
+        assert!(matches!(res, Err(JournalError::PathEscaped(_))));
+        // 中段是 symlink（link/x.txt 不存在）：拒绝
+        let res = ensure_not_symlink(&link.join("x.txt")).await;
+        assert!(matches!(res, Err(JournalError::PathEscaped(_))));
+        // 普通路径（文件不存在）：通过（幂等路径）
+        let ok =
+            ensure_not_symlink(&Utf8PathBuf::from_path_buf(tmp.path().join("plain.txt")).unwrap())
+                .await;
+        assert!(ok.is_ok());
     }
 
     // === Edited 撤销时 after 不匹配（冲突）===
