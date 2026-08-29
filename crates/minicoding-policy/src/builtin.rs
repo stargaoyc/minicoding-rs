@@ -311,8 +311,15 @@ fn shell_hits_blacklist(input: &Value) -> bool {
     let Some(cmd) = extract_command_text(input) else {
         return false;
     };
-    // SEC-1：fork bomb 字面量（tokenize 会拆掉 `(){` 结构，整串检查）
-    if cmd.contains(":(){") {
+    // SEC-1：fork bomb 字面量（tokenize 会拆掉 `(){` 结构，整串检查）。
+    // R8 SEC-3 修复：bash 允许空白变体（`: () { : | : & }; :`），仅精确匹配
+    // `:(){` 可被空格插入绕过。归一化空白后仍按 `:(){` 形态判定——`:` 命名
+    // 的递归函数是 fork bomb 的特征签名，普通函数定义（`foo(){...}`）不受误伤。
+    let compact = cmd
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if compact.contains(":(){") {
         return true;
     }
     // SEC-1：管道执行远程脚本（切段前判定，见函数文档）
@@ -1461,6 +1468,9 @@ mod tests {
             // fork bomb
             ":(){ :|:& };:",
             "bash -c ':(){ :|:& };:'",
+            // R8 SEC-3：空白变体 fork bomb（`:` 与 `(){` 间插入空格）
+            ": () { : | : & }; :",
+            "bash -c ': (){ : | : & };:'",
             // mkfs
             "mkfs.ext4 /dev/sda1",
             "mkfs /dev/sdb",

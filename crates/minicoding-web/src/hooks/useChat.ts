@@ -83,6 +83,9 @@ interface SSEStreamOptions {
     /** R4（FE4-1）：pending 快照携带的 options，SSE 实时事件无此字段 */
     options?: string[];
   }) => void;
+  /** R8 FE-4：权限已决/本 turn 结束时回调——前端弹窗须自动关闭
+   * （服务端超时 Deny 或他端已裁决时，pending 弹窗不再残留）。 */
+  onPermissionResolved?: () => void;
   onTaskUpdated?: () => void;
 }
 
@@ -182,6 +185,9 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         optsRef.current?.onPermissionRequested?.(state.waitingPermission!);
       } else if (event.type === "permission_resolved" || event.type === "turn_end") {
         waitingRef.current = state.waitingPermission;
+        // R8 FE-4：权限已决/回合结束 → 前端弹窗自动关闭（服务端超时 Deny、
+        // 他端已裁决等场景，避免弹窗残留致用户点"允许"得 404）。
+        optsRef.current?.onPermissionResolved?.();
       }
       if (event.type === "task_updated") {
         optsRef.current?.onTaskUpdated?.();

@@ -147,6 +147,9 @@ function AppInner() {
         });
       }
     },
+    // R8 FE-4：权限已决/回合结束 → 自动关闭弹窗（服务端超时 Deny、他端
+    // 已裁决时，pending 不再残留；否则用户点"允许"得 404 且无引导）
+    onPermissionResolved: () => permissions.dismiss(),
   });
   const sendMessage = useSendMessage(activeSessionId);
   // ARCH-5：api 层调用统一经 hooks 封装（AGENTS.md §8.3 分层令）

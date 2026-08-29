@@ -199,8 +199,11 @@ impl AutoMemory {
         if let Some(existing) = entries.iter_mut().find(|e| e.topic == topic) {
             existing.content = content;
             existing.category = category;
-            // 多次确认递增置信度（上限 1.0）。
-            existing.confidence = (existing.confidence + 0.1).min(1.0);
+            // R8 MEM-4 修复：此前更新分支固定 `+0.1` 递增并忽略调用方传入的
+            // confidence（工具层 LLM 评估值被丢弃）。改为确认递增与显式评估
+            // 取较大者——既有"多次确认递增（上限 1.0）"语义保留，同时调用方
+            // 基于新证据给出的更高置信度可表达。
+            existing.confidence = (existing.confidence + 0.1).max(confidence).min(1.0);
             existing.updated = now;
         } else {
             entries.push(AutoEntry {
@@ -441,6 +444,37 @@ mod tests {
         assert_eq!(entries[0].content, "v2");
         // 二次确认 → confidence +0.1。
         assert!((entries[0].confidence - 0.6).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn add_entry_update_honors_higher_caller_confidence() {
+        // R8 MEM-4：更新分支此前忽略调用方 confidence（固定 +0.1）——
+        // 基于新证据给出的更高置信度应可表达。
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_owned()).unwrap();
+        let mem = AutoMemory::with_dir(&dir);
+        mem.add_entry(
+            "topic".to_string(),
+            "v1".to_string(),
+            AutoCategory::Pref,
+            0.4,
+        )
+        .await
+        .unwrap();
+        // 新证据：调用方明确给出高置信度（0.9）
+        mem.add_entry(
+            "topic".to_string(),
+            "v2".to_string(),
+            AutoCategory::Pref,
+            0.9,
+        )
+        .await
+        .unwrap();
+        let entries = mem.load_entries().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "v2");
+        // 0.4+0.1=0.5 < 0.9 → 采用调用方 0.9（修复前为 0.5）
+        assert!((entries[0].confidence - 0.9).abs() < 1e-9);
     }
 
     #[tokio::test]
