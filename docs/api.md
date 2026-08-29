@@ -662,11 +662,11 @@ pub struct EventRecord {
     pub seq: u64,                              // 单调递增（每会话独立，从 1 开始）
     pub session_id: SessionId,
     pub timestamp: OffsetDateTime,
-    pub schema_version: u32,                   // 当前 SCHEMA_VERSION=1
+    pub schema_version: u32,                   // 当前 SCHEMA_VERSION=3（M-06 起）
     pub event: PersistedEvent,                 // #[serde(flatten)]
 }
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// 事件存储 trait（`dyn` 兼容）。`append` 必须 fsync 后返回（崩溃安全）。
 pub trait EventStore: Send + Sync {

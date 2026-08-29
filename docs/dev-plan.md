@@ -194,12 +194,12 @@ dev-plan.md ──── task（T-Mx-NN）输入/输出/验收/依赖  ← 本�
 #### T-M0-8 README + docs 占位与约束自检骨架
 - **crate**：workspace 根 + core
 - **输入**：T-M0-1..T-M0-7
-- **输出**：`README.md` 占位；`core::assert_constraints()` 骨架函数（启动校验，M0 仅占位，后续 milestone 填充）；`cargo doc --workspace` 可生成
+- **输出**：`README.md` 占位；约束自检清单骨架（`rules.md` §8，R8 审查后改述为"实现层强制 + CI 门禁"对照表，不再声称运行时 `assert_constraints()` 函数）；`cargo doc --workspace` 可生成
 - **涉及功能**：Q-01、Q-02
 - **涉及约束**：C-01..C-07、C-21..C-30（自检清单骨架，rules.md §8）
 - **验收标准**：
   - `cargo doc --workspace --no-deps` 无警告生成；
-  - `assert_constraints()` 在 M0 返回 `Ok(())`（占位）。
+  - 各 crate `tests/architecture.rs` 守卫测试存在且通过（实现层强制的静态部分）。
 - **预估工作量**：S
 
 #### T-M0-9 测试基础设施骨架（Test Infra Setup）

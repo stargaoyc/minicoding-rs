@@ -152,7 +152,7 @@
 | H-05 | PreToolUse 拦截/改写 | deny/allow(Ask→Allow)/modify_input | M5 | 已实现 |
 | H-06 | PostToolUse 后处理 | 跑 formatter/linter、改写 result | M5 | 已实现 |
 | H-07 | PermissionRequest 短路 | 自动批准/阻断，跳过 Prompter | M5 | 已实现 |
-| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact 未派发 | M5 | 部分实现（SessionStart/UserPromptSubmit/PreToolUse 注入经 `pending_hook_contexts` 缓冲并入 system 段；PreCompact/PostCompact 事件未接线，压缩管道内无 Hook 触发点） |
+| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact/PostCompact 已接线（R8，2026-08-29） | 已实现（SessionStart/UserPromptSubmit/PreToolUse 注入经 `pending_hook_contexts` 缓冲并入 system 段；R8 起 PreCompact/PostCompact 在 ContextManagerImpl 压缩管道前后派发，extras 含 tokens_before/after） |
 | H-09 | L0 不可覆盖 | Hook 的 allow 对内置黑名单 Deny 无效 | M5 | 已实现 |
 | H-10 | on_hook_error 策略 | continue/deny/fail，超时 kill | M5 | 已实现 |
 | H-11 | 6 个内置示例 Hook | fmt-on-write/auto-approve-tests/block-secrets/git-status-inject/backup-before-compact/test-on-stop | M5 | 已实现 |
@@ -218,7 +218,7 @@
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
 | F-01 | CLI 单次模式 | `minicoding "prompt"` | M1 | 已实现 |
-| F-02 | CLI 交互会话 | `--session` REPL（含 /undo /plan /mcp） | M2 | 已实现 |
+| F-02 | CLI 交互会话 | `--session` REPL（含 /help /model /status /tokens /clear /undo /plan /summary；`/mcp` 非 REPL 命令，MCP 管理走独立子命令 `minicoding mcp list/approve/reset-project-choices`） | M2 | 已实现 |
 | F-03 | 流式渲染 | token 直写 stdout | M1 | 已实现 |
 | F-04 | 非 TTY 降级 | 禁 spinner/颜色 | M1 | 已实现 |
 | F-05 | TUI 全屏 | ratatui 多视图 | M7 | 已实现 |
