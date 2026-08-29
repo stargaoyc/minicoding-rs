@@ -4,6 +4,45 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.9] - 2026-08-28
+
+> 自 v0.3.8 以来的 R8 修复批次（12 个 commit）。主题：**工具调度并行化改进**、
+> **ContextLength 紧急压缩联动**、**四形态能力矩阵收拢（server）**、**上下文/存储
+> P3 批量**、**Hook 压缩事件接线**、**/summary 命令**。无新增 P0。
+
+### Performance
+
+- **工具调用波次调度**：相邻只读调用聚为"读块"整体并行（上限 `parallel_reads`），
+  副作用严格串行——替代旧"全部只读在前才并行、否则全串行"逻辑。混合顺序
+  （写→读→读→写→读）下相邻读不再白白串行。顺序由原始调用序保证，无 DAG
+  启发式依赖判定风险（启发式 DAG 对 shell.run 等 opaque 工具路径依赖不可靠，
+  误判会在真实文件系统造成数据竞争，经评估未采用）
+
+### Security / Reliability
+
+- **ContextLength 紧急压缩联动（PT4-3）**：真实 400 上下文超长此前只回灌 LLM
+  自修正、压缩永不触发（本地阈值低于模型真实窗口时不压缩）。首次命中触发
+  `ContextManager::force_compress`（完整 4 级管道+熔断/降级链）+ 重建请求 +
+  重试一次，再失败才回灌
+- **capabilities 模型探测（PT-R7-2）**：OpenAI `context_window` 按模型前缀探测
+  （deepseek→64K、qwen-32b→32K，其余 128K 保守默认）——避免高估小窗口模型致
+  压缩过晚触发真实 400
+- **PreCompact/PostCompact Hook 接线（#1）**：ContextManagerImpl 注入 HookRegistry，
+  压缩管道前后派发（extras 含 tokens_before/after），backup-before-compact 等
+  示例 Hook 首次真实触发
+- **server 能力矩阵收拢（#12 部分）**：AGENTS.md 项目文档注入（C-05 边界）+
+  git/web/memory/ui.ask 工具补齐——Web/Desktop 用户此前无项目指令层与这些工具
+
+### Fixed
+
+- 上下文 P3：预测压缩计入 fixed_overhead（CTX-R6-8）；post_compact 注入头部计入
+  预算（CTX-R6-9）；auto.md 缓存补 size 校验（CTX-R6-10）；L1 裁剪改最大优先+
+  预算内即停（CTX-R6-11）
+- 存储 P3：snapshot tmp 崩溃残留清理（ST-R6-2）；事件流单行损坏跳过而非整流
+  Corrupted（ST-R6-3）；`next_seq` 自行持会话锁（ST-10）
+- **/summary 命令（TUI + CLI）**：生成并展示会话摘要（`summarize_session` 返回
+  摘要文本），跨会话恢复的写入侧
+
 ## [0.3.8] - 2026-08-28
 
 > 自 v0.3.7 以来的 R7 全面审查（`docs/project-review-20260828-r7.md`）修复。
