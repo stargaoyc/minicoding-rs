@@ -114,6 +114,10 @@ export function applyChatEvent(
             waitingPermission: null,
           });
         }
+      } else {
+        // R8 FE-12：中断后清理 waitingPermission 横幅（此前残留，UI 一直显示
+        // "等待权限确认"而 turn 已被取消；用户无操作可消除该状态）。
+        set({ waitingPermission: null });
       }
       break;
     }

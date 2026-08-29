@@ -381,6 +381,13 @@ impl App {
                     Role::Tool => {
                         let text = msg.text();
                         if !text.is_empty() {
+                            // R8 FE-11：移除 ToolCallStarted 放的占位符行
+                            // （Tool{name, done}），以工具结果文本替换消除双显。
+                            // 占位符行可能因 ToolCallFinished 标记而 done=true，
+                            // 位于 lines 末尾（单工具场景）。
+                            if matches!(self.lines.last(), Some(ChatLine::Tool { .. })) {
+                                self.lines.pop();
+                            }
                             self.lines.push(ChatLine::Tool {
                                 tool: text,
                                 done: true,
