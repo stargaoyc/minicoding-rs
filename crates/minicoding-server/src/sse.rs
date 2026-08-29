@@ -57,8 +57,18 @@ pub fn parse_last_event_id(header: Option<&str>) -> Option<u64> {
 ///
 /// 不发送 `event:` 命名事件字段：浏览器 `onmessage` 只能收到默认
 /// `message` 类型事件，命名事件会静默丢失（见模块注释）。
+///
+/// R8 FE-8：`data:` 载荷除 `EventKind` 外**注入 `seq` 字段**——`EventDto`
+/// 类型声明 `seq` 必填，但此前 seq 仅在 `id:` 字段（前端 `dto.seq` 恒
+/// `undefined`，与生成类型契约漂移）。`id:` 仍保留（浏览器 `EventSource`
+/// 用 `Last-Event-ID` 自动重连恢复），`data:` 补 seq 使载荷与 `EventDto`
+/// 序列化形态一致，前端可直接消费 cursor。
 fn format_sse_event(seq: u64, kind_json: &serde_json::Value) -> String {
-    let data = serde_json::to_string(kind_json).unwrap_or_default();
+    let mut data = kind_json.clone();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("seq".to_string(), serde_json::json!(seq));
+    }
+    let data = serde_json::to_string(&data).unwrap_or_default();
     format!("id: {seq}\ndata: {data}\n\n")
 }
 
@@ -214,5 +224,38 @@ async fn forward_live_events(
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::pedantic)]
+    use super::*;
+
+    #[test]
+    fn format_sse_event_includes_seq_in_data() {
+        // R8 FE-8：data 载荷须含 seq（EventDto 契约），id: 字段保留供
+        // EventSource Last-Event-ID 重连。
+        let kind = serde_json::json!({"type": "token", "text": "hi"});
+        let block = format_sse_event(42, &kind);
+        assert!(block.starts_with("id: 42\n"), "{block}");
+        let data_line = block.lines().find(|l| l.starts_with("data: ")).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(data_line.trim_start_matches("data: ")).unwrap();
+        assert_eq!(payload["seq"], 42, "data 载荷应含 seq: {payload}");
+        assert_eq!(payload["type"], "token");
+        assert_eq!(payload["text"], "hi");
+        // 序列化形态与 EventDto（seq + flatten kind）一致
+        assert!(payload.as_object().unwrap().contains_key("seq"));
+    }
+
+    #[test]
+    fn parse_last_event_id_returns_none_for_malformed() {
+        // R8 FE-14：畸形 header 视为无 cursor（走 sse_live），不回退 0
+        assert_eq!(parse_last_event_id(None), None);
+        assert_eq!(parse_last_event_id(Some("42")), Some(42));
+        assert_eq!(parse_last_event_id(Some(" 7 ")), Some(7));
+        assert_eq!(parse_last_event_id(Some("abc")), None);
+        assert_eq!(parse_last_event_id(Some("")), None);
     }
 }
