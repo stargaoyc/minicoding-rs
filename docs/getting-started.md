@@ -327,9 +327,10 @@ CC 用 JSON，minicoding 用 TOML（`data-model.md` §3.0、`architecture.md` §
 minicoding 配置加载优先级（高 → 低，见 `architecture.md` §7.1）：
 
 ```
-CLI args > Env vars > Project config (./.minicoding.toml)
-         > User config (~/.minicoding/config.toml) > Built-in defaults
+CLI args > Env vars > User config (~/.minicoding/config.toml) > Built-in defaults
 ```
+
+> **R9 审查更正**：早期设计稿含 `Project config (./.minicoding.toml)` 层，但**项目级分层加载未实现**（`config.rs` 仅单一用户级文件，见 `roadmap.md`）。
 
 ### 3.2 项目记忆：`CLAUDE.md` → `AGENTS.md`（兼容）
 
@@ -629,10 +630,10 @@ minicoding> /plan off      # 切回 Default 模式
 
 #### Hook 加载（M5 交付，`features.md` H-01）
 
-Hook 从 `.minicoding/hooks.toml`（项目级）或 `~/.minicoding/hooks.toml`（用户级）加载，按事件分 10 段配置（`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/...，PascalCase 段名，见 `core::config::HooksConfig`）。`hooks` feature 未启用时退化为 `NoopHookRegistry`（`modules.md` §12.3）。
+Hook 从 `MINICODING_HOME/config.toml` 的 `[hooks]` 表加载（单一用户级文件，**项目级 `.minicoding/hooks.toml` 未实现**，见 `roadmap.md`），按事件分 10 段配置（`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/...，PascalCase 段名，见 `core::config::HooksConfig`）。`hooks` feature 未启用时退化为 `NoopHookRegistry`（`modules.md` §12.3）。
 
 ```toml
-# .minicoding/hooks.toml 示例（嵌套在 [hooks] 表下）
+# ~/.minicoding/config.toml 的 [hooks] 段
 [hooks]
 default_timeout_sec = 30
 on_hook_error = "continue"

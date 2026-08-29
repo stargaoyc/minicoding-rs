@@ -698,7 +698,7 @@ exec 模式**移除 per-command 审批门**——AGENTS.md 内容被无条件执
 ### 9.3 CI 认证安全
 
 - 优先用 API Key 而非浏览器认证缓存令牌；
-- API Key 通过 `MINICODING_API_KEY` 环境变量传递，**不**写入 `.minicoding.toml`（明文配置文件可能被 Agent 读取）；
+- API Key 通过 `MINICODING_API_KEY` 环境变量传递，**不**写入配置文件（明文配置文件可能被 Agent 读取）；
 - CI secret 注入用环境变量，不依赖 `~/.minicoding/auth.json` 缓存。
 
 ---

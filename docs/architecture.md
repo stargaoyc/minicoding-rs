@@ -244,12 +244,15 @@ Frontend ──ask(prompt)──▶ Runtime
 分层合并优先级（高 → 低）：
 
 ```
-CLI args  >  Env vars  >  Project config (./.minicoding.toml)
-          >  User config (~/.minicoding/config.toml)
+CLI args  >  Env vars  >  User config (~/.minicoding/config.toml)
           >  Built-in defaults
 ```
 
-> 用户级与项目级配置路径以 `data-model.md` §3.0 的"路径约定"为权威来源：根目录默认 `~/.minicoding/`，可用 `MINICODING_HOME` 覆盖。本项目**不**采用 XDG 多目录分散方案，避免文档间路径漂移。
+> **R9 审查更正**：早期设计稿含 `Project config (./.minicoding.toml)` 层，但
+> **项目级分层加载未实现**（`config.rs` 仅单一用户级文件，见 `roadmap.md`）。
+> 用户级与项目级配置路径以 `data-model.md` §3.0 的"路径约定"为权威来源：
+> 根目录默认 `~/.minicoding/`，可用 `MINICODING_HOME` 覆盖。本项目**不**采用
+> XDG 多目录分散方案，避免文档间路径漂移。
 
 ### 7.2 错误与中断
 

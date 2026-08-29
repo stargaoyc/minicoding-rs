@@ -166,9 +166,9 @@ minicoding-core/src/
 │   └── error.rs           # RuntimeError / LlmError / ToolError / JournalError / McpError / HookError
 ├── provider/trait.rs      # LlmProvider / Tokenizer trait
 ├── tool/
-│   ├── trait.rs           # Tool trait（含 is_read_only()，见 api.md §3.3）
+│   ├── trait.rs           # Tool trait（含 is_read_only()，见 api.md §3.3）+ ToolContext / SideEffect
 │   ├── registry.rs        # ToolRegistry（按 side_effect 调度）
-│   └── context.rs         # ToolContext / SideEffect
+│   └── render.rs          # RenderIntent / output_schema（R-05，R9 审查更正：原树列 context.rs 不存在）
 ├── policy/
 │   ├── trait.rs           # PermissionPolicy + PermissionPrompter + Verdict + Decision + PlanModeController（见 api.md §3.6）
 │   ├── persist.rs         # PolicyPersist：AllowAlways 持久化存储（policy.toml 0600 原子写）
@@ -607,7 +607,11 @@ minicoding-providers/src/
 
 ### 11.1 职责
 
-实现内置 `Tool` 集合；作为"组合层"，可依赖多个领域 crate（context/policy/memory/hooks/journal/sandbox/mcp/storage）以完成工具执行闭环。
+实现内置 `Tool` 集合。**组合层"按需依赖"目前只有 `minicoding-policy` 真正启用**
+（路径沙箱 + 脱敏）；对 context/memory/hooks/journal/sandbox/mcp/storage 的
+依赖在 `Cargo.toml` 中**全部注释待启**（R9 审查更正——真实 tools 只直接依赖
+core + policy，领域功能经 `ToolContext` 注入的 trait 对象完成闭环，不构成
+编译期依赖）。
 
 ### 11.2 模块树
 
@@ -665,7 +669,7 @@ minicoding-tools/src/
 - **M-11 渲染声明（R-05，T-19）**：`Tool` trait 的 `output_schema()`/`render_output()` 由各工具实现（见 `design.md` §4.1）；本 crate 全部内置工具已补充，前端按工具名本地渲染（零协议改动）。
 - **mcp::wrapper**：把 `McpServerConfig` + 远程 schema 包装为 `Tool`，`side_effect` 据 `readOnlyHint`/`destructiveHint` 映射（C-25）。
 - **worktree.rs（M-05）**：`WorktreeSubagentRunner` 装饰器实现 `SubagentRunner`（trait 在 core），`Isolation::Worktree` 时 `git worktree add` 建隔离目录、按 `merge_back` 合并、`auto_cleanup` 清理，非 git 仓库降级 `Shared`（A-15）。
-- **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）+ 按需依赖 context/memory/hooks/journal/sandbox/mcp/storage（optional）+ `globset`/`ignore`/`regex`/`reqwest`。
+- **依赖**：`minicoding-core` + `minicoding-policy`（路径沙箱 + 脱敏）；context/memory/hooks/journal/sandbox/mcp/storage 依赖为**注释待启**（R9 审查更正：领域功能经 `ToolContext` trait 对象注入，见 §11.1）+ `globset`/`ignore`/`regex`/`reqwest`（web feature）。
 
 ---
 
@@ -711,7 +715,7 @@ minicoding-cli/src/
 - **feature 组装**：`builder.rs` 根据 cargo feature 启用的实现 crate 装配 Runtime（如未启用 `minicoding-sandbox` 则用 core 的 `NoopDriver`）。
 - **非 TTY 降级**：检测 `stdout.is_terminal()`，非交互时禁 spinner/颜色，权限走 `NonInteractivePrompter`。
 - **凭证管理（T-M4-11，C-04）**：`cred.rs` 实现 OS keyring 优先 + 文件 fallback（`~/.minicoding/credentials` 0600 权限 + 原子 rename）的凭证存储；`minicoding cred store/load/delete` 子命令从 stdin 读取 key（不回显），`load` 不打印 key 本身只验证存在性。keyring 不可用时降级并打 warn 日志。
-- **Hook 加载（T-M5-8，H-01）**：`builder.rs::build_hook_registry` 从 `config.hooks`（`.minicoding/hooks.toml`）把每个 `HookEntry` 转为 `ScriptHook`（matcher 解析为 `HookMatcher::for_tools`/`for_events`），注册到 `HookRegistryImpl`。`hooks` feature 未启用时退化为 `NoopHookRegistry`。
+- **Hook 加载（T-M5-8，H-01）**：`builder.rs::build_hook_registry` 从 `config.hooks`（`MINICODING_HOME/config.toml` 的 `[hooks]` 表，单一用户级文件，**项目级 `.minicoding/hooks.toml` 未实现**，见 `roadmap.md`）把每个 `HookEntry` 转为 `ScriptHook`（matcher 解析为 `HookMatcher::for_tools`/`for_events`），注册到 `HookRegistryImpl`。`hooks` feature 未启用时退化为 `NoopHookRegistry`。
 - **Plan 模式（T-M5-8，A-06）**：`--plan` 启动时初始 `PermissionMode::Plan`（副作用工具被硬门拒绝）；REPL `/plan [on|off|status]` 切换模式。`plan.exit` 与 `task.spawn` 工具在 Runtime 构造后通过 `register_dynamic_tool` 补注册（chicken-and-egg：tools 需 Runtime 引用，Runtime 需 tools）。
 - **/undo REPL（T-M5-8，A-10）**：`/undo` 调 `Journal::undo(1)` 回滚最近一次 operation。`file-undo` feature 未启用或 journal 未注入时打印提示；回滚结果（成功/冲突）打印到 stderr。
 - **serve 子命令（T-M8-2，`serve` feature）**：`minicoding serve` 启动 HTTP/SSE server，等价于独立运行 `minicoding-server`，但通过 CLI 统一入口。`commands/serve.rs` 定义 `ServeCommand`（clap 参数：`--bind`/`--port`/`--provider`/`--api-base`/`--api-key`/`--model`/`--workdir`/`--system`/`--permission-timeout-sec`），`run_serve_command` 构造 `ServerConfig` 委托 `minicoding_server::serve`（阻塞当前 task）。feature gate `serve` 默认关闭，启用时引入 `minicoding-server` 依赖。HRTB 兼容见 §16.3 与 `design.md` §24。
