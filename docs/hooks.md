@@ -39,7 +39,7 @@
 - **执行模式**：`同步` = Hook 必须在 `timeout_sec`（默认 30s）内返回，主流程阻塞等待；`异步可选` = 默认仍同步，Hook 可在 `HookOutput.async_rewake` 声明后台执行（§11.3），主流程继续。`PreToolUse`/`PermissionRequest` 等"事前"事件**不支持**异步（必须同步决策，否则权限门无法闭合）。
 - **可否阻断**：`是` = Hook 可返回 `deny`（或 `Stop` 事件的"要求继续"）改变主流程走向；`否` = Hook 只能观察/改写/注入，不能阻止该阶段发生（事后事件本身已发生）。
 - **可否改写**：`是` = Hook 可改写工具 `input`（PreToolUse）或工具 `result`/`error`（PostToolUse/PostToolUseFailure）；`否` = 该事件无载荷可改写。
-> **实现状态（2026-08-23 遗留#6 接线）**：`inject_context` 在 PreToolUse 路径已接线——Runtime 缓冲后于下一请求并入 system 段（包裹 `<hook_context>` 边界；不能在工具调用间隙 append，会破坏 tool_use/tool_result 配对）。SessionStart/UserPromptSubmit 阶段的注入与 `asyncRewake` 后台执行仍未接线（后者需 executor 集成设计），接线前不产生实际效果。
+> **实现状态（2026-08-23 遗留#6 接线 + R7/R8 更正）**：`inject_context` 在 PreToolUse 路径已接线——Runtime 缓冲后于下一请求并入 system 段（包裹 `<hook_context>` 边界；不能在工具调用间隙 append，会破坏 tool_use/tool_result 配对）。SessionStart/UserPromptSubmit 阶段的注入已接线（R8，经 `pending_hook_contexts` 缓冲并入 system 段）；`asyncRewake` 后台执行已接线（R7：SDK/CLI 生效，server Noop，见 features.md H-13）。
 - **可否注入上下文**：`是` = Hook 返回 `inject_context` 字段，Runtime 包裹 `<hook_context>` 边界后追加到 system/上下文（声明非指令，见 §7）；`否` = 该阶段不产生上下文注入。
 - **计数澄清**：10 类事件 = 7 类纯同步（SessionStart/UserPromptSubmit/PreToolUse/PreCompact/PostCompact/SubagentStop/PermissionRequest）+ 3 类同步/异步可选（PostToolUse/PostToolUseFailure/Stop）。`asyncRewake` 不是第 11 类事件，而是这 3 类事件的子模式。
 
@@ -340,13 +340,13 @@ PostToolUse Hook 触发
    ▼
 （后台 Hook 完成）
    │
-   ├─ Hook 通过 stdin 接收原 session_id + task_id
-   ├─ Hook 输出最终结果（JSON，含 wake_prompt）
+   ├─ Hook 通过 stdin 接收原 session_id（R3 对齐：无 task_id/wake_prompt 字段）
+   ├─ Hook 后台完成后结果经 inject_context 包裹 <async_rewake> 边界
    │
    ▼
 Runtime 检测到 async_rewake 完成
    │
-   ├─ 当前轮次结束后（Stop 事件前），注入 wake_prompt 作为 system reminder
+   ├─ 当前轮次结束后（Stop 事件前），注入 async_rewake 内容作为 system reminder
    └─ Agent 看到"安全扫描完成，发现 2 个漏洞..."并决定是否处理
 ```
 
@@ -357,7 +357,7 @@ Runtime 检测到 async_rewake 完成
 - 后台 Hook 超时（`estimated_duration` × 2）后自动 kill，注入超时提示；
 - 同一 session 最多 3 个并发 async_rewake（防资源耗尽）；
 - async_rewake 的结果走 `inject_context`，包裹 `<async_rewake>` 边界，声明非指令；
-- 阶段 6+ 交付，MVP 不含。
+- 已实现（R7 更正：协议 + 后台 executor 已接线，SDK/CLI 生效；server 侧 Noop，见 features.md H-13）。
 
 ---
 

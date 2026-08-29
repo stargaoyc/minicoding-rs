@@ -2982,36 +2982,44 @@ get_or_load(id) ──► 内存命中？──否──► restore_session(id)
 
 ### 26.2 前端架构分层
 
+> 2026-08-29 R8 审查更正：早期设计稿含 TanStack Router + `routes/` 目录，
+> 实际**未采用路由库**（单页状态切换，见 `tech-stack.md` §4.1、`AGENTS.md` §8.2），
+> 无 `router.tsx`/`routes/`/`views/`。树形描述同步如下：
+
 ```
 minicoding-web/                       # 纯前端项目，独立 package.json
 ├── src/
 │   ├── main.tsx                      # React 19.2 入口，React Compiler 启用
-│   ├── router.tsx                    # TanStack Router 1.170 类型安全路由
-│   ├── routes/
-│   │   ├── __root.tsx                # 根布局（主题 provider + 全局错误边界）
-│   │   ├── sessions.$sessionId.tsx   # 会话详情页（对话流 + 工具面板）
-│   │   └── settings.tsx              # 设置页（沙箱策略/审批模式/凭证管理）
+│   ├── App.tsx                       # 单页状态切换根（会话/面板/权限弹窗编排）
 │   ├── api/
-│   │   ├── client.ts                 # JSON-RPC 2.0 客户端（fetch + Zod 4.4 校验）
-│   │   ├── sse.ts                    # SSE 订阅（EventSource + cursor 恢复）
-│   │   └── schema.ts                 # 由 minicoding-protocol DTO 生成的 Zod schema
+│   │   ├── client.ts                 # JSON-RPC 2.0 客户端（fetch + DTO 类型）
+│   │   ├── event-guard.ts            # SSE 事件类型守卫（EventKind 判别联合）
+│   │   ├── tauri.ts                  # Tauri IPC 封装（目录选择、平台感知）
+│   │   └── generated/                # ts-rs 自动生成 DTO（不手编，见 AGENTS.md §8.4）
 │   ├── hooks/
-│   │   ├── useSession.ts             # TanStack Query 5.101 useQuery 封装
-│   │   ├── useEventStream.ts         # SSE 事件 → queryClient.setQueryData 增量更新
-│   │   └── usePermission.ts          # 权限弹窗状态管理（Zustand 5.0）
+│   │   ├── useChat.ts                # SSE 流订阅（Token/MessageAppended 增量更新）
+│   │   ├── chatReducer.ts            # 事件归约纯函数（可 record/replay 测试）
+│   │   ├── useSessions.ts            # 会话列表/创建（TanStack Query 5.101）
+│   │   ├── usePermissions.ts         # 权限弹窗状态（决策回传，C-01 不前端短路）
+│   │   ├── useTurnControl.ts         # cancel/undo/权限模式切换（ARCH-5 收口）
+│   │   └── useWorkspace.ts           # 工作区浏览/diff
 │   ├── components/
 │   │   ├── ui/                       # shadcn/ui 组件（复制粘贴源码）
-│   │   ├── chat/                     # 对话流（消息列表 + 流式 token 渲染）
-│   │   ├── tools/                    # 工具调用展开/折叠面板
+│   │   ├── chat/                     # 对话流（消息列表 + 流式 token 渲染 + PlanPanel）
+│   │   ├── layout/                   # Sidebar / NewSessionDialog
 │   │   ├── permission/               # 权限确认 Dialog
+│   │   ├── setup/                    # 配置引导（provider/API base）
 │   │   ├── tasks/                    # 任务进度面板
-│   │   └── theme/                    # 暗色/亮色主题切换（Tailwind v4）
-│   ├── store/
-│   │   ├── sessionStore.ts           # Zustand：当前会话/面板开关
-│   │   └── themeStore.ts             # Zustand：主题偏好
-│   └── lib/
-│       ├── rpc.ts                    # JSON-RPC 类型推导（Zod → TS）
-│       └── utils.ts                  # cn() 等工具函数
+│   │   ├── workspace/                # 文件浏览/diff 预览
+│   │   └── AnimeBackground.tsx       # 背景动画
+│   ├── stores/                       # Zustand 5.0（仅客户端 UI 状态，§8.5）
+│   │   ├── ui.ts                     # 主题/面板/活动会话
+│   │   ├── desktop.ts                # 桌面壳状态（sidecar 端口等）
+│   │   └── webSettings.ts            # Web 模式 provider 设置（localStorage）
+│   ├── lib/
+│   │   ├── utils.ts                  # cn() 等工具函数
+│   │   └── message.ts                # 消息渲染/乐观占位辅助
+│   └── test/                         # MSW + mock EventSource 测试基建
 ├── index.html
 ├── vite.config.ts                    # Vite 8.1 (Rolldown) 配置
 ├── tailwind.config.ts                # Tailwind v4 (Oxide) CSS-first 配置

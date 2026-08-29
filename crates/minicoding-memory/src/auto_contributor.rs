@@ -158,6 +158,8 @@ impl PromptContributor for AutoMemoryContributor {
             // 1) @memory 前缀 → BM25 检索 top-5；
             // 2) 全量渲染超限 → 检索截断（有查询词）或头部截断（无）；
             // 3) 其余 → 全量渲染。
+            // R8 MEM-2 注释：`over_limit` 仅查 auto_md——long_term 仅作检索语料
+            // （非直接注入内容），不纳入预算判定，此为设计权衡。
             let mut retrieved_hint = false;
             let explicit_retrieval = query
                 .as_deref()

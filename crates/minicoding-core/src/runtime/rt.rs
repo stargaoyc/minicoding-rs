@@ -673,6 +673,8 @@ impl Runtime {
                                     }
                                 }
                                 // 与正常路径一致：Hook 注入上下文并入 system 头部
+                                // R8 CTX-2 注释：二次 drain 捕获压缩期间 Hook 新推的
+                                // 上下文（首次 drain 后已空，非双消费）。
                                 {
                                     let drained: Vec<String> = self
                                         .pending_hook_contexts

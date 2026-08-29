@@ -944,8 +944,11 @@ pub trait SandboxDriver {
     /// 当前平台是否原生支持硬隔离（用于 doctor 自检与降级提示）。
     fn is_hardened(&self) -> bool;
 
-    /// 平台名（"seatbelt" / "landlock+seccomp" / "windows-acl" / "none"）。
+    /// 平台名（"seatbelt" / "landlock+seccomp" / "windows-token" / "none"）。
     fn id(&self) -> &'static str;
+
+    /// spawn 后附加保护（Windows Job Object 分配线程；Unix 默认 no-op，R8 审查补列）。
+    fn post_spawn(&self, _pid: u32) -> Result<(), SandboxError>;
 }
 ```
 
@@ -955,7 +958,7 @@ pub trait SandboxDriver {
 | 实现 | 平台 | 技术 | `id()` |
 |------|------|------|--------|
 | `SeatbeltDriver` | macOS 10.5+ | `sandbox_init(3)` FFI 直调（自研 profile 生成 + 转义），pre_exec 内加载 | `seatbelt` |
-| `LandlockDriver` | Linux 5.13+ | 自研 pre_exec 胶水 + `landlock` crate 直连 ruleset；网络 TCP 拒绝需 6.7+；seccomp 待接入 | `landlock` |
+| `LandlockDriver` | Linux 5.13+ | 自研 pre_exec 胶水 + `landlock` crate 直连 ruleset；网络 TCP 拒绝需 6.7+；seccomp 已接 opt-in（feature `seccomp` 默认关，R8 审查更正） | `landlock` |
 | `WindowsJobDriver` | Windows Vista+ | Job Object（KILL_ON_JOB_CLOSE/UI 限制/进程数上限）+ CREATE_SUSPENDED 两阶段；无文件系统隔离（`is_hardened()` 如实 false） | `windows-token` |
 | `ExternalSandboxDriver` | 全平台 | 显式声明外部隔离（CI/容器），不施加内核限制 | `external-sandbox` |
 | `NoopDriver` | 兜底 | 不强制，仅应用层（启动时 warn） | `noop` |
@@ -1929,6 +1932,12 @@ pub trait McpClient {
 
     /// 优雅关闭所有 server（stdio: EOF；http: 连接池释放）。
     async fn shutdown(&self) -> Result<(), McpError>;
+
+    /// 重启全部 server（默认实现：关闭后重启，R8 审查补列）。
+    async fn restart(&self) -> Result<(), McpError>;
+
+    /// 只读性 hint（据 server schema 映射 side_effect/is_read_only，C-25，R8 审查补列）。
+    async fn tool_hints(&self) -> HashMap<String, ToolHint>;
 }
 ```
 

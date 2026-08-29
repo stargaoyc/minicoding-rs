@@ -500,15 +500,15 @@ windows = { version = "...", features = ["..."] }
 
 ```
 minicoding-web/src/
-├── api/          # JSON-RPC 客户端 + SSE 订阅 + Zod schema（DTO 自动生成，见 §8.4）
+├── api/          # JSON-RPC 客户端 + SSE 订阅 + generated DTO（ts-rs 生成，见 §8.4）
 ├── hooks/        # TanStack Query + Zustand 封装（业务 hook）
 ├── components/   # shadcn/ui 组件 + 业务组件
-├── views/        # 单页状态切换的视图组件（无路由库，DOC-8 对齐：TanStack Router 未采用）
 ├── stores/       # Zustand 全局状态（UI 主题、面板开关等）
+├── App.tsx       # 单页状态切换根（R8 审查更正：无 views/ 目录，单页切换在 App.tsx 编排）
 └── main.tsx      # 入口
 ```
 
-- **严格分层**：`api/` 不依赖 `hooks/`/`components/`；`hooks/` 依赖 `api/`；`components/` 依赖 `hooks/`/`stores/`；`routes/` 依赖 `components/`；
+- **严格分层**：`api/` 不依赖 `hooks/`/`components/`；`hooks/` 依赖 `api/`；`components/` 依赖 `hooks/`/`stores/`；`App.tsx`（单页状态切换）依赖 `components/`；
 - **不跨层调用**：组件不直接调 `api/`，必须经 `hooks/` 封装（便于缓存/重试/失效统一管理）。
 
 ### 8.4 类型契约（DTO 自动生成）

@@ -325,10 +325,11 @@ minicoding-policy/src/
 ├── redact.rs              # 敏感数据脱敏（.env/api_key/password 模式替换，T-M4-11，C-04）
 ├── ssrf.rs                # SSRF 防护（RFC1918/链路本地/回环/CGNAT 拒绝，T-M4-11，C-02）
 ├── replay.rs              # ReplayPolicy（replay 模式禁副作用，C-06）
-└── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
+├── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
+└── tui.rs                 # TuiPrompter（M7 拆出，R8 审查补列）
 ```
 
-> **说明**：`Prompter` 各实现集中在单文件 `prompter.rs`（非子目录），因为实现体量较小且共享 `PermissionPrompter` trait 与辅助逻辑；`TuiPrompter` 将在 M7 拆出独立模块。决策持久化（`policy.toml` AllowAlways/DenyAlways）暂未在 policy crate 实现，由 `minicoding-core::policy` trait 抽象 + 调用方注入，M5+ 补 `store.rs`。
+> **说明**：`Prompter` 各实现集中在单文件 `prompter.rs`（非子目录），因为实现体量较小且共享 `PermissionPrompter` trait 与辅助逻辑；`TuiPrompter` 已拆出独立模块（`tui.rs`）。决策持久化（`policy.toml` AllowAlways/DenyAlways）已实现于 `minicoding-core::policy` trait 抽象 + 调用方注入（CLI `PolicyPersist`，见 `core/policy/persist.rs`），server 侧未接线（R8 审查 ARCH-1，待对齐）。
 
 ### 3.3 关键设计点
 
@@ -825,11 +826,17 @@ minicoding-server/src/
 ├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime；默认注入 FileChangeJournal）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
+├── ndjson.rs              # NDJSON stdio 适配器（单会话，R8 审查补列）
 ├── otel_init.rs           # OTLP 初始化（镜像 cli/otel_init.rs，feature gate `otel` 默认启用，见 observability.md §7.3）
 ├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
 ├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，feature gate `lsp`）
 ├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest 点对点权限交互）
-└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
+├── bounded_io.rs          # 有界 IO 读取（NDJSON 行长上限，FE-8）
+└── turn_tail.rs           # turn 尾部状态（R8 审查补列）
+
+> **R8 审查更正**：原树列 `rehydrate.rs` 不存在——`RehydrateRequired`
+> 信号定义于 `minicoding-protocol` crate（本 crate 无该文件）；补列
+> `ndjson.rs`/`bounded_io.rs`/`turn_tail.rs`。
 
 ### 16.3 关键设计点
 
@@ -902,7 +909,7 @@ minicoding-extension-sdk/src/
 | 框架 | React + React Compiler | 19.2 |
 | 语言 | TypeScript | 7.0 |
 | 构建 | Vite (Rolldown) | 8.1 |
-| 路由 | TanStack Router | 1.170 |
+| 路由 | 无路由库（单页状态切换，R8 审查更正；TanStack Router 1.170 曾评估未采用，见 AGENTS.md §8.2） | - |
 | 数据获取 | TanStack Query | 5.101 |
 | 客户端状态 | Zustand | 5.0 |
 | Schema 校验 | Zod | 4.4 |
@@ -914,7 +921,10 @@ minicoding-extension-sdk/src/
 
 ### 18.3 目录结构
 
-详见 `design.md` §26.2。核心分层：`api/`（JSON-RPC 客户端 + SSE 订阅 + Zod schema）→ `hooks/`（TanStack Query + Zustand 封装）→ `components/`（shadcn/ui + 业务组件）→ `routes/`（TanStack Router 页面）。
+详见 `design.md` §26.2（R8 审查更正后为实际结构，无 `routes/`/`views/`）。
+核心分层：`api/`（JSON-RPC 客户端 + SSE 订阅 + generated DTO）→ `hooks/`
+（TanStack Query + Zustand 封装）→ `components/`（shadcn/ui + 业务组件）→
+`App.tsx`（单页状态切换）。
 
 ### 18.4 与后端的契约
 

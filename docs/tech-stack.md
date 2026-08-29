@@ -197,7 +197,7 @@ OpenTelemetry 是**一等公民**（非后续可选），从 M0 起接入。业�
 | 异步测试 | `tokio::test` | 标配 |
 | HTTP mock | `wiremock` / `httpmock` | Provider 客户端测试 |
 | 临时文件 | `tempfile` | 文件工具测试 |
-| 快照测试 | `insta` | 配置 schema、CLI 输出快照 |
+| 快照测试 | `insta`（候选，未采用） | 配置 schema、CLI 输出快照（2026-08-29 R8 审查：当前未引入，断言以手写 `assert_eq!`/proptest 为主） |
 | 覆盖率 | `cargo-llvm-cov` | 基于 LLVM，准确 |
 | 属性测试 | `proptest` | `Message` JSON roundtrip、path sandbox 不变量（features Q-05） |
 | 性能基准 | `criterion` | 压缩管道 100/500/1000 消息基准（features Q-06） |
@@ -218,7 +218,7 @@ OS 级沙箱升级为一等公民后，安全相关依赖按"应用层 + 内核�
 | Linux 文件系统沙箱 | `landlock` | Linux 5.13+ | 官方 rust-landlock，内核 LSM 限制可写范围；纯 Rust 绑定无 C 依赖，由自研 pre_exec 胶水直连 |
 | Linux 系统调用过滤 | `libseccomp`（已接，opt-in feature `seccomp` 默认关） | Linux | seccomp-bpf deny-list 系统调用（禁 `ptrace`/`mount`/`reboot`/`kexec_load` 等）；需系统 C 库 libseccomp-dev（见 §13 决策记录、security.md §8.11） |
 | macOS 沙箱 | `sandbox_init`(3) FFI（自研胶水） | macOS 12+ | Seatbelt 框架：父进程生成 profile 临时文件，子进程 fork 后 exec 前经 FFI 加载；原 ~~`sandbox-run`~~ 方案已随之弃用，无需手写 profile 解析 |
-| Windows 受限令牌 | `windows` crate | Windows 10+ | 受限 token + Job Object + DACL 限制写路径；成熟度低于 macOS/Linux，初期可降级为应用层 + 用户提示 |
+| Windows 受限令牌 | `windows-sys`（R8 审查更正：此前文档误作 `windows` crate） | Windows 10+ | 受限 token + Job Object + DACL 限制写路径；成熟度低于 macOS/Linux，初期可降级为应用层 + 用户提示 |
 | 进程硬化 | `libc`（`PR_SET_DUMPABLE`/`RLIMIT_CORE`） | Linux/Unix | pre-main 禁 ptrace/core dump，清 `LD_*`/`DYLD_*` |
 | 跨进程文件锁 | `fs2` | 全平台 | 会话文件互斥（`data-model.md` §10） |
 | 文件权限收紧 | `std::fs` + `cfg!(unix)` `chmod 0600/0700` | Unix | `~/.minicoding/` 与会话文件权限收紧 |
