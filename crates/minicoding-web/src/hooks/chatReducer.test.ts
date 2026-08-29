@@ -112,7 +112,8 @@ describe("chatReducer replay", () => {
     }).state;
     s2 = applyChatEvent(s2, { seq: 2, type: "turn_end", stop_reason: "interrupted" }).state;
     expect(s2.permissionDeniedMsg).toBeNull();
-    // interrupted 不清未决权限（与原 useSSEStream 行为一致：pending 轮询兜底）
-    expect(s2.waitingPermission).not.toBeNull();
+    // R8 FE-12：interrupted 清理 waitingPermission 横幅（修复前残留，
+    // UI 一直显示"等待权限确认"而 turn 已被取消）
+    expect(s2.waitingPermission).toBeNull();
   });
 });

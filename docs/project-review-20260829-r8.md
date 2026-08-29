@@ -348,4 +348,37 @@ R8-CTX-4..6、R8-MEM-5..8。
 
 ---
 
+## 13. 修复进度追踪（2026-08-29 当天，随批次提交）
+
+> 审查报告落盘后当日分 5 批完成修复（commit `bd5e0bd`..`166e362`）。
+> 每批经 pre-commit 门禁（fmt/clippy -D warnings/deny）。
+
+| 批次 | 提交 | 覆盖问题 |
+|------|------|---------|
+| 1（P0） | `bd5e0bd` | SEC-1（journal symlink 组件级校验）、TL-1（shell 挂起 drain 宽限+杀树）、TL-2（脱敏并集合并）、TL-3（SAFETY 注释）、FE-1/2（Web confirm_danger 全链路）、ARCH-6（误提交文件清理） |
+| 2（P1） | `0bc59f0` | FE-3（NDJSON/ACP C-22 门控）、CTX-1（force_compress 错误传播）、MEM-1（long_term 告警）、MEM-3（BM25 截断） |
+| 3（P1） | `ae33b9a` | SEC-3（fork bomb 空白变体）、FE-4（权限弹窗自动关闭）、MEM-4（confidence 参数） |
+| 4（文档） | `99e630a`/`2bd8ced` | DOC-1..15 + 模块树/状态/版本号全量同步 |
+| 5（B 批） | `1998d60` | CTX-3（Hook workdir）、ARCH-1（server PolicyPersist）、SEC-7（索引重试）、PR-5/6、TL-5/6、MEM-7 |
+| 6（C 批） | `5e81daf` | PR-1/2/3/4、FE-9/14/15、SEC-4（PEM 脱敏） |
+| 7（D 批） | `76c1556`/`c23701d` | FE-10/13、SEC-9（io_uring）、MEM-8、SEC-10、ARCH-3（MCP 审计） |
+| 8（D 批） | `176a046`/`166e362` | FE-11/12、FE-6（DELETE 关门）、FE-7（turn_gate） |
+
+**已确认非 bug（设计/误报，代码注释澄清）**：R8-CTX-2（紧急路径二次 drain 语义正确）、
+R8-MEM-2（long_term 仅检索语料）、R8-MEM-7（单文件原子 rename 无错配）、R8-SEC-2
+（SDK builder 已注入 Hook 沙箱）、R8-SEC-6（rename 替换 inode 权限不残留）。
+
+**文档化残余风险（代码注释/security.md 已披露，不视为 bug）**：R8-SEC-5（Windows
+孙进程异步清理）、R8-SEC-8（非 Linux 无 core dump 硬化）、R8-SEC-9（clone3 不拒绝
+的理由——glibc 兼容性）、R8-SEC-11（audit.lock 无自动清理）、R8-P0-3（Windows
+TOCTOU 无 OS 兜底，security.md §14 已披露）。
+
+**遗留改进项（架构级，建议入 roadmap）**：R8-ARCH-4（SandboxDriver apply↔post_spawn
+句柄关联，消除 Windows 策略 FIFO 错配）、R8-P0-3（Windows AppContainer）、
+R8-FE-5（TUI 会话切换阻塞）、R8-FE-8（SSE seq 契约漂移——前端 EventDto 声明
+seq 必填但 SSE data 不含）、R8-ARCH-5（token 掩码三处重复）、R8-FE-16（TUI
+斜杠命令缺位）、UX 系列打磨、测试缺口（SSE 断线重放集成测试、Windows 策略错配）。
+
+---
+
 *审查日期：2026-08-29。审查者：AI 审查代理（R8）。*
