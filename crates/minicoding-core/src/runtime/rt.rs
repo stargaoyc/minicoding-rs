@@ -655,9 +655,11 @@ impl Runtime {
                                     "LLM 400 上下文超长：紧急压缩后重试一次"
                                 );
                                 emergency_compressed = true;
-                                if self.ctx.force_compress().await.is_err() {
+                                if let Err(ce) = self.ctx.force_compress().await {
                                     metrics::record_error("context");
-                                    return Ok(TurnOutcome::Failed(e.into()));
+                                    // R8 CTX-1 修复：返回压缩管道本身的错误（熔断/降级链），
+                                    // 而非原始 ContextLength——审计可区分"LLM 400"与"压缩熔断"。
+                                    return Ok(TurnOutcome::Failed(ce));
                                 }
                                 match self
                                     .ctx

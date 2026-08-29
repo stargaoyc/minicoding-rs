@@ -31,6 +31,10 @@ pub struct SessionConfig {
     /// 初始权限模式（默认 `Default`）。
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// C-22 二次确认：`permission_mode=BypassPermissions` 必须携带
+    /// `confirm_danger: true`（UI 红色警告确认后回传，NDJSON/ACP 历史路径）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_danger: Option<bool>,
 }
 
 /// 前端→后端命令（JSON-RPC method 参数）。

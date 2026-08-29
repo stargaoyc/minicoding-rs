@@ -64,6 +64,9 @@ pub enum AcpError {
     /// 客户端发送了格式错误的帧（缺 `Content-Length`、长度不匹配等）。
     #[error("frame error: {0}")]
     Frame(String),
+    /// 协议参数校验失败（如 C-22 二次确认缺失，R8 FE-3）。
+    #[error("protocol error: {0}")]
+    Protocol(String),
     /// 客户端发了 `shutdown`，主循环应退出。
     #[error("client requested shutdown")]
     Shutdown,
@@ -105,6 +108,10 @@ struct NewConversationParams {
     system: Option<String>,
     #[serde(default)]
     permission_mode: Option<minicoding_core::policy::PermissionMode>,
+    /// C-22 二次确认：`permission_mode=BypassPermissions` 必须携带
+    /// `confirm_danger: true`（R8 FE-3，与 HTTP/NDJSON 同门控）。
+    #[serde(default)]
+    confirm_danger: Option<bool>,
 }
 
 /// `prompt` 请求参数。
@@ -456,6 +463,17 @@ async fn handle_new_conversation(
     let workdir = p
         .workdir
         .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from);
+    // R8 FE-3 修复：C-22 二次确认补口——ACP（stdio）此前无 confirm_danger
+    // 门控，per-session 可直建 bypass_permissions 会话（HTTP 侧 SEC-2 已修）。
+    if p.permission_mode == Some(minicoding_core::policy::PermissionMode::BypassPermissions)
+        && p.confirm_danger != Some(true)
+    {
+        return Err(AcpError::Protocol(
+            "permission_mode `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+             自动放行。请在客户端确认红色警告后携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        ));
+    }
     let params = ServerRuntimeParams {
         provider_kind: p.provider.unwrap_or(default.provider_kind),
         provider_name: default.provider_name,

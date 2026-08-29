@@ -42,6 +42,7 @@
 use crate::runtime_builder::ServerRuntimeParams;
 use crate::session_mgr::{SessionManager, SessionManagerError};
 use minicoding_core::model::TurnOutcome;
+use minicoding_core::policy::PermissionMode;
 use minicoding_protocol::command::Command;
 use minicoding_protocol::event::{EventDto, EventKind, NdjsonCommandKind};
 use std::sync::Arc;
@@ -63,6 +64,10 @@ pub enum NdjsonError {
     /// 会话不存在（`SendUserMessage`/`Cancel`/`GetSession` 等命令引用了未创建的 `session_id`）。
     #[error("session {0} not found")]
     SessionNotFound(String),
+    /// 命令参数校验失败（如 C-22 二次确认缺失，R8 FE-3）——上抛为
+    /// `CommandError` 响应（seq=0），不终止主循环。
+    #[error("invalid command: {0}")]
+    Command(String),
 }
 
 /// 共享 stdout writer（`Mutex` 保护，避免 event forwarder 与 main loop 交叉写）。
@@ -300,6 +305,17 @@ async fn dispatch_command(
             // FE-12/13（2026-08-28 R5 收尾）：与 HTTP 路径对齐——CreateSession
             // 预校验 workdir 存在 + 规范化（canonicalize），否则相对路径隐式绑定
             // server CWD、目录不存在首个 turn 才报错。
+            // R8 FE-3 修复：C-22 二次确认补口——NDJSON 历史路径此前无 confirm_danger
+            // 门控，per-session 可直建 bypass_permissions 会话（HTTP 侧 SEC-2 已修）。
+            if config.permission_mode == PermissionMode::BypassPermissions
+                && config.confirm_danger != Some(true)
+            {
+                return Err(NdjsonError::Command(
+                    "权限模式 `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+                     自动放行。请在 UI 确认红色警告后携带 \"confirm_danger\": true 重试"
+                        .to_string(),
+                ));
+            }
             let mut params = build_params_from_config(mgr.default_params(), config);
             if !params.workdir.as_str().trim().is_empty() {
                 let canonical =
@@ -823,5 +839,53 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    // R8 FE-3：NDJSON CreateSession 的 C-22 二次确认门控
+    #[tokio::test]
+    async fn dispatch_create_session_bypass_without_confirm_rejected() {
+        let mgr = Arc::new(SessionManager::new(test_params(), Duration::from_secs(5)));
+        let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::BufWriter::new(Box::new(
+            tokio::io::sink(),
+        ))));
+
+        let result = dispatch_with(
+            &mgr,
+            &stdout,
+            Command::CreateSession {
+                config: minicoding_protocol::SessionConfig {
+                    permission_mode: PermissionMode::BypassPermissions,
+                    confirm_danger: None,
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(NdjsonError::Command(_))),
+            "bypass 未确认应被拒绝: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_create_session_bypass_with_confirm_allowed() {
+        let mgr = Arc::new(SessionManager::new(test_params(), Duration::from_secs(5)));
+        let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::BufWriter::new(Box::new(
+            tokio::io::sink(),
+        ))));
+
+        let result = dispatch_with(
+            &mgr,
+            &stdout,
+            Command::CreateSession {
+                config: minicoding_protocol::SessionConfig {
+                    permission_mode: PermissionMode::BypassPermissions,
+                    confirm_danger: Some(true),
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "confirm_danger=true 应放行: {result:?}");
     }
 }
