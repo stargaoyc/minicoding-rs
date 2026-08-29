@@ -424,12 +424,19 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
     // 4. 启动 MCP server（阻塞至 client 断开 stdin）
     //    `serve_as_mcp_server` 内部用 `Implementation::new(name, version)` 构造
     //    握手信息，调用方只需传字符串，不接触 `rmcp` 类型。
+    //    R8 ARCH-3：注入 FileAuditSink——MCP 暴露的破坏性工具（--expose-write-tools
+    //    时）此前零审计，违背 AGENTS.md §5.5。
     let registry = Arc::new(tools);
+    let audit_path = minicoding_core::paths::audit_log_path().ok().map(|p| {
+        std::sync::Arc::new(minicoding_storage::FileAuditSink::new(p))
+            as std::sync::Arc<dyn minicoding_core::storage::AuditSink>
+    });
     minicoding_mcp::serve_as_mcp_server(
         registry,
         ctx_template,
         "minicoding",
         env!("CARGO_PKG_VERSION"),
+        audit_path,
     )
     .await
     .map_err(|e| anyhow::anyhow!("MCP server 运行失败: {e}"))

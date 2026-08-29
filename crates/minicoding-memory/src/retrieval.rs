@@ -60,6 +60,15 @@ impl MemoryRetrieval {
                     None => section.body.clone(),
                 };
                 let doc = RetrievalDoc { text };
+                // R8 MEM-8：auto 覆盖 long_term 同标题时记 debug（design 语义
+                // "以 auto 为准——更新鲜"）。此前静默覆盖，排障无法感知语料损失。
+                if r.docs.contains_key(&title) {
+                    tracing::debug!(
+                        title = %title,
+                        source,
+                        "检索语料同标题覆盖（auto 优先于 long_term）"
+                    );
+                }
                 r.docs.insert(title, doc);
             }
         }

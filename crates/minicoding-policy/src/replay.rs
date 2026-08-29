@@ -5,6 +5,11 @@
 //!
 //! `--allow-side-effects` 时不应使用此策略——直接用 `BuiltinPolicy`，每条仍走
 //! 权限流程（见 `getting-started.md` --replay 段、`security.md` §13.4）。
+//!
+//! **R8 SEC-10 已知边界**：本策略依赖工具注册表的 `side_effect` 声明。MCP
+//! 工具若错误声明 `None`（违反 C-25 的 schema hint 映射），回放模式会放行。
+//! 这是"声明可信"模型的固有限制——由 `McpToolWrapper` 的 hint 映射与
+//! `tool_hints` 双重校验补偿（`minicoding-mcp`），非本策略可单独闭环。
 
 use minicoding_core::model::{PolicyError, SideEffect};
 use minicoding_core::policy::{PermissionContext, PermissionPolicy, Verdict};

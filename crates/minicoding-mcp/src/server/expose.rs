@@ -58,6 +58,9 @@ pub struct ToolExposer {
     ctx_template: ToolContext,
     /// server 实现信息（name/version，握手时返回给 client）。
     server_impl: Implementation,
+    /// 可选审计 sink（R8 ARCH-3 补）：注入后每次 `call_tool` 落审计
+    /// （best-effort 不阻塞工具结果）。未注入时无审计（仅进程内/测试）。
+    audit: Option<Arc<dyn minicoding_core::storage::AuditSink>>,
 }
 
 impl ToolExposer {
@@ -76,7 +79,16 @@ impl ToolExposer {
             registry,
             ctx_template,
             server_impl,
+            audit: None,
         }
+    }
+
+    /// 注入审计 sink（R8 ARCH-3）：每次工具调用落 `audit.log`
+    /// （AGENTS.md §5.5——MCP server 暴露的破坏性工具此前零审计）。
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<dyn minicoding_core::storage::AuditSink>) -> Self {
+        self.audit = Some(audit);
+        self
     }
 }
 
@@ -144,6 +156,8 @@ impl ServerHandler for ToolExposer {
         };
         let tool = self.registry.get(&name);
         let ctx = self.ctx_template.clone();
+        let audit = self.audit.clone();
+        let session_id = ctx.session_id.clone();
         async move {
             let Some(tool) = tool else {
                 // 工具不存在 → 协议错误（method not found），让 client 看到清晰错误
@@ -151,9 +165,28 @@ impl ServerHandler for ToolExposer {
                     rmcp::model::CallToolRequestMethod,
                 >());
             };
-            // 直接执行工具（不经过 PermissionPolicy——MCP server 模式下权限由
-            // 调用方 client 自行决定，本 server 仅做工具执行）。
+            // R8 ARCH-3 修复：工具调用落审计（AGENTS.md §5.5）。权限仍由调用方
+            // client 决定（本 server 不做审批——设计使然），但**审计不可缺**——
+            // 此前 MCP 暴露的破坏性工具（shell.run/fs.write 等）零追踪。
+            // best-effort：审计失败不阻塞工具结果（与 R7 SEC-R7-3 同语义）。
             let result = tool.execute(input, &ctx).await;
+            if let Some(audit) = audit {
+                let is_error = match &result {
+                    Ok(r) => r.is_error,
+                    Err(_) => true,
+                };
+                let rec = minicoding_core::storage::AuditRecord {
+                    ts: time::OffsetDateTime::now_utc(),
+                    session: session_id,
+                    kind: minicoding_core::storage::AuditKind::ToolCall,
+                    tool: Some(tool.name().to_string()),
+                    decision: None,
+                    detail: format!("mcp_server_exposed tool_result is_error={is_error}"),
+                };
+                if let Err(e) = audit.record(rec).await {
+                    tracing::warn!(error = %e, "mcp exposed tool audit failed (best-effort)");
+                }
+            }
             Ok(convert_tool_result_to_mcp(result))
         }
     }
@@ -169,6 +202,9 @@ impl ServerHandler for ToolExposer {
 /// 本函数封装在 `minicoding-mcp` 内部，避免 `rmcp` 类型泄漏到上游 crate
 /// （AGENTS.md §3.5：重依赖 `rmcp` 只在 `minicoding-mcp` 引入）。
 ///
+/// `audit`（R8 ARCH-3）：可选审计 sink，注入后每次工具调用落 `audit.log`。
+/// `None` 时无审计（兼容既有调用方/测试）。
+///
 /// # Errors
 /// - rmcp 握手失败（client 未发 `initialize` 请求）；
 /// - stdio IO 错误。
@@ -181,9 +217,13 @@ pub async fn serve_as_mcp_server(
     ctx_template: ToolContext,
     server_name: &str,
     server_version: &str,
+    audit: Option<Arc<dyn minicoding_core::storage::AuditSink>>,
 ) -> Result<(), Box<rmcp::RmcpError>> {
     let server_impl = Implementation::new(server_name, server_version);
-    let exposer = ToolExposer::new(registry, ctx_template, server_impl);
+    let mut exposer = ToolExposer::new(registry, ctx_template, server_impl);
+    if let Some(audit) = audit {
+        exposer = exposer.with_audit(audit);
+    }
     let (stdin, stdout) = rmcp::transport::stdio();
     // 先 `RmcpError::from` 把 `ServerInitializeError`/`JoinError` 统一成 `RmcpError`，
     // 再 `Box::new` 装箱避免 `result_large_err`。

@@ -42,7 +42,14 @@ use minicoding_core::sandbox::SandboxError;
 /// - 跨进程内存读取：`process_vm_readv`/`process_vm_writev`；
 /// - 密钥环/持久化：`keyctl`/`add_key`/`request_key`/`swapon`/`swapoff`
 ///   /`reboot`；
-/// - 命名空间切换（逃逸沙箱命名空间）：`setns`/`unshare`。
+/// - 命名空间切换（逃逸沙箱命名空间）：`setns`/`unshare`；
+/// - 现代内核攻击面（R8 SEC-9 补）：`io_uring_setup`/`io_uring_enter`/
+///   `io_uring_register`（`io_uring` 内核漏洞面，绕过普通 fd 审计）。
+///
+/// **`clone3` 明确不纳入 deny-list**：glibc ≥2.34 默认经 `clone3` 创建线程
+/// （`pthread_create`），全量拒绝会让一切多线程命令随机失败（EPERM 不触发
+/// glibc 的 ENOSYS 回退）——与 deny-list"不破坏正常命令"的工程取舍冲突
+/// （Docker default profile 同款只做参数过滤，实现复杂且收益有限，未采用）。
 const DENIED_SYSCALLS: &[&str] = &[
     "ptrace",
     "kexec_load",
@@ -64,6 +71,9 @@ const DENIED_SYSCALLS: &[&str] = &[
     "reboot",
     "setns",
     "unshare",
+    "io_uring_setup",
+    "io_uring_enter",
+    "io_uring_register",
 ];
 
 /// 构建完毕、待在子进程内加载的 seccomp 过滤器。
@@ -198,8 +208,16 @@ mod tests {
 
     #[test]
     fn denied_list_covers_core_kernel_attack_surfaces() {
-        // 关键项防回退：列表被误删时在此暴露
-        for required in ["ptrace", "bpf", "unshare", "setns", "open_by_handle_at"] {
+        // 关键项防回退：列表被误删时在此暴露（R8 SEC-9 补 io_uring 族）
+        for required in [
+            "ptrace",
+            "bpf",
+            "unshare",
+            "setns",
+            "open_by_handle_at",
+            "io_uring_setup",
+            "io_uring_enter",
+        ] {
             assert!(
                 DENIED_SYSCALLS.contains(&required),
                 "deny-list 缺少关键 syscall `{required}`"
