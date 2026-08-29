@@ -1,5 +1,0 @@
-error: failed to parse manifest at `/home/star/projects/minicoding-rs/crates/minicoding-sdk/Cargo.toml`
-
-Caused by:
-  feature `memory` includes `dep:minicoding-memory`, but `minicoding-memory` is not an optional dependency
-  A non-optional dependency of the same name is defined; consider adding `optional = true` to its definition.

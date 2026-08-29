@@ -4,14 +4,9 @@ import type { Message } from "./Message";
 /**
  * 会话（运行时镜像，与 storage 一致）。
  */
-export type Session = {
-  id: string;
-  created_at: string;
-  workdir: string;
-  /**
-   * 配置 hash，用于 resume 时校验一致性。
-   * 配置 hash（resume 一致性校验）。wire 为 JSON number（P5：bigint 谎言修正）。
-   */
-  config_hash: number;
-  messages: Array<Message>;
-};
+export type Session = { id: string, created_at: string, workdir: string, 
+/**
+ * 配置 hash，用于 resume 时校验一致性。
+ * 配置 hash（resume 一致性校验）。wire 为 JSON number（P5：bigint 谎言修正）。
+ */
+config_hash: number, messages: Array<Message>, };
