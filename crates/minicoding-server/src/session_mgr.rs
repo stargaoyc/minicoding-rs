@@ -54,6 +54,11 @@ pub enum SessionManagerError {
 /// 单个 server 会话的状态。
 ///
 /// 持有 `Arc<Runtime>`（单会话聚合根）、`EventCursor`（seq 分配）、
+/// 排队 turn 上限（R8 FE-13，C-07）：超过该数量的并发 POST /messages 直接
+/// 429（turn 本身可长跑，排队任务无界堆积会耗尽内存）。运行中 1 个 + 排队
+/// 4 个对交互式客户端足够。
+const TURN_QUEUE_LIMIT: usize = 4;
+
 /// `PendingPermissions`（权限交互表）、`turn_lock`（turn 串行化）、
 /// `task_state`（任务快照，供 `list_sessions`/`get_session` 返回）。
 pub struct ServerSession {
@@ -73,6 +78,11 @@ pub struct ServerSession {
     /// turn 串行锁（同一 session 同一时刻只允许一个 turn）。`TokioMutex` 因锁跨
     /// `run_turn().await` 持有（不能跨 await 持有 `std::sync::Mutex`）。
     pub turn_lock: TokioMutex<()>,
+    /// 排队 turn 信号量（R8 FE-13）：HTTP 每次 POST /messages spawn 一个 task
+    /// 阻塞在 `turn_lock`——无上限可无限堆积（C-07 资源不可耗尽）。容量
+    /// [`TURN_QUEUE_LIMIT`]，`try_acquire_owned` 失败即 429（客户端应稍后重试）。
+    /// `Arc` 因 permit 需跨 task 边界 owned 持有。
+    pub turn_queue: std::sync::Arc<tokio::sync::Semaphore>,
     /// 任务列表快照（由 `Event::TaskUpdated` 订阅者维护，纯内存态）。
     /// `StdMutex` 因仅做 `Vec` 查/改（无 async 上下文）。任务权威源是
     /// `TaskStore`（tools crate），此字段只用于 HTTP 查询返回。
@@ -95,6 +105,7 @@ impl ServerSession {
             sequenced_tx,
             pending_permissions: pending,
             turn_lock: TokioMutex::new(()),
+            turn_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(TURN_QUEUE_LIMIT)),
             task_state: StdMutex::new(Vec::new()),
             sse_subscribers: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -831,6 +842,47 @@ impl SessionManager {
         decision: Decision,
     ) -> Result<(), SessionManagerError> {
         let session = self.get_or_load(session_id).await?;
+        self.resolve_in_loaded(&session, permission_id, decision)
+            .await
+    }
+
+    /// 仅在**已加载**会话中解析权限（不触发磁盘懒恢复）。
+    ///
+    /// R8 FE-10：NDJSON/ACP 的 `ResolvePermission` 无 `session_id` 字段，需遍历
+    /// 全部会话——逐会话 `get_or_load` 会为每个磁盘会话触发完整事件流重放
+    /// （N 次放大）。本方法只查内存会话表，未加载的会话不可能有 pending
+    /// permission（pending 是运行期状态，磁盘恢复的会话无活跃权限请求）。
+    pub async fn resolve_permission_loaded_only(
+        &self,
+        permission_id: &str,
+        decision: Decision,
+    ) -> bool {
+        let sessions: Vec<Arc<ServerSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for session in sessions {
+            if self
+                .resolve_in_loaded(&session, permission_id, decision.clone())
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 在指定（已加载）会话中解析 pending permission。
+    async fn resolve_in_loaded(
+        &self,
+        session: &Arc<ServerSession>,
+        permission_id: &str,
+        decision: Decision,
+    ) -> Result<(), SessionManagerError> {
         let mut guard = session.pending_permissions.lock().await;
         match guard.remove(permission_id) {
             Some(entry) => {

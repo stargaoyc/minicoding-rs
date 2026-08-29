@@ -391,16 +391,12 @@ async fn dispatch_command(
         }
         Command::ResolvePermission { id, decision } => {
             // ResolvePermission 在 protocol 中无 session_id 字段——
-            // NDJSON 通常单会话，遍历所有会话查找 pending permission。
-            // 找到则解析，找不到则发 CommandError。
-            for meta in mgr.list_sessions() {
-                if mgr
-                    .resolve_permission(&meta.id, &id, decision.clone())
-                    .await
-                    .is_ok()
-                {
-                    return Ok(());
-                }
+            // NDJSON 通常单会话，遍历已加载会话查找 pending permission。
+            // R8 FE-10：只查内存会话（pending 是运行期状态，磁盘未恢复的
+            // 会话不可能有活跃权限请求）——此前逐会话 get_or_load 会为每个
+            // 磁盘会话触发完整事件流重放（N 次放大）。
+            if mgr.resolve_permission_loaded_only(&id, decision).await {
+                return Ok(());
             }
             write_command(
                 stdout,

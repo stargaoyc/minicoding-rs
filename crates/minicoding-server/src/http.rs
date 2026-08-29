@@ -769,10 +769,21 @@ async fn send_message(
             message: "消息内容不能为空".to_string(),
         });
     }
-    // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）
+    // R8 FE-13（C-07）：排队 turn 上限——`try_acquire_owned` 失败即 429（客户端
+    // 稍后重试），防止每次 POST spawn 的 task 无限堆积阻塞在 turn_lock。
+    let session = state.mgr.get_or_load(&session_id).await?;
+    let Ok(permit) = session.turn_queue.clone().try_acquire_owned() else {
+        return Err(HttpError {
+            status: axum::http::StatusCode::TOO_MANY_REQUESTS,
+            message: "会话 turn 队列已满（最多 1 个运行中 + 4 个排队），请稍后重试".to_string(),
+        });
+    };
+    // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）。
+    // permit 随 task 持有至 turn 结束（drop 释放信号量）。
     let mgr = state.mgr.clone();
     let sid = session_id.clone();
     tokio::spawn(async move {
+        let _permit = permit;
         match SessionManager::send_message_boxed(mgr, sid.clone(), body.text).await {
             Ok(TurnOutcome::Finished(msg)) => {
                 tracing::info!(session = %sid, chars = msg.text().chars().count(), "turn finished");
