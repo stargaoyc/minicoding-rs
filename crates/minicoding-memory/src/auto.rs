@@ -155,6 +155,9 @@ impl AutoMemory {
         };
 
         // 读取索引（source of truth）。
+        // R8 MEM-7 注释：`load_entries` 仅读 `index.json` 单文件（save 侧
+        // tmp+rename 原子替换，读者要么见旧要么见新、永不见半成品）；正文
+        // auto.md 由同一 entries 派生，不存在 long_term 双文件 hash 错配场景。
         let bytes = fs::read(&self.index_path).await?;
         let entries: Vec<AutoEntry> = serde_json::from_slice(&bytes)
             .map_err(|e| MemoryError::Serialize(format!("auto index parse: {e}")))?;

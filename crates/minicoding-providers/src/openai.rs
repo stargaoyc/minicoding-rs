@@ -252,7 +252,15 @@ impl LlmProvider for OpenAiProvider {
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>> {
         Box::pin(async move {
             let body = self.build_request_body(&req);
-            let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
+            let base = self.api_base.trim_end_matches('/');
+            // R8 PR-6：api_base 为空时 URL 变成 `/chat/completions`（reqwest 相对路径
+            // 断裂）。兜底默认值（`https://api.openai.com/v1`）仅用于日志整洁，实际
+            // 请求会因凭证缺失失败。
+            let url = if base.is_empty() {
+                "https://api.openai.com/v1/chat/completions".to_string()
+            } else {
+                format!("{base}/chat/completions")
+            };
 
             debug!(target: "minicoding::provider::openai", model = %self.model, url = %url, "POST chat/completions stream");
 

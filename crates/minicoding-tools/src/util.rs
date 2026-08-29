@@ -82,8 +82,13 @@ pub fn truncate_output(text: String, max_bytes: usize) -> (String, bool) {
 /// 临时文件写入、fsync、rename 或权限拷贝失败时返回 IO 错误。
 pub async fn atomic_write(path: &camino::Utf8PathBuf, content: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    // 同目录临时文件（rename 需同文件系统才原子）
-    let tmp = path.with_extension("minicoding.tmp");
+    // 同目录临时文件（rename 需同文件系统才原子）。
+    // R8 TL-6 修复：固定 `{path}.minicoding.tmp` 在同目标并发写时冲突
+    // （create(true) 截断 + 双写交错 → rename 竞态）。追加 pid+原子计数
+    // 后缀保证唯一，消除并发写冲突与 metadata/set_permissions TOCTOU 窗口。
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("minicoding.tmp.{}.{n}", std::process::id()));
     let mut opts = tokio::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]

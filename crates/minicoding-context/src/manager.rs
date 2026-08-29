@@ -214,10 +214,18 @@ impl ContextManagerImpl {
             return;
         };
         let session = self.session_id.lock().expect("session_id poisoned").clone();
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
-            .unwrap_or_else(|| Utf8PathBuf::from("."));
+        // R8 CTX-3 修复：Hook 子进程 cwd 应取会话 workdir（`prompt_ctx_template`
+        // 携带），而非进程级 `std::env::current_dir()`——server 多会话模式下进程
+        // cwd 与当前会话 workdir 可能不一致（此前压缩 Hook 的 cwd 字段失真）。
+        let cwd = self.prompt_ctx_template.as_ref().map_or_else(
+            || {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+                    .unwrap_or_else(|| Utf8PathBuf::from("."))
+            },
+            |t| t.workdir.clone(),
+        );
         let input = HookInput::new(event, session.unwrap_or_default(), 0, cwd);
         // extras 手动填充（HookInput::new 的 extras 为 Null）
         let input = HookInput { extras, ..input };

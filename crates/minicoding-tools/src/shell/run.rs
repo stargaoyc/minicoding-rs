@@ -99,10 +99,13 @@ impl Tool for ShellRun {
 
             // C-07/S8：超时默认取 ToolContext（120s）；工具入参只能**缩短**不能超过
             // 上限——防 LLM 传 `timeout_ms: u64::MAX` 使超时约束形同虚设。
+            // R8 TL-5：`timeout_ms=0` 导致立即超时 kill（schema 允许 minimum 0），
+            // 可被 LLM 用作 DoS——钳位到 1ms 最小非零值。
             let timeout = args
                 .timeout_ms
                 .map(Duration::from_millis)
-                .map_or(default_timeout, |t| t.min(default_timeout));
+                .map_or(default_timeout, |t| t.min(default_timeout))
+                .max(Duration::from_millis(1));
 
             let mut command = if cfg!(windows) {
                 let mut c = Command::new("cmd");
@@ -595,6 +598,25 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "clamp 生效"
+        );
+    }
+
+    /// R8 TL-5：timeout_ms=0 被钳位到 1ms，不立即超时——schema 允许 minimum=0，
+    /// 但 0 毫秒超时在 即 kill 前 pipe 采集无意义，且可被 LLM 用作 DoS。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_zero_clamped_to_nonzero() {
+        let (_tmp, workdir) = make_workdir();
+        let mut ctx = ToolContext::new(workdir, "test".to_string());
+        ctx.timeout = std::time::Duration::from_millis(500);
+        let tool = ShellRun::new();
+        // timeout_ms=0 的 sleep 不应立即超时（执行本身 ~0，钳位 1ms 后管道排空宽限）
+        let result = tool
+            .execute(json!({"command": "echo ok", "timeout_ms": 0}), &ctx)
+            .await;
+        assert!(
+            result.is_ok(),
+            "timeout_ms=0 应被钳位而非立即超时: {result:?}"
         );
     }
 

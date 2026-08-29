@@ -361,8 +361,34 @@ impl JsonlStorage {
             };
             idx.upsert_on_append(session_id, summary, now);
         });
+        // R8 SEC-7 修复：加锁失败（如锁文件被并发清理）多为瞬时——
+        // 短退避重试一次再降级。仍失败记 error（索引不一致影响会话可见性），
+        // 但**不阻塞主路径**（append 已落盘成功）。
         if let Err(e) = result {
-            tracing::warn!("failed to update session index on append: {e}");
+            let retried = self.mutate_index(|idx| {
+                let now = OffsetDateTime::now_utc();
+                let summary = if matches!(msg.role, Role::User) {
+                    let text = msg.text();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.chars().take(80).collect())
+                    }
+                } else {
+                    None
+                };
+                idx.upsert_on_append(session_id, summary, now);
+            });
+            match retried {
+                Ok(()) => {
+                    tracing::warn!("index lock transient failure on append, retried ok: {e}");
+                }
+                Err(re) => {
+                    tracing::error!(
+                        "failed to update session index on append (retried): {e}; {re}"
+                    );
+                }
+            }
         }
     }
 
