@@ -102,8 +102,11 @@ pub fn seatbelt_available() -> bool {
 fn seatbelt_escape(path: &str) -> std::io::Result<String> {
     for bad in ['(', ')'] {
         if path.contains(bad) {
+            // R8 UX-6：含括号的路径在 macOS Seatbelt 下无法安全生成 profile
+            // （fail-closed）。错误信息含可操作建议（移动到无括号路径 / 用符号链接）
             return Err(std::io::Error::other(format!(
-                "sandbox: 路径含 Seatbelt 元字符 `{bad}`，拒绝生成 profile: {path}"
+                "sandbox: 路径含 Seatbelt 元字符 `{bad}`，拒绝生成 profile: {path}\n\
+                 建议：将项目移动到不含括号的路径，或用 `ln -s` 创建无括号符号链接"
             )));
         }
     }

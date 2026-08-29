@@ -356,8 +356,21 @@ fn build_router(
     } else {
         let origins: Vec<_> = cors_origins
             .iter()
-            .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+            .filter_map(|s| {
+                if let Ok(h) = s.parse::<axum::http::HeaderValue>() {
+                    Some(h)
+                } else {
+                    tracing::warn!(
+                        origin = %s,
+                        "CORS 来源解析失败（非法 HeaderValue），已丢弃"
+                    );
+                    None
+                }
+            })
             .collect();
+        if origins.is_empty() {
+            tracing::warn!("所有自定义 CORS 来源均解析失败，回退本机来源策略");
+        }
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(Any)
