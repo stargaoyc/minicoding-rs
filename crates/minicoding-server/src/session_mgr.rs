@@ -90,6 +90,10 @@ pub struct ServerSession {
     /// SSE 活动订阅者计数（FE-17，2026-08-28 R5 收尾）：空闲驱逐跳过
     /// 有订阅者的会话（开着 Web 标签页的会话不应被驱逐）。
     pub sse_subscribers: std::sync::atomic::AtomicUsize,
+    /// 会话已删除标志（R8 FE-6）：`delete` 置位——已排队/已获取 `turn_lock`
+    /// 的 task 在真正执行前检查此标志，删除后不再跑 turn（此前 `cancel`
+    /// 只置 Runtime 取消 token，排队的 task 仍会执行并写存储）。
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl ServerSession {
@@ -108,6 +112,7 @@ impl ServerSession {
             turn_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(TURN_QUEUE_LIMIT)),
             task_state: StdMutex::new(Vec::new()),
             sse_subscribers: std::sync::atomic::AtomicUsize::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -814,6 +819,10 @@ impl SessionManager {
 
     /// 删除会话（同步——仅从 `HashMap` 移除）。
     ///
+    /// R8 FE-6：删除前置位 `closed` 标志——已排队/已持 `turn_lock` 的 task 在
+    /// 真正执行前检查（`send_message_boxed`），删除后不再跑 turn（此前
+    /// `cancel` 只置 Runtime 取消 token，排队的 task 仍执行并写存储）。
+    ///
     /// # Panics
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn delete(&self, session_id: &str) -> bool {
@@ -821,6 +830,11 @@ impl SessionManager {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(session) = guard.get(session_id) {
+            session
+                .closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let removed = guard.remove(session_id).is_some();
         if removed {
             // Metrics：活跃会话数 gauge
@@ -918,6 +932,12 @@ impl SessionManager {
 
         // 获取 turn 锁（串行化：同一 session 同时只有一个 turn）
         let _turn_guard = session.turn_lock.lock().await;
+
+        // R8 FE-6：已删除会话不再执行 turn（DELETE 后置位 closed；此前排队的
+        // task 拿到锁后仍会跑完整 turn 并写存储——"已删除"后消息仍在产生）。
+        if session.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SessionManagerError::NotFound(session_id));
+        }
 
         // Clone `Arc<Runtime>` 断开 `session.runtime` 的 Arc-deref 借用链。
         let runtime = session.runtime.clone();
@@ -1180,5 +1200,33 @@ mod tests {
         let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
         let result = mgr.get_or_load("01MISSING").await;
         assert!(matches!(result, Err(SessionManagerError::NotFound(_))));
+    }
+
+    // R8 FE-6：delete 置位 closed——已持会话 Arc 的排队 task 检查后不再跑 turn
+    #[tokio::test]
+    async fn delete_marks_session_closed() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        let session = mgr.create_session(None).expect("创建会话应成功");
+        let sid = session.session_id().clone();
+        let arc = mgr.get(&sid).expect("已创建的会话应在内存表");
+        assert!(
+            !arc.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "创建后未删除，closed 应为 false"
+        );
+        assert!(mgr.delete(&sid), "delete 应移除会话");
+        // 已持 Arc 的调用方可观察到 closed 置位（send_message_boxed 的关门检查）
+        assert!(
+            arc.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "delete 后 closed 应置位"
+        );
     }
 }

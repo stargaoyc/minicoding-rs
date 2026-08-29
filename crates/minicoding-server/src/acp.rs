@@ -156,6 +156,11 @@ pub async fn serve_acp(mgr: Arc<SessionManager>) -> Result<(), AcpError> {
     let stdout: Box<dyn AsyncWrite + Send + Unpin> = Box::new(tokio::io::stdout());
     let stdout: SharedStdout = Arc::new(Mutex::new(stdout));
 
+    // R8 FE-7：turn 互斥门（与 NDJSON/LSP 同款）——并发 `prompt` 若各自订阅
+    // 全会话事件并转发，会双份推送 token/工具事件。串行化后单订阅者单转发。
+    let turn_gate: std::sync::Arc<tokio::sync::Mutex<()>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(()));
+
     // 读 stdin 的 task 与消息消费循环分离：`prompt` 在 turn 期间阻塞，但仍须
     // 消费后续 `resolvePermission` 请求与 `cancel` 通知，否则权限交互死锁
     // （turn 等待决策而决策消息躺在 stdin 缓冲区无人读）。
@@ -196,7 +201,9 @@ pub async fn serve_acp(mgr: Arc<SessionManager>) -> Result<(), AcpError> {
     });
 
     while let Some(msg) = msg_rx.recv().await {
-        if let Err(e) = dispatch_message(mgr.clone(), &stdout, &mut msg_rx, &msg).await {
+        if let Err(e) =
+            dispatch_message(mgr.clone(), &stdout, &mut msg_rx, turn_gate.clone(), &msg).await
+        {
             if matches!(e, AcpError::Shutdown) {
                 tracing::info!("ACP client requested shutdown, exiting main loop");
                 return Ok(());
@@ -328,6 +335,7 @@ async fn dispatch_message(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
     msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    turn_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     msg: &serde_json::Value,
 ) -> Result<(), AcpError> {
     // 区分 Request（有 id）与 Notification（无 id）
@@ -343,7 +351,17 @@ async fn dispatch_message(
 
     if has_id {
         let id = parse_id(msg.get("id"))?;
-        if let Err(e) = dispatch_request(mgr.clone(), stdout, msg_rx, method, id, params).await {
+        if let Err(e) = dispatch_request(
+            mgr.clone(),
+            stdout,
+            msg_rx,
+            turn_gate.clone(),
+            method,
+            id,
+            params,
+        )
+        .await
+        {
             // Shutdown 是控制流信号，向上传递
             if matches!(e, AcpError::Shutdown) {
                 return Err(e);
@@ -377,6 +395,7 @@ async fn dispatch_request(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
     msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    turn_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     method: &str,
     id: Id,
     params: serde_json::Value,
@@ -385,7 +404,11 @@ async fn dispatch_request(
         "initialize" => handle_initialize(stdout, id).await,
         "newConversation" => handle_new_conversation(mgr, stdout, id, params).await,
         "loadConversation" => handle_load_conversation(mgr, stdout, id, params).await,
-        "prompt" => handle_prompt(mgr, stdout, msg_rx, id, params).await,
+        "prompt" => {
+            // R8 FE-7：并发 prompt 串行化（锁在 turn 全程持有，防双份事件转发）
+            let _gate = turn_gate.lock().await;
+            handle_prompt(mgr, stdout, msg_rx, id, params).await
+        }
         "shutdown" => {
             write_ok_response(stdout, id, serde_json::json!({})).await?;
             Err(AcpError::Shutdown)
@@ -873,9 +896,15 @@ mod tests {
             "method": "totally/unknown",
             "params": {},
         });
-        dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg)
-            .await
-            .unwrap();
+        dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await
+        .unwrap();
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
         let raw = String::from_utf8_lossy(&captured);
@@ -891,7 +920,14 @@ mod tests {
             "method": "cancel",
             "params": {"conversation_id": "nonexistent"},
         });
-        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
+        let result = dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await;
         assert!(result.is_ok());
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
@@ -908,7 +944,14 @@ mod tests {
             "id": 1,
             "method": "shutdown",
         });
-        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
+        let result = dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await;
         assert!(matches!(result, Err(AcpError::Shutdown)));
     }
 

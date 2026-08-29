@@ -107,6 +107,12 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
     let stdout: Box<dyn AsyncWrite + Send + Unpin> = Box::new(tokio::io::stdout());
     let stdout: SharedStdout = Arc::new(Mutex::new(tokio::io::BufWriter::new(stdout)));
 
+    // R8 FE-7：turn 互斥门（与 LSP `turn_gate` 同款）——并发 SendUserMessage
+    // 若各自订阅全会话事件并转发，会双份推送 token/工具事件。串行化后
+    // 单订阅者单转发（锁在 turn 全程持有，含事件转发循环）。
+    let turn_gate: std::sync::Arc<tokio::sync::Mutex<()>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(()));
+
     // 读 stdin 的 task 与命令消费循环分离：`SendUserMessage` 在 turn 期间阻塞，
     // 但仍须消费后续 `ResolvePermission`/`Cancel` 命令，否则权限交互死锁
     // （turn 等待决策而决策命令躺在 stdin 缓冲区无人读）。
@@ -170,7 +176,9 @@ pub async fn serve_ndjson(mgr: Arc<SessionManager>) -> Result<(), NdjsonError> {
 
     // 消费循环：`SendUserMessage` 阻塞于 turn，其余命令顺序处理
     while let Some(cmd) = cmd_rx.recv().await {
-        if let Err(e) = dispatch_command(mgr.clone(), &stdout, &mut cmd_rx, cmd).await {
+        if let Err(e) =
+            dispatch_command(mgr.clone(), &stdout, &mut cmd_rx, turn_gate.clone(), cmd).await
+        {
             tracing::warn!(error = %e, "NDJSON command dispatch failed");
             write_command(
                 &stdout,
@@ -298,6 +306,7 @@ async fn dispatch_command(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
     cmd_rx: &mut tokio::sync::mpsc::Receiver<Command>,
+    turn_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     cmd: Command,
 ) -> Result<(), NdjsonError> {
     match cmd {
@@ -354,7 +363,12 @@ async fn dispatch_command(
             session_id,
             text,
             attachments: _,
-        } => handle_send_user_message(mgr, stdout, cmd_rx, session_id, text).await,
+        } => {
+            // R8 FE-7：并发 SendUserMessage 串行化（锁在 turn 全程持有，
+            // 防双份事件转发）
+            let _gate = turn_gate.lock().await;
+            handle_send_user_message(mgr, stdout, cmd_rx, session_id, text).await
+        }
         Command::Cancel { session_id } => {
             mgr.cancel(&session_id).await?;
             // Runtime 会自动发 TurnEnd 事件（stop_reason=interrupted），
@@ -742,7 +756,8 @@ mod tests {
         cmd: Command,
     ) -> Result<(), NdjsonError> {
         let (_tx, mut rx) = tokio::sync::mpsc::channel::<Command>(16);
-        dispatch_command(mgr.clone(), stdout, &mut rx, cmd).await
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        dispatch_command(mgr.clone(), stdout, &mut rx, gate, cmd).await
     }
 
     #[tokio::test]
