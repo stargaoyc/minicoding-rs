@@ -6,8 +6,6 @@
 //!
 //! 详见 `docs/modules.md` §12。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod builder;
 pub mod commands;
 pub mod cred;

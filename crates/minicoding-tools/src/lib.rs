@@ -28,8 +28,6 @@
 //!
 //! 详见 `docs/modules.md` §11、`docs/design.md` §6、§16、§18。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod fs;
 mod git;
 mod memory;

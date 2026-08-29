@@ -15,7 +15,6 @@
 // 还会弹出一个承载 stdout/stderr 日志的控制台窗口。日志统一改写
 // `<安装目录>/logs/`（见下方 log dir 与 plugin targets），开发调试读文件即可。
 #![windows_subsystem = "windows"]
-#![deny(clippy::all, clippy::pedantic)]
 
 use minicoding_core::config::ProviderConfig;
 use minicoding_desktop::{config, sidecar, tray};

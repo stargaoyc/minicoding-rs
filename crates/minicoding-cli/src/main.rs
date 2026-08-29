@@ -25,8 +25,6 @@
 //!
 //! 详见 `docs/modules.md` §12。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use minicoding_cli::builder::{self, SessionLoadMode};

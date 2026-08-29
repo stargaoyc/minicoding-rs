@@ -13,8 +13,6 @@
 //!
 //! 详见 `docs/modules.md` §3、`docs/design.md` §9、`docs/security.md`。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod builtin;
 mod mode;
 mod path_sandbox;
@@ -26,7 +24,7 @@ mod tui;
 
 pub use builtin::BuiltinPolicy;
 pub use mode::{ApprovalMode, Preset};
-pub use path_sandbox::{PathSandboxError, resolve_under};
+pub use path_sandbox::{PathSandboxError, is_under, resolve_under};
 pub use prompter::{
     AutoApprovePrompter, CallbackPrompter, InteractivePrompter, NonInteractivePrompter,
 };

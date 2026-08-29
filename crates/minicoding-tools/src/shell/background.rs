@@ -137,6 +137,10 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             cmd.current_dir(workdir);
             cmd.env_clear();
             cmd.envs(env);
+            //  后台命令缺 `.stdin(null)`——继承宿主 stdin 使
+            // `cat`/`read` 等读 stdin 的命令**永久挂起并占住槽位**，且偷吃
+            // 宿主输入（前台 shell.run 已设 null，后台路径此前漏了）。
+            cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
             // SAFETY: 不依赖 pre_exec hook 的安全不变式（`pre_exec` 未设置）。
@@ -161,6 +165,9 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             // 必须经同一 OS 沙箱第二道防线——apply 失败视为执行错误上交
             // Runtime 的 denial/fallback 链路处理。
             let has_sandbox = sandbox.as_ref().is_some();
+            //  apply 返回 SpawnHandle（Windows 携带策略），
+            // post_spawn 消费同一句柄，消除并发 spawn 策略错配。
+            let mut spawn_handle = None;
             if let Some(sb) = sandbox.as_ref() {
                 let span = tracing::debug_span!(
                     "sandbox.apply",
@@ -168,9 +175,11 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                     driver = sb.driver.id(),
                 );
                 let _enter = span.enter();
-                sb.driver
-                    .apply(&sb.policy, cmd.as_std_mut())
-                    .map_err(|e| ToolError::Exec(format!("sandbox apply failed: {e}")))?;
+                spawn_handle = Some(
+                    sb.driver
+                        .apply(&sb.policy, cmd.as_std_mut())
+                        .map_err(|e| ToolError::Exec(format!("sandbox apply failed: {e}")))?,
+                );
             }
 
             // 2. Spawn 子进程
@@ -183,7 +192,8 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                 && let Some(sb) = sandbox.as_ref()
                 && let Some(pid) = child.id()
             {
-                sb.driver.post_spawn(pid).map_err(|e| {
+                let mut handle = spawn_handle.take().unwrap_or_default();
+                sb.driver.post_spawn(&mut handle, pid).map_err(|e| {
                     let _ = child.start_kill();
                     ToolError::Exec(format!("sandbox post_spawn failed: {e}"))
                 })?;

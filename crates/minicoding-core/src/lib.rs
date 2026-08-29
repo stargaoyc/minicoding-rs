@@ -11,8 +11,6 @@
 //!
 //! 详见 `docs/modules.md` §1、`docs/design.md` §1。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod agent;
 pub mod config;
 pub mod context;

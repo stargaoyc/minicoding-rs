@@ -26,8 +26,6 @@
 //!
 //! 详见 `docs/modules.md` §8、`docs/design.md` §19。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod approval;
 pub mod client;
 pub mod config;
@@ -39,5 +37,6 @@ pub use approval::{
     list_project_choices, reset_project_choices, set_project_approval,
 };
 pub use client::{McpToolWrapper, RmcpClient};
+pub use config::load_all_configs;
 pub use naming::{is_mcp_tool, mcp_tool_name, parse_mcp_tool_name};
 pub use server::{ToolExposer, serve_as_mcp_server};

@@ -135,6 +135,13 @@ impl SessionIndex {
             file.sync_all()?;
         }
         std::fs::rename(tmp.as_std_path(), path.as_std_path())?;
+        //   父目录 fsync：
+        // rename 元数据需随目录项落盘，崩溃极端情况否则可能丢失。
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(parent.as_std_path())
+        {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 

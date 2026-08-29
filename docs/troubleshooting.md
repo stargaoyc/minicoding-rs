@@ -1544,7 +1544,7 @@ glob = "/etc/hosts"  # 允许读取特定系统文件
 用户配置了 Hook 试图允许危险命令：
 
 ```toml
-# .minicoding/hooks.toml
+# ~/.minicoding/config.toml 的 [hooks] 段
 [[hooks.PreToolUse]]
 command = "echo allow"  # Hook 输出 {"decision": "allow"}
 matcher = "shell.run"
@@ -1580,7 +1580,7 @@ matcher = "shell.run"
 - Hook 的 `allow` 对黑名单 `Deny` 无效，Hook 仅能影响非黑名单的请求；
 - `audit.log` 记录决策链（黑名单 → Hook → 用户策略 → 默认矩阵），便于追溯；
 - 不要试图通过 Hook 绕过黑名单——改用 `policy.toml` 的 `[[allow]]`，仍受 L0 约束；
-- 安全审查时检查 `hooks.toml` 是否有可疑 Hook（如 `matcher = "shell.run"` + `allow`），但理解它们无法绕过黑名单。
+- 安全审查时检查 `config.toml` 的 `[hooks]` 段是否有可疑 Hook（如 `matcher = "shell.run"` + `allow`），但理解它们无法绕过黑名单。
 
 ---
 
@@ -1799,7 +1799,7 @@ C-26（asyncRewake 不可越权，见 `AGENTS.md` §5.1、`docs/hooks.md` §11�
 **配置 asyncRewake**：
 
 ```toml
-# .minicoding/hooks.toml
+# ~/.minicoding/config.toml 的 [hooks] 段
 [[hooks.PostToolUse]]
 command = "./scripts/post_tool.sh"
 matcher = "fs.write|fs.edit"
@@ -1821,7 +1821,7 @@ cat scripts/post_tool.sh
 - `default_timeout_sec` 限制 Hook 执行时间，超时 kill 防止僵尸进程；
 - 3 并发上限防止资源耗尽（C-07）；
 - `audit.log` 记录 asyncRewake 调用与错误，便于追溯；
-- 安全审查时检查 `hooks.toml` 的 `async_rewake = true` 配置，理解后台 Hook 行为；
+- 安全审查时检查 `config.toml` 的 `[hooks]` 段 `async_rewake = true` 配置，理解后台 Hook 行为；
 - Hook 脚本不要硬编码凭证（C-04），用 `env:VAR_NAME` 引用。
 
 ---
@@ -1847,7 +1847,7 @@ Hook 配置有 `timeout_sec`（默认 30s，见 `docs/hooks.md` §6）。超时�
 **调整 timeout_sec**：
 
 ```toml
-# .minicoding/hooks.toml
+# ~/.minicoding/config.toml 的 [hooks] 段
 [hooks]
 default_timeout_sec = 60  # 全局默认
 
@@ -1889,7 +1889,7 @@ grep "hook_timeout" ~/.minicoding/audit.log
 - Hook 脚本应幂等（多次执行结果一致），超时重试不破坏状态；
 - asyncRewake 的超时独立于同步 Hook（C-26，3 并发上限 + 超时 kill）；
 - `audit.log` 记录 Hook 超时与错误，便于定位慢 Hook；
-- 定期 review `hooks.toml`，移除不再需要的 Hook，避免超时累积。
+- 定期 review `config.toml` 的 `[hooks]` 段，移除不再需要的 Hook，避免超时累积。
 
 ---
 

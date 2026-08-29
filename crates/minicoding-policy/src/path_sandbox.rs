@@ -46,8 +46,19 @@ pub enum PathSandboxError {
 ///
 /// - [`PathSandboxError::NotFound`]：`workdir` 不存在或不可规范化，或输入路径
 ///   无法回溯到任何存在的祖先；
-/// - [`PathSandboxError::Escaped`]：规范化后的路径落在 `workdir` 之外（C-03）。
+/// - [`PathSandboxError::Escaped`]：规范化后的路径落在 `workdir` 之外（C-03），
+///   或输入以 `~` 开头（策略层不展开 `~`，按相对路径解析会落在 workdir
+///   内被误放行——若未来任何路径做了 shell 展开即成为逃逸口，显式拒绝）。
 pub fn resolve_under(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, PathSandboxError> {
+    //  显式拒绝 `~` 前缀路径——`~/.ssh/id_rsa` 若不拦，策略层按相对
+    // 路径解析成 `<workdir>/~/...`（在边界内，std::fs 也不展开 `~` 所以当前
+    // 无害），但任何未来 shell 展开路径都会把 `~` 变绝对逃逸。
+    if input.starts_with('~') || input.starts_with("~/") {
+        return Err(PathSandboxError::Escaped {
+            path: input.to_string(),
+            workdir: workdir.to_string(),
+        });
+    }
     // workdir 自身必须存在并可规范化，作为容纳判定的基准。
     let canon_workdir =
         canonicalize_utf8(workdir.as_std_path()).map_err(|_| PathSandboxError::NotFound {
@@ -78,8 +89,43 @@ pub fn resolve_under(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, 
 ///
 /// 使用 `Utf8Path::starts_with` 做组件级前缀匹配，避免字符串前缀误判：
 /// `/foo/bar` 在 `/foo` 之下为真，而 `/foo/barbaz` 在 `/foo/bar` 之下为假。
+///
+/// ** PATH-1 修复**：`starts_with` 是**词法组件匹配，不解析 `..`**——
+/// `/tmp/wd/nodir/../../evil/f.txt` 对 `/tmp/wd` 的 `starts_with` 判真（`..` 段不
+/// 弹出），连绝对路径逃逸都能通过。先对两侧做词法 `..` 规范化（纯组件栈，
+/// 不触碰文件系统），再组件级前缀比较。
+#[must_use]
 pub fn is_under(child: &Utf8Path, parent: &Utf8Path) -> bool {
-    child.starts_with(parent)
+    let child_comp = normalize_components(child);
+    let parent_comp = normalize_components(parent);
+    child_comp.len() >= parent_comp.len() && child_comp[..parent_comp.len()] == parent_comp[..]
+}
+
+/// 词法规范化路径组件（消解 `.`/`..`，纯组件栈操作，不触碰文件系统）。
+///
+/// 与 `std::fs::canonicalize` 不同：不解析符号链接、不要求路径存在——仅消除
+/// `.` 与 `..` 段（`..` 弹出上一段；栈空时保留 `..`，相对路径语义不变式，
+/// 与 core `normalize_lexical_rel_path` 一致）。用于 `is_under` 的逃逸判定：
+/// 含 `..` 的候选路径在规范化后正确落在（或不落在）父目录下。
+fn normalize_components(path: &Utf8Path) -> Vec<camino::Utf8Component<'_>> {
+    let mut stack: Vec<camino::Utf8Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            camino::Utf8Component::CurDir => {}
+            camino::Utf8Component::ParentDir => {
+                if stack
+                    .last()
+                    .is_some_and(|c| matches!(c, camino::Utf8Component::Normal(_)))
+                {
+                    stack.pop();
+                } else {
+                    stack.push(comp);
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    stack
 }
 
 /// 规范化一个可能尚不存在的路径：直接 `canonicalize` 失败时，回退到最长
@@ -169,6 +215,23 @@ mod tests {
         );
     }
 
+    ///  `~` 前缀路径显式拒绝（策略层不展开 `~`，按相对解析会误放行；
+    /// 防未来 shell 展开路径变绝对逃逸口）。
+    #[test]
+    fn rejects_tilde_prefix_paths() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+
+        for input in ["~/.ssh/id_rsa", "~/config", "~someone/x"] {
+            let err = resolve_under(&workdir, input).expect_err("~ 路径应被拒绝");
+            assert!(
+                matches!(err, PathSandboxError::Escaped { .. }),
+                "expected Escaped for `{input}`, got {err:?}"
+            );
+        }
+    }
+
     /// workdir 内的相对路径应正常解析。
     #[test]
     fn allows_path_under_workdir() {
@@ -191,6 +254,25 @@ mod tests {
         let child_out = Utf8Path::new("/foo/barbaz");
         assert!(is_under(child_in, parent));
         assert!(!is_under(child_out, parent));
+    }
+
+    ///  PATH-1：`is_under` 必须规范化 `..`——词法 `starts_with` 会把
+    /// `/tmp/wd/nodir/../../evil/f.txt` 判为在 `/tmp/wd` 之下（`..` 段不弹出）。
+    #[test]
+    fn is_under_resolves_parent_segments() {
+        let parent = Utf8Path::new("/tmp/wd");
+        // `..` 弹出后实际落在 /tmp 之下，不在 /tmp/wd 之下
+        assert!(!is_under(
+            Utf8Path::new("/tmp/wd/nodir/../../evil/f.txt"),
+            parent
+        ));
+        assert!(!is_under(Utf8Path::new("/tmp/wd/../../etc/passwd"), parent));
+        // 同级 `..` 归位后仍在父目录内
+        assert!(is_under(Utf8Path::new("/tmp/wd/a/../b.txt"), parent));
+        assert!(is_under(Utf8Path::new("/tmp/wd/sub/../c.txt"), parent));
+        // 父目录自身 + 直接子路径
+        assert!(is_under(Utf8Path::new("/tmp/wd"), parent));
+        assert!(is_under(Utf8Path::new("/tmp/wd/x/y.txt"), parent));
     }
 }
 

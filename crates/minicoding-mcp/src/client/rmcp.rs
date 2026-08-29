@@ -161,7 +161,11 @@ impl RmcpClient {
         cmd.args(args);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::inherit());
+        //  stderr 改为 `Stdio::null()`（丢弃）——`Stdio::inherit()` 让
+        // 远端 server 可写 ANSI 转义序列污染宿主终端（对比 stdin/stdout 是 piped，
+        // stderr 继承漏了）。MCP server stderr 输出仅 server 作者调试用，minicoding
+        // 不消费。若需记录可改为 `Stdio::piped()` + 日志，但当前无消费者。
+        cmd.stderr(Stdio::null());
         // env_clear + 白名单 + 配置 env（C-04：凭证不下传子进程）
         cmd.env_clear();
         for key in ENV_WHITELIST {
@@ -642,6 +646,10 @@ impl McpClient for RmcpClient {
     fn warm_up(&self) -> BoxFuture<'_, Result<(), McpError>> {
         // 刷新各 server 的工具列表（server 可能在运行期间增删工具）。
         // 捕获 `connections` Arc，使 future 不依赖 `&self`。
+        //   备注：本方法当前**无生产调用方**（trait 定义 + noop 默认 +
+        // 测试桩之外零调用点），属预留能力——未来若在会话启动/长空闲后做后台
+        // 预热，从 `builder`/`start` 路径调用即可；不做则保留实现防误删
+        // （声称已交付但依赖方缺失，modules.md §8.5 已如实标注）。
         let connections = self.connections.clone();
         Box::pin(async move {
             let mut guard = connections.write().await;

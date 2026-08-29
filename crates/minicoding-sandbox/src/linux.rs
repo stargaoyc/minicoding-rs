@@ -38,7 +38,7 @@
 
 use crate::hardening::vcs_protected_dirs;
 use landlock::{RulesetAttr, RulesetCreatedAttr};
-use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
+use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy, SpawnHandle};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
@@ -74,15 +74,18 @@ impl SandboxDriver for LandlockDriver {
         &self,
         policy: &SandboxPolicy,
         cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<SpawnHandle, SandboxError> {
         match policy {
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
-                apply_landlock(policy, cmd)
+                apply_landlock(policy, cmd)?;
+                Ok(SpawnHandle::default())
             }
             // ExternalSandbox / DangerFullAccess 不应用内核限制（C-22：依赖外部隔离
             // 或用户显式放弃隔离）。NoopDriver 等价语义，但走这里说明用户选了这两
             // 种策略之一，故意不拦。
-            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => Ok(()),
+            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => {
+                Ok(SpawnHandle::default())
+            }
         }
     }
 

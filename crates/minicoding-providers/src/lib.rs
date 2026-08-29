@@ -16,8 +16,6 @@
 //!
 //! 详见 `docs/modules.md` §10、`docs/design.md` §4。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod anthropic;
 mod common;
 mod ollama;

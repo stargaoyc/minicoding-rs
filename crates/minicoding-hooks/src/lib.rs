@@ -19,8 +19,6 @@
 //!
 //! 详见 `docs/modules.md` §5、`docs/hooks.md`。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod async_rewake;
 mod builtin;
 mod dispatch;

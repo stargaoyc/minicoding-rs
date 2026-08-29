@@ -295,22 +295,8 @@ file_undo = false              # /undo 文件回滚（参考 Codex features.undo
 plan_mode = true               # Plan 模式
 typed_subagents = true         # 类型化子 Agent
 
-# MCP server 配置（见 docs/design.md §19.2）
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false
-enabled_tools = ["list_prs", "create_pr"]
-
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"
+# MCP server 配置（见 docs/design.md §19.2；实际为 mcp.json 的
+# JSON 格式，非 config.toml 的 TOML `[mcp_servers.*]` 段）
 ```
 
 ### 2.4 配置加载优先级
@@ -318,13 +304,13 @@ bearer_token_env_var = "INTERNAL_API_TOKEN"
 配置加载优先级（高 → 低，见 `docs/getting-started.md` §3.1）：
 
 ```
-CLI args > Env vars > Project config (./.minicoding.toml)
-         > User config (~/.minicoding/config.toml) > Built-in defaults
+CLI args > Env vars > User config (~/.minicoding/config.toml) > Built-in defaults
 ```
+
+> 早期设计稿含 `Project config (./.minicoding.toml)` 层，但**项目级分层加载未实现**（`config.rs` 仅单一用户级文件，见 `roadmap.md`）。
 
 - **CLI args**：`--provider`/`--model`/`--preset`/`--sandbox`/`--allow`/`--deny` 等命令行参数优先级最高，仅本次运行有效。
 - **Env vars**：环境变量次之，如 `OPENAI_API_KEY`/`OTEL_EXPORTER_OTLP_ENDPOINT`。
-- **Project config**：工作目录下的 `.minicoding.toml`，随仓库版本化，团队共享。
 - **User config**：`~/.minicoding/config.toml`（或 `$MINICODING_HOME/config.toml`），用户级配置。
 - **Built-in defaults**：内置默认值。
 
@@ -342,7 +328,7 @@ CLI args > Env vars > Project config (./.minicoding.toml)
 | `OPENAI_PROVIDER` | `minicoding serve` 默认 provider 类型 | `openai` |
 | `OPENAI_API_BASE` | `minicoding serve` API base URL | 按 provider 选默认 |
 | `OPENAI_MODEL` | `minicoding serve` 默认模型 | `gpt-4o` |
-| `MINICODING_API_KEY` | CI 场景 API Key（不写入 `.minicoding.toml`） | — |
+| `MINICODING_API_KEY` | CI 场景 API Key（不写入配置） | — |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP 导出端点 | 未设置则降级本地 fmt 日志 |
 | `OTEL_TRACES_SAMPLER` | 采样策略（`always_on`/`trace_id_ratio`） | `always_on` |
 | `RUST_LOG` | 日志级别覆盖（文件始终 DEBUG） | `info` |
@@ -741,7 +727,9 @@ minicoding auth login --provider openai  # 输入 sk-...
 cd crates/minicoding-web && npm run build && cd ../..
 
 # 4. 启动 server
-minicoding-server \
+# 注意：--bind 0.0.0.0 绑定非本机地址时**必须启用鉴权**，
+# 否则拒绝启动。通过 MINICODING_AUTH_TOKEN env 传入 token。
+MINICODING_AUTH_TOKEN="$(openssl rand -hex 32)" minicoding-server \
   --bind 0.0.0.0:8080 \
   --web ./crates/minicoding-web/dist \
   --cors-origin https://coding.example.com
@@ -1525,7 +1513,7 @@ Hooks 系统参考 Claude Code 设计，按需精简为 10 类事件（见 `docs
 
 ### 11.2 Hook 配置
 
-Hook 从 `.minicoding/hooks.toml`（项目级）或 `~/.minicoding/hooks.toml`（用户级）加载，按事件分 10 段配置（PascalCase 段名）：
+Hook 从 `MINICODING_HOME/config.toml` 的 `[hooks]` 表加载（单一用户级文件，**项目级 `.minicoding/hooks.toml` 未实现**，见 `roadmap.md`），按事件分 10 段配置（PascalCase 段名）：
 
 ```toml
 # ~/.minicoding/config.toml
@@ -1649,25 +1637,45 @@ minicoding 作为 MCP client，连接外部 MCP server，把其工具注册进 `
 
 **配置示例**：
 
-```toml
-# .minicoding.toml
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }   # 环境变量展开
-cwd = "."
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false                # true 时启动失败则 minicoding 拒绝启动
-enabled_tools = ["list_prs", "create_pr"]   # None=全部
+> MCP server 配置在 `mcp.json`（JSON 格式，非 `config.toml` TOML
+> `[mcp_servers.*]` 段）：`~/.minicoding/mcp.json`（local/user 作用域）与
+> `<project>/.minicoding/mcp.json`（project 作用域，入版本控制，见 §12.3）。
 
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"   # 不直接写 token
-http_headers = { "X-Client" = "minicoding" }
+```json
+// ~/.minicoding/mcp.json
+{
+  "local": {
+    "servers": [
+      {
+        "name": "github",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+        "startup_timeout_sec": 20,
+        "tool_timeout_sec": 60,
+        "enabled": true,
+        "required": false,
+        "enabled_tools": ["list_prs", "create_pr"]
+      }
+    ]
+  }
+}
+```
+
+```json
+// <project>/.minicoding/mcp.json（project 作用域）
+{
+  "servers": [
+    {
+      "name": "internal_api",
+      "transport": "http",
+      "url": "https://internal.corp/mcp",
+      "bearer_token_env_var": "INTERNAL_API_TOKEN",
+      "http_headers": { "X-Client": "minicoding" }
+    }
+  ]
+}
 ```
 
 `bearer_token_env_var` 走环境变量引用而非明文，与凭证管理一致（C-04）。
@@ -2222,7 +2230,7 @@ $MINICODING_HOME  (默认 ~/.minicoding/)
     └── minicoding.YYYY-MM-DD.log
 ```
 
-根目录可通过 `MINICODING_HOME` 环境变量覆盖（绝对路径）；设置后所有子路径都相对该根解析。项目级配置使用工作目录下的 `.minicoding.toml`。凭证**不**落入此目录，统一存 OS keyring。
+根目录可通过 `MINICODING_HOME` 环境变量覆盖（绝对路径）；设置后所有子路径都相对该根解析。配置统一存 `~/.minicoding/config.toml`（**项目级配置未实现**）。凭证**不**落入此目录，统一存 OS keyring。
 
 ---
 

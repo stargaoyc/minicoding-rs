@@ -30,6 +30,12 @@ use tokio::io::AsyncWriteExt;
 /// 消息流格式版本。旧文件（无 header）视为 v1。
 const MESSAGE_FORMAT_VERSION: u32 = 1;
 
+///  单行消息长度上限（4 MiB）。此前 JSONL 全量 `read_to_string` 且
+/// 单行无长度检查——异常/损坏文件中的超长行可撑爆内存（读取已全量到内存，
+/// 解析阶段再限制已晚，但可阻止畸形行被当作消息解析）。正常消息行受工具
+/// `max_output_bytes`（默认 1 MiB）约束，4 MiB 上限覆盖正常范围且防异常膨胀。
+const MAX_MESSAGE_LINE_BYTES: usize = 4 * 1024 * 1024;
+
 /// 消息流 header 行的 JSON 前缀（用于 load/scan 跳过 header 行）。
 const HEADER_PREFIX: &str = "{\"_header\"";
 
@@ -268,13 +274,35 @@ impl JsonlStorage {
                     .map_err(|e| StorageError::Serialize(e.to_string()))?;
                 file.write_all(line.as_bytes())?;
                 file.write_all(b"\n")?;
-                file.flush()?;
-                file.sync_all()?;
             }
+            //   批量写后**一次 fsync**（此前每条消息一次 fsync +
+            // 一次 mutate_index。对大 fork 分别 5000 次 IO 放大）。
+            file.flush()?;
+            file.sync_all()?;
         }
-        // 更新索引（best effort）：fork 后逐条 upsert，复用 append 路径
-        for msg in messages {
-            self.update_index_on_append(new_session_id, msg);
+        // 一次索引更新（替代逐条 upsert）
+        //   改为一次 mutate_index 批量 upsert 全部消息
+        // （此前每条消息一次 mutate_index：每次 acquire 锁 + 全量 load + 全量 save）。
+        if !messages.is_empty() {
+            let now = OffsetDateTime::now_utc();
+            let result = self.mutate_index(|idx| {
+                for msg in messages {
+                    let summary = if matches!(msg.role, Role::User) {
+                        let text = msg.text();
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.chars().take(80).collect())
+                        }
+                    } else {
+                        None
+                    };
+                    idx.upsert_on_append(new_session_id, summary, now);
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!("fork 后索引更新失败: {e}");
+            }
         }
         Ok(())
     }
@@ -334,7 +362,20 @@ impl JsonlStorage {
         // 阻塞式跨进程锁（热路径低竞争：index 更新仅在消息追加/删除/摘要变更时）。
         let lock = SessionLock::acquire_blocking(self.base_dir.join("index.lock"))?;
         // 锁内重新从磁盘加载——合并其他进程的最新写入，避免 last-rename-wins。
-        let mut index = SessionIndex::load(&self.index_path()).unwrap_or_default();
+        //   损坏索引此前 `unwrap_or_default()` 静默清空，只写入
+        // 本次 f() 触及的条目后覆盖落盘（其余会话元数据永久丢失）。改为损坏时
+        // warn + 从空索引起步（`f` 只 upsert 本次条目，不丢历史——历史本已
+        // 不可读，覆盖不损失更多；且后续读路径扫描兜底会重建）。
+        let mut index = match SessionIndex::load(&self.index_path()) {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "session index 损坏，本次更新从空索引起步（读路径将扫描重建）"
+                );
+                SessionIndex::new()
+            }
+        };
         let out = f(&mut index);
         index.save(&self.index_path())?;
         // 更新内存缓存（读路径走缓存，保持一致性）。
@@ -543,6 +584,14 @@ fn extract_message_lines(content: &str) -> (Vec<&str>, bool) {
         if line.is_empty() {
             continue;
         }
+        //  超长行跳过（防畸形行被当作消息解析）
+        if line.len() > MAX_MESSAGE_LINE_BYTES {
+            tracing::warn!(
+                "跳过超长消息行（{} 字节 > {MAX_MESSAGE_LINE_BYTES}）",
+                line.len()
+            );
+            continue;
+        }
         if is_header_line(line) {
             if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
                 && header.header.format_version > MESSAGE_FORMAT_VERSION
@@ -573,6 +622,16 @@ fn parse_session_lines(content: &str) -> Result<Vec<Message>, StorageError> {
             continue;
         }
         non_empty += 1;
+        //  超长行跳过（防畸形行撑爆内存/被当作消息解析）
+        if line.len() > MAX_MESSAGE_LINE_BYTES {
+            saw_bad = true;
+            tracing::warn!(
+                "skip oversized message line {} ({} bytes > {MAX_MESSAGE_LINE_BYTES})",
+                idx + 1,
+                line.len()
+            );
+            continue;
+        }
         if is_header_line(line) {
             if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
                 && header.header.format_version > MESSAGE_FORMAT_VERSION
@@ -683,7 +742,30 @@ impl Storage for JsonlStorage {
                 }
             }
             // 2. 尝试加载索引文件
-            let index = SessionIndex::load(&self.index_path())?;
+            //   损坏（JSON 解析失败）不再硬失败——与坏消息行的
+            // 跳过策略对齐，warn 后走扫描兜底重建（此前损坏直接上抛，列表
+            // 整体不可用且无自愈；"空"能自愈、"坏"不能的读写不对称）。
+            let index = match SessionIndex::load(&self.index_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "session index 损坏，回退目录扫描重建（会话正文 jsonl 不受影响）"
+                    );
+                    let index = self.build_index_from_scan().await?;
+                    let metas = index.to_metas();
+                    {
+                        let mut guard = self.lock_index();
+                        *guard = Some(index.clone());
+                    }
+                    //  落盘走 mutate_index（持 index.lock，防共用
+                    // tmp 并发截断），best effort
+                    if let Err(e) = self.mutate_index(|idx| *idx = index) {
+                        tracing::warn!("failed to persist rebuilt session index: {e}");
+                    }
+                    return Ok(metas);
+                }
+            };
             if !index.is_empty() {
                 let metas = index.to_metas();
                 let mut guard = self.lock_index();
@@ -693,13 +775,14 @@ impl Storage for JsonlStorage {
             // 3. 回退：扫描目录构建索引
             let index = self.build_index_from_scan().await?;
             let metas = index.to_metas();
-            // 缓存 + 落盘（best effort）
+            // 缓存 + 落盘（best effort；修复：走 mutate_index 持
+            // index.lock，避免与 mutate_index 共用固定 tmp 并发截断）。
             {
                 let mut guard = self.lock_index();
                 *guard = Some(index.clone());
             }
-            if let Err(e) = index.save(&self.index_path()) {
-                tracing::warn!("failed to persist session index: {e}");
+            if let Err(e) = self.mutate_index(|idx| *idx = index) {
+                tracing::warn!("failed to persist rebuilt session index: {e}");
             }
             Ok(metas)
         })
@@ -713,7 +796,10 @@ impl Storage for JsonlStorage {
             // 删除前取会话排他锁（阻塞式）——并发
             // append 若在删除窗口内重建文件会产生孤儿会话。持锁删文件 + 移除
             // 索引后释放。
-            let _guard = crate::lock::SessionLock::acquire_blocking(&lock_path);
+            //   加锁结果此前被 `let _guard = ...` 丢弃（无 `?`），
+            // 加锁失败时删除在无锁状态下继续（与同步版 `:212` 的 `?` 写法
+            // 不一致，且注释明说取锁是为防并发重建——没取到就该中止）。
+            let _guard = crate::lock::SessionLock::acquire_blocking(&lock_path)?;
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

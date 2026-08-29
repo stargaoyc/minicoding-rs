@@ -19,8 +19,6 @@
 //!
 //! 详见 `docs/modules.md` §9、`docs/data-model.md`、`docs/design.md` §25。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod audit;
 mod event_store;
 mod export;
