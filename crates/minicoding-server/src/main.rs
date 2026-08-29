@@ -138,9 +138,11 @@ async fn main() -> Result<()> {
         // FE-5（2026-08-25 R2 审查）：token 经 env 下传（desktop sidecar 场景）
         // 时不回显明文到 stdout——desktop 会把每行 stdout 写入日志文件，原样
         // 记录等于把鉴权 token 落盘（C-04）。打印掩码供人工核对；完整值由
-        // 下传方自持。
-        let cut = t.char_indices().nth(4).map_or(t.len(), |(i, _)| i);
-        println!("SERVER_TOKEN={}*** (from MINICODING_AUTH_TOKEN)", &t[..cut]);
+        // 下传方自持。R8 ARCH-5：掩码统一走 core `mask_token`（前 4 字符）。
+        println!(
+            "SERVER_TOKEN={} (from MINICODING_AUTH_TOKEN)",
+            minicoding_core::util::mask_token(&t)
+        );
         Some(t)
     } else {
         let t = cli

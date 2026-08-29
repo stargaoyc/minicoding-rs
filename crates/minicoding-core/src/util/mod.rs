@@ -16,6 +16,22 @@ pub fn generate_auth_token() -> String {
     format!("{}{}", ulid::Ulid::new(), ulid::Ulid::new())
 }
 
+/// API token 掩码（前 4 字符 + `***`，C-04）。
+///
+/// R8 ARCH-5：单一事实来源——此前 `minicoding-server/main.rs`、
+/// `minicoding-cli/commands/serve.rs`、`minicoding-desktop/sidecar.rs` 三处
+/// 各自内联同语义掩码（可漂移）。日志/输出脱敏统一走此函数；`len <= 4`
+/// 时整体掩码。
+#[must_use]
+pub fn mask_token(token: &str) -> String {
+    let cut = token.char_indices().nth(4).map_or(token.len(), |(i, _)| i);
+    if cut == 0 || token.chars().count() <= 4 {
+        "***".to_string()
+    } else {
+        format!("{}***", &token[..cut])
+    }
+}
+
 /// 检测内容是否含指令性模式（C-27：Auto memory 指令注入降级 `Ask`）。
 ///
 /// 单一事实来源（2026-08-23 审查 §8-P2）：此前 `minicoding-policy::builtin`
@@ -279,5 +295,15 @@ mod path_tests {
         assert_eq!(norm(""), "");
         assert_eq!(norm("."), "");
         assert_eq!(norm("a/.."), "");
+    }
+
+    // R8 ARCH-5：掩码统一语义（前 4 字符 + ***；短值整体掩码）
+    #[test]
+    fn mask_token_keeps_first_four_chars() {
+        assert_eq!(super::mask_token("abcdef"), "abcd***");
+        assert_eq!(super::mask_token("ab"), "***");
+        assert_eq!(super::mask_token(""), "***");
+        // 多字节字符：按 char 边界截取前 4 个字符
+        assert_eq!(super::mask_token("一二三四五六"), "一二三四***");
     }
 }

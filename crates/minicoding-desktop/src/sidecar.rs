@@ -149,15 +149,15 @@ fn parse_port(line: &str) -> Option<u16> {
 /// `SERVER_TOKEN=<token>` 行——desktop 把每行 stdout 以 info 级写入日志文件，
 /// 原样记录等于把鉴权 token 落盘（C-04）。所有 sidecar 输出经本函数清洗后再
 /// 进日志；desktop 自身已知 token（env 下传方），无需从日志读取。
+///
+/// R8 ARCH-5：掩码统一走 core `mask_token`（前 4 字符 + ***）——此前三处
+/// 各自内联同语义掩码可漂移。
 #[must_use]
 fn redact_token_line(line: &str) -> String {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix("SERVER_TOKEN=") {
         let token = rest.trim();
-        if token.len() <= 4 {
-            return "SERVER_TOKEN=***".to_string();
-        }
-        return format!("SERVER_TOKEN={}***", &token[..4]);
+        return format!("SERVER_TOKEN={}", minicoding_core::util::mask_token(token));
     }
     line.to_string()
 }

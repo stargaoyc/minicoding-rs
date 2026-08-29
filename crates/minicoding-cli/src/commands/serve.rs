@@ -308,8 +308,11 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         );
         None
     } else if let Some(t) = token_from_env {
-        let cut = t.char_indices().nth(4).map_or(t.len(), |(i, _)| i);
-        println!("SERVER_TOKEN={}*** (from MINICODING_AUTH_TOKEN)", &t[..cut]);
+        // R8 ARCH-5：掩码统一走 core `mask_token`（前 4 字符 + ***）
+        println!(
+            "SERVER_TOKEN={} (from MINICODING_AUTH_TOKEN)",
+            minicoding_core::util::mask_token(&t)
+        );
         Some(t)
     } else {
         Some(
