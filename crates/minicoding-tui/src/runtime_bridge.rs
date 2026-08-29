@@ -44,6 +44,16 @@ pub enum UiCommand {
     /// 生成会话摘要（R8）：bridge 调 `Runtime::summarize_session`，回传
     /// `AppEvent::Summary`。
     Summary,
+    /// `/tokens`：查询 token/消息计数（R8 FE-16）。
+    Tokens,
+    /// `/status`：会话状态摘要（模型/工作目录/权限模式，R8 FE-16）。
+    Status,
+    /// `/model [name]`：无参查看当前模型，带参切换（R8 FE-16）。
+    Model(Option<String>),
+    /// `/plan`：切换 Plan 模式（R8 FE-16）。
+    PlanToggle,
+    /// `/undo [steps]`：回滚文件改动（R8 FE-16）。
+    Undo { steps: usize },
     /// 退出 TUI（终止后台 task）。
     Exit,
 }
@@ -127,45 +137,10 @@ pub fn spawn_runtime_bridge(
                         .await;
                 }
 
-                // command handler：UiCommand → run_turn → AppEvent::TurnResult
+                // command handler：UiCommand → Runtime 操作 → AppEvent 回传
                 while let Some(cmd) = ui_rx.recv().await {
-                    match cmd {
-                        UiCommand::Submit(text) => {
-                            let result = rt.run_turn(UserInput::from_text(text)).await;
-                            let mapped = result.map_err(|e| e.to_string());
-                            if rt_tx.send(AppEvent::TurnResult(mapped)).await.is_err() {
-                                break; // UI 端关闭
-                            }
-                        }
-                        UiCommand::SwitchSession(id) => {
-                            // T-M7-2：取消当前 turn（如运行中），通知 main 重建 Runtime。
-                            // 不在此处切换——Runtime `session` 字段非 interior mutable，
-                            // 重建是更简洁的路径（避免给 Runtime 加锁 + reset API）。
-                            rt.cancel_token().cancel();
-                            if rt_tx.send(AppEvent::SwitchSession(id)).await.is_err() {
-                                break; // UI 端关闭
-                            }
-                        }
-                        UiCommand::Summary => {
-                            let result = rt.summarize_session().await;
-                            match result {
-                                Ok(summary) => {
-                                    if rt_tx.send(AppEvent::Summary(summary)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    if rt_tx
-                                        .send(AppEvent::Summary(Some(format!("摘要生成失败: {e}"))))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        UiCommand::Exit => break,
+                    if !handle_ui_command(&rt, &rt_tx, cmd).await {
+                        break; // UI 端关闭
                     }
                 }
                 events_handle.abort();
@@ -173,4 +148,113 @@ pub fn spawn_runtime_bridge(
             });
         })
         .expect("spawn tui-runtime 线程失败")
+}
+
+/// 处理单个 `UiCommand`，返回 `false` 表示 UI 端已关闭（应终止循环）。
+///
+/// 斜杠命令（R8 FE-16）统一在此调 Runtime 查询/操作，结果经
+/// `AppEvent::CommandOutput`/`AppEvent::Summary` 等回传渲染为 System 行。
+async fn handle_ui_command(
+    rt: &std::sync::Arc<Runtime>,
+    rt_tx: &mpsc::Sender<AppEvent>,
+    cmd: UiCommand,
+) -> bool {
+    match cmd {
+        UiCommand::Submit(text) => {
+            let result = rt.run_turn(UserInput::from_text(text)).await;
+            let mapped = result.map_err(|e| e.to_string());
+            rt_tx.send(AppEvent::TurnResult(mapped)).await.is_ok()
+        }
+        UiCommand::SwitchSession(id) => {
+            // T-M7-2：取消当前 turn（如运行中），通知 main 重建 Runtime。
+            // 不在此处切换——Runtime `session` 字段非 interior mutable，
+            // 重建是更简洁的路径（避免给 Runtime 加锁 + reset API）。
+            rt.cancel_token().cancel();
+            rt_tx.send(AppEvent::SwitchSession(id)).await.is_ok()
+        }
+        UiCommand::Summary => match rt.summarize_session().await {
+            Ok(summary) => rt_tx.send(AppEvent::Summary(summary)).await.is_ok(),
+            Err(e) => rt_tx
+                .send(AppEvent::Summary(Some(format!("摘要生成失败: {e}"))))
+                .await
+                .is_ok(),
+        },
+        UiCommand::Tokens => {
+            let ctx = rt.context();
+            let msg = format!(
+                "消息 {} 条 / token {}（压缩触发比例阈值由上下文预算决定）",
+                ctx.message_count(),
+                ctx.token_count()
+            );
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::Status => {
+            let workdir = rt.workdir().await;
+            let mode = rt.plan_controller().snapshot().await.mode;
+            let msg = format!(
+                "模型: {} | 工作目录: {} | 权限模式: {:?} | 会话: {}",
+                rt.model(),
+                workdir,
+                mode,
+                rt.session().id
+            );
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::Model(Some(name)) => {
+            let prev = rt.model();
+            rt.set_model(&name);
+            let msg = format!("模型切换: {prev} → {name}");
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::Model(None) => {
+            let msg = format!("当前模型: {}", rt.model());
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::PlanToggle => {
+            let controller = rt.plan_controller();
+            let mode = controller.snapshot().await.mode;
+            let target = if mode == minicoding_core::policy::PermissionMode::Plan {
+                minicoding_core::policy::PermissionMode::Default
+            } else {
+                minicoding_core::policy::PermissionMode::Plan
+            };
+            controller.set_mode(target).await;
+            let msg = format!("权限模式: {mode:?} → {target:?}");
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::Undo { steps } => {
+            let steps = steps.max(1);
+            let msg = if let Some(journal) = rt.journal() {
+                match journal.undo(steps).await {
+                    Ok(report) => {
+                        let mut msg = format!(
+                            "已撤销 {} 条 operation，恢复 {} 个文件",
+                            report.undone_entries,
+                            report.restored_files.len()
+                        );
+                        if !report.failed_files.is_empty() {
+                            use std::fmt::Write as _;
+                            let _ = write!(
+                                msg,
+                                "；{} 个文件冲突未覆盖（C-28）：{}",
+                                report.failed_files.len(),
+                                report
+                                    .failed_files
+                                    .iter()
+                                    .map(|(p, e)| format!("{p} ({e})"))
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            );
+                        }
+                        msg
+                    }
+                    Err(e) => format!("/undo 失败: {e}"),
+                }
+            } else {
+                "journal 未启用（file-undo feature 关闭或未注入）".to_string()
+            };
+            rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
+        }
+        UiCommand::Exit => false,
+    }
 }

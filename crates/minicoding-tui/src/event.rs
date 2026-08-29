@@ -31,4 +31,7 @@ pub enum AppEvent {
     /// `/summary` 结果（R8）：bridge 调 `Runtime::summarize_session` 后回传
     /// 摘要文本（`None` = 无消息/未注入 summarizer），UI 渲染为 System 行。
     Summary(Option<String>),
+    /// 斜杠命令输出（R8 FE-16）：`/tokens`/`/status`/`/model`/`/plan`/`/undo`
+    /// 的执行结果文本，UI 渲染为 System 行。
+    CommandOutput(String),
 }

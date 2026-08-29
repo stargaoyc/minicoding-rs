@@ -330,6 +330,13 @@ impl App {
                     }
                 }
             }
+            AppEvent::CommandOutput(text) => {
+                // R8 FE-16：斜杠命令（/tokens /status /model /plan /undo）结果
+                for line in text.lines() {
+                    self.lines.push(ChatLine::System(line.to_string()));
+                }
+                self.status_msg = "命令完成".to_string();
+            }
         }
     }
 
@@ -676,15 +683,27 @@ impl App {
                 self.lines.push(ChatLine::System(hint));
                 self.status_msg = "未知命令".to_string();
             }
-            SlashCommand::Tokens
-            | SlashCommand::Status
-            | SlashCommand::Model(_)
-            | SlashCommand::PlanToggle
-            | SlashCommand::Undo { .. } => {
-                self.lines.push(ChatLine::System(format!(
-                    "当前版本 TUI 暂不支持 {cmd}：UI 进程未持有 Runtime 查询通道"
-                )));
-                self.status_msg = "暂不支持".to_string();
+            // R8 FE-16：/tokens /status /model /plan /undo 经 bridge 调 Runtime
+            // 查询/操作，结果回传 AppEvent::CommandOutput 渲染为 System 行。
+            SlashCommand::Tokens => {
+                let _ = self.ui_tx.try_send(UiCommand::Tokens);
+                self.status_msg = "查询 token…".to_string();
+            }
+            SlashCommand::Status => {
+                let _ = self.ui_tx.try_send(UiCommand::Status);
+                self.status_msg = "查询状态…".to_string();
+            }
+            SlashCommand::Model(arg) => {
+                let _ = self.ui_tx.try_send(UiCommand::Model(arg));
+                self.status_msg = "处理模型…".to_string();
+            }
+            SlashCommand::PlanToggle => {
+                let _ = self.ui_tx.try_send(UiCommand::PlanToggle);
+                self.status_msg = "切换权限模式…".to_string();
+            }
+            SlashCommand::Undo { steps } => {
+                let _ = self.ui_tx.try_send(UiCommand::Undo { steps });
+                self.status_msg = "回滚中…".to_string();
             }
             SlashCommand::Summary => {
                 // R8：/summary 经 bridge 调 Runtime::summarize_session，结果经
@@ -913,17 +932,18 @@ fn option_label(opt: PromptOption) -> String {
 }
 
 /// `/help` 的 System 行列表（F3）。标注各命令在 TUI 的支持状态：
-/// 纯 UI 命令就地可用；Runtime 数据类命令诚实降级（App 无 Runtime 查询通道）。
+/// 纯 UI 命令就地可用；Runtime 数据类命令经 bridge 查询（R8 FE-16 已接线）。
 fn help_lines() -> Vec<String> {
     vec![
         "可用命令：".to_string(),
         "  /help    显示此帮助".to_string(),
         "  /clear   清空聊天区显示（会话上下文保留）".to_string(),
-        "  /tokens  本会话 token 计量（当前版本 TUI 暂不支持）".to_string(),
-        "  /status  会话状态摘要（当前版本 TUI 暂不支持）".to_string(),
-        "  /model   查看/切换模型（当前版本 TUI 暂不支持）".to_string(),
-        "  /plan    切换 Plan 模式（当前版本 TUI 暂不支持）".to_string(),
-        "  /undo    回滚文件改动（当前版本 TUI 暂不支持）".to_string(),
+        "  /tokens  本会话 token 计量".to_string(),
+        "  /status  会话状态摘要".to_string(),
+        "  /model   查看/切换模型".to_string(),
+        "  /plan    切换 Plan 模式".to_string(),
+        "  /undo    回滚文件改动".to_string(),
+        "  /summary 生成会话摘要".to_string(),
         "其他输入作为提问发送给助手。Ctrl-C 中断/退出，Ctrl-D 退出。".to_string(),
     ]
 }
@@ -1090,7 +1110,10 @@ mod tests {
     }
 
     #[test]
-    fn slash_runtime_commands_degrade_gracefully() {
+    fn slash_runtime_commands_dispatch_to_bridge() {
+        // R8 FE-16：/tokens /status /model /plan /undo 已接线——经 bridge 调
+        // Runtime，不再降级为"暂不支持"。测试用无接收方的 channel，
+        // try_send 静默失败不 panic（桥接缺失时的安全行为），状态栏更新。
         let mut app = make_app();
         for raw in ["/tokens", "/status", "/model gpt-x", "/plan", "/undo 2"] {
             type_and_submit(&mut app, raw);
@@ -1100,11 +1123,7 @@ mod tests {
             .iter()
             .filter(|l| matches!(l, ChatLine::System(s) if s.contains("当前版本 TUI 暂不支持")))
             .count();
-        assert_eq!(
-            degraded, 5,
-            "5 个 Runtime 类命令均应诚实降级: {:?}",
-            app.lines
-        );
+        assert_eq!(degraded, 0, "斜杠命令不再降级为暂不支持: {:?}", app.lines);
         assert!(!app.is_turning);
     }
 }
