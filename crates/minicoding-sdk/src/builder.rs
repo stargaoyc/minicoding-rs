@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::{ContextManagerImpl, SimpleContextManager};
 use minicoding_core::config::{ProviderConfig, SmallProviderConfig, config_hash};
+use minicoding_core::hooks::HookRegistry;
 use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
 use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
@@ -340,6 +341,35 @@ fn inner_build_runtime(
     let audit_path = minicoding_core::paths::audit_log_path().context("无法确定审计日志路径")?;
     let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(audit_path));
 
+    // 4c. 预构造沙箱对 + Hook registry（R8 提前到 ctx 构造前）：
+    //     ContextManagerImpl 需注入 Hook registry 以派发 PreCompact/PostCompact
+    //     事件（#1），而 registry 构造需要 sandbox_pair（SEC-5：Hook 子进程 OS 沙箱）。
+    //     原 11a 步的构造移至此；11a 步保留 sandbox_pair 供 subagent/Runtime 注入。
+    //     sandbox feature 未启用时 pair 为 None（Hook 子进程无 OS 隔离，同旧行为）。
+    let sandbox_pair: Option<(Arc<dyn SandboxDriver>, SandboxPolicy)> = {
+        #[cfg(feature = "sandbox")]
+        {
+            let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
+                workdir: workdir_path.clone(),
+                writable: Vec::new(),
+            });
+            Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
+        }
+        #[cfg(not(feature = "sandbox"))]
+        {
+            None
+        }
+    };
+    // SEC-17（R5 收尾）：注入 audit——Hook 协议违规记 audit.log。
+    // 统一为 `Option<Arc<dyn HookRegistry>>`：hooks feature 关闭时为 None
+    // （RuntimeBuilder 默认 NoopHookRegistry，ctx 侧零开销）。
+    #[cfg(feature = "hooks")]
+    let hook_registry: Option<Arc<dyn HookRegistry>> = Some(Arc::new(
+        build_hook_registry(&config.hooks, sandbox_pair.as_ref()).with_audit(audit.clone()),
+    ) as Arc<dyn HookRegistry>);
+    #[cfg(not(feature = "hooks"))]
+    let hook_registry: Option<Arc<dyn HookRegistry>> = None;
+
     // 5. 构造 context manager（T-M3-1/2/3：ContextManagerImpl + 4 级压缩 + 熔断）
     //    注入 TiktokenTokenizer 做精确 token 计数；L2 摘要 provider 用 small（如有）
     //    降本，回退到主 provider。分词器构造失败时降级为 SimpleContextManager（无压缩）。
@@ -392,7 +422,10 @@ fn inner_build_runtime(
                 llm_timeout_secs: config.context.summarize_timeout_secs,
             })
             // CTX-R6-7：压缩触发比例接线（此前 config.budget_ratio 零消费）
-            .with_budget_ratio(f64::from(config.context.budget_ratio));
+            .with_budget_ratio(f64::from(config.context.budget_ratio))
+            // R8：#1 PreCompact/PostCompact Hook 派发——hooks feature 启用时注入
+            // 注册表（未启用时 `None`，零开销）；`hook_registry` 在 4c 步预构建。
+            .with_hook_registry(hook_registry.clone());
             // M-07（R-02）：注入压缩审计 sink
             mgr.set_audit(audit.clone());
             #[cfg(feature = "extensions")]
@@ -525,6 +558,8 @@ fn inner_build_runtime(
     //        复用上方 `event_bus` 的 clone（原件在下方 move 进 builder）。
     //        config_path 复用给 `RuntimeBuilder::with_config_path`（M-12：
     //        turn 边界白名单热更新读取同一 config.toml 文件）。
+    //        注：sandbox_pair + hook_registry 已在 4c 步（行 348-353）预构建，
+    //        此处不再重复（R8 为 PreCompact/PostCompact Hook 提前到 ctx 构造前）。
     let config_path = minicoding_core::paths::config_path()
         .unwrap_or_else(|_| camino::Utf8PathBuf::from("config.toml"));
     let config_watcher =
@@ -537,29 +572,7 @@ fn inner_build_runtime(
     //        全部继承父会话（C-01/C-22 不因嵌套而失效）。
     //        注入必须在 `build()` 之前——`task.spawn` 工具经 `rt.subagent_runner()`
     //        拿到的引用即此处注入的实现（12 步）。
-    let sandbox_pair: Option<(Arc<dyn SandboxDriver>, SandboxPolicy)> = {
-        #[cfg(feature = "sandbox")]
-        {
-            // ARCH-1（R5）：policy 仅在 sandbox feature 下消费（`--no-default-features`
-            // 编译时无 sandbox 分支引用，`#[cfg]` 内定义避免 unused 告警）
-            let policy = sandbox_override.unwrap_or_else(|| SandboxPolicy::WorkspaceWrite {
-                workdir: workdir_path.clone(),
-                writable: Vec::new(),
-            });
-            Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
-        }
-        #[cfg(not(feature = "sandbox"))]
-        {
-            // sandbox feature 未启用：父 Runtime 走 NoopDriver，子代理同样不启用
-            // （第二道防线缺失时父子一致，不制造虚假隔离声明）。
-            None
-        }
-    };
-    // SEC-5（R5）：Hook registry 移至 sandbox_pair 就绪后构造（OS 沙箱注入）。
-    // SEC-17（R5 收尾）：注入 audit——Hook 协议违规记 audit.log。
-    #[cfg(feature = "hooks")]
-    let hook_registry =
-        build_hook_registry(&config.hooks, sandbox_pair.as_ref()).with_audit(audit.clone());
+    //        sandbox_pair 来自 4c 步预构建（行 348），此处直接使用。
     let child_tokenizer: Arc<dyn Tokenizer> = tokenizer
         .clone()
         .unwrap_or_else(crate::subagent::fallback_tokenizer);
@@ -652,17 +665,16 @@ fn inner_build_runtime(
     }
 
     // 11d. 注入 Hook 注册表（`hooks` feature 启用时，T-M5-8）
-    //      `hook_registry` 在 `config` move 之前预构建（见 11a）。
+    //      `hook_registry` 在 4c 步预构建（`Option<Arc<dyn>>`；ctx 侧已复用同一实例）。
     #[cfg(feature = "hooks")]
     {
-        use minicoding_core::hooks::HookRegistry;
-        if hook_registry.count() > 0 {
-            tracing::info!(
-                hook_count = hook_registry.count(),
-                "hooks 已加载并注入 Runtime"
-            );
+        if let Some(registry) = &hook_registry {
+            let hook_count = registry.count();
+            if hook_count > 0 {
+                tracing::info!(hook_count, "hooks 已加载并注入 Runtime");
+            }
+            builder = builder.hook_registry(registry.clone());
         }
-        builder = builder.hook_registry(Arc::new(hook_registry));
     }
 
     // 11e. 注入 ExtensionHost（`extensions` feature 启用时，T-M8-2）

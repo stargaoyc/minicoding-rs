@@ -19,13 +19,14 @@ thiserror = { workspace = true }
 tiktoken-rs = { workspace = true }
 time = { workspace = true }
 ulid = { workspace = true }
+# R8：#1 PreCompact/PostCompact Hook 派发需要 Utf8PathBuf（HookInput.cwd）
+camino = { workspace = true }
 
 [dev-dependencies]
 # A8 架构守卫：复用 core 的 manifest 断言
 minicoding-core = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 criterion = { workspace = true }
-camino = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]

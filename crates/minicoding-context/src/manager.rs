@@ -12,8 +12,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use camino::Utf8PathBuf;
 use minicoding_core::config::RuntimeConfig;
 use minicoding_core::context::{ContextManager, ContextSnapshot};
+use minicoding_core::hooks::{DispatchConfig, HookEvent, HookInput, HookRegistry};
 use minicoding_core::metrics;
 use minicoding_core::model::{Message, RuntimeError};
 use minicoding_core::otel::span_name;
@@ -97,6 +99,9 @@ pub struct ContextManagerImpl {
     // messages-only，fixed_overhead 大时压缩"成功"后有效用量仍超阈值（且熔断被
     // record_success 重置、每轮白烧一次 L2 摘要）。
     fixed_overhead: AtomicUsize,
+    // R8：Hook 注册表（PreCompact/PostCompact 事件派发用，见 `hooks.md` §2）。
+    // 可选注入——未注入时压缩管道内无 Hook 触发点（与旧行为一致）。
+    hook_registry: Option<Arc<dyn HookRegistry>>,
 }
 
 impl ContextManagerImpl {
@@ -127,6 +132,7 @@ impl ContextManagerImpl {
             session_id: std::sync::Mutex::new(None),
             summarize_config: SummarizeConfig::default(),
             fixed_overhead: AtomicUsize::new(0),
+            hook_registry: None,
         }
     }
 
@@ -187,6 +193,37 @@ impl ContextManagerImpl {
     pub fn with_budget_ratio(mut self, ratio: f64) -> Self {
         self.budget = self.budget.with_ratio(ratio);
         self
+    }
+
+    /// 注入 Hook 注册表（R8：#1 PreCompact/PostCompact 事件接线，`hooks.md` §2）。
+    ///
+    /// 注入后 `compress()` 在压缩管道启动前派发 `PreCompact`（extras 携带
+    /// `tokens_before`），成功后派发 `PostCompact`（extras 携带
+    /// `tokens_before`/`tokens_after`）。未注入时无 Hook 触发点（与旧行为一致，
+    /// 零开销）。Hook 仅观察/注入（`inject_context`），不参与压缩决策（C-29
+    /// 熔断状态机由 Runtime 判定，与 Hook 无关）。
+    #[must_use]
+    pub fn with_hook_registry(mut self, registry: Option<Arc<dyn HookRegistry>>) -> Self {
+        self.hook_registry = registry;
+        self
+    }
+
+    /// 派发压缩生命周期 Hook（R8：#1）。
+    async fn dispatch_compress_hook(&self, event: HookEvent, extras: serde_json::Value) {
+        let Some(registry) = &self.hook_registry else {
+            return;
+        };
+        let session = self.session_id.lock().expect("session_id poisoned").clone();
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .unwrap_or_else(|| Utf8PathBuf::from("."));
+        let input = HookInput::new(event, session.unwrap_or_default(), 0, cwd);
+        // extras 手动填充（HookInput::new 的 extras 为 Null）
+        let input = HookInput { extras, ..input };
+        // 忽略 Hook 输出：PreCompact/PostCompact 的 inject_context 由 Runtime 的
+        // pending_hook_contexts 缓冲消费，此处仅派发通知（C-21 不可影响压缩决策）。
+        let _ = registry.dispatch(input, DispatchConfig::default()).await;
     }
 
     /// 链式注入 Prompt 管道与 context 模板（启用动态 system prompt 构建）。
@@ -304,6 +341,15 @@ impl ContextManagerImpl {
         let state_keep = StateKeep::snapshot(&self.system_prompt);
         let provider_ref = self.provider.as_deref();
 
+        // R8：#1 PreCompact Hook——压缩管道启动前派发（extras 携带压缩前 token
+        // 预估值；tokens_after 未知，由 PostCompact 携带）。
+        let tokens_estimate_before = self.token_count();
+        self.dispatch_compress_hook(
+            HookEvent::PreCompact,
+            serde_json::json!({ "tokens_before": tokens_estimate_before }),
+        )
+        .await;
+
         // 持写锁运行压缩管道，释放后再获取熔断器锁（避免锁序倒置：messages → breaker）。
         //
         // CT-1（2026-08-25 审查）：写锁跨整个管道含 L2 的 LLM 摘要调用。曾评估
@@ -347,6 +393,15 @@ impl ContextManagerImpl {
             let level = compress_level(result);
             self.record_compress_audit(result, level, tokens_before, new_tokens)
                 .await;
+            // R8：#1 PostCompact Hook——压缩成功后派发（extras 携带压缩前后 token 数）。
+            self.dispatch_compress_hook(
+                HookEvent::PostCompact,
+                serde_json::json!({
+                    "tokens_before": tokens_before,
+                    "tokens_after": new_tokens,
+                }),
+            )
+            .await;
         }
 
         let threshold = self.budget.compact_threshold();
@@ -759,12 +814,14 @@ mod tests {
     use super::*;
     use minicoding_core::config::RuntimeConfig;
     use minicoding_core::context::{ContextManager, ContextSnapshot};
+    use minicoding_core::hooks::{DispatchResult, Hook};
     use minicoding_core::model::{
         Message, RuntimeError, SideEffect, ToolError, ToolResult, ToolSchema,
     };
     use minicoding_core::provider::Tokenizer;
     use minicoding_core::tool::{Tool, ToolContext, ToolRegistry};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use crate::budget::TokenBudget;
     use camino::Utf8PathBuf;
@@ -1325,5 +1382,81 @@ mod tests {
         mgr.append(Message::user_text("fifth")).await;
         assert_eq!(mgr.message_count(), 3);
         assert_eq!(mgr.token_count(), 30);
+    }
+
+    // === R8：#1 PreCompact/PostCompact Hook 派发 ===
+
+    /// 记录事件派发的 HookRegistry（验证 PreCompact/PostCompact 触发顺序）。
+    #[derive(Default)]
+    struct RecordingRegistry {
+        events: Mutex<Vec<HookEvent>>,
+    }
+
+    impl HookRegistry for RecordingRegistry {
+        fn register(&self, _hook: Arc<dyn Hook>) {}
+        fn for_event(&self, _event: HookEvent) -> Vec<Arc<dyn Hook>> {
+            Vec::new()
+        }
+        fn count(&self) -> usize {
+            0
+        }
+        fn dispatch(
+            &self,
+            input: HookInput,
+            _config: DispatchConfig,
+        ) -> BoxFuture<'_, DispatchResult> {
+            self.events.lock().expect("lock").push(input.event);
+            Box::pin(async move { DispatchResult::default() })
+        }
+    }
+
+    #[tokio::test]
+    async fn compress_dispatches_pre_and_post_compact_hooks() {
+        // R8：#1——注入 registry 后 compress 应依次派发 PreCompact（含
+        // tokens_before extras）与 PostCompact（含 tokens_before/after）。
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let registry = Arc::new(RecordingRegistry::default());
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None)
+            .with_hook_registry(Some(registry.clone() as Arc<dyn HookRegistry>));
+        mgr.set_session_hint("sess-hook-1");
+        for _ in 0..30 {
+            mgr.append(Message::user_text("x".repeat(200))).await;
+        }
+        assert!(mgr.token_count() > TokenBudget::new(6_000).compact_threshold());
+
+        mgr.compress().await.expect("compress 应成功");
+
+        let events = registry.events.lock().expect("lock").clone();
+        assert!(
+            events.iter().any(|e| matches!(e, HookEvent::PreCompact)),
+            "应派发 PreCompact: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, HookEvent::PostCompact)),
+            "应派发 PostCompact: {events:?}"
+        );
+        let pre_idx = events
+            .iter()
+            .position(|e| matches!(e, HookEvent::PreCompact))
+            .expect("PreCompact 存在");
+        let post_idx = events
+            .iter()
+            .position(|e| matches!(e, HookEvent::PostCompact))
+            .expect("PostCompact 存在");
+        assert!(
+            pre_idx < post_idx,
+            "PreCompact 必须先于 PostCompact: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_without_registry_no_hook_dispatch() {
+        // 未注入 registry：compress 正常完成且无 Hook 派发（零开销路径）。
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 6_000, None);
+        for _ in 0..30 {
+            mgr.append(Message::user_text("x".repeat(200))).await;
+        }
+        mgr.compress().await.expect("compress 应成功");
     }
 }
