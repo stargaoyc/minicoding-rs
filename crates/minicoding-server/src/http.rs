@@ -356,8 +356,21 @@ fn build_router(
     } else {
         let origins: Vec<_> = cors_origins
             .iter()
-            .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+            .filter_map(|s| {
+                if let Ok(h) = s.parse::<axum::http::HeaderValue>() {
+                    Some(h)
+                } else {
+                    tracing::warn!(
+                        origin = %s,
+                        "CORS 来源解析失败（非法 HeaderValue），已丢弃"
+                    );
+                    None
+                }
+            })
             .collect();
+        if origins.is_empty() {
+            tracing::warn!("所有自定义 CORS 来源均解析失败，回退本机来源策略");
+        }
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(Any)
@@ -551,16 +564,26 @@ async fn create_session(
     // 工作目录预校验（2026-08-24 用户反馈）：目录不存在时立即 400 并给出可读
     // 错误，而非照常建会话、首个 turn 才在沙箱路径层报错（用户感知为
     // "创建成功但一发消息就坏"）。
-    if let Some(wd) = body.workdir.as_deref().filter(|s| !s.trim().is_empty())
-        && std::fs::canonicalize(wd).is_err()
-    {
-        return Err(HttpError {
-            status: axum::http::StatusCode::BAD_REQUEST,
-            message: format!(
-                "工作目录不存在或不可访问：{wd}（请检查路径拼写，或使用目录选择器选择真实存在的目录）"
-            ),
-        });
-    }
+    //   canonicalize 后**回写**规范化路径（与 NDJSON 对齐）——
+    // 相对路径/符号链接下 OS 沙箱锚点（landlock/Seatbelt 可写根）与应用层
+    // C-03 判定必须基于同一规范化值，否则锚点不一致。
+    let canonical_workdir: Option<camino::Utf8PathBuf> = body
+        .workdir
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|wd| {
+            let canon = std::fs::canonicalize(wd).map_err(|_| HttpError {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                message: format!(
+                    "工作目录不存在或不可访问：{wd}（请检查路径拼写，或使用目录选择器选择真实存在的目录）"
+                ),
+            })?;
+            camino::Utf8PathBuf::from_path_buf(canon).map_err(|_| HttpError {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                message: format!("工作目录非 UTF-8：{wd}"),
+            })
+        })
+        .transpose()?;
     let default = state.mgr.default_params();
     let mut params = ServerRuntimeParams {
         provider_kind: body
@@ -570,9 +593,7 @@ async fn create_session(
         api_base: body.api_base.unwrap_or_else(|| default.api_base.clone()),
         api_key: default.api_key.clone(),
         model: body.model.unwrap_or_else(|| default.model.clone()),
-        workdir: body
-            .workdir
-            .map_or_else(|| default.workdir.clone(), Utf8PathBuf::from),
+        workdir: canonical_workdir.unwrap_or_else(|| default.workdir.clone()),
         system: body.system.or(default.system.clone()),
         permission_mode: body.permission_mode.unwrap_or(default.permission_mode),
         sandbox_policy: default.sandbox_policy.clone(),
@@ -761,10 +782,21 @@ async fn send_message(
             message: "消息内容不能为空".to_string(),
         });
     }
-    // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）
+    //  （C-07）：排队 turn 上限——`try_acquire_owned` 失败即 429（客户端
+    // 稍后重试），防止每次 POST spawn 的 task 无限堆积阻塞在 turn_lock。
+    let session = state.mgr.get_or_load(&session_id).await?;
+    let Ok(permit) = session.turn_queue.clone().try_acquire_owned() else {
+        return Err(HttpError {
+            status: axum::http::StatusCode::TOO_MANY_REQUESTS,
+            message: "会话 turn 队列已满（最多 1 个运行中 + 4 个排队），请稍后重试".to_string(),
+        });
+    };
+    // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）。
+    // permit 随 task 持有至 turn 结束（drop 释放信号量）。
     let mgr = state.mgr.clone();
     let sid = session_id.clone();
     tokio::spawn(async move {
+        let _permit = permit;
         match SessionManager::send_message_boxed(mgr, sid.clone(), body.text).await {
             Ok(TurnOutcome::Finished(msg)) => {
                 tracing::info!(session = %sid, chars = msg.text().chars().count(), "turn finished");
@@ -962,14 +994,19 @@ async fn sse_events(
 
     let headers = headers.clone();
     let header = headers.get("last-event-id").and_then(|v| v.to_str().ok());
-    let stream = if header.is_some() {
-        // 断线重连（浏览器 EventSource 自动携带 Last-Event-ID）：从断点恢复重放
-        let last_seq = sse::parse_last_event_id(header);
-        sse::sse_stream(session, last_seq)
-    } else {
-        // 首次连接：只推新事件，不回放历史（历史 permission_requested 若重放
-        // 会让前端弹窗 pid 错乱，见 `sse.rs::sse_live` 说明）
-        sse::sse_live(session)
+    //  畸形 Last-Event-ID（非数字）视为无 cursor——回退全量重放
+    // 会让历史 permission_requested 重放导致弹窗 pid 错乱。
+    let last_seq = sse::parse_last_event_id(header);
+    let stream = match last_seq {
+        Some(seq) => {
+            // 断线重连（浏览器 EventSource 自动携带 Last-Event-ID）：从断点恢复重放
+            sse::sse_stream(session, seq)
+        }
+        None => {
+            // 首次连接 / 畸形 cursor：只推新事件，不回放历史（历史
+            // permission_requested 若重放会让前端弹窗 pid 错乱，见 sse.rs::sse_live）
+            sse::sse_live(session)
+        }
     };
     let mapped = stream.map(|item| {
         let sse_str = item.unwrap_or_default();

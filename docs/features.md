@@ -152,7 +152,7 @@
 | H-05 | PreToolUse 拦截/改写 | deny/allow(Ask→Allow)/modify_input | M5 | 已实现 |
 | H-06 | PostToolUse 后处理 | 跑 formatter/linter、改写 result | M5 | 已实现 |
 | H-07 | PermissionRequest 短路 | 自动批准/阻断，跳过 Prompter | M5 | 已实现 |
-| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact 未派发 | M5 | 部分实现（SessionStart/UserPromptSubmit/PreToolUse 注入经 `pending_hook_contexts` 缓冲并入 system 段；PreCompact/PostCompact 事件未接线，压缩管道内无 Hook 触发点） |
+| H-08 | 上下文注入 | SessionStart/UserPromptSubmit 注入已接线；PreCompact/PostCompact 已接线 | 已实现（SessionStart/UserPromptSubmit/PreToolUse 注入经 `pending_hook_contexts` 缓冲并入 system 段；起 PreCompact/PostCompact 在 ContextManagerImpl 压缩管道前后派发，extras 含 tokens_before/after） |
 | H-09 | L0 不可覆盖 | Hook 的 allow 对内置黑名单 Deny 无效 | M5 | 已实现 |
 | H-10 | on_hook_error 策略 | continue/deny/fail，超时 kill | M5 | 已实现 |
 | H-11 | 6 个内置示例 Hook | fmt-on-write/auto-approve-tests/block-secrets/git-status-inject/backup-before-compact/test-on-stop | M5 | 已实现 |
@@ -218,7 +218,7 @@
 | ID | 功能 | 描述 | 里程碑 | 状态 |
 |----|------|------|:---:|:---:|
 | F-01 | CLI 单次模式 | `minicoding "prompt"` | M1 | 已实现 |
-| F-02 | CLI 交互会话 | `--session` REPL（含 /undo /plan /mcp） | M2 | 已实现 |
+| F-02 | CLI 交互会话 | `--session` REPL（含 /help /model /status /tokens /clear /undo /plan /summary；`/mcp` 非 REPL 命令，MCP 管理走独立子命令 `minicoding mcp list/approve/reset-project-choices`） | M2 | 已实现 |
 | F-03 | 流式渲染 | token 直写 stdout | M1 | 已实现 |
 | F-04 | 非 TTY 降级 | 禁 spinner/颜色 | M1 | 已实现 |
 | F-05 | TUI 全屏 | ratatui 多视图 | M7 | 已实现 |
@@ -323,7 +323,7 @@
 | Web 与桌面（M9） | 20 |
 | **合计** | **205** |
 
-> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 54 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（按主表逐行里程碑列重新统计，四段相加 = 205 与合计一致（修正约数表述）；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
+> **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 48 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（按主表逐行里程碑列重新统计；原注"四段相加 = 205"算术错误——48+84+46+20=198，合计 **205** 以功能项 ID 实数为准，四段为约数口径且跨里程碑条目归属重复计数，两者不直接对等；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 
 ---
 

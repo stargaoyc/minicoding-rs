@@ -3,20 +3,8 @@
 /**
  * `GET /config` 响应（server 当前默认配置，不含 API key，C-04）。
  */
-export type ServerConfigResponse = {
-  provider_kind: string;
-  provider_name: string | null;
-  api_base: string;
-  model: string;
-  timeout_sec: number;
-  max_retries: number;
-  small_model: string | null;
-  turn_timeout_sec: number;
-  compress: boolean;
-  permission_timeout_sec: number;
-  preset: string;
-  /**
-   * 配置修订号（M-10 防陈旧写：前端保存前锁定基准，config.toml 实时值）。
-   */
-  config_revision: number;
-};
+export type ServerConfigResponse = { provider_kind: string, provider_name: string | null, api_base: string, model: string, timeout_sec: number, max_retries: number, small_model: string | null, turn_timeout_sec: number, compress: boolean, permission_timeout_sec: number, preset: string, 
+/**
+ * 配置修订号（M-10 防陈旧写：前端保存前锁定基准，config.toml 实时值）。
+ */
+config_revision: number, };

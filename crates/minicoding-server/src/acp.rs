@@ -64,6 +64,9 @@ pub enum AcpError {
     /// 客户端发送了格式错误的帧（缺 `Content-Length`、长度不匹配等）。
     #[error("frame error: {0}")]
     Frame(String),
+    /// 协议参数校验失败（如 C-22 二次确认缺失）。
+    #[error("protocol error: {0}")]
+    Protocol(String),
     /// 客户端发了 `shutdown`，主循环应退出。
     #[error("client requested shutdown")]
     Shutdown,
@@ -105,6 +108,10 @@ struct NewConversationParams {
     system: Option<String>,
     #[serde(default)]
     permission_mode: Option<minicoding_core::policy::PermissionMode>,
+    /// C-22 二次确认：`permission_mode=BypassPermissions` 必须携带
+    /// `confirm_danger: true`（与 HTTP/NDJSON 同门控）。
+    #[serde(default)]
+    confirm_danger: Option<bool>,
 }
 
 /// `prompt` 请求参数。
@@ -149,6 +156,11 @@ pub async fn serve_acp(mgr: Arc<SessionManager>) -> Result<(), AcpError> {
     let stdout: Box<dyn AsyncWrite + Send + Unpin> = Box::new(tokio::io::stdout());
     let stdout: SharedStdout = Arc::new(Mutex::new(stdout));
 
+    //  turn 互斥门（与 NDJSON/LSP 同款）——并发 `prompt` 若各自订阅
+    // 全会话事件并转发，会双份推送 token/工具事件。串行化后单订阅者单转发。
+    let turn_gate: std::sync::Arc<tokio::sync::Mutex<()>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(()));
+
     // 读 stdin 的 task 与消息消费循环分离：`prompt` 在 turn 期间阻塞，但仍须
     // 消费后续 `resolvePermission` 请求与 `cancel` 通知，否则权限交互死锁
     // （turn 等待决策而决策消息躺在 stdin 缓冲区无人读）。
@@ -189,7 +201,9 @@ pub async fn serve_acp(mgr: Arc<SessionManager>) -> Result<(), AcpError> {
     });
 
     while let Some(msg) = msg_rx.recv().await {
-        if let Err(e) = dispatch_message(mgr.clone(), &stdout, &mut msg_rx, &msg).await {
+        if let Err(e) =
+            dispatch_message(mgr.clone(), &stdout, &mut msg_rx, turn_gate.clone(), &msg).await
+        {
             if matches!(e, AcpError::Shutdown) {
                 tracing::info!("ACP client requested shutdown, exiting main loop");
                 return Ok(());
@@ -321,6 +335,7 @@ async fn dispatch_message(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
     msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    turn_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     msg: &serde_json::Value,
 ) -> Result<(), AcpError> {
     // 区分 Request（有 id）与 Notification（无 id）
@@ -336,7 +351,17 @@ async fn dispatch_message(
 
     if has_id {
         let id = parse_id(msg.get("id"))?;
-        if let Err(e) = dispatch_request(mgr.clone(), stdout, msg_rx, method, id, params).await {
+        if let Err(e) = dispatch_request(
+            mgr.clone(),
+            stdout,
+            msg_rx,
+            turn_gate.clone(),
+            method,
+            id,
+            params,
+        )
+        .await
+        {
             // Shutdown 是控制流信号，向上传递
             if matches!(e, AcpError::Shutdown) {
                 return Err(e);
@@ -370,6 +395,7 @@ async fn dispatch_request(
     mgr: Arc<SessionManager>,
     stdout: &SharedStdout,
     msg_rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    turn_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     method: &str,
     id: Id,
     params: serde_json::Value,
@@ -378,7 +404,11 @@ async fn dispatch_request(
         "initialize" => handle_initialize(stdout, id).await,
         "newConversation" => handle_new_conversation(mgr, stdout, id, params).await,
         "loadConversation" => handle_load_conversation(mgr, stdout, id, params).await,
-        "prompt" => handle_prompt(mgr, stdout, msg_rx, id, params).await,
+        "prompt" => {
+            //  并发 prompt 串行化（锁在 turn 全程持有，防双份事件转发）
+            let _gate = turn_gate.lock().await;
+            handle_prompt(mgr, stdout, msg_rx, id, params).await
+        }
         "shutdown" => {
             write_ok_response(stdout, id, serde_json::json!({})).await?;
             Err(AcpError::Shutdown)
@@ -456,6 +486,17 @@ async fn handle_new_conversation(
     let workdir = p
         .workdir
         .map_or_else(|| default.workdir.clone(), camino::Utf8PathBuf::from);
+    //   C-22 二次确认补口——ACP（stdio）此前无 confirm_danger
+    // 门控，per-session 可直建 bypass_permissions 会话（HTTP 侧已修）。
+    if p.permission_mode == Some(minicoding_core::policy::PermissionMode::BypassPermissions)
+        && p.confirm_danger != Some(true)
+    {
+        return Err(AcpError::Protocol(
+            "permission_mode `bypass_permissions` 属高危配置（C-22）：全部副作用免弹窗 \
+             自动放行。请在客户端确认红色警告后携带 \"confirm_danger\": true 重试"
+                .to_string(),
+        ));
+    }
     let params = ServerRuntimeParams {
         provider_kind: p.provider.unwrap_or(default.provider_kind),
         provider_name: default.provider_name,
@@ -855,9 +896,15 @@ mod tests {
             "method": "totally/unknown",
             "params": {},
         });
-        dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg)
-            .await
-            .unwrap();
+        dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await
+        .unwrap();
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
         let raw = String::from_utf8_lossy(&captured);
@@ -873,7 +920,14 @@ mod tests {
             "method": "cancel",
             "params": {"conversation_id": "nonexistent"},
         });
-        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
+        let result = dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await;
         assert!(result.is_ok());
         drop(stdout);
         let captured = drain_reader(&mut rx).await;
@@ -890,7 +944,14 @@ mod tests {
             "id": 1,
             "method": "shutdown",
         });
-        let result = dispatch_message(mgr, &stdout, &mut empty_msg_rx(), &msg).await;
+        let result = dispatch_message(
+            mgr,
+            &stdout,
+            &mut empty_msg_rx(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            &msg,
+        )
+        .await;
         assert!(matches!(result, Err(AcpError::Shutdown)));
     }
 

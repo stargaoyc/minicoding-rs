@@ -141,7 +141,10 @@ impl PromptContributor for AutoMemoryContributor {
                 String::new()
             });
             let long_term_md = match &long_term {
-                Some(store) => store.load().await.unwrap_or_default(),
+                Some(store) => store.load().await.unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "加载长期记忆失败，本轮跳过注入");
+                    String::new()
+                }),
                 None => String::new(),
             };
             if auto_md.trim().is_empty() && long_term_md.trim().is_empty() {
@@ -155,6 +158,8 @@ impl PromptContributor for AutoMemoryContributor {
             // 1) @memory 前缀 → BM25 检索 top-5；
             // 2) 全量渲染超限 → 检索截断（有查询词）或头部截断（无）；
             // 3) 其余 → 全量渲染。
+            //   `over_limit` 仅查 auto_md——long_term 仅作检索语料
+            // （非直接注入内容），不纳入预算判定，此为设计权衡。
             let mut retrieved_hint = false;
             let explicit_retrieval = query
                 .as_deref()
@@ -177,7 +182,9 @@ impl PromptContributor for AutoMemoryContributor {
                     truncate_chars(&auto_md, max_chars)
                 } else {
                     retrieved_hint = true;
-                    hits.join("\n\n")
+                    //   BM25 检索 top-5 整节文本可达数万字符，
+                    // 远超 max_chars（4K），须截断以保持预算稳定。
+                    truncate_chars(&hits.join("\n\n"), max_chars)
                 }
             } else {
                 truncate_chars(&auto_md, max_chars)

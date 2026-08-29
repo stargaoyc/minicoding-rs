@@ -40,6 +40,8 @@ export function useMessages(sessionId: string | null) {
 
 export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
+  //  乐观消息 id 唯一性计数器（跨会话单调，防同毫秒双发冲突）。
+  const optimisticSeq = useRef(0);
   return useMutation({
     // POST /messages 改 202 Accepted——结果走 SSE，不消费响应体。
     // F-202residue：后端已删除残留的空 stop_reason/final_text，
@@ -51,8 +53,10 @@ export function useSendMessage(sessionId: string | null) {
       // 取消进行中的 refetch，避免覆盖乐观更新
       await qc.cancelQueries({ queryKey: ["messages", sessionId] });
       const prev = qc.getQueryData<Message[]>(["messages", sessionId]);
+      //  `optimistic-${Date.now()}` 同毫秒双发会 key 冲突（乐观占位
+      // 被 message_appended 剥除时按 id 前缀过滤）——追加单调计数保证唯一。
       const optimistic: Message = {
-        id: `optimistic-${Date.now()}`,
+        id: `optimistic-${Date.now()}-${optimisticSeq.current++}`,
         role: "user",
         content: [{ type: "text", text }],
         tool_calls: [],
@@ -83,6 +87,9 @@ interface SSEStreamOptions {
     /** ：pending 快照携带的 options，SSE 实时事件无此字段 */
     options?: string[];
   }) => void;
+  /**  ：权限已决/本 turn 结束时回调——前端弹窗须自动关闭
+   * （服务端超时 Deny 或他端已裁决时，pending 弹窗不再残留）。 */
+  onPermissionResolved?: () => void;
   onTaskUpdated?: () => void;
 }
 
@@ -182,6 +189,9 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
         optsRef.current?.onPermissionRequested?.(state.waitingPermission!);
       } else if (event.type === "permission_resolved" || event.type === "turn_end") {
         waitingRef.current = state.waitingPermission;
+        //  权限已决/回合结束 → 前端弹窗自动关闭（服务端超时 Deny、
+        // 他端已裁决等场景，避免弹窗残留致用户点"允许"得 404）。
+        optsRef.current?.onPermissionResolved?.();
       }
       if (event.type === "task_updated") {
         optsRef.current?.onTaskUpdated?.();

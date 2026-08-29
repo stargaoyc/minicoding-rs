@@ -252,7 +252,15 @@ impl LlmProvider for OpenAiProvider {
     ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Delta, LlmError>>, LlmError>> {
         Box::pin(async move {
             let body = self.build_request_body(&req);
-            let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
+            let base = self.api_base.trim_end_matches('/');
+            //  api_base 为空时 URL 变成 `/chat/completions`（reqwest 相对路径
+            // 断裂）。兜底默认值（`https://api.openai.com/v1`）仅用于日志整洁，实际
+            // 请求会因凭证缺失失败。
+            let url = if base.is_empty() {
+                "https://api.openai.com/v1/chat/completions".to_string()
+            } else {
+                format!("{base}/chat/completions")
+            };
 
             debug!(target: "minicoding::provider::openai", model = %self.model, url = %url, "POST chat/completions stream");
 
@@ -483,6 +491,9 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
         }
         // refusal 已推 Filtered 的 chunk，其 `finish_reason` 若为
         // `content_filter` 不再重复推 Stop（双 Stop 修复）。
+        //   refusal 存在时无论 finish_reason 为何（含 "stop"）
+        // 都跳过——否则推 Filtered + EndTurn 双重 Stop，消费端首个 Stop 即停
+        // 会错过后续 Usage delta。
         let refusal_pushed = choice
             .get("delta")
             .and_then(|d| d.get("refusal"))
@@ -490,7 +501,7 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
             .is_some_and(|s| !s.is_empty());
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str)
             && !reason.is_empty()
-            && !(refusal_pushed && reason == "content_filter")
+            && !refusal_pushed
         {
             deltas.push(Delta::Stop(map_stop_reason(reason)));
         }
@@ -514,7 +525,11 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
 /// 语义不同，不可合并为单一判定（曾尝试合并，回归测试拦截）。
 fn uses_max_completion_tokens(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    ["o1", "o3", "o4", "gpt-5"]
+    //   扩充推理系前缀（o1/o3/o4/gpt-5/o5 + deepseek-r 系），
+    // 降低 OpenAI 兼容推理模型漏网致 400 的概率。残余风险：无 API 探测
+    // 前仅靠前缀启发式，未知推理模型仍可能直发 temperature/top_p 被上游
+    // 拒绝——fail-fast 方向（400 可），不静默吞。
+    ["o1", "o3", "o4", "o5", "gpt-5", "deepseek-r"]
         .iter()
         .any(|prefix| lower.starts_with(prefix))
 }

@@ -230,7 +230,7 @@ OS 沙箱是平台强相关的（Linux Landlock、macOS Seatbelt、Windows Job O
 
 - `SandboxDriver::is_hardened()` 如实报告当前是否内核级隔离；
 - `doctor --security` 命令输出降级状态，建议用户在 WSL2/容器内运行；
-- 启动时 `assert_constraints()` 检查 `DangerFullAccess`/`ExternalSandbox` 已显式确认且 `is_hardened()` 状态记日志（C-22）。
+- C-22 显式确认由配置/请求层强制（预设确认 + `confirm_danger`），`is_hardened()` 状态记日志（见 `rules.md` §8 对照表）。
 
 #### 3.4.3 带来的价值
 
@@ -280,7 +280,7 @@ Rust Runtime 校验（确定性代码）
 
 #### 4.1.3 带来的价值
 
-- **安全可审计**：L0 约束在 `assert_constraints()` 启动自检（见 `rules.md` §8），约束机制就位才允许启动；
+- **安全可审计**：L0 约束在实现层强制（见 `rules.md` §8 对照表——policy/sandbox/hooks 真实代码点 + CI 回归测试），非纸面声明；
 - **抗 prompt 注入**：即使 LLM 被诱导输出「rm -rf /」，内置黑名单在实现层拒绝；
 - **抗 LLM 幻觉**：LLM「声称已获授权」无效，Runtime 独立决策（C-01）；
 - **抗熔断绕过**：压缩熔断与沙箱拒绝熔断由状态机判定，LLM 文本声明无法跳过（C-29/C-30）。
@@ -1411,7 +1411,7 @@ AI 助手在写代码时容易「自信地编造 API」或「为通过测试而�
 创新的可持续性依赖三条保障：
 
 1. **约束写入规范**：创新点（如 L0 硬约束、单向依赖、零实现 core）写入 `AGENTS.md`/`rules.md`，AI 助手写代码时遵守，代码审查强制；
-2. **启动自检**：`assert_constraints()`（`rules.md` §8）+ `doctor --security`（`security.md` §16）确保约束机制就位才允许启动；
+2. **实现层强制**：L0 约束落在 policy/sandbox/hooks 等真实代码点（见 `rules.md` §8 对照表），CI 回归测试锁死行为；`doctor --security`（`security.md` §16）检查运行期配置；
 3. **CI 门禁**：`cargo fmt --check`/`clippy`/`test`/`audit`/`deny` 全绿门禁，约束不被无声破坏。
 
 这三条保障让创新不仅是「当前状态」，而是「持续约束」——后续演进必须评估对既有创新的影响，避免无意破坏。

@@ -176,7 +176,7 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 - **证据来源**：用户明确修正（"不对，应该用 X"）、连续 ≥2 次同类工具失败、用户显式偏好陈述（含"我喜欢/讨厌/总是/从不"等触发词）、Agent 提案后用户的明确选择。
 - **不臆造**：对没有证据支撑的"用户可能偏好 X"，不写入 `auto.md`；宁可不记也不记错。
 - **初始低置信度**：新条目 `confidence ∈ [0.3, 0.5]`，仅当后续会话再次确认才递增；长期未被引用的递减并最终淘汰。
-- **可读可清**：用户 `/memory auto show` 可查看，`/memory auto off` 可关闭，`/memory auto clear` 可清空——Agent 不得阻碍用户审查与清除。
+- **可读可清**：用户可查看 `auto.md` 内容（其物理位置见 `design.md` §8.7，`~/.minicoding/memory/auto.md`）并自行删除/清空；`/memory auto show|off|clear` 等管理命令属规划项（未实现，如实披露），Agent 不得阻碍用户审查与清除。
 
 ### C-35 压缩经济
 模型应主动减轻上下文压缩压力，避免触发熔断（C-29）：
@@ -247,6 +247,39 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 
 ---
 
+### 6.1 功能项 ↔ 约束对照表（AGENTS.md §4.5 待建项， 补齐）
+
+`features.md` 功能项编号（A/T/C/M/H/E/P/X/W-xx）与 `rules.md` 约束编号（C-01..C-35）
+属不同命名空间。下表按功能项映射其**主要关联约束**（约束↔设计位置见上表 §6）：
+"主要关联"指该功能项是实现某约束的载体、或该功能项的行为被某约束强制。
+
+| features.md 功能项 | 关联约束 | 关系说明 |
+|-------------------|---------|---------|
+| P-01..P-05 权限/黑名单（P-01 Policy/Prompter 双抽象、P-05 内置黑名单） | C-01/C-02 | 权限链载体；黑名单不可覆盖 |
+| P-06 应用层路径沙箱 | C-03 | 路径越界拒绝 |
+| P-11/P-12 环境变量隔离/敏感脱敏 | C-04 | 凭证不落子进程/脱敏 |
+| T-01..T-12 工具系统（写/删/shell/web/git） | C-05/C-07/C-11 | 输出边界、资源上限、副作用标注 |
+| A-09 会话回放 | C-06 | 回放禁副作用 |
+| A-04 停止条件/防死循环 | C-13 | 单轮调用上限 |
+| H-01..H-13 Hooks 系统 | C-21/C-26/C-32 | Hook 不可覆盖 L0；asyncRewake 不可越权/协议契约 |
+| P-15..P-18 沙箱与预设 | C-22 | 沙箱二道防线/降级需显式 |
+| M-07 AGENTS.md 项目记忆 | C-23 | 指令层不可自主编辑 |
+| X-07 project 作用域首次批准 | C-24 | MCP project server 需批准 |
+| X-05 MCP 工具包装 | C-25 | 只读性据 server schema 声明 |
+| M-09 Auto memory | C-27/C-34 | 隔离/指令性降级/谨慎写入 |
+| A-10 /undo 文件回滚 | C-28 | 不可绕过权限回滚 |
+| C-07 压缩熔断 | C-29 | 熔断不可被 LLM 绕过 |
+| P-19 沙箱拒绝检测/熔断 | C-30 | 拒绝不可被应用层覆盖 |
+| A-07 任务管理工具 | C-31 | 增量语义/状态机不可跳跃 |
+| T-14 task 工具（同 A-07） | C-31 | 同上 |
+| L-05 重试与限流 | C-07/C-13 | 资源不可耗尽/防死循环 |
+
+> 说明：本表覆盖**主要**关联；同一功能项可能与多条约束相关（如 shell.run 同时
+> 关联 C-02/C-04/C-07/C-11），此处只列最直接的一条。新增功能项时按本表格式
+> 同步登记。
+
+---
+
 ## 7. 约束演进与评审
 
 - 新增 L0 硬约束需 ADR 评审（见 `architecture.md` §9），明确威胁模型与实现位置。
@@ -256,28 +289,46 @@ Agent 写入 Auto memory（`auto.md`，见 `design.md` §8.7）应基于确凿�
 
 ---
 
-## 8. 约束检查清单（运行时启动校验）
+## 8. 约束检查清单（实现层强制 + CI 门禁）
 
-Runtime 启动时执行 `assert_constraints()`，失败则拒绝启动：
+> 早期设计稿声称"Runtime 启动时执行 `assert_constraints()` 函数，
+> 失败拒绝启动"，但该函数从未实现（grep 全仓无匹配，dev-plan M0 仅占位）。
+> 实际强制机制分三层，本清单如实改述如下；不再声称不存在的运行时自检。
 
-- [ ] `ToolRegistry` 中所有工具 `side_effect()` 与实现一致（静态断言 + 抽样运行）
-- [ ] `policy::builtin` 黑名单已加载且优先级最高
-- [ ] `sandbox_path` 对越界路径返回 `Err`
-- [ ] 凭证未出现在 `ToolContext.env`（含 MCP/Hook 子进程 env）
-- [ ] `max_tool_iters` / `turn_timeout` 已配置且 > 0
-- [ ] 审计 sink 已就绪（audit.log 可写）
-- [ ] OTel span 字段命名符合 `design.md` §15.2
-- [ ] `SandboxDriver` 已选定；`DangerFullAccess`/`ExternalSandbox` 已显式确认且 `is_hardened()` 状态记日志（C-22）
-- [ ] `HookRegistry` 已初始化；内置黑名单 `Deny` 优先于 Hook（C-21）
-- [ ] `ProjectDocLoader` 对 AGENTS.md 写操作注入 `Verdict::Ask`（C-23）
-- [ ] `mcp_choices.toml` 加载完成；未批准的 project 作用域 server 已隔离（C-24）
-- [ ] MCP 工具 wrapper 据 schema hint 映射 `side_effect`/`is_read_only`（C-25）
-- [ ] async_rewake 仅对 `PostToolUse`/`PostToolUseFailure`/`Stop` 生效；后台 Hook 子进程 env 不含凭证（C-26）
-- [ ] `auto.md` 与 `long_term.md` 物理分离；`auto.md` 指令性内容降级 Ask 检测器已加载（C-27）
-- [ ] `FileChangeJournal` 冲突检测就绪（恢复前比对 `after`）；`file_undo` 特性门控状态记日志（C-28）
-- [ ] 压缩熔断阈值已配置（`compress_fail_threshold=3`、`thrash_threshold=2`）；`SessionMeta` 字段不被工具直接改写（C-29）
-- [ ] 沙箱拒绝熔断阈值已配置（3 次提醒 / 5 次 TurnEnd）；拒绝计数器每 turn 重置（C-30）
-- [ ] 任务状态机转换校验就绪（`Completed`/`Cancelled` 不可回退）；`task_id` 由 Runtime 生成（C-31）
-- [ ] async_rewake 协议错误检测就绪（事件白名单、`AsyncRewakeSpec` 字段必填校验）（C-32）
+L0 约束（C-01..C-35）在实现层的强制分三层，**不依赖"启动自检函数"**：
 
-该自检与 `security.md` §16 的 `doctor --security` 互补：前者保证约束**机制**就位，后者保证**配置**合理。
+1. **CI 架构守卫测试**（`crates/*/tests/architecture.rs`）：静态断言依赖白名单
+   （core 不引领域 crate、重依赖隔离），保证 §3 的依赖方向与零实现 core 不被破坏。
+2. **单元/集成回归测试**：每条约束的关键行为有对应测试锁死
+   （如 policy 黑名单优先级、path_sandbox 越界拒绝、sandbox deny 熔断、
+   ReplayPolicy、C-22 确认门控、audit 落盘等）。测试失败即 CI 红。
+3. **`doctor --security`**（`security.md` §16）：运行时检查**配置**是否合理
+   （沙箱驱动与 `is_hardened()` 状态、预设确认、MCP 批准状态等）。
+
+下表为约束↔实现层强制点的对照（替代原"启动校验清单"，均可在代码中定位）：
+
+| 约束 | 实现层强制点 |
+|------|-------------|
+| C-01 副作用必须经权限 | `Runtime::execute_side_effect_call_inner` 权限链（policy check → prompter → Allow 才执行） |
+| C-02 黑名单不可覆盖 | `policy::builtin` 黑名单优先级最高（Hook `allow` 无法覆盖 `Deny`，C-21） |
+| C-03 路径不可越界 | `policy::path_sandbox::resolve_under` 规范化校验 + OS 沙箱二次强制（C-22） |
+| C-04 凭证不可外泄 | env 白名单 + 子进程 env 过滤 + 日志/输出脱敏（redact） |
+| C-05 输出不可作为指令 | provider 层 `<tool_output>` 边界包裹 |
+| C-06 回放禁副作用 | `ReplayPolicy` 非只读一律 Deny |
+| C-07 资源不可耗尽 | 工具层超时/输出上限/进程组约束（shell killpg + drain 宽限） |
+| C-13 防死循环 | `max_tool_iters` 单轮上限（config 默认 50） |
+| C-21 Hook 不可覆盖 L0 | builtin 黑名单 Deny 在 Hook 之前生效 |
+| C-22 沙箱二道防线 | 显式预设确认 + `confirm_danger`（HTTP/NDJSON/ACP 三路径）+ `is_hardened()` 日志 |
+| C-23 AGENTS.md 不可自主编辑 | 写操作注入 `Verdict::Ask` 且不可 AllowAlways |
+| C-24 MCP project 首次批准 | `mcp_choices.toml` 批准状态 |
+| C-25 MCP 工具只读声明 | schema hint → `side_effect`/`is_read_only` 映射 |
+| C-26 asyncRewake 不可越权 | 事件白名单 + 后台 Hook 同 OS 沙箱（SDK builder 注入） |
+| C-27 Auto memory 隔离 | `auto.md`/`long_term.md` 物理分离 + 指令性降级 Ask |
+| C-28 Journal 不可绕过权限 | 恢复前比对 `after`、失败记 `failed_files`、路径 symlink 组件级校验 |
+| C-29 压缩熔断 | `compress_fail_threshold`/`thrash_threshold` 状态机 |
+| C-30 沙箱拒绝熔断 | 内核级硬反馈，应用层 `allow` 不可覆盖 |
+| C-31 任务状态机 | 增量语义 + `Completed`/`Cancelled` 不可回退；`task_id` 由 Runtime 生成 |
+| C-32 asyncRewake 协议契约 | 事件白名单 + `AsyncRewakeSpec` 字段校验 |
+
+该对照与 `security.md` §16 的 `doctor --security` 互补：前者定位约束**机制**
+（实现代码），后者检查运行期**配置**（预设/沙箱/MCP 状态）。

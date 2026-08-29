@@ -3,4 +3,4 @@
 /**
  * 交互后的最终决策（不再含 Ask）。
  */
-export type Decision = "allow" | "allow_always" | { deny_always: string } | { deny: string };
+export type Decision = "allow" | "allow_always" | { "deny_always": string } | { "deny": string };

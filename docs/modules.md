@@ -21,7 +21,7 @@ minicoding-rs (workspace)
 │   ├── minicoding-memory        # 记忆实现：长期/Auto/会话记忆 + AGENTS.md loader
 │   ├── minicoding-hooks         # Hooks 实现：Registry + ScriptHook + asyncRewake + 内置 Hook
 │   ├── minicoding-journal       # FileChangeJournal 实现 + /undo
-│   ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock 直连，seccomp 待接入）
+│   ├── minicoding-sandbox       # OS 沙箱驱动（自研 pre_exec 胶水 + landlock 直连 + seccomp opt-in）
 │   ├── minicoding-mcp           # MCP client/server（基于 rmcp 2.x）+ 进程池 + 后台预热 + inflight merge
 │   ├── minicoding-storage       # JSONL 存储 + audit.log 审计
 │   ├── minicoding-providers     # LLM Provider 实现（OpenAI/Anthropic/Ollama）+ 小 LLM 配置
@@ -325,10 +325,11 @@ minicoding-policy/src/
 ├── redact.rs              # 敏感数据脱敏（.env/api_key/password 模式替换，T-M4-11，C-04）
 ├── ssrf.rs                # SSRF 防护（RFC1918/链路本地/回环/CGNAT 拒绝，T-M4-11，C-02）
 ├── replay.rs              # ReplayPolicy（replay 模式禁副作用，C-06）
-└── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
+├── path_sandbox.rs        # sandbox_path 路径校验（应用层第一道防线，见 security.md §3）
+└── tui.rs                 # TuiPrompter（M7 拆出）
 ```
 
-> **说明**：`Prompter` 各实现集中在单文件 `prompter.rs`（非子目录），因为实现体量较小且共享 `PermissionPrompter` trait 与辅助逻辑；`TuiPrompter` 将在 M7 拆出独立模块。决策持久化（`policy.toml` AllowAlways/DenyAlways）暂未在 policy crate 实现，由 `minicoding-core::policy` trait 抽象 + 调用方注入，M5+ 补 `store.rs`。
+> **说明**：`Prompter` 各实现集中在单文件 `prompter.rs`（非子目录），因为实现体量较小且共享 `PermissionPrompter` trait 与辅助逻辑；`TuiPrompter` 已拆出独立模块（`tui.rs`）。决策持久化（`policy.toml` AllowAlways/DenyAlways）已实现于 `minicoding-core::policy` trait 抽象 + 调用方注入（CLI `PolicyPersist`，见 `core/policy/persist.rs`），server 侧未接线（待对齐）。
 
 ### 3.3 关键设计点
 
@@ -350,6 +351,10 @@ minicoding-policy/src/
 
 ### 4.2 模块树
 
+> 实际另有 `auto_contributor.rs`（M-09 注入 contributor）、
+> `retrieval.rs`（M-08 `@memory` BM25 检索）与 `project_doc/inject.rs`，
+> 树形描述同步如下：
+
 ```
 minicoding-memory/src/
 ├── lib.rs                 # 工厂
@@ -359,8 +364,11 @@ minicoding-memory/src/
 ├── project_doc/
 │   ├── mod.rs
 │   ├── loader.rs          # AGENTS.md 分层加载算法（见 design.md §8.6）
-│   └── fallback.rs        # fallback 文件名与 override 解析（CLAUDE.md/.cursorrules）
+│   ├── fallback.rs        # fallback 文件名与 override 解析（CLAUDE.md/.cursorrules）
+│   └── inject.rs          # 项目文档注入 system 段（含 AGENTS.md，C-05 边界）
 ├── vector.rs              # `@memory` BM25 语义检索（CJK 逐字分词，零外部依赖）
+├── retrieval.rs           # MemoryRetrieval（auto+long_term 语料组装与检索，M-08）
+├── auto_contributor.rs    # AutoMemoryContributor（prompt pipeline contributor，B2/B3）
 └── inject.rs              # 记忆注入 system 段（包裹 <long_term_memory>/<auto_memory> 边界）
 ```
 
@@ -384,7 +392,8 @@ minicoding-memory/src/
 ```
 minicoding-hooks/src/
 ├── lib.rs                 # 工厂 + re-export
-├── registry.rs            # HookRegistryImpl（dispatch 算法 A1 后位于本 crate `registry.rs`/`dispatch.rs`，core 仅留 trait 与 Noop） 实现 HookRegistry（串行聚合，见 hooks.md §5）
+├── registry.rs            # HookRegistryImpl 实现 HookRegistry（串行聚合，见 hooks.md §5）
+├── dispatch.rs            # dispatch 算法（事件 → 匹配 hook → 聚合结果）
 ├── script.rs              # ScriptHook 适配器（外部可执行 + JSON over stdio + 退出码语义）
 ├── async_rewake.rs        # asyncRewake 异步唤醒管理（后台任务 + 唤醒注入，见 hooks.md §11）
 ├── builtin.rs             # 6 个内置示例 Hook（FmtOnWrite/AutoApproveTests/BlockSecrets/
@@ -409,13 +418,15 @@ minicoding-hooks/src/
 
 ### 6.2 模块树
 
+> 实际为双文件布局（entry/undo/report 已并入
+> journal_impl.rs），树形描述同步如下：
+
 ```
 minicoding-journal/src/
-├── lib.rs                 # FileChangeJournal 实现 Journal
-├── journal.rs             # FileChangeJournal（内存，不落盘）
-├── entry.rs               # ChangeEntry / FileChange 数据结构
-├── undo.rs                # undo 反向恢复 + 冲突检测（见 design.md §17.4）
-└── report.rs              # UndoReport（含 failed_files）
+├── lib.rs                 # re-export
+└── journal_impl.rs        # FileChangeJournal 实现 Journal（账本 + undo 冲突检测
+                           #   + UndoReport，见 design.md §17.4；恢复路径
+                           #   symlink 组件级校验，C-03/C-28）
 ```
 
 ### 6.3 关键设计点
@@ -431,7 +442,7 @@ minicoding-journal/src/
 
 ### 7.1 职责
 
-实现 `SandboxDriver` trait（定义在 core）：自研轻量驱动提供跨平台内核级隔离——Linux `landlock` 直连（`Command::pre_exec` 在子进程 fork 后 exec 前应用）、macOS `sandbox_init`(3) FFI、Windows Job Object；`libseccomp`（syscall 过滤）待接入。原 ~~`sandbox-run`~~ 选型因 EUPL-1.2 许可证不合规弃用（见 `tech-stack.md` §13）。另实现 `SandboxDenialDetector`/`SandboxDenialTracker` trait（定义在 core，M-05 下沉）：平台 denial 签名库 + 单 turn 熔断（C-30）。
+实现 `SandboxDriver` trait（定义在 core）：自研轻量驱动提供跨平台内核级隔离——Linux `landlock` 直连（`Command::pre_exec` 在子进程 fork 后 exec 前应用）+ `libseccomp` 可选（feature gate `seccomp`，默认关，deny-list 过滤）、macOS `sandbox_init`(3) FFI、Windows Job Object。原 ~~`sandbox-run`~~ 选型因 EUPL-1.2 许可证不合规弃用（见 `tech-stack.md` §13）。另实现 `SandboxDenialDetector`/`SandboxDenialTracker` trait（定义在 core，M-05 下沉）：平台 denial 签名库 + 单 turn 熔断（C-30）。
 
 ### 7.2 模块树
 
@@ -440,9 +451,11 @@ minicoding-sandbox/src/
 ├── lib.rs                 # detect_driver() 工厂：按 cfg!(target_os) 选实现
 ├── driver.rs              # SandboxDriverImpl 实现 trait
 ├── denial.rs              # DenialDetector + PLATFORM_SIGNATURES + SandboxCircuitBreaker（C-30，M-05 从 core 下沉）
-├── linux.rs               # Linux: landlock 直连（pre_exec 应用；seccomp 待接入）
+├── linux.rs               # Linux: landlock 直连（pre_exec 应用）
+├── seccomp.rs             # Linux syscall 过滤（libseccomp，feature gate `seccomp` 默认关）
 ├── macos.rs               # macOS: sandbox_init(3) FFI（Seatbelt，profile 临时文件 + pre_exec）
-├── windows.rs             # Windows: windows crate（受限令牌 + Job Object）
+├── windows.rs             # Windows: windows-sys（Job Object + 受限令牌）
+├── external.rs            # ExternalSandbox 驱动（容器内运行，is_hardened()=false，C-22）
 └── hardening.rs           # pre-main 进程硬化（PR_SET_DUMPABLE/RLIMIT_CORE/清 LD_*）
 ```
 
@@ -452,7 +465,7 @@ minicoding-sandbox/src/
 |------|-------|------|------|
 | 跨平台统一 API | 自研轻量驱动（~~`sandbox-run`~~ 已弃用） | - | 原 `sandbox-run`（systemd 风格 API）因 EUPL-1.2 许可证不合规弃用；现为自研 pre_exec 胶水：Linux landlock 直连、macOS `sandbox_init`(3) FFI、Windows Job Object（见 `tech-stack.md` §11/§13） |
 | Linux 文件系统沙箱 | `landlock` | 0.4.5 | 官方 rust-landlock，Landlock LSM 安全抽象，纯 Rust 无 C 依赖，1260 万下载 |
-| Linux syscall 过滤 | `libseccomp`（待接入） | - | seccomp-bpf 白名单系统调用（禁 ptrace/mount/reboot/kexec_load）；需系统 libseccomp C 库，尚未接线 |
+| Linux syscall 过滤 | `libseccomp`（已接，opt-in） | 0.4 | seccomp deny-list（禁 ptrace/mount/reboot/kexec_load 等，已接线，feature gate `seccomp` 默认关）；需系统 libseccomp C 库 |
 | Windows | `windows-sys` | 0.59 | Job Object + 受限令牌 |
 | 进程硬化 | `libc` | - | PR_SET_DUMPABLE/RLIMIT_CORE |
 
@@ -463,9 +476,9 @@ minicoding-sandbox/src/
 - **平台检测**：`detect_driver()` 编译期按 `cfg!(target_os)` 选实现；运行期 `landlock_available()` 探测内核支持（Linux，`HardRequirement` + `create()` 探测不约束当前进程），不支持则返回 `NoopDriver`（来自 core）并 warn。
 - **VCS 目录保护**：`.git`/`.hg`/`.svn` 纳入只读规则（P-20）；landlock"白名单并集"语义下 workdir 可写会使子目录继承可写，故实际硬保护由应用层 builtin 黑名单补偿（S5）。
 - **pre-exec apply**：自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前应用约束（Linux `restrict_self()` / macOS `sandbox_init`），子进程启动即受限，无窗口期（参考 Codex，见 security.md §8.3）。
-- **依赖隔离**：`landlock` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译；macOS 无外部 crate 依赖（FFI 直连 libsystem）；`libseccomp` 待接入。
+- **依赖隔离**：`landlock` 通过 `[target.'cfg(target_os = "linux")'.dependencies]` 条件引入，非 Linux 不编译；macOS 无外部 crate 依赖（FFI 直连 libsystem）；`libseccomp` 同条件引入（feature gate `seccomp`，默认关，见 §0.4）。
 - **denial 领域实现（M-05）**：`DenialDetector`（子串匹配 `PLATFORM_SIGNATURES`，覆盖 EPERM/EACCES/Landlock/seccomp/Seatbelt/Windows）与 `SandboxCircuitBreaker`（计数熔断，阈值 3/5）实现 core 的 trait 抽象；未启用本 crate 时 core 兜底 `NoopDenialDetector`/`NoopDenialTracker`（不识别沙箱拒绝，与 NoopDriver 语义一致）。CLI（`sandbox` feature）/server 在注入 `SandboxDriver` 的同时注入 denial 实现。
-- **依赖**：`minicoding-core` + `landlock`（Linux）+ `libc`（Linux）+ `windows-sys`（Windows）；macOS FFI 直连无外部 crate。`libseccomp` 待接入。
+- **依赖**：`minicoding-core` + `landlock`（Linux）+ `libseccomp`（Linux，opt-in feature）+ `libc`（Linux）+ `windows-sys`（Windows）；macOS FFI 直连无外部 crate。
 
 ---
 
@@ -482,16 +495,23 @@ minicoding-mcp/src/
 ├── lib.rs                 # re-export + build_client() 工厂
 ├── client/
 │   ├── mod.rs
-│   ├── rmcp.rs            # RmcpClient：基于 rmcp 2.x 的实现（stdio，M4；HTTP+OAuth 留 M6）
+│   ├── rmcp.rs            # RmcpClient：基于 rmcp 2.x 的实现（stdio，含进程池复用 +
+│   │                      #   inflight 并发合并 + 预热，X-12/13/14）
 │   └── wrapper.rs         # McpToolWrapper：把远程工具包装为 minicoding Tool（含 mcp.call span）
 ├── server/                # T-M8-3：MCP server 暴露侧（把内置工具暴露为 MCP server）
 │   ├── mod.rs             # 模块声明 + re-export `ToolExposer`/`serve_as_mcp_server`
-│   └── expose.rs          # ToolExposer 实现 ServerHandler，serve_as_mcp_server 启动 stdio server
+│   ├── expose.rs          # ToolExposer 实现 ServerHandler，serve_as_mcp_server 启动 stdio server
+│   └── tool_search.rs     # BM25 工具检索索引（X-09，工具数多时按自然语言查 top-k）
+├── config.rs              # McpConfig（mcp.json 解析 + 环境变量展开）
 ├── approval.rs            # project 作用域首次批准流（mcp_choices.toml，C-24）
 └── naming.rs              # mcp__<server>__<tool> 命名 + 解析 + 权限通配匹配
 ```
 
-> **未实现（M6+/M7+）**：`pool.rs`（进程池增强）、`prewarm.rs`（后台预热）、`inflight.rs`（并发请求合并）规划在 M6+。M4 仅交付基础进程池（`RmcpClient` 内置跨 turn 复用）。T-M8-3（`server/expose.rs`）已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露给外部 client（如 Claude Desktop）。T-M8-5（`server/tool_search.rs`）已交付：BM25 工具检索索引，工具数多时按自然语言查询返回 top-k 相关 schema。
+> 原注"进程池增强/后台预热/inflight 未实现（M6+）"已过时——
+> X-12（进程池）/X-13（预热）/X-14（inflight merge）均已实现于 `client/rmcp.rs`；
+> `config.rs`/`server/tool_search.rs` 同为本模块实际文件。T-M8-3（`server/expose.rs`）
+> 已交付：CLI `minicoding serve --as-mcp-server` 把内置工具通过 MCP stdio 协议暴露
+> 给外部 client（如 Claude Desktop）。
 
 ### 8.3 库选型（不自研）
 
@@ -554,28 +574,23 @@ minicoding-storage/src/
 
 ### 10.2 模块树
 
+> 实际代码为扁平文件布局（非目录分组），
+> 树形描述同步如下：
+
 ```
 minicoding-providers/src/
 ├── lib.rs                 # re-export + build_provider() 工厂
-├── openai/
-│   ├── mod.rs
-│   ├── client.rs          # reqwest HTTP 客户端
-│   ├── request.rs         # ChatRequest → OpenAI JSON
-│   ├── response.rs        # SSE → Delta
-│   └── tokenizer.rs       # tiktoken-rs 封装
-├── anthropic/
-│   ├── mod.rs
-│   ├── client.rs
-│   ├── request.rs         # ChatRequest → Anthropic JSON
-│   ├── response.rs        # 事件流 → Delta
-│   └── tokenizer.rs       # 近似计数
-├── ollama/
-│   └── mod.rs
+├── openai.rs              # OpenAI 兼容 Provider（含 request/response/模型探测）
+├── anthropic.rs           # Anthropic Provider（含 request/response/thinking 预算）
+├── ollama.rs              # Ollama Provider（原生工具调用 + NUM_CTX）
+├── tokenizer.rs           # tiktoken-rs 封装
 └── common/
-    ├── retry.rs           # 重试策略（指数退避、429 Retry-After）
+    ├── mod.rs             # 共享工具（wrap_tool_output、mask_key 等）
+    ├── credential.rs      # CredentialResolver（TTL 缓存 + 重载，C-04）
+    ├── ndjson.rs          # NDJSON 流解析
+    ├── retry.rs           # 重试策略（指数退避、429 Retry-After、splitmix64 抖动）
     ├── sse.rs             # SSE 流解析
-    ├── error.rs           # LlmError 分类
-    └── small_llm.rs       # 小 LLM 配置（摘要/compact/memory 提取用独立 provider 降本）
+    └── stream_runner.rs   # 流式响应统一跑批（token 追踪/usage 聚合）
 ```
 
 ### 10.3 关键设计点
@@ -607,7 +622,8 @@ minicoding-tools/src/
 │   ├── delete.rs          # + Journal::record
 │   ├── list.rs
 │   ├── glob.rs            # globset + ignore
-│   └── grep.rs            # regex + ignore
+│   ├── grep.rs            # regex + ignore
+│   └── journal_helper.rs  # 工具→Journal entry 构造
 ├── shell/
 │   ├── run.rs             # tokio::process + 超时 + 截断 + SandboxDriver::apply
 │   ├── background.rs      # 启动后台命令返回 shell_id
@@ -625,16 +641,15 @@ minicoding-tools/src/
 │   ├── create.rs          # TaskCreate（增量模型，见 design.md §18）
 │   ├── update.rs          # TaskUpdate（增量 + 依赖 + 状态机）
 │   └── list.rs            # TaskList 快照
+├── memory/
+│   ├── mod.rs             # 记忆工具装配
+│   └── write.rs           # memory.write（写入 long_term/auto，经权限+审计）
 ├── worktree.rs            # WorktreeSubagentRunner（git worktree 隔离装饰器，M-05 从 core 下沉）
 ├── plan/
 │   ├── exit.rs            # ExitPlanMode（见 design.md §16.4）
 │   └── list.rs            # PlanList 快照（M-11 新增，只读，穿透 Plan 硬门）
-├── mcp/
-│   └── wrapper.rs         # 把 McpClient 远程工具包装为本地 Tool trait
-└── util/
-    ├── path.rs            # sandbox_path 路径校验（委托 minicoding-policy）
-    ├── output.rs          # 输出截断与格式化
-    └── diff.rs            # edit 工具的 diff 生成
+├── ui.rs                  # ui.ask（交互确认，T-12a）
+└── util.rs                # 输出截断/格式化 + diff 生成（单文件，非目录）
 ```
 
 ### 11.3 关键设计点
@@ -811,11 +826,17 @@ minicoding-server/src/
 ├── runtime_builder.rs     # `ServerRuntimeParams` + `build_runtime`（构造单会话 Runtime；默认注入 FileChangeJournal）
 ├── prompter.rs            # `ServerPrompter`（实现 `PermissionPrompter`，oneshot + 超时）+ `PendingPermissions`
 ├── sse.rs                 # SSE 流 + cursor 恢复
+├── ndjson.rs              # NDJSON stdio 适配器（单会话）
 ├── otel_init.rs           # OTLP 初始化（镜像 cli/otel_init.rs，feature gate `otel` 默认启用，见 observability.md §7.3）
 ├── acp.rs                 # ACP stdio 适配器（JSON-RPC over stdio，T-M8-7）
 ├── lsp.rs                 # LSP stdio 适配器（tower-lsp，语义映射见 design.md §24，feature gate `lsp`）
 ├── lsp_prompter.rs        # LspPrompter：实现 PermissionPrompter（window/showMessageRequest 点对点权限交互）
-└── rehydrate.rs           # RehydrateRequired 处理（通知客户端重拉 snapshot）
+├── bounded_io.rs          # 有界 IO 读取（NDJSON 行长上限）
+└── turn_tail.rs           # turn 尾部状态
+
+> 原树列 `rehydrate.rs` 不存在——`RehydrateRequired`
+> 信号定义于 `minicoding-protocol` crate（本 crate 无该文件）；补列
+> `ndjson.rs`/`bounded_io.rs`/`turn_tail.rs`。
 
 ### 16.3 关键设计点
 
@@ -888,7 +909,7 @@ minicoding-extension-sdk/src/
 | 框架 | React + React Compiler | 19.2 |
 | 语言 | TypeScript | 7.0 |
 | 构建 | Vite (Rolldown) | 8.1 |
-| 路由 | TanStack Router | 1.170 |
+| 路由 | 无路由库（单页状态切换；TanStack Router 1.170 曾评估未采用，见 AGENTS.md §8.2） | - |
 | 数据获取 | TanStack Query | 5.101 |
 | 客户端状态 | Zustand | 5.0 |
 | Schema 校验 | Zod | 4.4 |
@@ -900,7 +921,10 @@ minicoding-extension-sdk/src/
 
 ### 18.3 目录结构
 
-详见 `design.md` §26.2。核心分层：`api/`（JSON-RPC 客户端 + SSE 订阅 + Zod schema）→ `hooks/`（TanStack Query + Zustand 封装）→ `components/`（shadcn/ui + 业务组件）→ `routes/`（TanStack Router 页面）。
+详见 `design.md` §26.2（后为实际结构，无 `routes/`/`views/`）。
+核心分层：`api/`（JSON-RPC 客户端 + SSE 订阅 + generated DTO）→ `hooks/`
+（TanStack Query + Zustand 封装）→ `components/`（shadcn/ui + 业务组件）→
+`App.tsx`（单页状态切换）。
 
 ### 18.4 与后端的契约
 

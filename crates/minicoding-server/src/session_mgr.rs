@@ -54,6 +54,11 @@ pub enum SessionManagerError {
 /// 单个 server 会话的状态。
 ///
 /// 持有 `Arc<Runtime>`（单会话聚合根）、`EventCursor`（seq 分配）、
+/// 排队 turn 上限（C-07）：超过该数量的并发 POST /messages 直接
+/// 429（turn 本身可长跑，排队任务无界堆积会耗尽内存）。运行中 1 个 + 排队
+/// 4 个对交互式客户端足够。
+const TURN_QUEUE_LIMIT: usize = 4;
+
 /// `PendingPermissions`（权限交互表）、`turn_lock`（turn 串行化）、
 /// `task_state`（任务快照，供 `list_sessions`/`get_session` 返回）。
 pub struct ServerSession {
@@ -73,6 +78,11 @@ pub struct ServerSession {
     /// turn 串行锁（同一 session 同一时刻只允许一个 turn）。`TokioMutex` 因锁跨
     /// `run_turn().await` 持有（不能跨 await 持有 `std::sync::Mutex`）。
     pub turn_lock: TokioMutex<()>,
+    /// 排队 turn 信号量：HTTP 每次 POST /messages spawn 一个 task
+    /// 阻塞在 `turn_lock`——无上限可无限堆积（C-07 资源不可耗尽）。容量
+    /// [`TURN_QUEUE_LIMIT`]，`try_acquire_owned` 失败即 429（客户端应稍后重试）。
+    /// `Arc` 因 permit 需跨 task 边界 owned 持有。
+    pub turn_queue: std::sync::Arc<tokio::sync::Semaphore>,
     /// 任务列表快照（由 `Event::TaskUpdated` 订阅者维护，纯内存态）。
     /// `StdMutex` 因仅做 `Vec` 查/改（无 async 上下文）。任务权威源是
     /// `TaskStore`（tools crate），此字段只用于 HTTP 查询返回。
@@ -80,6 +90,10 @@ pub struct ServerSession {
     /// SSE 活动订阅者计数（2026-08-28收尾）：空闲驱逐跳过
     /// 有订阅者的会话（开着 Web 标签页的会话不应被驱逐）。
     pub sse_subscribers: std::sync::atomic::AtomicUsize,
+    /// 会话已删除标志：`delete` 置位——已排队/已获取 `turn_lock`
+    /// 的 task 在真正执行前检查此标志，删除后不再跑 turn（此前 `cancel`
+    /// 只置 Runtime 取消 token，排队的 task 仍会执行并写存储）。
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl ServerSession {
@@ -95,8 +109,10 @@ impl ServerSession {
             sequenced_tx,
             pending_permissions: pending,
             turn_lock: TokioMutex::new(()),
+            turn_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(TURN_QUEUE_LIMIT)),
             task_state: StdMutex::new(Vec::new()),
             sse_subscribers: std::sync::atomic::AtomicUsize::new(0),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -803,6 +819,10 @@ impl SessionManager {
 
     /// 删除会话（同步——仅从 `HashMap` 移除）。
     ///
+    ///  删除前置位 `closed` 标志——已排队/已持 `turn_lock` 的 task 在
+    /// 真正执行前检查（`send_message_boxed`），删除后不再跑 turn（此前
+    /// `cancel` 只置 Runtime 取消 token，排队的 task 仍执行并写存储）。
+    ///
     /// # Panics
     /// 内部 `sessions` Mutex poisoned 时 panic。
     pub fn delete(&self, session_id: &str) -> bool {
@@ -810,6 +830,11 @@ impl SessionManager {
             .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(session) = guard.get(session_id) {
+            session
+                .closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let removed = guard.remove(session_id).is_some();
         if removed {
             // Metrics：活跃会话数 gauge
@@ -831,6 +856,47 @@ impl SessionManager {
         decision: Decision,
     ) -> Result<(), SessionManagerError> {
         let session = self.get_or_load(session_id).await?;
+        self.resolve_in_loaded(&session, permission_id, decision)
+            .await
+    }
+
+    /// 仅在**已加载**会话中解析权限（不触发磁盘懒恢复）。
+    ///
+    ///  NDJSON/ACP 的 `ResolvePermission` 无 `session_id` 字段，需遍历
+    /// 全部会话——逐会话 `get_or_load` 会为每个磁盘会话触发完整事件流重放
+    /// （N 次放大）。本方法只查内存会话表，未加载的会话不可能有 pending
+    /// permission（pending 是运行期状态，磁盘恢复的会话无活跃权限请求）。
+    pub async fn resolve_permission_loaded_only(
+        &self,
+        permission_id: &str,
+        decision: Decision,
+    ) -> bool {
+        let sessions: Vec<Arc<ServerSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for session in sessions {
+            if self
+                .resolve_in_loaded(&session, permission_id, decision.clone())
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 在指定（已加载）会话中解析 pending permission。
+    async fn resolve_in_loaded(
+        &self,
+        session: &Arc<ServerSession>,
+        permission_id: &str,
+        decision: Decision,
+    ) -> Result<(), SessionManagerError> {
         let mut guard = session.pending_permissions.lock().await;
         match guard.remove(permission_id) {
             Some(entry) => {
@@ -866,6 +932,12 @@ impl SessionManager {
 
         // 获取 turn 锁（串行化：同一 session 同时只有一个 turn）
         let _turn_guard = session.turn_lock.lock().await;
+
+        //  已删除会话不再执行 turn（DELETE 后置位 closed；此前排队的
+        // task 拿到锁后仍会跑完整 turn 并写存储——"已删除"后消息仍在产生）。
+        if session.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SessionManagerError::NotFound(session_id));
+        }
 
         // Clone `Arc<Runtime>` 断开 `session.runtime` 的 Arc-deref 借用链。
         let runtime = session.runtime.clone();
@@ -1128,5 +1200,33 @@ mod tests {
         let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
         let result = mgr.get_or_load("01MISSING").await;
         assert!(matches!(result, Err(SessionManagerError::NotFound(_))));
+    }
+
+    //  delete 置位 closed——已持会话 Arc 的排队 task 检查后不再跑 turn
+    #[tokio::test]
+    async fn delete_marks_session_closed() {
+        let _g = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let dir_str = dir
+            .path()
+            .to_str()
+            .expect("tempdir 路径应为 UTF-8")
+            .to_string();
+        let _guard = EnvGuard::set(&dir_str);
+
+        let mgr = SessionManager::new(test_params(), Duration::from_secs(5));
+        let session = mgr.create_session(None).expect("创建会话应成功");
+        let sid = session.session_id().clone();
+        let arc = mgr.get(&sid).expect("已创建的会话应在内存表");
+        assert!(
+            !arc.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "创建后未删除，closed 应为 false"
+        );
+        assert!(mgr.delete(&sid), "delete 应移除会话");
+        // 已持 Arc 的调用方可观察到 closed 置位（send_message_boxed 的关门检查）
+        assert!(
+            arc.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "delete 后 closed 应置位"
+        );
     }
 }
