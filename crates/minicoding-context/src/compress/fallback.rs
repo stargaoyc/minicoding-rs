@@ -153,14 +153,22 @@ async fn call_llm_summary(
 /// 启发式兜底摘要：每条消息取前 200 字符，用 `; ` 拼接，标注 `[heuristic fallback]`。
 ///
 /// 不调 LLM，纯本地字符串操作，**必成功**。质量低于 LLM 摘要但保证对话不中断。
+/// R9 CTX-3：被截断的消息（原长度 > 保留字符数）追加 `(截断, 原文 N 字符)`——
+/// 模型据此知道该段摘要是**低质量近似**而非全文语义浓缩（代码类消息首段常是
+/// 函数签名、中段实现逻辑被裁，无标记会误导模型以为摘要完整）。
 #[must_use]
 fn heuristic_summary(messages: &[&Message]) -> String {
     let parts: Vec<String> = messages
         .iter()
         .map(|m| {
             let text = m.text();
-            let truncated: String = text.chars().take(HEURISTIC_CHARS_PER_MSG).collect();
-            format!("[{}] {truncated}", role_label(&m.role))
+            let kept: String = text.chars().take(HEURISTIC_CHARS_PER_MSG).collect();
+            let mut seg = format!("[{}] {kept}", role_label(&m.role));
+            if text.chars().count() > HEURISTIC_CHARS_PER_MSG {
+                use std::fmt::Write as _;
+                let _ = write!(seg, " …(截断, 原文 {} 字符)", text.chars().count());
+            }
+            seg
         })
         .collect();
     format!("[heuristic fallback] {}", parts.join("; "))
@@ -380,11 +388,21 @@ mod tests {
         let summary = heuristic_summary(&[&msg]);
 
         assert!(summary.starts_with("[heuristic fallback]"));
-        // 截取后应远短于原文
+        // 截取后应远短于原文，且带截断标记（R9 CTX-3）
         let user_part = summary
             .strip_prefix("[heuristic fallback] [user] ")
             .unwrap();
-        assert_eq!(user_part.chars().count(), HEURISTIC_CHARS_PER_MSG);
+        assert!(
+            user_part.contains("截断, 原文 500 字符"),
+            "被截断消息应带质量标记: {user_part}"
+        );
+        // 保留的正文恰为 HEURISTIC_CHARS_PER_MSG（标记在正文后，前有空隙）
+        let kept = user_part.split('…').next().unwrap().trim_end();
+        assert_eq!(kept.chars().count(), HEURISTIC_CHARS_PER_MSG);
+        // 短消息不追加标记
+        let short = Message::user_text("hi");
+        let s2 = heuristic_summary(&[&short]);
+        assert!(!s2.contains("截断"), "未截断消息不应带标记: {s2}");
     }
 
     #[test]
