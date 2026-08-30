@@ -30,6 +30,12 @@ use tokio::io::AsyncWriteExt;
 /// 消息流格式版本（M-02）。旧文件（无 header）视为 v1。
 const MESSAGE_FORMAT_VERSION: u32 = 1;
 
+/// R9 STR-3：单行消息长度上限（4 MiB）。此前 JSONL 全量 `read_to_string` 且
+/// 单行无长度检查——异常/损坏文件中的超长行可撑爆内存（读取已全量到内存，
+/// 解析阶段再限制已晚，但可阻止畸形行被当作消息解析）。正常消息行受工具
+/// `max_output_bytes`（默认 1 MiB）约束，4 MiB 上限覆盖正常范围且防异常膨胀。
+const MAX_MESSAGE_LINE_BYTES: usize = 4 * 1024 * 1024;
+
 /// 消息流 header 行的 JSON 前缀（用于 load/scan 跳过 header 行）。
 const HEADER_PREFIX: &str = "{\"_header\"";
 
@@ -578,6 +584,14 @@ fn extract_message_lines(content: &str) -> (Vec<&str>, bool) {
         if line.is_empty() {
             continue;
         }
+        // R9 STR-3：超长行跳过（防畸形行被当作消息解析）
+        if line.len() > MAX_MESSAGE_LINE_BYTES {
+            tracing::warn!(
+                "跳过超长消息行（{} 字节 > {MAX_MESSAGE_LINE_BYTES}）",
+                line.len()
+            );
+            continue;
+        }
         if is_header_line(line) {
             if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
                 && header.header.format_version > MESSAGE_FORMAT_VERSION
@@ -608,6 +622,16 @@ fn parse_session_lines(content: &str) -> Result<Vec<Message>, StorageError> {
             continue;
         }
         non_empty += 1;
+        // R9 STR-3：超长行跳过（防畸形行撑爆内存/被当作消息解析）
+        if line.len() > MAX_MESSAGE_LINE_BYTES {
+            saw_bad = true;
+            tracing::warn!(
+                "skip oversized message line {} ({} bytes > {MAX_MESSAGE_LINE_BYTES})",
+                idx + 1,
+                line.len()
+            );
+            continue;
+        }
         if is_header_line(line) {
             if let Ok(header) = serde_json::from_str::<HeaderLine>(line)
                 && header.header.format_version > MESSAGE_FORMAT_VERSION
