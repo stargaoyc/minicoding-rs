@@ -142,7 +142,9 @@ fn build_and_start(
     // `run_turn` 前会通过 `Runtime::restore_history` 回填——见 builder.rs 文档。
 
     // UI ↔ Runtime channel
-    let cancel_token = rt.cancel_token();
+    // R9 P3-3：不再获取并注入 cancel token——Runtime 每轮结束重建 token，
+    // build 时克隆在首轮取消后失效。Ctrl-C 改发 `UiCommand::CancelTurn` 由
+    // 桥接层实时 `rt.cancel_token().cancel()`（见 runtime_bridge.rs）。
     // 恢复会话历史 → UI 聊天区初始行（§11-P1：此前 restore_history 只回填
     // 上下文，UI 从空白开始）。工具输出行不回放（噪音大），带 tool_calls 的
     // assistant 显示为已完成的工具行。
@@ -179,7 +181,18 @@ fn build_and_start(
     spawn_runtime_bridge(rt, ui_rx, perm_rx, rt_tx);
 
     let mut app = App::new(ui_tx, sessions, current_session_id);
-    app.set_cancel_token(cancel_token);
+    // R9 P3-3：输入历史跨启动持久化——重开 TUI 后按 ↑ 仍可回读之前的对话
+    // （此前仅内存，进程退出即丢）。文件行尾每行一条，简单可靠。
+    let history_file = minicoding_core::paths::minicoding_home()
+        .map(|home| home.join("tui-history.txt"))
+        .ok();
+    if let Some(path) = &history_file {
+        let persisted = std::fs::read_to_string(path.as_std_path())
+            .map(|s| s.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+        app.set_input_history(persisted);
+        app.set_history_file(path.clone());
+    }
     app.set_history(history);
     Ok((app, rt_rx))
 }

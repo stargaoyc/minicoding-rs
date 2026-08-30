@@ -19,8 +19,12 @@
 //!
 //! 权限弹窗（T-M7-3）以覆盖层渲染在中心区域。
 
+/// 输入历史容量上限（持久化文件与内存同步裁剪，防无限增长）。
+const HISTORY_LIMIT: usize = 200;
+
 use std::sync::Arc;
 
+use camino::Utf8PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use minicoding_core::model::{Role, Task};
 use minicoding_core::policy::{Decision, PermissionPrompt, PromptOption, TuiPermissionRequest};
@@ -216,7 +220,13 @@ pub struct App {
     /// 当前 Runtime 的取消 token（2026-08-23 审查 §11-P0：Ctrl-C 中断 turn——
     /// 此前仅设状态文案不调 cancel，长 turn 唯一手段是杀进程）。turn 间隙为
     /// `None`（`cancel()` 对非运行 turn 本就不生效）。
+    /// R9 P3-3：已废弃——Runtime 每轮重建 token，旧克隆取消无效；Ctrl-C 改为
+    /// 发送 `UiCommand::CancelTurn` 由桥接层实时 `rt.cancel_token().cancel()`，
+    /// 该字段保留编译兼容但不再使用。
     cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// 输入历史持久化文件路径（`~/.minicoding/tui-history.txt`），由 main.rs 设置。
+    /// 每次 submit 后 best-effort 追加保存，重开 TUI 时恢复。
+    history_file: Option<camino::Utf8PathBuf>,
     /// 回看偏移（0=吸底；PgUp 增/PgDn 减，2026-08-23 审查遗留#4 scrollback）
     scroll_offset: usize,
     // T-M7-4：主题配色（未来 Ctrl+Shift+T 切换深/浅色）
@@ -257,6 +267,7 @@ impl App {
             tasks: Vec::new(),
             task_panel_state: ratatui::widgets::ListState::default(),
             cancel_token: None,
+            history_file: None,
             scroll_offset: 0,
             theme: Theme::default(),
         }
@@ -472,6 +483,36 @@ impl App {
         self.lines = history;
     }
 
+    /// 设置输入历史持久化文件路径（main.rs 启动时注入 `~/.minicoding/tui-history.txt`）。
+    ///
+    /// R9 P3-3：输入历史默认只存内存，重开 TUI 后按 ↑ 无法回读之前的对话。
+    /// 注入路径后每次提交自动追加保存；启动时由 main.rs 读回并注入
+    /// `InputState`（经 `set_input_history`）。
+    pub fn set_history_file(&mut self, path: Utf8PathBuf) {
+        self.history_file = Some(path);
+    }
+
+    /// 注入持久化的输入历史（main.rs 启动时读 `tui-history.txt` 回填）。
+    ///
+    /// 过滤空行、去重保留尾部（与提交语义一致），容量上限 [`HISTORY_LIMIT`]。
+    pub fn set_input_history(&mut self, history: Vec<String>) {
+        self.input.history =
+            history
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .fold(Vec::new(), |mut acc, s| {
+                    if acc.last().is_none_or(|l| l != &s) {
+                        acc.push(s);
+                    }
+                    acc
+                });
+        if self.input.history.len() > HISTORY_LIMIT {
+            let overflow = self.input.history.len() - HISTORY_LIMIT;
+            self.input.history.drain(..overflow);
+        }
+        self.input.history_idx = None;
+    }
+
     /// 处理普通按键（输入模式）。
     fn handle_key(&mut self, key: &KeyEvent) {
         if key.kind != KeyEventKind::Press {
@@ -483,9 +524,11 @@ impl App {
                 if self.is_turning {
                     // 中断当前 turn（C-13 graceful：已落盘消息保留，
                     // run_turn 返回 Interrupted）——2026-08-23 审查 §11-P0
-                    if let Some(token) = &self.cancel_token {
-                        token.cancel();
-                    }
+                    // R9 P3-3：改为发 CancelTurn 由桥接层实时取当前 token——
+                    // 此前的 `self.cancel_token` 是 build 时克隆，Runtime 每轮
+                    // 结束重建 token（rt.rs CORE-9），首轮取消后旧克隆对后续
+                    // turn 无效（"卡死后 Ctrl-C 无法中断"）。
+                    let _ = self.ui_tx.try_send(UiCommand::CancelTurn);
                     self.status_msg = "正在中断…".to_string();
                 } else {
                     self.should_exit = true;
@@ -634,7 +677,10 @@ impl App {
     /// 改动范围）诚实降级为 System 提示行。
     fn submit_input(&mut self) {
         if self.is_turning {
-            return; // 一轮未结束，忽略提交
+            // R9 P3-3：运行中提交静默忽略——用户反馈"卡死后再输入无反馈"。
+            // 改为提示（而非静默 return），有 Ctrl-C 中断路径。
+            self.status_msg = "正在运行…Ctrl-C 中断后可发送".to_string();
+            return;
         }
         if let Some(text) = self.input.submit() {
             // 斜杠命令拦截：解析与执行分离（core::util::slash 单一事实来源）
@@ -647,8 +693,26 @@ impl App {
             // 追加一次——用户消息双显。改由事件驱动（事件在消息落盘后毫秒级
             // 到达，无感知延迟），消除重复。
             let _ = self.ui_tx.try_send(UiCommand::Submit(text));
+            // R9 P3-3：输入历史持久化——每次提交后 best-effort 追加保存
+            self.persist_input_history();
             self.is_turning = true;
             self.status_msg = "等待响应…".to_string();
+        }
+    }
+
+    /// 持久化输入历史到文件（best-effort：文件不可写时静默跳过）。
+    fn persist_input_history(&self) {
+        let Some(path) = &self.history_file else {
+            return;
+        };
+        let history = &self.input.history;
+        if history.is_empty() {
+            return;
+        }
+        // 写全部历史（覆盖写，保持最新 200 条）
+        let content = history.join("\n") + "\n";
+        if let Err(e) = std::fs::write(path.as_std_path(), &content) {
+            tracing::warn!("保存输入历史失败: {e}");
         }
     }
 

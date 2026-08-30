@@ -54,6 +54,9 @@ pub enum UiCommand {
     PlanToggle,
     /// `/undo [steps]`：回滚文件改动（R8 FE-16）。
     Undo { steps: usize },
+    /// R9 P3-3：取消当前 turn（Ctrl-C）。由桥接层实时 `rt.cancel_token().cancel()`
+    /// 而非 UI 持有陈旧 token 克隆（Runtime 每轮重建 token，旧克隆取消无效）。
+    CancelTurn,
     /// 退出 TUI（终止后台 task）。
     Exit,
 }
@@ -154,6 +157,8 @@ pub fn spawn_runtime_bridge(
 ///
 /// 斜杠命令（R8 FE-16）统一在此调 Runtime 查询/操作，结果经
 /// `AppEvent::CommandOutput`/`AppEvent::Summary` 等回传渲染为 System 行。
+// 分支较多（斜杠命令 + CancelTurn + Exit），拆函数收益低于保持一个 match 的可读性。
+#[allow(clippy::too_many_lines)]
 async fn handle_ui_command(
     rt: &std::sync::Arc<Runtime>,
     rt_tx: &mpsc::Sender<AppEvent>,
@@ -256,5 +261,11 @@ async fn handle_ui_command(
             rt_tx.send(AppEvent::CommandOutput(msg)).await.is_ok()
         }
         UiCommand::Exit => false,
+        UiCommand::CancelTurn => {
+            // R9 P3-3：实时取当前 token 取消（Runtime 每轮重建 token，UI 持有的
+            // 构建时克隆在首轮取消后失效——此前二次 Ctrl-C 无法中断新 turn）。
+            rt.cancel_token().cancel();
+            true
+        }
     }
 }
