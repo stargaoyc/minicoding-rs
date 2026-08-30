@@ -137,6 +137,10 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             cmd.current_dir(workdir);
             cmd.env_clear();
             cmd.envs(env);
+            // R9 TOOL-5：后台命令缺 `.stdin(null)`——继承宿主 stdin 使
+            // `cat`/`read` 等读 stdin 的命令**永久挂起并占住槽位**，且偷吃
+            // 宿主输入（前台 shell.run 已设 null，后台路径此前漏了）。
+            cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
             // SAFETY: 不依赖 pre_exec hook 的安全不变式（`pre_exec` 未设置）。
