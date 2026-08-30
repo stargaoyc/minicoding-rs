@@ -104,14 +104,21 @@ pub fn replay_session_state(
     }
 
     for record in events {
-        // seq 连续性检查（snapshot 之后首事件应为 `last_seq + 1`）
+        // seq 连续性检查（snapshot 之后首事件应为 `last_seq + 1`）。
+        // R9 STR-1 修复：SeqGap 不再硬失败——`parse_events` 会跳过中间坏行
+        // （崩溃残留/损坏），坏行跳过即 seq 跳跃。硬失败使**整会话报废**且无
+        // 降级（此前仅"events 全空"才回退消息列表）。对齐消息流"坏行跳过"
+        // 策略：warn + 继续重放（后续事件仍有效；丢失的事件仅是快照覆盖的
+        // 那几条），状态重建不中断。`last_seq` 以实际 record.seq 推进。
         let expected = last_seq + 1;
         if record.seq != expected {
-            return Err(ReplayError::SeqGap {
+            tracing::warn!(
                 expected,
-                actual: record.seq,
-            });
+                actual = record.seq,
+                "事件流 seq 跳跃（可能中间坏行被跳过），继续重放（对齐坏行跳过策略）"
+            );
         }
+        last_seq = record.seq;
         // schema 版本检查
         if record.schema_version > CURRENT_SCHEMA {
             return Err(ReplayError::UnsupportedSchema(
@@ -158,7 +165,7 @@ pub fn replay_session_state(
             // 不重建任何状态。v1 事件流无此变体；此处显式匹配保持 forward-compat。
             PersistedEvent::StepStarted { .. } | PersistedEvent::StepEnded { .. } => {}
         }
-        last_seq = record.seq;
+        // `last_seq` 已在循环头（seq 连续性检查处）推进，此处不重复赋值。
     }
 
     let session = session.ok_or(ReplayError::MissingSessionCreated)?;
@@ -287,20 +294,26 @@ mod tests {
     }
 
     #[test]
-    fn replay_seq_gap_errors() {
+    fn replay_seq_gap_continues_with_warning() {
+        // R9 STR-1 修复：中间坏行被 parse_events 跳过 → seq 跳跃，此前硬失败
+        // 报废整会话。现改为 warn + 继续重放（对齐消息流"坏行跳过"策略）。
         let id = "01GAP";
         let events = vec![
             make_session_created(1, id),
             make_message_appended(3, id, "skipped seq 2"), // seq 跳跃
         ];
-        let result = replay_session_state(None, events);
-        assert!(matches!(
-            result,
-            Err(ReplayError::SeqGap {
-                expected: 2,
-                actual: 3
-            })
-        ));
+        let result = replay_session_state(None, events).unwrap();
+        assert_eq!(result.session.messages.len(), 1);
+        assert_eq!(result.session.messages[0].text(), "skipped seq 2");
+        // 后续事件仍继续重放
+        let more = vec![
+            make_session_created(1, id),
+            make_message_appended(3, id, "msg-3"),
+            make_message_appended(4, id, "msg-4"),
+        ];
+        let result = replay_session_state(None, more).unwrap();
+        assert_eq!(result.session.messages.len(), 2);
+        assert_eq!(result.last_seq, 4);
     }
 
     #[test]
