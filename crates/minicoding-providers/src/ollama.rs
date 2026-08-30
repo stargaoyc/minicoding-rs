@@ -219,8 +219,12 @@ impl LlmProvider for OllamaProvider {
             supports_vision: false,
             supports_streaming: true,
             supports_json_mode: true,
-            // 本地模型上下文窗口取决于模型配置，保守 8K（可通过 Modelfile 调整）
-            context_window: 8_192,
+            // R9 PROV-2 修复：本地模型上下文窗口取决于模型/Modelfile 配置——
+            // 若显式设置 `OLLAMA_NUM_CTX`（构造时快照，R8 PR-4），直接采用该值
+            // （防"capability 声明 8192 而实际 32K/2K 导致过早/过晚压缩"；且请求
+            // options 已随 num_ctx 下发，capabilities 与请求行为一致）。未设置时
+            // 保守 8K（可通过 Modelfile 调整，低估方向安全）。
+            context_window: self.num_ctx.unwrap_or(8_192),
             max_output: 4_096,
         }
     }
