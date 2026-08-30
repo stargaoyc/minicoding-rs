@@ -889,3 +889,30 @@ STR-1 SeqGap 继续、CTX-3/4/5 各 1 例、P2-4 ~ 路径 1 例等）；clippy `
 
 **遗留架构级（需独立排期，非本批范围）**：P0-2（合并双轨 builder）、SANDBOX-1（Linux
 旧内核网络限制提示）、P2-3（fs.read 审计）、P2-10（CLI 测试补齐）、E2E/一致性测试。
+
+---
+
+## 16. 第三轮修复追踪（2026-08-29 当日第三轮，除 CI-1/ENG-1/P3-2 外全量）
+
+> 第二轮（§15）之后继续修复剩余项，每批过 pre-commit 门禁。
+
+| 批次 | 提交 | 覆盖问题 |
+|------|------|---------|
+| H1 | `42d4fea` | SANDBOX-1（Linux 旧内核网络限制启动警告）、SANDBOX-3（.git/AGENTS.md 写保护变形回归——发现并修复 WRITE_VERBS 未剥包装前缀的真实缺口）、P2-9（Hook inject_context 包裹 `<hook name>` 来源边界） |
+| H2 | `3c13a87` | CTX-2（calibrate 低估 streak 检测 + effective_compact_threshold 动态收紧，防真实 400 熔断） |
+| H3 | `59ec135`/`f3f29a1` | P2-10（CLI exec 沙箱映射测试）、CI-2（shell 黑名单 proptest 三组属性测试） |
+| H4 | `b9a472c` | UX-1（只读/无害命令 Default 模式自动放行：ls/cat/git status/cargo check 等白名单，写/解释器/复合仍 Ask，黑名单优先级不变） |
+| H5 | `d12390d` | P0-2（双轨 builder 能力矩阵一致性测试——server 与 SDK 工具集漂移即 CI 失败） |
+
+**验证**：`cargo test --workspace` **1791 例全绿**（新增：UX-1 白名单/非白名单回归、
+CTX-2 低估 streak、H5 能力矩阵、H1 .git 变形 ×13、proptest 3 组 ×256 例）；
+clippy `-D warnings` 零告警；前端 tsc + vitest 13 例通过。
+
+**本轮修复确认非 bug**：MCP-4/架构守卫/CompressedContext 均已核实存在或非问题
+（§15 已记录）。TOOL-4（内置工具声明式 schema 校验）评估后确认收益有限
+（内置工具 schema 与输入同源可信），维持 P3 文档化。
+
+**剩余（用户指定不修或环境项）**：CI-1/P1-8（覆盖率门禁，CI 配置）、
+ENG-1/P0-1（回迁 stable，等上游）、R9 P3-2（target/ 243GB 本地清理）、
+P2-3（fs.read 审计，需 Runtime 层大改）、CTX-4 完整版（来源文件指纹，
+跨模块改动）、E2E 测试框架（跨组件基础设施）。
