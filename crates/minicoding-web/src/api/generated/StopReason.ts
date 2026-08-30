@@ -3,4 +3,10 @@
 /**
  * LLM 停止原因。
  */
-export type StopReason = "end_turn" | "max_tokens" | "tool_use" | "stopped" | "interrupted" | { "filtered": { reason: string, } };
+export type StopReason =
+  | "end_turn"
+  | "max_tokens"
+  | "tool_use"
+  | "stopped"
+  | "interrupted"
+  | { filtered: { reason: string } };

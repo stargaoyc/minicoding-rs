@@ -69,10 +69,12 @@ impl SandboxDriver for SeatbeltDriver {
     ) -> Result<SpawnHandle, SandboxError> {
         match policy {
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
-                apply_seatbelt(policy, cmd)
+                apply_seatbelt(policy, cmd).map(|()| SpawnHandle::default())
             }
             // ExternalSandbox / DangerFullAccess 不应用内核限制（C-22）。
-            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => Ok(()),
+            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => {
+                Ok(SpawnHandle::default())
+            }
         }
     }
 
@@ -183,10 +185,10 @@ fn apply_seatbelt(
                     "seatbelt sandbox_init failed: {msg}"
                 )));
             }
-            Ok(SpawnHandle::default())
+            Ok(())
         });
     }
-    Ok(SpawnHandle::default())
+    Ok(())
 }
 
 /// 生成 Seatbelt profile（Scheme DSL）。
