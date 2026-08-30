@@ -275,6 +275,9 @@ struct GetSessionResponse {
     messages: Vec<minicoding_core::model::Message>,
     /// 任务列表快照（`task_state`，见 `SessionManager`）。
     tasks: Vec<minicoding_core::model::Task>,
+    /// 当前是否有 turn 在运行（R9 P3-3：SSE 断线/页面刷新后前端据此恢复
+    /// `isStreaming`；同时是新消息打断卡死 turn 的判定依据）。
+    turn_running: bool,
 }
 
 /// `ListSessions` 响应。
@@ -765,6 +768,7 @@ async fn get_session(
         session_id,
         messages,
         tasks,
+        turn_running: session.runtime.turn_running(),
     }))
 }
 
@@ -796,6 +800,15 @@ async fn send_message(
             message: "会话 turn 队列已满（最多 1 个运行中 + 4 个排队），请稍后重试".to_string(),
         });
     };
+    // R9 P3-3：预占取消卡死 turn——若旧 turn 卡死（LLM 请求挂起/工具挂起，
+    // 前端已无流式反馈），新消息排队在 `turn_lock` 上永不执行（用户反馈
+    // "卡死之后再输入对话就立刻结束"）。此处先 graceful 取消在运行的 turn
+    //（C-13：已落盘消息保留，`Runtime::cancel` 幂等——无 turn 运行时直接
+    // 返回），新 turn 才能尽快获得 `turn_lock` 执行。
+    if session.runtime.turn_running() {
+        tracing::warn!(session = %session_id, "preempting running turn for new user message");
+        let _ = state.mgr.cancel(&session_id).await;
+    }
     // 后台执行 turn：spawn 到 tokio runtime，错误记日志（结果走 SSE）。
     // permit 随 task 持有至 turn 结束（drop 释放信号量）。
     let mgr = state.mgr.clone();

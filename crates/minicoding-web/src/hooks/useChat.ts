@@ -38,6 +38,24 @@ export function useMessages(sessionId: string | null) {
   });
 }
 
+/**
+ * 会话 turn 运行状态（`GET /sessions/{id}` 的 `turn_running` 字段）。
+ *
+ * R9 P3-3：SSE 断线/页面刷新后前端据此恢复 `isStreaming`——此前 turn 卡死
+ * 时前端状态与后端失同步（SSE 无事件、`turn_end` 未达），用户再输入消息被
+ * 静默排队或 UI 误判空闲。`turn_running=true` 时前端恢复"运行中"指示。
+ */
+export function useTurnRunning(sessionId: string | null) {
+  return useQuery({
+    queryKey: ["turn-running", sessionId],
+    queryFn: () => getSession(sessionId!).then((r) => r.turn_running),
+    enabled: !!sessionId,
+    // 轮询兜底：SSE 断线期间无事件驱动，靠轮询保持状态新鲜
+    refetchInterval: (query) => (query.state.data ? 5_000 : false),
+    refetchIntervalInBackground: false,
+  });
+}
+
 export function useSendMessage(sessionId: string | null) {
   const qc = useQueryClient();
   // R8 FE-15：乐观消息 id 唯一性计数器（跨会话单调，防同毫秒双发冲突）。
@@ -99,7 +117,14 @@ interface SSEStreamOptions {
  * 返回当前正在流式生成的文本（`streamingText`）与是否在流式中（`isStreaming`）。
  * `MessageAppended` 事件 invalidate 消息快照，保证最终一致性。
  */
-export function useSSEStream(sessionId: string | null, options?: SSEStreamOptions) {
+export function useSSEStream(
+  sessionId: string | null,
+  options?: SSEStreamOptions,
+  /** R9 P3-3：外部 turn 运行信号（`useTurnRunning` 轮询结果）。SSE 断线/
+   * 刷新后据此恢复 isStreaming——服务端 turn 仍在跑而 SSE 无事件时，
+   * 前端此前误判空闲导致新消息排队/UI 无运行指示。 */
+  turnRunning?: boolean,
+) {
   const qc = useQueryClient();
   // SSE 归约状态集中在单一对象（M-14：归约逻辑在 chatReducer.ts，可 record/replay 测试）
   const [chatState, setChatState] = useState<ChatStreamState>(initialChatState);
@@ -279,6 +304,21 @@ export function useSSEStream(sessionId: string | null, options?: SSEStreamOption
     }, 1000);
     return () => clearInterval(timer);
   }, [isStreaming]);
+
+  // R9 P3-3：外部 turn 运行信号同步——SSE 断线/刷新后 `turn_running` 轮询
+  // 为 true 而前端 isStreaming 为 false（turn_streaming_started 事件丢失），
+  // 恢复"运行中"指示，避免用户误以为空闲再发消息排队。SSE 事件驱动的
+  // turn_end 仍优先（reducer 置 false），此同步只做 true 方向的恢复。
+  useEffect(() => {
+    if (turnRunning && !chatStateRef.current.isStreaming) {
+      setChatState((prev) => {
+        if (prev.isStreaming) return prev;
+        const next = { ...prev, isStreaming: true };
+        chatStateRef.current = next;
+        return next;
+      });
+    }
+  }, [turnRunning]);
 
   return {
     streamingText,

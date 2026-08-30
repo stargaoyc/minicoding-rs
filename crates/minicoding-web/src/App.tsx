@@ -11,7 +11,12 @@ import { TaskPanel } from "./components/tasks/TaskPanel";
 import { SetupDialog } from "./components/setup/SetupDialog";
 import { FilePreview } from "./components/workspace/FilePreview";
 import { Button } from "./components/ui/button";
-import { useMessages, useSendMessage, useSSEStream } from "./hooks/useChat";
+import {
+  useMessages,
+  useSendMessage,
+  useSSEStream,
+  useTurnRunning,
+} from "./hooks/useChat";
 import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
@@ -125,6 +130,8 @@ function AppInner() {
 
   // 消息 + SSE 流（含权限请求回调）
   const { data: messages, isLoading } = useMessages(activeSessionId);
+  // R9 P3-3：turn 运行状态轮询（SSE 断线/刷新后恢复 isStreaming）
+  const { data: turnRunning } = useTurnRunning(activeSessionId);
   const {
     streamingText,
     streamingReasoning,
@@ -150,7 +157,7 @@ function AppInner() {
     // R8 FE-4：权限已决/回合结束 → 自动关闭弹窗（服务端超时 Deny、他端
     // 已裁决时，pending 不再残留；否则用户点"允许"得 404 且无引导）
     onPermissionResolved: () => permissions.dismiss(),
-  });
+  }, turnRunning);
   const sendMessage = useSendMessage(activeSessionId);
   // ARCH-5：api 层调用统一经 hooks 封装（AGENTS.md §8.3 分层令）
   const cancelTurnById = useCancelTurn();

@@ -303,6 +303,16 @@ impl Runtime {
             .clone()
     }
 
+    /// 当前是否有 turn 在运行（`turn_active` 原子查询）。
+    ///
+    /// 供 server/前端在 SSE 断线重连或页面刷新后恢复 `isStreaming` 状态：
+    /// 若返回 true 但前端已失去流式状态，说明旧 turn 仍在执行（可能卡死），
+    /// 新消息应触发打断（见 `send_message` 的预占取消逻辑）而非静默排队。
+    #[must_use]
+    pub fn turn_running(&self) -> bool {
+        self.turn_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// 触发取消（CLI 的 Ctrl-C handler 调用）。
     ///
     /// 取消是 graceful 的：当前 in-flight 的迭代被丢弃，已落盘的消息保留

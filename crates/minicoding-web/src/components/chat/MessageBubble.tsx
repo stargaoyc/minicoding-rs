@@ -1,9 +1,63 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { User, Bot, Wrench } from "lucide-react";
+import { ChevronDown, ChevronUp, User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall } from "../../api/generated";
 import { cn, formatTime } from "../../lib/utils";
 import { extractText, extractToolResultSummary, sandboxDenyLabel } from "../../lib/message";
+
+/** 工具结果超过该长度默认折叠（用户反馈"工具调用结果太长占屏"，可展开查看全文）。 */
+const TOOL_RESULT_COLLAPSE_THRESHOLD = 300;
+
+/**
+ * 可折叠长文本：超阈值默认折叠（显示前段 + 展开按钮），点击展开/收起。
+ *
+ * 语义：折叠态展示开头截断 + "展开 N 字符"按钮；展开态全文 + "收起"按钮。
+ * 用于工具结果（cat/glob/diff 等大输出）与错误详情。
+ */
+function CollapsibleText({ text, error }: { text: string; error?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const needsCollapse = text.length > TOOL_RESULT_COLLAPSE_THRESHOLD;
+  const shown = needsCollapse && !expanded ? `${text.slice(0, TOOL_RESULT_COLLAPSE_THRESHOLD)}…` : text;
+  const ExpandIcon = expanded ? ChevronUp : ChevronDown;
+
+  return (
+    <div className="min-w-0">
+      <span
+        className={cn("whitespace-pre-wrap break-all", expanded && "block")}
+        onClick={needsCollapse ? () => setExpanded((v) => !v) : undefined}
+        role={needsCollapse ? "button" : undefined}
+        tabIndex={needsCollapse ? 0 : undefined}
+        onKeyDown={
+          needsCollapse
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setExpanded((v) => !v);
+                }
+              }
+            : undefined
+        }
+      >
+        {shown}
+      </span>
+      {needsCollapse && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className={cn(
+            "mt-1 inline-flex items-center gap-1 text-[11px] font-medium",
+            error ? "text-[var(--color-risk-high)]" : "text-[var(--color-accent)]",
+            "hover:underline",
+          )}
+        >
+          <ExpandIcon className="h-3 w-3" />
+          {expanded ? "收起" : `展开全文（${text.length} 字符）`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 const ROLE_CONFIG = {
   user: {
@@ -166,7 +220,8 @@ export function MessageBubble({
               <span className="mr-1.5 text-[var(--color-text-muted)]">
                 {toolResult.isError ? "✗" : "✓"}
               </span>
-              <span className="whitespace-pre-wrap break-all">{toolResult.text}</span>
+              {/* R9 P3-1：长工具结果默认折叠（可展开全文），避免大输出占满整个聊天区 */}
+              <CollapsibleText text={toolResult.text} error={toolResult.isError} />
             </div>
           ) : toolCalls.length > 0 ? (
             <ToolCallList calls={toolCalls} />

@@ -180,11 +180,14 @@ export function getSession(sessionId: string): Promise<{
   session_id: string;
   messages: Message[];
   tasks: import("./generated").Task[];
+  /** R9 P3-3：当前是否有 turn 在运行（SSE 断线/刷新后恢复 isStreaming 用）。 */
+  turn_running: boolean;
 }> {
   return http<{
     session_id: string;
     messages: Message[];
     tasks: import("./generated").Task[];
+    turn_running: boolean;
   }>(`/sessions/${sessionId}`);
 }
 
