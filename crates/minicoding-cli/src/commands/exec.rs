@@ -216,3 +216,33 @@ async fn run_single_turn(rt: &minicoding_core::runtime::Runtime, prompt: String)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+
+    #[test]
+    fn to_policy_maps_all_variants() {
+        let wd = Utf8PathBuf::from("/tmp/wd");
+        assert!(matches!(
+            SandboxArg::ReadOnly.to_policy(wd.clone()),
+            minicoding_core::sandbox::SandboxPolicy::ReadOnly
+        ));
+        assert!(matches!(
+            SandboxArg::ExternalSandbox.to_policy(wd.clone()),
+            minicoding_core::sandbox::SandboxPolicy::ExternalSandbox
+        ));
+        assert!(matches!(
+            SandboxArg::DangerFullAccess.to_policy(wd.clone()),
+            minicoding_core::sandbox::SandboxPolicy::DangerFullAccess
+        ));
+        // WorkspaceWrite 携带 workdir
+        match SandboxArg::WorkspaceWrite.to_policy(wd.clone()) {
+            minicoding_core::sandbox::SandboxPolicy::WorkspaceWrite { workdir, .. } => {
+                assert_eq!(workdir, wd);
+            }
+            other => panic!("expected WorkspaceWrite, got {other:?}"),
+        }
+    }
+}
