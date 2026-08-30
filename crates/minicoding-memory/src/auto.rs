@@ -319,17 +319,29 @@ fn render_entries(entries: &[AutoEntry]) -> String {
     if entries.is_empty() {
         return String::new();
     }
+    let now = OffsetDateTime::now_utc();
     let mut out = String::new();
     for e in entries {
         let updated = e
             .updated
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "unknown".to_string());
+        // R9 CTX-4 务实实现：陈旧治理（基础版）——长期未更新的条目可能是过时
+        // 知识（代码重构后旧偏好持续误导）。超过 [`STALE_AFTER`] 未更新的条目
+        // 渲染时标注 `[可能陈旧]`，注入侧 LLM 据此降低权重；同时容量淘汰按
+        // `updated asc` 优先淘汰旧条目（`evict_until_fit`）。完整方案（来源
+        // 文件 mtime + 指纹自动标记 stale）留 roadmap。
+        let stale = now - e.updated > STALE_AFTER;
         let _ = writeln!(
             out,
-            "## [{}] {}\n\n{}\n\n- confidence: {:.2}\n- updated: {}\n",
+            "## [{}] {}{}\n\n{}\n\n- confidence: {:.2}\n- updated: {}\n",
             e.category.as_str(),
             e.topic,
+            if stale {
+                "（可能陈旧，仅供参考）"
+            } else {
+                ""
+            },
             e.content.trim(),
             e.confidence,
             updated,
@@ -337,6 +349,9 @@ fn render_entries(entries: &[AutoEntry]) -> String {
     }
     out
 }
+
+/// R9 CTX-4：条目被视为"可能陈旧"的未更新时间阈值（90 天）。
+const STALE_AFTER: time::Duration = time::Duration::days(90);
 
 /// 容量淘汰：按 `confidence asc, updated asc` 移除条目，直至行数与字节均在限内。
 ///
@@ -698,6 +713,37 @@ mod tests {
         assert!(rendered.contains("[pref] indent"));
         assert!(rendered.contains("use 4 spaces"));
         assert!(rendered.contains("confidence: 0.90"));
+    }
+
+    /// R9 CTX-4：陈旧治理基础版——超过 90 天未更新的条目标注"可能陈旧"。
+    #[test]
+    fn render_marks_stale_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        let stale_entry = AutoEntry {
+            topic: "old-pref".to_string(),
+            content: "legacy".to_string(),
+            confidence: 0.8,
+            // 91 天前
+            updated: OffsetDateTime::now_utc() - time::Duration::days(91),
+            category: AutoCategory::Pref,
+        };
+        let fresh_entry = AutoEntry {
+            topic: "new-pref".to_string(),
+            content: "recent".to_string(),
+            confidence: 0.8,
+            updated: OffsetDateTime::now_utc(),
+            category: AutoCategory::Pref,
+        };
+        let rendered = mem.render(&[stale_entry, fresh_entry]);
+        assert!(
+            rendered.contains("old-pref（可能陈旧，仅供参考）"),
+            "陈旧条目标注: {rendered}"
+        );
+        assert!(
+            !rendered.contains("new-pref（可能陈旧"),
+            "新条目不应标注: {rendered}"
+        );
     }
 
     // === AutoCategory::as_str 各变体标签 ===
