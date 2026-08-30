@@ -916,3 +916,34 @@ clippy `-D warnings` 零告警；前端 tsc + vitest 13 例通过。
 ENG-1/P0-1（回迁 stable，等上游）、R9 P3-2（target/ 243GB 本地清理）、
 P2-3（fs.read 审计，需 Runtime 层大改）、CTX-4 完整版（来源文件指纹，
 跨模块改动）、E2E 测试框架（跨组件基础设施）。
+
+---
+
+## 17. 第四轮修复追踪（2026-08-30，用户报告三问题 + 遗留项收尾）
+
+> 用户反馈 Web 客户端三问题 + 指定继续修复三个遗留项，全部完成并过 pre-commit 门禁。
+
+### 17.1 Web 客户端三问题（`776ec1a`/`403643b`/`ba6d3d7`）
+
+| 问题 | 修复 |
+|------|------|
+| 工具调用结果太长占屏 | `MessageBubble` 新增 `CollapsibleText`（300 字符阈值），长结果默认折叠 + 展开全文按钮 |
+| 卡死后再输入对话立刻结束/不执行 | 三层：`send_message` 预占取消在运行的 turn（C-13 graceful，幂等）；`Runtime::turn_running()` + `GetSessionResponse.turn_running` 暴露状态；前端 `useTurnRunning` 5s 轮询 + SSE 断线/刷新后恢复 `isStreaming`；`ChatInput` sendDisabled 时 Enter 给明确提示；顶部栏新增红色"结束对话"按钮（turnBusy 时显示） |
+| 重开对话按上下键无法读取历史 | Web 输入历史改 localStorage 持久化（`minicoding.inputHistory`，上限 200）；TUI 持久化到 `~/.minicoding/tui-history.txt` |
+
+### 17.2 遗留项收尾（`ba6d3d7`/`cbfabfd`/`ed5152f`）
+
+| 遗留项 | 修复 |
+|--------|------|
+| P2-3（fs.read 审计，Runtime 层权限链） | 策略层 `check_file_read`：含 `path` 的只读工具做 C-03 越界校验（Escaped Deny / NotFound 不误伤，与 tool 层共用 `resolve_under`）；只读桶成功调用补落 audit.log（`AuditKind::ToolCall`/allow）——只读权威 Allow 不再无痕。新增 4 个专项测试 |
+| CTX-4 完整版（AutoMemory 来源指纹） | `AutoEntry.source` 记录来源文件；渲染时源文件 mtime 晚于条目更新自动标"来源已变更，可能陈旧"（与 90 天超时标注互补）；`AutoMemoryWriter::add_entry` 增 `source` 参数，`memory.write` schema 暴露 `source`；新增 `render_marks_source_changed_entries` 测试 |
+| E2E 框架（跨组件基础设施） | `crates/minicoding-server/tests/e2e.rs`：起真实 server 二进制 + wiremock mock LLM（默认 CI 安全）+ 真实 LLM（`MINICODING_E2E_REAL` env 门控，已验证 apihub 真实端点全链路）。四场景：完整会话闭环 / 工具调用闭环（fs.read）/ 并发消息不卡死 / 完整项目脚手架（多步 fs.write 断言磁盘落盘）。dev-deps 新增 reqwest/wiremock（workspace 已锁定） |
+
+**验证**：`cargo test --workspace` **1800 例全绿**；clippy `-D warnings` 零告警；
+前端 tsc + vitest 13 例通过；E2E mock 模式 4 例全过、真实 LLM 模式全链路
+15.4s 通过（事件序列 `turn_streaming_started` → `reasoning_delta` → `token`
+→ `message_appended` → `turn_end` 完整）。
+
+**剩余**：R9 P3-2（target/ 清理，用户指定不修）、CI-1/P1-8（覆盖率门禁）、
+ENG-1/P0-1（回迁 stable，等上游）、E2E 扩展（Playwright Web 端，AGENTS.md
+§8.8 规划项）。
