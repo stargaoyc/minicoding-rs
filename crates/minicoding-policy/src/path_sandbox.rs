@@ -46,8 +46,19 @@ pub enum PathSandboxError {
 ///
 /// - [`PathSandboxError::NotFound`]：`workdir` 不存在或不可规范化，或输入路径
 ///   无法回溯到任何存在的祖先；
-/// - [`PathSandboxError::Escaped`]：规范化后的路径落在 `workdir` 之外（C-03）。
+/// - [`PathSandboxError::Escaped`]：规范化后的路径落在 `workdir` 之外（C-03），
+///   或输入以 `~` 开头（P2-4：策略层不展开 `~`，按相对路径解析会落在 workdir
+///   内被误放行——若未来任何路径做了 shell 展开即成为逃逸口，显式拒绝）。
 pub fn resolve_under(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, PathSandboxError> {
+    // R9 P2-4：显式拒绝 `~` 前缀路径——`~/.ssh/id_rsa` 若不拦，策略层按相对
+    // 路径解析成 `<workdir>/~/...`（在边界内，std::fs 也不展开 `~` 所以当前
+    // 无害），但任何未来 shell 展开路径都会把 `~` 变绝对逃逸。
+    if input.starts_with('~') || input.starts_with("~/") {
+        return Err(PathSandboxError::Escaped {
+            path: input.to_string(),
+            workdir: workdir.to_string(),
+        });
+    }
     // workdir 自身必须存在并可规范化，作为容纳判定的基准。
     let canon_workdir =
         canonicalize_utf8(workdir.as_std_path()).map_err(|_| PathSandboxError::NotFound {
@@ -202,6 +213,23 @@ mod tests {
             matches!(err, PathSandboxError::Escaped { .. }),
             "expected Escaped, got {err:?}"
         );
+    }
+
+    /// R9 P2-4：`~` 前缀路径显式拒绝（策略层不展开 `~`，按相对解析会误放行；
+    /// 防未来 shell 展开路径变绝对逃逸口）。
+    #[test]
+    fn rejects_tilde_prefix_paths() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+
+        for input in ["~/.ssh/id_rsa", "~/config", "~someone/x"] {
+            let err = resolve_under(&workdir, input).expect_err("~ 路径应被拒绝");
+            assert!(
+                matches!(err, PathSandboxError::Escaped { .. }),
+                "expected Escaped for `{input}`, got {err:?}"
+            );
+        }
     }
 
     /// workdir 内的相对路径应正常解析。

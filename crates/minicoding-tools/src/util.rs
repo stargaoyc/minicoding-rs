@@ -90,7 +90,12 @@ pub async fn atomic_write(path: &camino::Utf8PathBuf, content: &[u8]) -> std::io
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("minicoding.tmp.{}.{n}", std::process::id()));
     let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    // R9 FS-1：`create(true).truncate(true)` 会跟随已存在文件——pid+计数
+    // 后缀可被恶意仓库预置同名 symlink 使 `open` 写穿。改 `create_new(true)`
+    // （不存在才创建，已存在/symlink 即 AlreadyExists 报错），一次修掉并发写
+    // 与 symlink 两类问题。残余：create_new 后到 rename 间若被替换仍可写穿，
+    // 但窗口极窄（临时文件在 $MINICODING_HOME/工作区临时目录，非持久暴露面）。
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     opts.mode(0o644); // tokio 原生支持 unix mode
     let mut file = opts.open(&tmp).await?;

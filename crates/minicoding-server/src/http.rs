@@ -422,6 +422,11 @@ fn build_router(
         Router::new().merge(api_routes)
     };
 
+    // R9 SRV-2：HTTP 请求体上限——此前无 DefaultBodyLimit，配合 `--no-auth` +
+    // `--bind 0.0.0.0` 可被远程内存耗尽（NDJSON 有 256 KiB 有界读取，HTTP 漏了）。
+    // 8 MiB 覆盖大工具输入/附件，防无限 body 累积。
+    let app = app.layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024));
+
     // S1：鉴权中间件（除 /health 外强制 Bearer token 或 ?token=，OPTIONS 预检放行由
     // CORS 层应答——auth 在内层、CORS 在外层，预检请求不触达 auth）
     let app = if let Some(token) = auth_token {
