@@ -53,5 +53,5 @@ pub use hardening::{harden_process, vcs_protected_dirs};
 /// re-export core 的 trait 与类型，便于调用方单点导入。
 pub use minicoding_core::sandbox::{
     BreakerState, DenialMatch, DenialSignature, NoopDriver, SandboxDenialDetector,
-    SandboxDenialTracker, SandboxDriver, SandboxError, SandboxPolicy,
+    SandboxDenialTracker, SandboxDriver, SandboxError, SandboxPolicy, SpawnHandle,
 };

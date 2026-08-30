@@ -22,7 +22,7 @@
 //! Apple 推荐的 Containerization framework 仅 Swift 可用，不适用于 Rust。
 
 use crate::hardening::vcs_protected_dirs;
-use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
+use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy, SpawnHandle};
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
 
@@ -66,7 +66,7 @@ impl SandboxDriver for SeatbeltDriver {
         &self,
         policy: &SandboxPolicy,
         cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<SpawnHandle, SandboxError> {
         match policy {
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
                 apply_seatbelt(policy, cmd)
@@ -183,10 +183,10 @@ fn apply_seatbelt(
                     "seatbelt sandbox_init failed: {msg}"
                 )));
             }
-            Ok(())
+            Ok(SpawnHandle::default())
         });
     }
-    Ok(())
+    Ok(SpawnHandle::default())
 }
 
 /// 生成 Seatbelt profile（Scheme DSL）。

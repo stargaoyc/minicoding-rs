@@ -66,13 +66,49 @@ impl SandboxPolicy {
     }
 }
 
+/// `apply` → `post_spawn` 关联句柄（R9 SANDBOX-2 修复）。
+///
+/// 消除 Windows FIFO 队列的策略错配：`apply` 返回本次 spawn 的关联句柄，
+/// `post_spawn` 消费**同一句柄**（而非从共享队列按序弹出）——并发 spawn
+/// 时 A 的 `apply`/`post_spawn` 与 B 的严格配对，不再可能"A 拿到 B 的策略"。
+/// Linux/macOS 返回空句柄（沙箱在 `pre_exec` 内一次性应用，`post_spawn`
+/// 为 no-op，句柄无内容）。
+#[derive(Debug, Default)]
+pub struct SpawnHandle {
+    /// Windows：本次 spawn 的策略快照（`post_spawn` 消费）。
+    #[cfg(target_os = "windows")]
+    policy: Option<SandboxPolicy>,
+}
+
+impl SpawnHandle {
+    /// Windows 平台：携带策略创建句柄（`apply` 使用）。
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn with_policy(policy: SandboxPolicy) -> Self {
+        Self {
+            policy: Some(policy),
+        }
+    }
+
+    /// 取回策略快照（`post_spawn` 消费后句柄清空）。
+    #[cfg(target_os = "windows")]
+    pub fn take_policy(&mut self) -> Option<SandboxPolicy> {
+        self.policy.take()
+    }
+}
+
 /// 沙箱驱动 trait（同步、`dyn` 兼容）。
 ///
-/// `apply` 在子进程 `exec` 前同步调用，应用内核级限制。
+/// `apply` 在子进程 `exec` 前同步调用，应用内核级限制，并返回关联句柄
+/// [`SpawnHandle`]（Windows 携带策略供 `post_spawn` 消费）。
 /// `post_spawn` 在 `spawn()` 后调用，供需要 post-spawn 设置的平台（如 Windows
 /// Job Object）使用；默认 no-op，Linux/macOS 不需覆写。
 pub trait SandboxDriver: Send + Sync {
     /// 在子进程 exec 前应用沙箱策略。
+    ///
+    /// 返回 [`SpawnHandle`]：Linux/macOS 为空句柄；Windows 携带策略快照
+    /// 供随后的 [`Self::post_spawn`] 消费（R9 SANDBOX-2：替代 FIFO 队列，
+    /// 消除并发 spawn 策略错配）。
     ///
     /// # Errors
     /// 沙箱策略应用失败（如内核限制不可用、IO 失败）时返回 `SandboxError`。
@@ -80,7 +116,7 @@ pub trait SandboxDriver: Send + Sync {
         &self,
         policy: &SandboxPolicy,
         cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError>;
+    ) -> Result<SpawnHandle, SandboxError>;
 
     /// 当前平台是否原生支持硬隔离。
     fn is_hardened(&self) -> bool;
@@ -90,13 +126,13 @@ pub trait SandboxDriver: Send + Sync {
 
     /// 在 `spawn()` 后调用，供需要 post-spawn 设置的平台使用。
     ///
-    /// Windows Job Object 驱动在此创建 Job Object、分配子进程、恢复线程
-    /// （`apply` 仅设置 `CREATE_SUSPENDED` 标志）。Linux/macOS 不需覆写
-    /// （沙箱在 `pre_exec` 内一次性应用完成）。
+    /// 消费 [`Self::apply`] 返回的关联句柄（Windows Job Object 驱动在此创建
+    /// Job Object、分配子进程、恢复线程）。Linux/macOS 不需覆写（沙箱在
+    /// `pre_exec` 内一次性应用完成），句柄为空。
     ///
     /// # Errors
     /// post-spawn 设置失败（如 Job Object 创建/分配失败）时返回 `SandboxError`。
-    fn post_spawn(&self, _pid: u32) -> Result<(), SandboxError> {
+    fn post_spawn(&self, _handle: &mut SpawnHandle, _pid: u32) -> Result<(), SandboxError> {
         Ok(())
     }
 }
@@ -151,8 +187,8 @@ impl SandboxDriver for NoopDriver {
         &self,
         _policy: &SandboxPolicy,
         _cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError> {
-        Ok(())
+    ) -> Result<SpawnHandle, SandboxError> {
+        Ok(SpawnHandle::default())
     }
 
     fn is_hardened(&self) -> bool {
@@ -271,7 +307,8 @@ mod tests {
         let driver = NoopDriver;
         let mut cmd = std::process::Command::new("echo");
         let policy = SandboxPolicy::default();
-        let result = driver.apply(&policy, &mut cmd);
+        let mut handle = driver.apply(&policy, &mut cmd).expect("noop apply ok");
+        let result = driver.post_spawn(&mut handle, 12345);
         assert!(result.is_ok());
     }
 
@@ -286,7 +323,7 @@ mod tests {
     fn noop_driver_post_spawn_default_is_ok() {
         let driver = NoopDriver;
         // 默认实现的 `post_spawn` 应返回 Ok
-        let result = driver.post_spawn(12345);
+        let result = driver.post_spawn(&mut SpawnHandle::default(), 12345);
         assert!(result.is_ok());
     }
 

@@ -24,7 +24,7 @@
 //! 能做），Windows 平台子进程**不限制网络**——`is_hardened()` 如实返回 false；
 //! 网络管控仅由应用层权限审批承担。文档矩阵中该平台网络列为"未实现"。
 
-use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
+use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy, SpawnHandle};
 use std::io;
 
 /// `CREATE_SUSPENDED`：进程创建后挂起主线程，等待 `ResumeThread`。
@@ -43,7 +43,7 @@ pub struct WindowsJobDriver {
     /// 语义不变；交错场景下消费顺序确定（先 apply 先消费），残余风险为"A 拿
     /// 到 B 的策略"而非"拿到 None 裸奔 resume"。彻底消除需扩展
     /// `SandboxDriver` trait 的 apply↔post_spawn 关联句柄（列入 roadmap）。
-    last_policy: std::sync::Mutex<std::collections::VecDeque<SandboxPolicy>>,
+
     /// pid → 活跃 Job Object 句柄表。
     ///
     /// SEC-4（2026-08-25 R2 审查）：此前为单槽 `Option<JobHandle>`——后台 shell
@@ -59,7 +59,6 @@ impl WindowsJobDriver {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            last_policy: std::sync::Mutex::new(std::collections::VecDeque::new()),
             active_jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -129,35 +128,29 @@ impl SandboxDriver for WindowsJobDriver {
         &self,
         policy: &SandboxPolicy,
         cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<SpawnHandle, SandboxError> {
         match policy {
             SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
-                // 策略快照入队供 post_spawn 按序消费（SEC-4 FIFO）
-                self.last_policy
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push_back(policy.clone());
-
-                // 设置 CREATE_SUSPENDED：进程创建后挂起，post_spawn 分配 Job Object 后恢复
+                // R9 SANDBOX-2：策略携带在 SpawnHandle 中供 post_spawn 消费，
+                // 不再入共享 FIFO 队列——消除并发 spawn 时 apply/post_spawn
+                // 交错导致的策略错配（A 的 apply 后 B 的 apply 插入，B 的
+                // post_spawn 取到 A 的策略）。
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_SUSPENDED);
-                Ok(())
+                Ok(SpawnHandle::with_policy(policy.clone()))
             }
-            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => Ok(()),
+            SandboxPolicy::ExternalSandbox | SandboxPolicy::DangerFullAccess => {
+                Ok(SpawnHandle::default())
+            }
         }
     }
 
-    fn post_spawn(&self, pid: u32) -> Result<(), SandboxError> {
+    fn post_spawn(&self, handle: &mut SpawnHandle, pid: u32) -> Result<(), SandboxError> {
         // SEC-4：先惰性清理已结束的 Job（ActiveProcesses==0），防止句柄表无界增长；
         // 关闭句柄时进程树已退出，KILL_ON_JOB_CLOSE 无杀灭副作用。
         self.prune_dead_jobs();
 
-        let policy = self
-            .last_policy
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front();
-
+        let policy = handle.take_policy();
         let Some(policy) = policy else {
             // 无策略（ExternalSandbox/DangerFullAccess 或 apply 未调用）：仅恢复线程
             resume_thread(pid)?;

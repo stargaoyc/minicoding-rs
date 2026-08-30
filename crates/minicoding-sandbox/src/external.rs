@@ -8,7 +8,7 @@
 //! macOS/Windows 在 M4 降级为 `NoopDriver`（平台优先级 M5+/M6+），与此区分：
 //! `ExternalSandbox` 是用户**显式选择**依赖外部隔离，`NoopDriver` 是**降级兜底**。
 
-use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy};
+use minicoding_core::sandbox::{SandboxDriver, SandboxError, SandboxPolicy, SpawnHandle};
 
 /// 外部沙箱驱动（依赖容器/CI 外层隔离，本进程不应用内核限制）。
 ///
@@ -40,9 +40,9 @@ impl SandboxDriver for ExternalSandboxDriver {
         &self,
         _policy: &SandboxPolicy,
         _cmd: &mut std::process::Command,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<SpawnHandle, SandboxError> {
         // 依赖外部容器隔离，本进程不应用内核限制
-        Ok(())
+        Ok(SpawnHandle::default())
     }
 
     fn is_hardened(&self) -> bool {

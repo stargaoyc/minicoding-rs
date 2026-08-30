@@ -157,6 +157,8 @@ fn kill_process_group(pid: u32, hook_name: &str) {
 // （调用点位于 #[cfg(unix)] 内，Windows 不编译该分支，不存在死代码）。
 // setup_process_group 的 Windows 版本因无条件调用而保留。
 
+/// R9 SANDBOX-2 新增 `post_spawn` 逻辑使函数略超 100 行，线性展开不改分支结构。
+#[allow(clippy::too_many_lines)]
 async fn run_script_hook(
     name: &str,
     command_template: &str,
@@ -218,16 +220,29 @@ async fn run_script_hook(
 
     // 3b. OS 沙箱（C-26，SEC-5）：与 `shell.run` 同等待遇——landlock/Seatbelt/
     //     Job Object 约束 hook 子进程。未注入驱动时跳过（兼容既有调用方）。
+    //     R9 SANDBOX-2：apply 返回 SpawnHandle（Windows 携带策略），spawn 后
+    //     post_spawn 消费同一句柄——顺带修复 Windows 上 hook 此前只 apply
+    //     （CREATE_SUSPENDED）不 post_spawn（恢复线程）导致子进程挂起。
+    let mut spawn_handle = None;
     if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref()) {
-        driver.apply(policy, command.as_std_mut()).map_err(|e| {
+        spawn_handle = Some(driver.apply(policy, command.as_std_mut()).map_err(|e| {
             HookError::Internal(format!("sandbox apply failed for hook `{name}`: {e}"))
-        })?;
+        })?);
     }
 
     // 4. spawn 子进程。
     let mut child = command
         .spawn()
         .map_err(|e| HookError::Internal(format!("spawn hook `{name}` failed: {e}")))?;
+
+    // 4b. post_spawn（Windows Job Object：分配 Job + 恢复线程；其余平台 no-op）
+    if let (Some(driver), Some(pid)) = (sandbox_driver.as_ref(), child.id()) {
+        let mut handle = spawn_handle.take().unwrap_or_default();
+        driver.post_spawn(&mut handle, pid).map_err(|e| {
+            let _ = child.start_kill();
+            HookError::Internal(format!("sandbox post_spawn failed for hook `{name}`: {e}"))
+        })?;
+    }
 
     // 5. 序列化 HookInput JSON，spawn 独立 task 写 stdin（避免与 stdout 读写死锁）。
     //    脚本可选读取 stdin（简单脚本可仅靠命令行参数；完整协议脚本读 stdin 取上下文）。

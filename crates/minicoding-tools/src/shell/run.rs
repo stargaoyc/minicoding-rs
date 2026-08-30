@@ -148,6 +148,9 @@ impl Tool for ShellRun {
             // seatbelt 的 pre_exec 钩子（Linux/macOS），或设置 CREATE_SUSPENDED（Windows）。
             // 未注入驱动/策略时跳过（兼容测试）。
             let has_sandbox = sandbox_driver.is_some() && sandbox_policy.is_some();
+            // R9 SANDBOX-2：apply 返回 SpawnHandle（Windows 携带策略），
+            // 随后的 post_spawn 消费同一句柄——消除并发 spawn 策略错配。
+            let mut spawn_handle = None;
             if let (Some(driver), Some(policy)) = (sandbox_driver.as_ref(), sandbox_policy.as_ref())
             {
                 let span = tracing::debug_span!(
@@ -156,11 +159,11 @@ impl Tool for ShellRun {
                     driver = driver.id(),
                 );
                 let _enter = span.enter();
-                driver.apply(policy, command.as_std_mut()).map_err(|e| {
+                spawn_handle = Some(driver.apply(policy, command.as_std_mut()).map_err(|e| {
                     // 沙箱 apply 失败（如 landlock ruleset 构建失败）视为执行错误，
                     // 由 Runtime 的 denial detector 进一步识别是否为 denial。
                     ToolError::Exec(format!("sandbox apply failed: {e}"))
-                })?;
+                })?);
             }
 
             let mut child = command
@@ -173,7 +176,8 @@ impl Tool for ShellRun {
                 && let Some(driver) = sandbox_driver.as_ref()
                 && let Some(pid) = child.id()
             {
-                driver.post_spawn(pid).map_err(|e| {
+                let mut handle = spawn_handle.take().unwrap_or_default();
+                driver.post_spawn(&mut handle, pid).map_err(|e| {
                     // post_spawn 失败（如 Job Object 分配失败）：kill 子进程并报错
                     let _ = child.start_kill();
                     ToolError::Exec(format!("sandbox post_spawn failed: {e}"))

@@ -165,6 +165,9 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
             // 必须经同一 OS 沙箱第二道防线——apply 失败视为执行错误上交
             // Runtime 的 denial/fallback 链路处理。
             let has_sandbox = sandbox.as_ref().is_some();
+            // R9 SANDBOX-2：apply 返回 SpawnHandle（Windows 携带策略），
+            // post_spawn 消费同一句柄，消除并发 spawn 策略错配。
+            let mut spawn_handle = None;
             if let Some(sb) = sandbox.as_ref() {
                 let span = tracing::debug_span!(
                     "sandbox.apply",
@@ -172,9 +175,11 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                     driver = sb.driver.id(),
                 );
                 let _enter = span.enter();
-                sb.driver
-                    .apply(&sb.policy, cmd.as_std_mut())
-                    .map_err(|e| ToolError::Exec(format!("sandbox apply failed: {e}")))?;
+                spawn_handle = Some(
+                    sb.driver
+                        .apply(&sb.policy, cmd.as_std_mut())
+                        .map_err(|e| ToolError::Exec(format!("sandbox apply failed: {e}")))?,
+                );
             }
 
             // 2. Spawn 子进程
@@ -187,7 +192,8 @@ impl BackgroundShellStore for InMemoryBackgroundShellStore {
                 && let Some(sb) = sandbox.as_ref()
                 && let Some(pid) = child.id()
             {
-                sb.driver.post_spawn(pid).map_err(|e| {
+                let mut handle = spawn_handle.take().unwrap_or_default();
+                sb.driver.post_spawn(&mut handle, pid).map_err(|e| {
                     let _ = child.start_kill();
                     ToolError::Exec(format!("sandbox post_spawn failed: {e}"))
                 })?;

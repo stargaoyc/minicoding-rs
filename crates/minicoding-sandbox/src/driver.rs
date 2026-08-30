@@ -134,6 +134,7 @@ mod tests {
     //! 当前平台仅一条分支被编译，但通过 `DriverKind::as_str` 可覆盖全部枚举变体映射。
 
     use super::*;
+    use minicoding_core::sandbox::SpawnHandle;
 
     #[test]
     fn driver_kind_as_str_covers_all_variants() {
@@ -184,7 +185,7 @@ mod tests {
         // NoopDriver / Linux/macOS 默认 post_spawn 返回 Ok；Windows 覆写。
         // 这里仅验证不 panic + 返回 Ok 或可忽略错误（取决于平台）。
         let driver = detect_driver();
-        let _ = driver.post_spawn(0);
+        let _ = driver.post_spawn(&mut SpawnHandle::default(), 0);
     }
 
     #[test]
@@ -194,6 +195,6 @@ mod tests {
         let driver = detect_driver();
         let policy = minicoding_core::sandbox::SandboxPolicy::default();
         let mut cmd = std::process::Command::new("echo");
-        let _ = driver.apply(&policy, &mut cmd);
+        let _ = driver.apply(&policy, &mut cmd).map(drop);
     }
 }
