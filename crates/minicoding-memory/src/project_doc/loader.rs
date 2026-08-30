@@ -24,6 +24,7 @@ use minicoding_core::model::MemoryError;
 use minicoding_core::otel::span_name;
 use minicoding_core::provider::BoxFuture;
 use std::collections::HashSet;
+use time::OffsetDateTime;
 use tokio::fs;
 
 /// 默认项目文档最大字节数（32 KiB，见 `design.md` §8.6）。
@@ -320,6 +321,10 @@ impl ProjectDocLoaderImpl {
 }
 
 /// 展开一节内容并追加到 parts（来源标注优先相对 `repo_root`）。
+///
+/// R9 CTX-5：对真实文件来源附加最后修改时间（`# modified: <RFC3339>`）——AGENTS.md
+/// 是静态文档会随代码演进而过时，模型注入时可见修改时间，对长期未更新的指令层
+/// 保持审慎（过时的指令层比没有更危险）。`<global>`/不可读等非文件来源不加。
 fn push_part(parts: &mut Vec<String>, content: &str, source: &str, repo_root: &str) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -328,7 +333,18 @@ fn push_part(parts: &mut Vec<String>, content: &str, source: &str, repo_root: &s
     let rel = Utf8Path::new(source)
         .strip_prefix(repo_root)
         .map_or_else(|_| source.to_string(), ToString::to_string);
-    parts.push(format!("# source: {rel}\n\n{trimmed}"));
+    // R9 CTX-5：附加源文件 mtime（仅真实文件；`<global>` 等非文件来源跳过）
+    let modified = std::fs::metadata(source).ok().and_then(|md| {
+        md.modified().ok().and_then(|t| {
+            OffsetDateTime::from(t)
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+    });
+    match modified {
+        Some(ts) => parts.push(format!("# source: {rel}\n# modified: {ts}\n\n{trimmed}")),
+        None => parts.push(format!("# source: {rel}\n\n{trimmed}")),
+    }
 }
 
 /// 合并 parts 并按 `max_bytes` 截断（char 边界安全）。
