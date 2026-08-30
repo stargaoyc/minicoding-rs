@@ -2034,3 +2034,23 @@ impl MemoryRetrieval {
     pub fn is_empty(&self) -> bool;
 }
 ```
+
+**`AutoMemory` 来源指纹（CTX-4 完整版，2026-08-30 R9）**：`AutoEntry` 新增可选
+`source: Option<String>` 字段（来源文件路径），`add_entry` 保留旧签名（委托
+`add_entry_with_source(topic, content, category, confidence, source)`）。渲染时
+若来源文件 mtime 晚于条目 `updated`，自动标注"来源文件已变更，可能陈旧"——代码
+重构后旧记忆不再误导模型（与 90 天超时标注互补）。`memory.write` 工具输入
+schema 新增 `source` 字段供 LLM 传来源；`AutoMemoryWriter::add_entry` trait
+同步增加 `source: Option<String>` 参数（默认实现 `InMemoryAutoMemory` 存储该值）。
+
+**只读路径策略层校验与审计（P2-3，2026-08-30 R9）**：`BuiltinPolicy` 对含
+`path` 字段的只读工具（`fs.read` 等）在策略层做 C-03 越界校验（`Escaped`
+直接 `Deny`，`NotFound` 不误伤——文件不存在由 tool 层返回；与 tool 层共用
+`resolve_under` 单一实现）。只读桶（`run_readonly_bucket`）成功调用补落
+audit.log（`AuditKind::ToolCall`，`decision=allow`），此前只读权威 Allow 无痕。
+
+**`Runtime::turn_running`（2026-08-30 R9）**：新增 `pub fn turn_running(&self) -> bool`，
+查询 `turn_active` 原子。供 server `GET /sessions/{id}` 响应新增 `turn_running`
+字段——SSE 断线/页面刷新后前端据此恢复 `isStreaming`（`useTurnRunning` 5s 轮询）；
+同时 `POST /sessions/{id}/messages` 在排队前预占取消在运行的 turn（C-13 graceful，
+幂等），保证卡死 turn 后新消息总能执行。

@@ -349,10 +349,11 @@ deny_domains = ["*.internal.corp"]
 
 ### 7.1 审计日志
 
-每次**权限决策**与关键工具事件写一条审计记录到 `~/.minicoding/audit.log`（JSONL）——只读工具调用不经权限链故无记录（R3 口径修正）：
+每次**权限决策**与关键工具事件写一条审计记录到 `~/.minicoding/audit.log`（JSONL）——只读工具成功调用也落 `tool_call/allow` 记录（R9 P2-3 补口：此前 R3 口径"只读不经权限链故无记录"，但只读权威 Allow 是最应留痕的取证事件；`run_readonly_bucket` 成功调用补审计，沙箱拒绝路径本就记录 `sandbox_denied`）：
 
 ```json
 {"ts":"2026-08-26T10:00:00Z","session":"sess_01H...","kind":"permission_resolved","tool":"fs.write","decision":"allow","detail":"user allowed fs.write always @ src (persisted)"}
+{"ts":"2026-08-30T10:00:00Z","session":"sess_01H...","kind":"tool_call","tool":"fs.read","decision":"allow","detail":"readonly tool call (ok)"}
 {"ts":"2026-08-26T10:00:05Z","session":"sess_01H...","kind":"tool_result","tool":"shell.run","decision":"sandbox_denied","detail":"authoritative=true kind=WriteForbidden breaker=3 detail=landlock denied write"}
 ```
 

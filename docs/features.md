@@ -107,6 +107,7 @@
 
 | M-08 | 向量检索（`@memory`） | BM25 语义检索（零外部依赖，CJK 逐字分词） | M8 | 已实现（@memory 接线完成：显式查询槽契约，前缀触发 top-5 注入；无槽退化全量渲染+截断，见 `api.md` §12.2） |
 | M-09 | Auto memory 注入（B2/B3） | `AutoMemoryContributor` 渲染注入 system 稳定区（cacheable），与 `memory.write` 共享实例形成写读闭环；检索语料 auto+long_term 统一入 BM25 索引 | M3 | 已实现（2026-08-25 R2 批次接线，此前生产链路零调用） |
+| M-10 | Auto memory 来源指纹（CTX-4 完整版） | `AutoEntry.source` 记录来源文件；渲染时源文件 mtime 晚于条目更新时间自动标注"来源文件已变更，可能陈旧"（与 90 天超时标注互补，代码重构后旧记忆不再误导模型）；`AutoMemoryWriter::add_entry` 增加 `source` 参数，`memory.write` schema 暴露 `source` 字段 | M3 | 已实现（2026-08-30 R9 批次） |
 
 ## 6. 权限与安全
 
@@ -140,6 +141,7 @@
 | P-25 | PermissionMode 模式生效 | `AcceptEdits`（工作区内文件编辑自动 Allow，shell 仍 Ask）/ `BypassPermissions`（全自动，C-03 越界与 C-23 仍硬拦）；server `--preset` 与会话级 `CreateSessionBody.preset`（auto/read-only/external-sandbox/full-access，C-22 警告） | M2 | 已实现 |
 | P-26 | 沙箱初始化失败询问回退 | `apply`/`post_spawn` 失败（如 Windows Job Object 恢复线程快照竞态）→ High risk 询问是否沙箱外运行（C-22 用户显式选定）→ `DangerFullAccess` 重试一次，决策落 audit.log；仅询问一次不回退循环 | M4 | 已实现 |
 | P-27 | 配置写防陈旧（M-10） | `config.toml` 顶层 `revision` 原子自增；`save_provider_config(provider, expected_revision)` 不匹配返回 `StaleWrite` 且不覆盖（防桌面 + Web 并发写覆盖）；`GET /config` 返回 `config_revision` 供前端锁定基准（见 `security.md` §6.4、`api.md` §9.1） | M10 | 已实现 |
+| P-28 | 只读路径策略层校验 + 只读桶审计（P2-3） | 策略层对含 `path` 的只读工具（`fs.read` 等）做 C-03 越界校验（Escaped 直接 Deny，NotFound 不误伤，与 tool 层共用 `resolve_under`）；只读桶成功调用补落 audit.log（`ToolCall`/allow）——此前只读工具权威 Allow 无痕 | M2 | 已实现（2026-08-30 R9 批次） |
 
 ## 7. Hooks 系统（参考 Claude Code）
 
@@ -269,6 +271,7 @@
 | W-18 | 退出时终止 sidecar | desktop 应用退出/重启（关窗、托盘"退出"、`restart_app`）时终止 `minicoding-server-sidecar` 进程，不残留孤儿进程（`tauri-plugin-shell` `CommandChild` 无 Drop 清理，需 `RunEvent::Exit` 显式 kill；另加按 PID OS 级兜底强杀） | M9 | 已实现（`SidecarProcess` managed state + `kill_sidecar` + PID 兜底；2026-08-24 起关闭窗口即退出并触发清理） |
 | W-19 | 设置面板扩展 | 设置弹窗除模型信息外新增三组配置（Tauri 写 `config.toml` `[provider]`+`[context]` 段并重启 sidecar；Web 存 localStorage 经 `POST /sessions` 覆盖注入，参数缺失时 `GET /config` 兜底）：模型参数（LLM 请求超时 C-07 / 最大重试 C-13 / 小 LLM 模型 design.md §3.8）+ 上下文（turn 超时 / 压缩开关 C-18） | M9 | 已实现（`ServerConfig`/`ServerRuntimeParams`/`CreateSessionBody` 扩 5 字段；`GET /config` 只读响应不含 API key C-04；desktop `get/save_context_config` invoke；SetupDialog 分组表单） |
 | W-20 | 前端回放/单测基建（M-14） | Vitest + MSW（REST 拦截 + mock EventSource 重放 SSE fixture，不连真实后端）；SSE 事件流 record/replay 快照三态（`SNAPSHOT_MODE`=replay/record/off，对齐 dsh `DSH_SNAPSHOT`）覆盖"发消息→流式渲染→权限确认→沙箱拒绝卡片"；chatReducer 纯函数抽取（`useSSEStream` 行为不变重构）；MessageBubble/ToolCallCard 沙箱拒绝卡片（M-09 前端补齐）；CI `web` job（oxlint+tsc+vitest+build）（见 AGENTS.md §8.8） | M9 | 已实现 |
+| W-21 | 结束对话按钮 + 卡死恢复 | 顶部栏"结束对话"红色按钮（turnBusy 时显示，显式停止当前 turn）；输入历史持久化（localStorage，重开对话按 ↑ 可回读）；工具结果长文本折叠可展开（CollapsibleText，300 字符阈值）；`sendDisabled` 时 Enter 给提示不静默丢弃 | M9 | 已实现（2026-08-30 R9 批次） |
 
 ## 13. 工程与质量
 
@@ -283,6 +286,7 @@
 | Q-07 | 沙箱平台 CI matrix | Linux/macOS/Windows 拒绝语义 | M4+ | 已实现（三平台 CI matrix：Linux Landlock + macOS Seatbelt + Windows Job Object 编译/单测全覆盖） |
 | Q-08 | cargo dist 跨平台二进制 | Linux/macOS/Windows | M10 | 已实现（`cargo-dist.toml` 配置 5 个 target + shell/powershell/homebrew/scoop 安装器） |
 | Q-09 | 分发（brew/scoop/cargo install） | 三渠道 | M10 | 已实现（cargo-dist `tap`/`scoop`/`publish-jobs` 覆盖三渠道） |
+| Q-10 | E2E 端到端测试框架（CI-2） | 起真实 `minicoding-server` 二进制 + wiremock mock LLM（默认 CI 安全）+ 真实 LLM（`MINICODING_E2E_REAL` env 门控），HTTP/SSE 驱动完整会话：全链路对话、工具调用闭环（fs.read）、并发消息不卡死、完整项目脚手架（多步 fs.write 断言磁盘落盘） | M10 | 已实现（2026-08-30 R9 批次，`crates/minicoding-server/tests/e2e.rs`） |
 
 ## 14. Extension 扩展
 
@@ -309,19 +313,19 @@
 | LLM Provider | 9 |
 | 工具系统 | 25 |
 | 上下文管理 | 10 |
-| 记忆 | 9 |
-| 权限与安全 | 28 |
+| 记忆 | 10 |
+| 权限与安全 | 29 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
 | 可观测性 | 8 |
 | 持久化与存储 | 17 |
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
-| 工程与质量 | 9 |
+| 工程与质量 | 10 |
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
-| Web 与桌面（M9） | 20 |
-| **合计** | **205** |
+| Web 与桌面（M9） | 21 |
+| **合计** | **209** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 48 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（DOC-5，2026-08-25 R2 审查：按主表逐行里程碑列重新统计；R8 审查更正：原注"四段相加 = 205"算术错误——48+84+46+20=198，合计 **205** 以功能项 ID 实数为准，四段为约数口径且跨里程碑条目归属重复计数，两者不直接对等；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 
