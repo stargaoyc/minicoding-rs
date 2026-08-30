@@ -89,6 +89,38 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
     }
 }
 
+/// SDK 侧真实工具装配（守卫测试与生产共用——此前 `inner_build_runtime`
+/// 内联注册序列，能力矩阵测试把两侧列表硬编码在测试体内、恒真，任何一侧
+/// 增删注册测试仍绿。提取为 `pub` 纯函数，测试直接调用比对）。
+///
+/// 注册集：readonly + ui + write + shell + git + web(optional) + task + memory.write。
+#[must_use]
+pub fn assemble_sdk_tool_registry(
+    event_bus: &minicoding_core::runtime::EventBus,
+    long_term_store: Arc<dyn MemoryStore>,
+    auto_memory: Arc<AutoMemory>,
+) -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    register_readonly_tools(&mut tools);
+    minicoding_tools::register_ui_tools(&mut tools);
+    register_write_tools(&mut tools);
+    register_shell_tools(&mut tools);
+    // git 工具组（git.diff 只读 / git.apply 写入）
+    minicoding_tools::register_git_tools(&mut tools);
+    // web 工具组（web.fetch/search，需 `web` feature）
+    #[cfg(feature = "web")]
+    minicoding_tools::register_web_tools(&mut tools);
+    // 任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
+    // 注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
+    register_task_tools(&mut tools, Some(event_bus.clone()));
+    // 6b. 注册 memory.write 工具（long_term + auto memory）
+    //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
+    //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
+    let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter { inner: auto_memory });
+    tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
+    tools
+}
+
 /// 从 CLI 参数构建 `Runtime`。
 ///
 /// `provider_override` 覆盖 `config.provider.default`（`--provider`），
@@ -125,6 +157,9 @@ fn inner_build_runtime(
     >,
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
+    // 沙箱 fail-closed（`true` → 沙箱不可用/初始化失败拒绝执行）。
+    // exec/CI 场景注入，交互式场景默认 `false` 保持向后兼容。
+    #[cfg_attr(not(feature = "sandbox"), allow(unused_variables))] sandbox_fail_closed: bool,
 ) -> Result<(Runtime, Option<MemoryQuerySlot>)> {
     // 1. 加载配置（config.toml > last-known-good > 内置默认），env/CLI flag 在其上
     //    叠加。与 serve/server 对齐的优先级：CLI 参数 > 环境变量 > config.toml >
@@ -485,28 +520,8 @@ fn inner_build_runtime(
     //    EventBus 提前创建，clone 给 task store 用于广播 `TaskUpdated`，
     //    原件传入 RuntimeBuilder（EventBus 内部是 broadcast::Sender，clone 共享通道）。
     let event_bus = minicoding_core::runtime::EventBus::new();
-    let mut tools = ToolRegistry::new();
-    register_readonly_tools(&mut tools);
-    minicoding_tools::register_ui_tools(&mut tools);
-    register_write_tools(&mut tools);
-    register_shell_tools(&mut tools);
-    // git 工具组（git.diff 只读 / git.apply 写入）
-    minicoding_tools::register_git_tools(&mut tools);
-    // web 工具组（web.fetch/search，需 `web` feature）
-    #[cfg(feature = "web")]
-    minicoding_tools::register_web_tools(&mut tools);
-    // 任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
-    // 注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
-    register_task_tools(&mut tools, Some(event_bus.clone()));
-
-    // 6b. 注册 memory.write 工具（long_term + auto memory）
-    //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
-    //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
-    //     LongTermMemory::default / AutoMemory::default 在 home 不可解析时退化为相对路径。
-    let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter {
-        inner: auto_memory.clone(),
-    });
-    tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
+    let tools =
+        assemble_sdk_tool_registry(&event_bus, long_term_store.clone(), auto_memory.clone());
 
     // 7. 构造权限策略 + 交互器（C-01：副作用必须经权限）
     //    TTY → InteractivePrompter（stdin 读 y/n）；非 TTY → NonInteractivePrompter
@@ -613,6 +628,8 @@ fn inner_build_runtime(
         sandbox_pair.clone(),
         child_config,
         workdir_path.clone(),
+        // 子 Agent 继承父权限模式（Plan 模式下子级保持只读硬门）。
+        initial_mode,
     );
     let subagent_runner: Arc<dyn minicoding_core::agent::SubagentRunner> =
         Arc::new(minicoding_tools::WorktreeSubagentRunner::new(
@@ -658,11 +675,12 @@ fn inner_build_runtime(
                     as std::sync::Arc<dyn minicoding_core::hooks::AsyncRewakeScheduler>
             }
         })
-        .with_policy_persist(
-            minicoding_core::paths::policy_path()
-                .ok()
-                .map(|p| std::sync::Arc::new(minicoding_core::policy::PolicyPersist::new(p))),
-        )
+        .with_policy_persist(minicoding_core::paths::policy_path().ok().map(|p| {
+            std::sync::Arc::new(minicoding_core::policy::PolicyPersist::with_workdir(
+                p,
+                workdir_path.clone(),
+            ))
+        }))
         .event_store(Arc::new(event_store))
         .snapshot_store(Arc::new(snapshot_store));
 
@@ -673,6 +691,8 @@ fn inner_build_runtime(
         builder = builder
             .sandbox_driver(driver)
             .sandbox_policy(sandbox_policy)
+            // 沙箱 fail-closed（exec/CI 场景沙箱不可用即拒绝）
+            .sandbox_fail_closed(sandbox_fail_closed)
             // 注入领域级 denial 检测与熔断（sandbox 签名库 + C-30 熔断）
             .sandbox_denial_detector(Arc::new(minicoding_sandbox::DenialDetector::new()))
             .sandbox_denial_breaker(Arc::new(
@@ -771,6 +791,7 @@ pub fn build_runtime_with_memory_slot(
         sandbox_override,
         start_in_plan_mode,
         prompter_override,
+        false,
     )
     .map(|(rt, slot)| {
         (
@@ -810,6 +831,46 @@ pub fn build_runtime(
         sandbox_override,
         start_in_plan_mode,
         prompter_override,
+        false,
+    )
+    .map(|(rt, _)| rt)
+}
+
+/// 带沙箱 fail-closed 的构建入口（`minicoding exec` 使用）。
+///
+/// `sandbox_fail_closed = true` 时沙箱不可用/初始化失败**拒绝执行**而非询问
+/// 沙箱外运行——`exec` 是无人值守批量场景，`AutoApprovePrompter` 会对
+/// `maybe_sandbox_fallback` 弹窗恒 `Allow`，此前可静默降级为完全无隔离执行。
+///
+/// # Errors
+/// 同 [`inner_build_runtime`]。
+#[allow(clippy::too_many_arguments)] // 透传 inner_build_runtime 参数
+pub fn build_runtime_fail_closed(
+    provider_override: Option<&str>,
+    provider_name_override: Option<&str>,
+    api_base: Option<&str>,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    workdir: &str,
+    system: Option<&str>,
+    mode: &SessionLoadMode,
+    sandbox_override: Option<SandboxPolicy>,
+    start_in_plan_mode: bool,
+    prompter_override: Option<Arc<dyn PermissionPrompter>>,
+) -> Result<Runtime> {
+    inner_build_runtime(
+        provider_override,
+        provider_name_override,
+        api_base,
+        api_key,
+        model,
+        workdir,
+        system,
+        mode,
+        sandbox_override,
+        start_in_plan_mode,
+        prompter_override,
+        true,
     )
     .map(|(rt, _)| rt)
 }

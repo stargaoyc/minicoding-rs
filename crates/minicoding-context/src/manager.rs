@@ -124,13 +124,21 @@ impl ContextManagerImpl {
         context_window: usize,
         provider: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
+        // 预留输出由 provider 声明的 `max_output` 驱动（取 min(声明值,
+        // 窗口 25%)，`with_reserved_output` 内部 clamp）——此前硬编码 4096，
+        // 与 Anthropic 64K max_output 脱钩：可用预算被低估/高估都可能触发真实
+        // 400（输入超阈值但输出预留不足）。
+        let mut budget = TokenBudget::new(context_window);
+        if let Some(p) = &provider {
+            budget = budget.with_reserved_output(p.capabilities().max_output);
+        }
         Self {
             messages: tokio::sync::RwLock::new(Vec::new()),
             system_prompt,
             pipeline: None,
             prompt_ctx_template: None,
             tokenizer,
-            budget: TokenBudget::new(context_window),
+            budget,
             provider,
             count: AtomicUsize::new(0),
             token_cache: AtomicUsize::new(0),
@@ -675,7 +683,13 @@ impl ContextManager for ContextManagerImpl {
             max_tokens_per_file: config.context.post_compact_max_tokens_per_file,
         };
         Box::pin(async move {
-            let threshold = self.budget.compact_threshold();
+            //  P1-附加：触发阈值统一用 `effective_compact_threshold()`——
+            // 成功判据（`handle_oversize` 分支，见 compress 内）同样基于该函数
+            // （低估 streak ≥ 3 时收紧至 −40%）。此前触发用基础
+            // `budget.compact_threshold()`，低估检测生效后压缩在基础阈值触发、
+            // 却按收紧阈值判成功——落入两阈值之间的区间即 record_oversize，
+            // 连续 2 次即 thrash 熔断（健康会话被误熔断）。
+            let threshold = self.effective_compact_threshold();
             let current_tokens = self.token_count();
 
             // Metrics：请求阶段 token 分布

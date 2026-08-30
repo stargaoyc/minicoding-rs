@@ -443,7 +443,16 @@ fn build_router(
                         || req.method() == axum::http::Method::OPTIONS
                         || request_authorized(&req, &expected);
                     if !authorized {
-                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                        // 401 返回可操作 body——此前裸状态码前端显示
+                        // "HTTP 401: "（冒号后空白），用户无从知道要配置 token。
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "error": "unauthorized",
+                                "hint": "请配置访问令牌：Web 模式在设置中填入 SERVER_TOKEN（服务端启动时打印），或使用 --no-auth 仅限本机",
+                            })),
+                        )
+                            .into_response();
                     }
                     next.run(req).await
                 }
@@ -715,10 +724,11 @@ pub fn build_preset_policy(
         "full-access" => Ok((
             PermissionMode::BypassPermissions,
             SandboxPolicy::DangerFullAccess,
-            Some(
-                "WARNING: 会话以 full-access 预设运行（沙箱外 + 权限全自动）——                 仅限受信隔离容器内使用（C-22）"
-                    .to_string(),
-            ),
+            // 复用 `Preset::warning_text()`（C-22 red 警告唯一事实源），
+            // 消除 `requires_confirmation`/`warning_text` 死代码（此前零调用点）
+            minicoding_policy::Preset::FullAccess
+                .warning_text()
+                .map(ToOwned::to_owned),
         )),
         other => Err(HttpError {
             status: axum::http::StatusCode::BAD_REQUEST,

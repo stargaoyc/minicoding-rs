@@ -34,6 +34,23 @@ impl TokenBudget {
         }
     }
 
+    /// 设置预留输出 token（由 provider `max_output` 驱动，取 min(声明值,
+    /// 窗口的 25%)，使可用预算更准确，防止"预留不足 → 输入超阈值 → 压缩未触发
+    /// → 真实 400"）。
+    #[must_use]
+    pub fn with_reserved_output(mut self, output: usize) -> Self {
+        // 预留输出至少 512（安全偏低限），至多窗口的 25%（留足输入预算）。
+        // 小窗口（<2048）下 25% 可能低于 512 下限——此时放弃下限直接取窗口
+        // 的 25%，避免 `clamp(512, max_reserved)` 在 min>max 时 panic。
+        let max_reserved = self.context_window / 4;
+        self.reserved_output = if max_reserved < 512 {
+            max_reserved.max(1)
+        } else {
+            output.clamp(512, max_reserved)
+        };
+        self
+    }
+
     /// 设置压缩触发比例（builder，：由 `config.budget_ratio` 驱动）。
     #[must_use]
     pub fn with_ratio(mut self, ratio: f64) -> Self {

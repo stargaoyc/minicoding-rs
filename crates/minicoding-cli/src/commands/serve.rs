@@ -128,6 +128,12 @@ pub struct ServeCommand {
     #[arg(long, default_value = "auto")]
     preset: String,
 
+    /// `--preset full-access` 的二次确认旗标（C-22）——与 `exec
+    /// --i-understand-full-access` 对齐。缺失时 `full-access` 拒绝启动，
+    /// 防止无人值守/误配置下静默进入沙箱外全自动模式。
+    #[arg(long, default_value_t = false)]
+    i_understand_full_access: bool,
+
     /// 切换为 MCP stdio server 模式：把内置工具通过 MCP 协议暴露给
     /// 外部 MCP client（如 Claude Desktop），不启动 HTTP server。
     ///
@@ -435,6 +441,7 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
         prompter: None,
         events: None,
         audit: None,
+        sandbox_fail_closed: false,
     };
 
     // 4. 启动 MCP server（阻塞至 client 断开 stdin）
@@ -629,6 +636,17 @@ fn resolve_stdio_preset(
 )> {
     let workdir = Utf8PathBuf::from(&cmd.workdir);
     let preset = cmd.preset.as_str();
+    // `full-access` 必须显式 `--i-understand-full-access` 确认（C-22）——
+    // 此前仅 tracing warn，无人值守/误配置可静默进入沙箱外全自动模式。
+    let parsed = minicoding_policy::Preset::parse(preset).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if parsed.requires_confirmation() && !cmd.i_understand_full_access {
+        anyhow::bail!(
+            "--preset full-access 需同时传入 --i-understand-full-access 以确认放弃 OS 级隔离（C-22）。\n\
+             警告：full-access 将完全禁用内核级沙箱隔离（DangerFullAccess），\
+             模型可在工作区外任意读写、执行命令、访问网络且无需逐次审批。\
+             仅在受信容器/虚拟机内使用。"
+        );
+    }
     let (mode, policy, warning) = minicoding_server::http::build_preset_policy(preset, &workdir)
         .map_err(|e| anyhow::anyhow!("{} (status {})", e.message, e.status))?;
     if let Some(w) = warning {
