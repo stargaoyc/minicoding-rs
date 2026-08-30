@@ -1464,22 +1464,9 @@ file_undo = false              # /undo 文件回滚（参考 Codex features.undo
 plan_mode = true               # Plan 模式（design.md §16）
 typed_subagents = true         # 类型化子 Agent（design.md §7.2）
 
-# MCP server 配置（见 design.md §19.2）
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false
-enabled_tools = ["list_prs", "create_pr"]
-
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"
+# MCP server 配置（见 design.md §19.2；R9 审查更正：实际为 mcp.json 的 JSON
+# 格式，非 config.toml——`~/.minicoding/mcp.json` 用户级 / `.minicoding/mcp.json`
+# 项目级，TOML `[mcp_servers.*]` 形态已被 JSON 数组替代）
 ```
 
 ---

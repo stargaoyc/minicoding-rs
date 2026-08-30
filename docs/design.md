@@ -2065,25 +2065,48 @@ explicitly deferred. Prefer tool calls over prose for tracking progress.
 
 ### 19.2 传输与配置
 
-```toml
-# .minicoding.toml
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }   # 环境变量展开（${VAR} / ${VAR:-fallback}）
-cwd = "."
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false                # true 时启动失败则 minicoding 拒绝启动
-enabled_tools = ["list_prs", "create_pr"]   # None=全部
+> **R9 审查更正**：MCP server 配置在 `mcp.json` 中（JSON 格式），非 `config.toml`。
+> 用户级：`~/.minicoding/mcp.json`；项目级：`.minicoding/mcp.json`（入版本控制，
+> 经 C-24 首次批准机制弹窗确认）。TOML 配置示例已在早期版本删除。
 
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"   # 不直接写 token
-http_headers = { "X-Client" = "minicoding" }
+```json
+// ~/.minicoding/mcp.json（用户级）
+{
+  "local": {
+    "servers": [
+      {
+        "name": "github",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+        "startup_timeout_sec": 20,
+        "tool_timeout_sec": 60,
+        "enabled": true,
+        "required": false,
+        "enabled_tools": ["list_prs", "create_pr"]
+      }
+    ]
+  },
+  "user": {
+    "servers": [...]
+  }
+}
+```
+
+```json
+// <project>/.minicoding/mcp.json（项目级，入版本控制）
+{
+  "servers": [
+    {
+      "name": "internal_api",
+      "transport": "http",
+      "url": "https://internal.corp/mcp",
+      "bearer_token_env_var": "INTERNAL_API_TOKEN",
+      "http_headers": { "X-Client": "minicoding" }
+    }
+  ]
+}
 ```
 
 `McpTransport` 枚举覆盖两种主流协议；`bearer_token_env_var` 走环境变量引用而非明文，与 `security.md` §6 凭证管理一致。
@@ -2259,7 +2282,7 @@ Runtime 关闭 → 优雅关闭各 MCP server（stdio: EOF；http: 连接池释�
 | 凭证隔离 | MCP server 子进程不继承 minicoding 的凭证环境变量（同 `shell.run`，见 `security.md` §6） |
 | 路径校验 | MCP 工具若返回路径并触发本地 `fs` 操作，仍经 `sandbox_path` |
 | 审计 | MCP 工具调用落 `audit.log`，标注 `tool=mcp__<server>__<tool>`、`mcp_server=<server>` |
-| 网络白名单 | `http` 传输的 MCP server 受 `tools.web.allowed_domains` 约束（防 SSRF） |
+| 网络白名单 | **R9 审查更正：`tools.web.allowed_domains` 未实现**（早期设计稿承诺 `http` 传输的 MCP server 受其约束防 SSRF，但全仓代码零命中，`design.md` §19.1 亦无此配置键）。现状：`web.fetch`/`web.search` 有 IP 级 SSRF 防护（私有段拒绝 + pinning），MCP HTTP 传输**无 SSRF 检查**——属已知缺口，需 MCP 配置加 `allowed_domains` 后才可声称为"已实现" |
 | L0 不可覆盖 | MCP 工具的 `side_effect` 声明不影响内置黑名单——即使 MCP server 声明"只读"，若其触发的下游 `fs.write` 命中黑名单仍 Deny |
 | project 作用域批准 | 防"clone 即执行"攻击 |
 

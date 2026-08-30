@@ -281,14 +281,21 @@ R4 补强：`$()` 命令替换参与切段、`>&`/`&>` 重定向变体归一至 
 
 ### 5.2 域名策略
 
+> **R9 审查更正**：`tools.web.allowed_domains` / `deny_domains` **未实现**
+> （早期设计稿的配置示例与 `doctor` 检查项，全仓代码零命中——见 R9 MCP-2）。
+> `web.fetch`/`web.search` 的 SSRF 防护是 IP 级（§5.1 私网/元数据段拒绝 +
+> DNS pinning），**无域名白名单层**；MCP HTTP 传输**连 IP 级检查都没有**。
+> 以下示例仅作设计意图参考，实现前不可视为有效配置：
+
 ```toml
+# 设计意图（未实现，R9 审查更正）
 [tools.web]
 allowed_domains = ["github.com", "*.githubusercontent.com", "crates.io"]
 deny_domains = ["*.internal.corp"]
 ```
 
-- `allowed_domains = ["*"]` 表示放开（仍受 SSRF 防护）。
-- 非通配时，未列明域名一律 Ask。
+- `allowed_domains = ["*"]` 表示放开（仍受 SSRF 防护）——**未实现**；
+- 非通配时，未列明域名一律 Ask——**未实现**。
 
 ### 5.3 TLS
 
@@ -887,7 +894,7 @@ minicoding doctor --security
 - [ ] 配置文件不含明文 `api_key`
 - [ ] `~/.minicoding/` 权限 ≤ 0700
 - [ ] `policy.toml` 含合理 deny 规则
-- [ ] `tools.web.allowed_domains` 非通配（生产环境）
+- [ ] `tools.web.allowed_domains` 非通配（生产环境）——**未实现，待 MCP HTTP 白名单落地后启用**（R9 MCP-2）
 - [ ] `tools.shell.timeout_sec` ≤ 600
 - [ ] 审计日志可写
 - [ ] keyring 可用（或环境变量已设置）

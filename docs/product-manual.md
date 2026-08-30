@@ -295,22 +295,8 @@ file_undo = false              # /undo 文件回滚（参考 Codex features.undo
 plan_mode = true               # Plan 模式
 typed_subagents = true         # 类型化子 Agent
 
-# MCP server 配置（见 docs/design.md §19.2）
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false
-enabled_tools = ["list_prs", "create_pr"]
-
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"
+# MCP server 配置（见 docs/design.md §19.2；R9 审查更正：实际为 mcp.json 的
+# JSON 格式，非 config.toml 的 TOML `[mcp_servers.*]` 段）
 ```
 
 ### 2.4 配置加载优先级
@@ -1649,27 +1635,45 @@ minicoding 作为 MCP client，连接外部 MCP server，把其工具注册进 `
 
 **配置示例**：
 
-> **R9 审查更正**：MCP server 配置在 `~/.minicoding/config.toml` 的 `[mcp_servers]` 段，非项目级 `.minicoding.toml`（项目级配置未实现）。
+> **R9 审查更正**：MCP server 配置在 `mcp.json`（JSON 格式，非 `config.toml` TOML
+> `[mcp_servers.*]` 段）：`~/.minicoding/mcp.json`（local/user 作用域）与
+> `<project>/.minicoding/mcp.json`（project 作用域，入版本控制，见 §12.3）。
 
-```toml
-# ~/.minicoding/config.toml
-[mcp_servers.github]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }   # 环境变量展开
-cwd = "."
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
-required = false                # true 时启动失败则 minicoding 拒绝启动
-enabled_tools = ["list_prs", "create_pr"]   # None=全部
+```json
+// ~/.minicoding/mcp.json
+{
+  "local": {
+    "servers": [
+      {
+        "name": "github",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+        "startup_timeout_sec": 20,
+        "tool_timeout_sec": 60,
+        "enabled": true,
+        "required": false,
+        "enabled_tools": ["list_prs", "create_pr"]
+      }
+    ]
+  }
+}
+```
 
-[mcp_servers.internal_api]
-transport = "http"
-url = "https://internal.corp/mcp"
-bearer_token_env_var = "INTERNAL_API_TOKEN"   # 不直接写 token
-http_headers = { "X-Client" = "minicoding" }
+```json
+// <project>/.minicoding/mcp.json（project 作用域）
+{
+  "servers": [
+    {
+      "name": "internal_api",
+      "transport": "http",
+      "url": "https://internal.corp/mcp",
+      "bearer_token_env_var": "INTERNAL_API_TOKEN",
+      "http_headers": { "X-Client": "minicoding" }
+    }
+  ]
+}
 ```
 
 `bearer_token_env_var` 走环境变量引用而非明文，与凭证管理一致（C-04）。
