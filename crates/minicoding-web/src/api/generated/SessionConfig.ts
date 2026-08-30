@@ -4,24 +4,30 @@ import type { PermissionMode } from "./PermissionMode";
 /**
  * 会话配置（创建会话时传入）。
  */
-export type SessionConfig = { 
-/**
- * 工作目录（默认当前目录）。
- */
-workdir: string | null, 
-/**
- * 系统 prompt 覆盖。
- */
-system: string | null, 
-/**
- * Provider 覆盖（如 `"openai"`/`"anthropic"`/`"ollama"`）。
- */
-provider: string | null, 
-/**
- * 模型覆盖。
- */
-model: string | null, 
-/**
- * 初始权限模式（默认 `Default`）。
- */
-permission_mode: PermissionMode, };
+export type SessionConfig = {
+  /**
+   * 工作目录（默认当前目录）。
+   */
+  workdir: string | null;
+  /**
+   * 系统 prompt 覆盖。
+   */
+  system: string | null;
+  /**
+   * Provider 覆盖（如 `"openai"`/`"anthropic"`/`"ollama"`）。
+   */
+  provider: string | null;
+  /**
+   * 模型覆盖。
+   */
+  model: string | null;
+  /**
+   * 初始权限模式（默认 `Default`）。
+   */
+  permission_mode: PermissionMode;
+  /**
+   * C-22 二次确认：`permission_mode=BypassPermissions` 必须携带
+   * `confirm_danger: true`（UI 红色警告确认后回传，NDJSON/ACP 历史路径）。
+   */
+  confirm_danger: boolean | null;
+};

@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Undo2 } from "lucide-react";
+import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Square, Undo2 } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
@@ -11,7 +11,12 @@ import { TaskPanel } from "./components/tasks/TaskPanel";
 import { SetupDialog } from "./components/setup/SetupDialog";
 import { FilePreview } from "./components/workspace/FilePreview";
 import { Button } from "./components/ui/button";
-import { useMessages, useSendMessage, useSSEStream } from "./hooks/useChat";
+import {
+  useMessages,
+  useSendMessage,
+  useSSEStream,
+  useTurnRunning,
+} from "./hooks/useChat";
 import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
@@ -125,6 +130,8 @@ function AppInner() {
 
   // 消息 + SSE 流（含权限请求回调）
   const { data: messages, isLoading } = useMessages(activeSessionId);
+  //  turn 运行状态轮询（SSE 断线/刷新后恢复 isStreaming）
+  const { data: turnRunning } = useTurnRunning(activeSessionId);
   const {
     streamingText,
     streamingReasoning,
@@ -150,7 +157,7 @@ function AppInner() {
     //  权限已决/回合结束 → 自动关闭弹窗（服务端超时 Deny、他端
     // 已裁决时，pending 不再残留；否则用户点"允许"得 404 且无引导）
     onPermissionResolved: () => permissions.dismiss(),
-  });
+  }, turnRunning);
   const sendMessage = useSendMessage(activeSessionId);
   // api 层调用统一经 hooks 封装（AGENTS.md §8.3 分层令）
   const cancelTurnById = useCancelTurn();
@@ -214,6 +221,22 @@ function AppInner() {
             <Undo2 className="h-4 w-4" />
             回滚
           </Button>
+          {/*  ：结束对话——运行中显式停止当前 turn。此前只能靠输入框
+              停止按钮（isStreaming 时），用户对"前一个对话未结束就发送下一个
+              是否卡死"有疑虑：后端 send_message 已预占取消卡死 turn，此处
+              提供显式入口，确认状态后再发送下一条。 */}
+          {turnBusy && (
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleCancel}
+              disabled={!activeSessionId}
+              title="结束当前对话（停止正在运行的 turn）"
+            >
+              <Square className="h-4 w-4" />
+              结束对话
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

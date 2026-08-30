@@ -303,6 +303,16 @@ impl Runtime {
             .clone()
     }
 
+    /// 当前是否有 turn 在运行（`turn_active` 原子查询）。
+    ///
+    /// 供 server/前端在 SSE 断线重连或页面刷新后恢复 `isStreaming` 状态：
+    /// 若返回 true 但前端已失去流式状态，说明旧 turn 仍在执行（可能卡死），
+    /// 新消息应触发打断（见 `send_message` 的预占取消逻辑）而非静默排队。
+    #[must_use]
+    pub fn turn_running(&self) -> bool {
+        self.turn_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// 触发取消（CLI 的 Ctrl-C handler 调用）。
     ///
     /// 取消是 graceful 的：当前 in-flight 的迭代被丢弃，已落盘的消息保留
@@ -1320,6 +1330,9 @@ impl Runtime {
     /// 是 `&&ToolCall`，闭包签名 `fn(&'a &'b ToolCall) -> impl Future + 'a` 不满足
     /// `buffer_unordered` 要求的 HRTB（future 类型对任意 `'a` 必须相同）。把每个
     /// future 装箱为 `Pin<Box<dyn Future + Send>>`，擦除生命周期参数，统一类型。
+    //  只读桶审计补口（成功调用落 audit.log）新增约 15 行，行数压缩
+    // 收益低于保持闭包结构的可读性（与 `execute_tool_calls` 共用 allow）。
+    #[allow(clippy::too_many_lines)]
     async fn run_readonly_bucket(
         &self,
         readonly: &[&ToolCall],
@@ -1407,6 +1420,20 @@ impl Runtime {
                             }
                         }
                     };
+                    //  只读工具成功调用也落 audit.log——此前只读桶仅
+                    // 沙箱拒绝落审计，成功调用无痕（策略层对
+                    // SideEffect::None 的权威 Allow 是最应留痕的取证事件）。
+                    // 审计为 best-effort（record 失败仅告警，不阻断工具执行）。
+                    if let Err(e) = audit.record(crate::storage::AuditRecord {
+                        ts: time::OffsetDateTime::now_utc(),
+                        session: session_id.clone(),
+                        kind: crate::storage::AuditKind::ToolCall,
+                        tool: Some(tool_name.clone()),
+                        decision: Some("allow".to_string()),
+                        detail: format!("readonly tool call ({})", if result.is_error { "error" } else { "ok" }),
+                    }).await {
+                        tracing::warn!(error = %e, tool = %tool_name, "readonly audit record failed");
+                    }
                     Self::emit_readonly_finished(
                         &events, &tool_name, &call_id, &result, tool_timer,
                     );

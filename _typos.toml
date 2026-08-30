@@ -29,6 +29,8 @@ ulid = "ulid"
 flate = "flate"
 # RFC 4648 base64 测试向量（f/fo/foo/foob/fooba/foobar）
 fo = "fo"
+# base64 解码为 "abcdef123456"（redact.rs 测试向量），含 "Iz" 子串被 typos 误报
+iz = "iz"
 
 [files]
 extend-exclude = [

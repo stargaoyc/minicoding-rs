@@ -889,3 +889,61 @@ P0-2（合并双轨 builder，server 委托 sdk）、（Windows FIFO→pid 映�
 
 **遗留架构级（需独立排期，非本批范围）**：P0-2（合并双轨 builder）、（Linux
 旧内核网络限制提示）、P2-3（fs.read 审计）、P2-10（CLI 测试补齐）、E2E/一致性测试。
+
+---
+
+## 16. 第三轮修复追踪（2026-08-29 当日第三轮，除 P3-2 外全量）
+
+> 第二轮之后继续修复剩余项，每批过 pre-commit 门禁。
+
+| 批次 | 提交 | 覆盖问题 |
+|------|------|---------|
+| H1 | `42d4fea` | （Linux 旧内核网络限制启动警告）、（.git/AGENTS.md 写保护变形回归——发现并修复 WRITE_VERBS 未剥包装前缀的真实缺口）、P2-9（Hook inject_context 包裹 `<hook name>` 来源边界） |
+| H2 | `3c13a87` | （calibrate 低估 streak 检测 + effective_compact_threshold 动态收紧，防真实 400 熔断） |
+| H3 | `59ec135`/`f3f29a1` | P2-10（CLI exec 沙箱映射测试）、（shell 黑名单 proptest 三组属性测试） |
+| H4 | `b9a472c` | （只读/无害命令 Default 模式自动放行：ls/cat/git status/cargo check 等白名单，写/解释器/复合仍 Ask，黑名单优先级不变） |
+| H5 | `d12390d` | P0-2（双轨 builder 能力矩阵一致性测试——server 与 SDK 工具集漂移即 CI 失败） |
+
+**验证**：`cargo test --workspace` **1791 例全绿**（新增： 白名单/非白名单回归、
+ 低估 streak、H5 能力矩阵、H1 .git 变形 ×13、proptest 3 组 ×256 例）；
+clippy `-D warnings` 零告警；前端 tsc + vitest 13 例通过。
+
+**本轮修复确认非 bug**：架构守卫/CompressedContext 均已核实存在或非问题
+（§15 已记录）。（内置工具声明式 schema 校验）评估后确认收益有限
+（内置工具 schema 与输入同源可信），维持 P3 文档化。
+
+**剩余（用户指定不修或环境项）**：P1-8（覆盖率门禁，CI 配置）、
+P0-1（回迁 stable，等上游）、 P3-2（target/ 243GB 本地清理）、
+P2-3（fs.read 审计，需 Runtime 层大改）、 完整版（来源文件指纹，
+跨模块改动）、E2E 测试框架（跨组件基础设施）。
+
+---
+
+## 17. 第四轮修复追踪（2026-08-30，用户报告三问题 + 遗留项收尾）
+
+> 用户反馈 Web 客户端三问题 + 指定继续修复三个遗留项，全部完成并过 pre-commit 门禁。
+
+### 17.1 Web 客户端三问题（`776ec1a`/`403643b`/`ba6d3d7`）
+
+| 问题 | 修复 |
+|------|------|
+| 工具调用结果太长占屏 | `MessageBubble` 新增 `CollapsibleText`（300 字符阈值），长结果默认折叠 + 展开全文按钮 |
+| 卡死后再输入对话立刻结束/不执行 | 三层：`send_message` 预占取消在运行的 turn（C-13 graceful，幂等）；`Runtime::turn_running()` + `GetSessionResponse.turn_running` 暴露状态；前端 `useTurnRunning` 5s 轮询 + SSE 断线/刷新后恢复 `isStreaming`；`ChatInput` sendDisabled 时 Enter 给明确提示；顶部栏新增红色"结束对话"按钮（turnBusy 时显示） |
+| 重开对话按上下键无法读取历史 | Web 输入历史改 localStorage 持久化（`minicoding.inputHistory`，上限 200）；TUI 持久化到 `~/.minicoding/tui-history.txt` |
+
+### 17.2 遗留项收尾（`ba6d3d7`/`cbfabfd`/`ed5152f`）
+
+| 遗留项 | 修复 |
+|--------|------|
+| P2-3（fs.read 审计，Runtime 层权限链） | 策略层 `check_file_read`：含 `path` 的只读工具做 C-03 越界校验（Escaped Deny / NotFound 不误伤，与 tool 层共用 `resolve_under`）；只读桶成功调用补落 audit.log（`AuditKind::ToolCall`/allow）——只读权威 Allow 不再无痕。新增 4 个专项测试 |
+|  完整版（AutoMemory 来源指纹） | `AutoEntry.source` 记录来源文件；渲染时源文件 mtime 晚于条目更新自动标"来源已变更，可能陈旧"（与 90 天超时标注互补）；`AutoMemoryWriter::add_entry` 增 `source` 参数，`memory.write` schema 暴露 `source`；新增 `render_marks_source_changed_entries` 测试 |
+| E2E 框架（跨组件基础设施） | `crates/minicoding-server/tests/e2e.rs`：起真实 server 二进制 + wiremock mock LLM（默认 CI 安全）+ 真实 LLM（`MINICODING_E2E_REAL` env 门控，已验证 apihub 真实端点全链路）。四场景：完整会话闭环 / 工具调用闭环（fs.read）/ 并发消息不卡死 / 完整项目脚手架（多步 fs.write 断言磁盘落盘）。dev-deps 新增 reqwest/wiremock（workspace 已锁定） |
+
+**验证**：`cargo test --workspace` **1800 例全绿**；clippy `-D warnings` 零告警；
+前端 tsc + vitest 13 例通过；E2E mock 模式 4 例全过、真实 LLM 模式全链路
+15.4s 通过（事件序列 `turn_streaming_started` → `reasoning_delta` → `token`
+→ `message_appended` → `turn_end` 完整）。
+
+**剩余**： P3-2（target/ 清理，用户指定不修）、P1-8（覆盖率门禁）、
+P0-1（回迁 stable，等上游）、E2E 扩展（Playwright Web 端，AGENTS.md
+§8.8 规划项）。

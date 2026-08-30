@@ -383,7 +383,16 @@ mod s16_tests {
             Utf8PathBuf::from_path_buf(outside.canonicalize().expect("canon")).expect("utf8");
 
         // 形态 1：`nodir/../../<external>/f.txt`——`..` 弹出后落点在工作区外
-        let rel_parent = outside_utf8.strip_prefix("/").expect("绝对路径");
+        // 取外部目录相对文件系统根的路径（Windows 根为盘符，不能硬编码 `/`）
+        let rel_parent = std::path::Path::new(outside_utf8.as_str())
+            .ancestors()
+            .last()
+            .map(|root| {
+                outside_utf8
+                    .strip_prefix(root.to_string_lossy().as_ref())
+                    .expect("绝对路径")
+            })
+            .expect("绝对路径根");
         let escape1 = wd.join(format!("nodir/../../{rel_parent}/f.txt"));
         assert!(
             assert_within_workdir(&wd, &escape1).is_err(),

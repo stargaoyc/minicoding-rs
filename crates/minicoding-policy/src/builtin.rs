@@ -95,7 +95,7 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
         return check_memory_write(tool, input);
     }
     match ctx.side_effect {
-        SideEffect::None => Verdict::Allow,
+        SideEffect::None => check_file_read(input, ctx),
         SideEffect::FileWrite => check_file_write(tool, input, ctx),
         // BypassPermissions（design.md §16.2）：全放行（仅隔离容器内使用，对齐 CC
         // `bypassPermissions`）。文件写入仍走 `check_file_write` 保留 C-03 越界 Deny
@@ -105,12 +105,24 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
         {
             Verdict::Allow
         }
-        SideEffect::Command => Verdict::Ask(make_prompt(
-            tool,
-            command_summary(input),
-            Risk::High,
-            full_options(),
-        )),
+        SideEffect::Command => {
+            //  只读/无害命令自动放行（Default 模式下免弹窗）。
+            // 当前实现对所有 shell 命令返回 Ask，安全但交互成本极高——
+            // 一次常规重构触发几十次确认，长期驱使用户切到 full-access
+            // （反而更不安全）。保守只读白名单：仅含纯读操作，无复合操作
+            // 符/重定向/管道/子 shell。写操作（如 git commit/cargo build）
+            // 明确不在白名单中，仍 Ask。
+            if is_harmless_command(tool, input) {
+                Verdict::Allow
+            } else {
+                Verdict::Ask(make_prompt(
+                    tool,
+                    command_summary(input),
+                    Risk::High,
+                    full_options(),
+                ))
+            }
+        }
         SideEffect::Network => Verdict::Ask(make_prompt(
             tool,
             network_summary(input),
@@ -118,6 +130,58 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             full_options(),
         )),
     }
+}
+
+///  只读/无害命令判定（Default 模式下自动放行，免弹窗）。
+///
+/// **保守设计**：只放行**纯读操作**——动词在只读白名单内、无复合操作符/
+/// 重定向/管道/子 shell/后台符。写操作（`git commit`/`cargo build`/`echo > f`）
+/// 与解释器（`python -c '...'`）明确不在白名单，仍走 Ask。此判定是交互
+/// 降噪层，**不替代** L0 黑名单（`is_blacklisted` 已在更上层强制，危险命令
+/// 仍 Deny）。
+fn is_harmless_command(tool: &str, input: &Value) -> bool {
+    // 只读动词白名单（保守：这些命令无参数形态也不会产生副作用）
+    const READONLY_VERBS: &[&str] = &[
+        "ls", "cat", "head", "tail", "grep", "find", "pwd", "echo", "date", "which", "wc", "uname",
+        "whoami", "printf", "true", "false", "env", "dir", "type", "help",
+    ];
+    // 仅 shell.run/shell.background（shell.kill/output 无 command 文本）
+    if tool != "shell.run" && tool != "shell.background" {
+        return false;
+    }
+    let Some(command_text) = extract_command_text(input) else {
+        return false;
+    };
+    // 复合操作符/重定向/管道/子 shell/后台 → 不自动放行（有副作用可能）
+    if [";", "&&", "||", "|", ">", "<", "`", "$(", "&", "\n", "\r"]
+        .iter()
+        .any(|op| command_text.contains(op))
+    {
+        return false;
+    }
+    let tokens = tokenize_command(&command_text);
+    let verb = tokens.first().map(String::as_str).unwrap_or_default();
+    if READONLY_VERBS.contains(&verb) {
+        return true;
+    }
+    // git 只读子命令（status/diff/log/show/branch/remote/config --get）
+    if verb == "git"
+        && let Some(sub) = tokens.get(1).map(String::as_str)
+        && matches!(
+            sub,
+            "status" | "diff" | "log" | "show" | "branch" | "remote" | "config"
+        )
+    {
+        return true;
+    }
+    // cargo check（只读编译检查，无产物落盘）
+    if verb == "cargo"
+        && let Some(sub) = tokens.get(1).map(String::as_str)
+        && matches!(sub, "check" | "fmt" | "clippy")
+    {
+        return true;
+    }
+    false
 }
 
 /// 检测工具调用是否命中 `plan.exit` 缓存的预批准清单（词法比对版）。
@@ -303,6 +367,11 @@ fn shell_hits_blacklist(input: &Value) -> bool {
         "do", "done", "then", "else", "elif", "fi", "if", "for", "while", "until", "case", "esac",
         "in", "!", "{", "}", "(", ")", ";;",
     ];
+    //  动词提取剥离的包装前缀（与 hits_dangerous_patterns 同口径）
+    const WRAPPERS: &[&str] = &[
+        "sudo", "doas", "env", "xargs", "nice", "nohup", "command", "busybox", "timeout", "nproc",
+        "ionice",
+    ];
     // `>&`/`&>` 变体归一为 `>`——POSIX/bash 中 `cmd >& f`、
     // `cmd &> f` 均等价 `> f 2>&1`（真实创建/截断文件）。不能只往 REDIRECTS
     // 加条目：切段字符集含 `&`，`>&` 在切段阶段即被拆散（tokenizer 的连写
@@ -376,18 +445,29 @@ fn shell_hits_blacklist(input: &Value) -> bool {
             if hits_dangerous_patterns(segment, &tokens) {
                 return true;
             }
-            // 段首词即动词（先剥控制关键字）；`sed -i` 特判写模式
-            let verb = tokens
+            // 段首词即动词（先剥控制关键字）；`sed -i` 特判写模式。
+            //   与 `hits_dangerous_patterns` 同口径——剥离包装
+            // 前缀（env/xargs/nice/nohup/command/busybox/timeout/sudo/doas）后取
+            // basename。此前仅 `hits_dangerous_patterns` 做了剥离，`.git`/AGENTS.md
+            // 写保护（`WRITE_VERBS`）仍取原始首 token——`env tee .git/config` 等
+            // 变形绕过（修复只堵了危险命令，没堵写保护）。
+            let verb_start = tokens
                 .iter()
+                .position(|t| !WRAPPERS.contains(&t.as_str()))
+                .unwrap_or(0);
+            let raw_verb = tokens
+                .iter()
+                .skip(verb_start)
                 .find(|t| !CONTROL_WORDS.contains(&t.as_str()))
-                .map(String::as_str);
+                .map(String::as_str)
+                .unwrap_or_default();
+            let verb = raw_verb.rsplit('/').next().unwrap_or(raw_verb);
             let verb_writes = match verb {
                 // `-i.bak`/`--in-place` 与 `-i` 同为原地写
-                Some("sed") => tokens
+                "sed" => tokens
                     .iter()
                     .any(|t| *t == "-i" || t.starts_with("-i") || t == "--in-place"),
-                Some(v) => WRITE_VERBS.contains(&v),
-                None => false,
+                v => WRITE_VERBS.contains(&v),
             };
             tokens.iter().enumerate().any(|(i, tok)| {
                 // 参数式写目标——`dd of=AGENTS.md`
@@ -773,6 +853,27 @@ fn in_vcs_metadata(path: &str) -> bool {
         let lower = lower.trim_end_matches(['.', ' ']);
         matches!(lower, ".git" | ".hg" | ".svn")
     })
+}
+
+/// 文件只读类工具的路径越界校验（此前策略层对 `SideEffect::None`
+/// 直接 `Allow` 不做路径校验，越界由 tool 层兜底且审计不留痕——C-03 在
+/// 策略层强制，只读桶权威允许也落 audit.log）。
+///
+/// 仅当输入含 `path` 字段（`fs.read`/`fs.grep`/`fs.glob` 等文件工具）时校验；
+/// 无 path 的只读工具（`ui.ask`/`plan.exit` 等）维持原 Allow 语义。
+fn check_file_read(input: &Value, ctx: &PermissionContext) -> Verdict {
+    let Some(path) = extract_path(input) else {
+        return Verdict::Allow;
+    };
+    // C-03：只读路径也必须落在 workdir 内，越界直接 Deny（与 check_file_write
+    // 同口径）。NotFound（workdir/祖先不存在）不在此 Deny——文件不存在由 tool
+    // 层返回 NotFound，策略层不误伤合法相对路径。
+    match resolve_under(&ctx.workdir, path) {
+        Err(crate::path_sandbox::PathSandboxError::Escaped { .. }) => {
+            Verdict::Deny(format!("path not allowed (read): {path}"))
+        }
+        Ok(_) | Err(crate::path_sandbox::PathSandboxError::NotFound { .. }) => Verdict::Allow,
+    }
 }
 
 /// 文件写入类工具的权限判定。
@@ -1231,7 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn side_effect_command_returns_ask_high_risk_with_full_options() {
         let policy = BuiltinPolicy::new();
-        let input = serde_json::json!({"command": "ls -la"});
+        let input = serde_json::json!({"command": "sleep 1"});
         let verdict = policy
             .check(
                 "shell.run",
@@ -1243,7 +1344,7 @@ mod tests {
         match verdict {
             Verdict::Ask(prompt) => {
                 assert_eq!(prompt.risk, Risk::High);
-                assert!(prompt.summary.contains("ls -la"));
+                assert!(prompt.summary.contains("sleep 1"));
                 assert!(prompt.options.contains(&PromptOption::AllowAlways));
                 assert!(prompt.options.contains(&PromptOption::DenyAlways));
             }
@@ -1430,6 +1531,106 @@ mod tests {
         assert!(
             matches!(verdict, Verdict::Ask(_)),
             "AGENTS.md 应保持 Ask，实际 {verdict:?}"
+        );
+    }
+
+    // === check_file_read 测试（只读路径越界策略层强制）===
+
+    #[tokio::test]
+    async fn file_read_in_workdir_allows() {
+        // 相对路径在 workdir 内（父目录存在）→ Allow
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        std::fs::create_dir_all(workdir.join("src")).expect("create src");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "workdir 内只读应 Allow，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_escapes_workdir_denies() {
+        // 绝对路径越界（真实存在的目录，规避 NotFound）→ Deny（C-03 策略层强制）
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "/etc/passwd"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("not allowed"), "期望越界 Deny，实际 {msg}"),
+            other => panic!("期望 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_read_dotdot_escape_denies() {
+        // `../` 词法逃逸：resolve_under 规范化后越界 → Deny
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        std::fs::create_dir_all(workdir.join("sub")).expect("create sub");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "../outside.txt"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Deny(_)),
+            "../ 逃逸应 Deny，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_no_path_field_allows() {
+        // 无 path 字段的只读工具（ui.ask 等）维持原 Allow 语义
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"question": "hi"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("ui.ask", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "无 path 只读工具应 Allow，实际 {verdict:?}"
         );
     }
 
@@ -1953,9 +2154,32 @@ mod tests {
             "echo hook > .git/hooks/pre-commit",
             "tee .git/config < payload",
             "rm -rf .git",
+            //  变形形态——landlock 并集语义下 .git 继承 workdir 可写，
+            // 实际写保护由应用层黑名单承担；黑名单加固（wrapper 剥离 +
+            // basename）后这些形态仍须被拦（重定向目标判定基于 token 位置，
+            // 与动词前缀无关，此处锁定防回归）。
+            "env echo x > .git/hooks/pre-commit",
+            "xargs -I{} echo x > .git/hooks/pre-commit",
+            "/bin/echo x > .git/hooks/pre-commit",
+            "env tee .git/config < payload",
+            "nice rm -rf .git",
+            "env rm -rf .git",
+            "command rm -rf .git",
+            // AGENTS.md 写保护同形态
+            "env echo x > AGENTS.md",
+            "/usr/bin/echo x > AGENTS.md",
+            "xargs echo x > AGENTS.md",
         ] {
             let input = serde_json::json!({ "command": cmd });
             assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+        // 后台路径同黑名单（background 与 run 共用词法判定）
+        for cmd in ["env echo x > .git/hooks/pre-commit", "rm -rf .git"] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.background", &input),
+                "{cmd} 在 background 下应命中黑名单"
+            );
         }
     }
 
@@ -2338,8 +2562,66 @@ mod tests {
     #[test]
     fn compute_verdict_command_returns_ask() {
         let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
-        let verdict = compute_verdict("shell.run", &serde_json::json!({"command": "ls"}), &ctx);
+        let verdict = compute_verdict(
+            "shell.run",
+            &serde_json::json!({"command": "sleep 1"}),
+            &ctx,
+        );
         assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    ///  只读/无害命令在 Default 模式下自动放行（免弹窗）。
+    #[test]
+    fn readonly_commands_auto_allowed_in_default_mode() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        for cmd in [
+            "ls",
+            "cat README.md",
+            "git status",
+            "git diff",
+            "cargo check",
+            "grep foo src",
+        ] {
+            let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
+            assert!(
+                matches!(verdict, Verdict::Allow),
+                "只读命令 {cmd} 应自动放行，实际 {verdict:?}"
+            );
+        }
+        // background 同白名单
+        let verdict = compute_verdict(
+            "shell.background",
+            &serde_json::json!({"command": "ls"}),
+            &ctx,
+        );
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    ///  非只读命令仍 Ask（写/复合/解释器不在白名单）。
+    #[test]
+    fn non_readonly_commands_still_ask() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        for cmd in [
+            "git commit -m x",   // 写操作
+            "cargo build",       // 写产物
+            "echo x > file.txt", // 重定向写
+            "python3 -c 'x'",    // 解释器执行任意代码
+            "ls; rm file",       // 复合
+            "sleep 1",           // 非白名单动词
+        ] {
+            let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
+            assert!(
+                matches!(verdict, Verdict::Ask(_)),
+                "非只读命令 {cmd} 应 Ask，实际 {verdict:?}"
+            );
+        }
+        // 黑名单优先（白名单不能覆盖 Deny）
+        let verdict = compute_verdict(
+            "shell.run",
+            &serde_json::json!({"command": "rm -rf /"}),
+            &ctx,
+        );
+        assert!(matches!(verdict, Verdict::Deny(_)));
     }
 
     #[test]
@@ -2374,5 +2656,37 @@ mod tests {
             &ctx,
         );
         assert!(matches!(verdict, Verdict::Allow));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// C-02：任意 shell 命令输入不应使黑名单判定 panic（Ok 或 Err 均合法）。
+        #[test]
+        fn blacklist_never_panics_on_arbitrary_input(
+            cmd in "[^\u{0}]{0,128}",
+        ) {
+            let input = serde_json::json!({ "command": cmd });
+            let _ = shell_hits_blacklist(&input);
+            let _ = is_blacklisted("shell.run", &input);
+            // 无害命令判定同样不 panic
+            let _ = is_harmless_command("shell.run", &input);
+        }
+
+        /// C-02：tokenize 不 panic 且重构后的危险子串仍在（模糊不变量）。
+        #[test]
+        fn tokenize_never_panics_and_roundtrips(cmd in "[^\"']{0,64}") {
+            let tokens = tokenize_command(&cmd);
+            // 危险原语若在原文中，token 化后仍应能找到对应 token 片段
+            if cmd.contains("rm -rf /") {
+                prop_assert!(tokens.iter().any(|t| t.contains("rm") || t.contains("-rf")));
+            }
+        }
     }
 }

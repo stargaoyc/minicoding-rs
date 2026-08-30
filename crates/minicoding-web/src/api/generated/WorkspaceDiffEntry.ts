@@ -4,16 +4,17 @@ import type { WorkspaceFileChange } from "./WorkspaceFileChange";
 /**
  * diff 单条记录（一次操作批次的全部文件改动）。
  */
-export type WorkspaceDiffEntry = { 
-/**
- * 触发该批改动的用户消息 id。
- */
-op_id: string, 
-/**
- * 触发消息前 80 字（展示用）。
- */
-prompt_snippet: string, 
-/**
- * 该批次内的所有文件改动。
- */
-files: Array<WorkspaceFileChange>, };
+export type WorkspaceDiffEntry = {
+  /**
+   * 触发该批改动的用户消息 id。
+   */
+  op_id: string;
+  /**
+   * 触发消息前 80 字（展示用）。
+   */
+  prompt_snippet: string;
+  /**
+   * 该批次内的所有文件改动。
+   */
+  files: Array<WorkspaceFileChange>;
+};
