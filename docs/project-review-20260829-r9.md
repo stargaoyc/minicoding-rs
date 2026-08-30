@@ -828,3 +828,34 @@ git ls-files | wc -l ; du -sh target ; git tag | wc -l
 | git tag | 44（v0.3.5–v0.3.9 近期） |
 | `target/` 体积 | 243 GB |
 | crate 数 | 18 Cargo + 1 npm |
+
+---
+
+## 14. 修复进度追踪（2026-08-29 当日，随批次提交）
+
+> 审查落盘后当日分批完成修复，每批过 pre-commit 门禁（fmt/clippy -D warnings/deny）。
+
+| 批次 | 提交 | 覆盖问题 |
+|------|------|---------|
+| 文档 | `63a0e58` | DOC-1~5（hooks.toml/项目级配置/模块树/标题层级）+ security 引用清理 |
+| 安全关键 | `55e452f` | STR-0（崩溃半行冻结+自愈）、PATH-1（is_under 规范化 + assert_within_workdir 尾部保留） |
+| 安全关键 | `f8a9910`/`b84478e` | TOOL-5（background stdin null）、MCP-3（描述注入清洗）、MCP-6（远端结果输出上限） |
+| 黑名单 | `2f9ddc3` | P1-1（basename/小写/包装前缀剥离/ROOT_TARGETS 扩展/fork bomb 结构/内联解释器 + 19 payload 回归） |
+| Low-risk | `89aad59` | SRV-2（body limit）、P2-4（~ 路径拒绝）、FS-1（create_new） |
+| Storage | `24b069e` | STR-2（索引损坏读写对称化）、STR-4/5（删除持锁）、STR-7（父目录 fsync）、STR-8（fork 批量写） |
+| MCP | `6afd36a` | MCP-1（批准命令指纹，配置变更需重新批准） |
+| 标注 | `d249712`/`c82aec1`/`1a39e41` | MCP-5（warm_up 预留标注）、P3 常量重复、MCP-2（allowed_domains 未实现披露）、DOC-3（ConfigChanged 更正）、DOC-4（MCP 配置格式）、NET-1（SSRF 死代码标注） |
+
+**验证**：`cargo test --workspace` 1781 例全绿（新增 12 例回归：STR-0 半行 ×2、
+PATH-1 is_under/mkdir 逃逸、P2-4 ~、黑名单 19 payload、sse seq）；clippy `-D
+warnings` 零告警；前端 tsc + vitest 13 例通过。
+
+**已确认非 bug（代码注释/文档如实披露）**：MCP-4（tool_search 已有 mod 声明，
+R9b 审查时未同步）；MCP-5（warm_up 预留能力）；NET-1（policy::ssrf 死代码
+标注"新代码不得调用"）。
+
+**遗留架构级项（需独立排期）**：ENG-1（回迁 stable 工具链，等 1.99 发布）、
+P0-2（合并双轨 builder，server 委托 sdk）、SANDBOX-2（Windows FIFO→pid 映射）、
+SANDBOX-1（Linux 旧内核网络限制提示）、CI-1（cli/server/tui 覆盖率独立门槛 +
+去 `|| true`）、ENG-2（target 清理）、UX-1（只读命令自动放行）、UX-3（/undo
+默认开启落盘）。
