@@ -334,7 +334,11 @@ pub fn assert_within_workdir(
     if minicoding_policy::is_under(&cand, &wd) {
         Ok(())
     } else {
-        Err(ToolError::Exec(format!(
+        // R9 TOOL-6：返回 `PathEscaped` 而非 `Exec`——Runtime 对 `PathEscaped`
+        // 有专门的 denial 计数/审计路径，`Exec` 归类为普通执行错误（绕过
+        // PathEscaped 的审计归类）。调用方 `write.rs` 的 NotFound 分支（mkdir
+        // 前防护）以 `?` 上抛，错误类型不变更调用语义。
+        Err(ToolError::PathEscaped(format!(
             "path escapes workdir: {candidate}"
         )))
     }
