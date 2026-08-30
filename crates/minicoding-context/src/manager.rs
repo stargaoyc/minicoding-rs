@@ -32,6 +32,11 @@ use crate::compress::{
     should_predict_compact,
 };
 
+/// R9 CTX-2：低估检测常量——连续 3 次实际用量超本地估算 20% 触发压缩阈值收紧。
+const UNDERESTIMATE_TRIGGER: usize = 3;
+/// R9 CTX-2：低估判定的整数百分比阈值（实际 ≥ 估算 × 120% 视为低估）。
+const UNDERESTIMATE_RATIO_PCT: usize = 120;
+
 /// 根据压缩结果计算压缩级别（0-4，用于 metrics 维度）。
 ///
 /// 级别语义：`0`=无操作；`1`=L1 裁剪；`2`=L2 摘要；`3`=L3 滚动；`4`=L4 硬截断。
@@ -82,6 +87,10 @@ pub struct ContextManagerImpl {
     circuit_breaker: Mutex<CircuitBreaker>,
     // C-08：预测性压缩追踪器（记录每 turn token 历史）。
     predictive_tracker: Mutex<PredictiveTracker>,
+    // R9 CTX-2：连续低估计数器（`calibrate` 检测到 provider 实际用量持续高于
+    // 本地估算时递增，累积到阈值后收紧压缩触发比例——防"低估 → 压缩触发晚
+    // → 真实 400 → force_compress → 熔断"的静默降级路径）。
+    underestimate_streak: AtomicUsize,
     // M-07（R-02）：消息序号锚点——append 计数，供压缩追溯区间推算
     // （每条 append 的消息占一个连续序号，与事件流 seq 的关系见
     // `CompressedRange` 文档；Step 事件不占消息序号）。
@@ -127,6 +136,7 @@ impl ContextManagerImpl {
             token_cache: AtomicUsize::new(0),
             circuit_breaker: Mutex::new(CircuitBreaker::new()),
             predictive_tracker: Mutex::new(PredictiveTracker::new()),
+            underestimate_streak: AtomicUsize::new(0),
             append_seq: AtomicU64::new(0),
             audit: None,
             session_id: std::sync::Mutex::new(None),
@@ -412,7 +422,10 @@ impl ContextManagerImpl {
             .await;
         }
 
-        let threshold = self.budget.compact_threshold();
+        // R9 CTX-2：触发阈值改用 `effective_compact_threshold()`——检测到持续
+        // 低估（calibrate 累计 streak）时提前触发压缩，防"触发晚 → 真实 400 →
+        // force_compress → 熔断"静默降级路径。
+        let threshold = self.effective_compact_threshold();
         let fixed_overhead = self.fixed_overhead.load(Ordering::SeqCst);
         let effective_threshold = threshold.saturating_sub(fixed_overhead);
         let mut breaker = self.circuit_breaker.lock().await;
@@ -516,6 +529,25 @@ impl ContextManagerImpl {
         metrics::set_circuit_breaker("compress", "warning");
         Ok(())
     }
+
+    /// R9 CTX-2：压缩触发阈值（考虑低估收紧）。
+    ///
+    /// 正常情况下与 `budget.compact_threshold()` 一致；检测到持续低估（
+    /// [`ContextManager::calibrate`] 累计 streak）时按低估强度提前触发压缩——
+    /// 低估方向越强触发越早，避免"压缩触发晚 → 真实 400 → `force_compress` →
+    /// 熔断"静默降级路径。
+    #[must_use]
+    fn effective_compact_threshold(&self) -> usize {
+        let streak = self.underestimate_streak.load(Ordering::SeqCst);
+        let base = self.budget.compact_threshold();
+        if streak == 0 {
+            return base;
+        }
+        // 每连续低估 3 次收紧 10%，最多收紧 40%（低估严重时几乎每轮都收紧）。
+        // 用整数百分比运算避免 f64 精度/截断告警。
+        let tighten_pct = (streak / 3).min(4) * 10;
+        base.saturating_mul(100 - tighten_pct) / 100
+    }
 }
 
 impl fmt::Debug for ContextManagerImpl {
@@ -559,6 +591,28 @@ impl ContextManager for ContextManagerImpl {
         let current = self.token_cache.load(Ordering::SeqCst);
         let blended = usize::midpoint(current, messages_actual);
         self.token_cache.store(blended, Ordering::SeqCst);
+        // R9 CTX-2：低估检测——provider 实际用量（扣固定开销后）持续高于本地
+        // 估算（token_cache），说明分词器/估算系统性低估（压缩触发过晚 → 真实
+        // 400 → force_compress → 熔断的静默降级路径）。连续
+        // [`ContextManagerImpl::UNDERESTIMATE_TRIGGER`] 次超 20% 后，
+        // `effective_compact_threshold` 按低估强度收紧触发阈值（提前压缩，而非
+        // 等真实 400）。整数百分比比较避免浮点转换（CLIPPY pedantic）。
+        if messages_actual > 0 && current > 0 {
+            let ratio_pct = messages_actual.saturating_mul(100) / current;
+            if ratio_pct > UNDERESTIMATE_RATIO_PCT {
+                let streak = self.underestimate_streak.fetch_add(1, Ordering::SeqCst) + 1;
+                if streak >= UNDERESTIMATE_TRIGGER {
+                    tracing::warn!(
+                        streak,
+                        estimate = current,
+                        actual = messages_actual,
+                        "上下文 token 估算连续低估（>20%），已收紧压缩触发阈值（防真实 400 熔断）"
+                    );
+                }
+            } else {
+                self.underestimate_streak.store(0, Ordering::SeqCst);
+            }
+        }
         tracing::debug!(
             current,
             actual = actual_input_tokens,
@@ -1475,5 +1529,39 @@ mod tests {
             mgr.append(Message::user_text("x".repeat(200))).await;
         }
         mgr.compress().await.expect("compress 应成功");
+    }
+
+    // ===== R9 CTX-2：低估检测与触发阈值收紧 =====
+
+    #[test]
+    fn calibrate_tracks_underestimate_streak() {
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(CharTokenizer);
+        let mgr = ContextManagerImpl::new("sys".into(), tokenizer, 128_000, None);
+        // 初始估算 1000 token；provider 实际持续报 10000（远超 20% 低估）。
+        // midpoint 收敛使 current 逐次升高，actual=10000 在 cache 升至 7750
+        // 前仍 >20%，足以累计到 3 次。
+        mgr.token_cache.store(1_000, Ordering::SeqCst);
+        mgr.calibrate(10_000);
+        assert_eq!(mgr.underestimate_streak.load(Ordering::SeqCst), 1);
+        mgr.calibrate(10_000);
+        assert_eq!(mgr.underestimate_streak.load(Ordering::SeqCst), 2);
+        // 第三次触发收紧（streak >= 3）
+        mgr.calibrate(10_000);
+        assert_eq!(mgr.underestimate_streak.load(Ordering::SeqCst), 3);
+        // 有效阈值应低于 base（128000 * 0.85 = 108800，收紧 10% → ~97920）
+        let base = TokenBudget::new(128_000).compact_threshold();
+        let eff = mgr.effective_compact_threshold();
+        assert!(
+            eff < base,
+            "低估 streak 后阈值应收紧: eff={eff} base={base}"
+        );
+        // 正常用量不累计（重置 streak）
+        mgr.token_cache.store(10_000, Ordering::SeqCst);
+        mgr.calibrate(11_000);
+        assert_eq!(
+            mgr.underestimate_streak.load(Ordering::SeqCst),
+            0,
+            "正常用量应重置低估 streak"
+        );
     }
 }
