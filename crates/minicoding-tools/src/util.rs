@@ -292,30 +292,41 @@ pub fn assert_within_workdir(
         .canonicalize_utf8()
         .unwrap_or_else(|_| workdir.clone());
     let cand = candidate.canonicalize_utf8().or_else(|_| {
-        // 目标不存在：对最长存在祖先规范化后拼回剩余段
+        // 目标不存在：对最长存在祖先规范化后，把**剩余相对尾部原文**（含 `..`
+        // 段）拼回。R9 PATH-1 修复：此前按层级收集 `file_name` 重建会**丢失
+        // `..` 段**（`file_name` 对 `..` 返回 `None`），重建路径看似仍以 workdir
+        // 开头而放行（mkdir 逃逸）。保留尾部原文后交由 `is_under` 做词法 `..`
+        // 规范化比较（见下）。
         let mut ancestor = candidate.clone();
-        let mut suffix = Vec::new();
+        let mut tail: Option<String> = None;
         loop {
-            ancestor = ancestor
-                .parent()
-                .map(Utf8PathBuf::from)
-                .unwrap_or(ancestor.clone());
-            suffix.push(
+            let parent = ancestor.parent().map(Utf8PathBuf::from);
+            let Some(prev) = parent else {
+                break;
+            };
+            tail = Some(
                 candidate
-                    .strip_prefix(&ancestor)
+                    .strip_prefix(&prev)
                     .map(std::string::ToString::to_string)
                     .unwrap_or_default(),
             );
-            if ancestor.canonicalize_utf8().is_ok() || ancestor.parent().is_none() {
+            ancestor = prev;
+            if ancestor.canonicalize_utf8().is_ok() {
                 break;
             }
         }
         ancestor
             .canonicalize_utf8()
-            .map(|canon| suffix.iter().rev().fold(canon, |acc, seg| acc.join(seg)))
+            .map(|canon| match tail {
+                Some(t) if !t.is_empty() => canon.join(t),
+                _ => canon,
+            })
             .map_err(|e| ToolError::Exec(format!("path normalize failed: {e}")))
     })?;
-    if cand.starts_with(&wd) {
+    // R9 PATH-1 修复：最终包容判定用 policy 的 `is_under`（词法规范化 `..`
+    // 后组件级比较）——`starts_with` 不解析 `..`，候选含 `..` 段时仍会
+    // 误放行（mkdir 逃逸）。`is_under` 为纯组件操作，路径不必存在。
+    if minicoding_policy::is_under(&cand, &wd) {
         Ok(())
     } else {
         Err(ToolError::Exec(format!(
@@ -344,5 +355,42 @@ mod s16_tests {
             Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canon")).expect("utf8");
         // 不存在的越界路径（mkdir 前防护场景）
         assert!(assert_within_workdir(&wd, &Utf8PathBuf::from("/tmp/s16-escape/a/b")).is_err());
+    }
+
+    /// R9 PATH-1：`nodir/../../evil/f.txt` 形态的 mkdir 逃逸——
+    /// 此前 suffix 每层 push 完整相对段，`.rev().fold(acc.join(seg))` 堆叠出
+    /// 仍以 workdir 开头的垃圾路径被 `starts_with` 放行，`create_dir_all` 可
+    /// 在工作区外创建目录。修复后规范化 `..` 正确拒绝。
+    #[test]
+    fn mkdir_escape_with_dotdot_rejected() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let wd =
+            Utf8PathBuf::from_path_buf(tmp.path().canonicalize().expect("canon")).expect("utf8");
+        // 外部落点：用 `/tmp/` 下的真实目录（非 wd 下属）
+        let outside = std::path::Path::new("/tmp").join("fp_mkdir_escape");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("外部目录");
+        let outside_utf8 =
+            Utf8PathBuf::from_path_buf(outside.canonicalize().expect("canon")).expect("utf8");
+
+        // 形态 1：`nodir/../../<external>/f.txt`——`..` 弹出后落点在工作区外
+        let rel_parent = outside_utf8.strip_prefix("/").expect("绝对路径");
+        let escape1 = wd.join(format!("nodir/../../{rel_parent}/f.txt"));
+        assert!(
+            assert_within_workdir(&wd, &escape1).is_err(),
+            ".. 逃逸应被拒绝: {escape1}"
+        );
+
+        // 形态 2：`../<external>/x.txt`
+        let escape2 = wd.join(format!("../{rel_parent}/x.txt"));
+        assert!(
+            assert_within_workdir(&wd, &escape2).is_err(),
+            ".. 逃逸应被拒绝: {escape2}"
+        );
+
+        // 正常相对子路径仍放行
+        assert!(assert_within_workdir(&wd, &wd.join("sub/new/file.txt")).is_ok());
+
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

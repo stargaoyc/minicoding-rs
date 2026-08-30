@@ -78,8 +78,43 @@ pub fn resolve_under(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, 
 ///
 /// 使用 `Utf8Path::starts_with` 做组件级前缀匹配，避免字符串前缀误判：
 /// `/foo/bar` 在 `/foo` 之下为真，而 `/foo/barbaz` 在 `/foo/bar` 之下为假。
+///
+/// **R9 PATH-1 修复**：`starts_with` 是**词法组件匹配，不解析 `..`**——
+/// `/tmp/wd/nodir/../../evil/f.txt` 对 `/tmp/wd` 的 `starts_with` 判真（`..` 段不
+/// 弹出），连绝对路径逃逸都能通过。先对两侧做词法 `..` 规范化（纯组件栈，
+/// 不触碰文件系统），再组件级前缀比较。
+#[must_use]
 pub fn is_under(child: &Utf8Path, parent: &Utf8Path) -> bool {
-    child.starts_with(parent)
+    let child_comp = normalize_components(child);
+    let parent_comp = normalize_components(parent);
+    child_comp.len() >= parent_comp.len() && child_comp[..parent_comp.len()] == parent_comp[..]
+}
+
+/// 词法规范化路径组件（消解 `.`/`..`，纯组件栈操作，不触碰文件系统）。
+///
+/// 与 `std::fs::canonicalize` 不同：不解析符号链接、不要求路径存在——仅消除
+/// `.` 与 `..` 段（`..` 弹出上一段；栈空时保留 `..`，相对路径语义不变式，
+/// 与 core `normalize_lexical_rel_path` 一致）。用于 `is_under` 的逃逸判定：
+/// 含 `..` 的候选路径在规范化后正确落在（或不落在）父目录下。
+fn normalize_components(path: &Utf8Path) -> Vec<camino::Utf8Component<'_>> {
+    let mut stack: Vec<camino::Utf8Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            camino::Utf8Component::CurDir => {}
+            camino::Utf8Component::ParentDir => {
+                if stack
+                    .last()
+                    .is_some_and(|c| matches!(c, camino::Utf8Component::Normal(_)))
+                {
+                    stack.pop();
+                } else {
+                    stack.push(comp);
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    stack
 }
 
 /// 规范化一个可能尚不存在的路径：直接 `canonicalize` 失败时，回退到最长
@@ -191,6 +226,25 @@ mod tests {
         let child_out = Utf8Path::new("/foo/barbaz");
         assert!(is_under(child_in, parent));
         assert!(!is_under(child_out, parent));
+    }
+
+    /// R9 PATH-1：`is_under` 必须规范化 `..`——词法 `starts_with` 会把
+    /// `/tmp/wd/nodir/../../evil/f.txt` 判为在 `/tmp/wd` 之下（`..` 段不弹出）。
+    #[test]
+    fn is_under_resolves_parent_segments() {
+        let parent = Utf8Path::new("/tmp/wd");
+        // `..` 弹出后实际落在 /tmp 之下，不在 /tmp/wd 之下
+        assert!(!is_under(
+            Utf8Path::new("/tmp/wd/nodir/../../evil/f.txt"),
+            parent
+        ));
+        assert!(!is_under(Utf8Path::new("/tmp/wd/../../etc/passwd"), parent));
+        // 同级 `..` 归位后仍在父目录内
+        assert!(is_under(Utf8Path::new("/tmp/wd/a/../b.txt"), parent));
+        assert!(is_under(Utf8Path::new("/tmp/wd/sub/../c.txt"), parent));
+        // 父目录自身 + 直接子路径
+        assert!(is_under(Utf8Path::new("/tmp/wd"), parent));
+        assert!(is_under(Utf8Path::new("/tmp/wd/x/y.txt"), parent));
     }
 }
 

@@ -26,7 +26,7 @@ mod tui;
 
 pub use builtin::BuiltinPolicy;
 pub use mode::{ApprovalMode, Preset};
-pub use path_sandbox::{PathSandboxError, resolve_under};
+pub use path_sandbox::{PathSandboxError, is_under, resolve_under};
 pub use prompter::{
     AutoApprovePrompter, CallbackPrompter, InteractivePrompter, NonInteractivePrompter,
 };

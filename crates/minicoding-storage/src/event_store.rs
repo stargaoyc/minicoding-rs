@@ -119,6 +119,12 @@ impl JsonlEventStore {
 /// 冻结）且 `next_seq_sync` 失败（`--resume`/`--replay` 不可用）。修复：末行
 /// 若跨窗口起点（缓冲区内无换行符且起点非文件头），向前回退窗口再读，直到
 /// 取到完整末行；每次读 ≤ 8 KiB（O(1) 内存）。文件不存在/为空返回 `None`。
+///
+/// **R9 STR-0 修复**：崩溃（`kill -9`/断电/磁盘满）会在文件尾留下**无换行结尾
+/// 的半行**。此前半行被当作"完整末行"返回 → `next_seq_sync`/`append` 解析失败
+/// 硬报 Corrupted（事件流永久冻结、`--resume` 硬失败、无自愈）。本函数改为
+/// 跳过无换行结尾的尾部半行，返回其前一条**完整**行（与 `parse_events` 的
+/// 坏行跳过策略对齐）；整文件仅一条半行时返回 `None`。
 fn read_tail_line(path: &std::path::Path) -> std::io::Result<Option<String>> {
     use std::io::{Read, Seek, SeekFrom};
     const WINDOW: usize = 8 * 1024;
@@ -148,11 +154,89 @@ fn read_tail_line(path: &std::path::Path) -> std::io::Result<Option<String>> {
             start = start.saturating_sub(WINDOW as u64);
             continue;
         }
+        // R9 STR-0：文件未以 `\n` 结尾 = 尾部半行（崩溃残留），跳过它——
+        // 从最后一个换行前的完整行返回。窗口内找不到更早换行则回退扩展。
+        if !text.ends_with('\n') {
+            let Some(nl_pos) = text.rfind('\n') else {
+                // 整窗口无换行：可能是超长半行/超长完整行跨窗口，回退扩展
+                if start == 0 {
+                    // 整个文件仅一条半行（无任何完整行）→ 视为无末行
+                    return Ok(None);
+                }
+                start = start.saturating_sub(WINDOW as u64);
+                continue;
+            };
+            // 半行之前有换行：取换行前的最后一个完整行（`..nl_pos` 段内）。
+            let before = &text[..nl_pos];
+            match before.rfind('\n') {
+                Some(prev_nl) => return Ok(Some(before[prev_nl + 1..].to_string())),
+                None if start == 0 => {
+                    // 窗口即文件头：半行前仅一条完整行（整文件就这一行 + 半行）
+                    return Ok(Some(before.to_string()));
+                }
+                None => {
+                    // 完整行跨窗口起点，回退扩展
+                    start = start.saturating_sub(WINDOW as u64);
+                    continue;
+                }
+            }
+        }
         if let Some(nl_pos) = trimmed.rfind('\n') {
             return Ok(Some(trimmed[nl_pos + 1..].to_string()));
         }
         if start == 0 {
             return Ok(Some(trimmed.to_string()));
+        }
+        start = start.saturating_sub(WINDOW as u64);
+    }
+}
+
+/// 截断文件尾部的崩溃半行（R9 STR-0 自愈）。
+///
+/// 事件文件尾部若不以 `\n` 结尾，说明 `kill -9`/断电/磁盘满打断了一次写入，
+/// 留下半行不完整 JSON。此半行会：
+/// - 使 `next_seq_sync`/`append` 的尾行解析失败（硬报 Corrupted，事件流冻结）；
+/// - 若直接在其后 append 新行，新行会拼到半行后形成**更长**的坏行。
+///
+/// 本函数把文件截断到最后一个完整行末尾（保留 `\n`），使后续 append 从完整
+/// 行续写。无 `\n`（整文件仅一条半行）时截断为空文件。幂等：尾部已是完整行
+/// 或文件为空/不存在时不动作。调用方须持会话锁（与 `read_tail_line` 同约定）。
+fn truncate_partial_tail(path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: usize = 8 * 1024;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    // 尾部已是 `\n` 结尾：无半行，无需动作
+    file.seek(SeekFrom::Start(len.saturating_sub(1)))?;
+    let mut last = [0u8; 1];
+    if file.read_exact(&mut last).is_ok() && last[0] == b'\n' {
+        return Ok(());
+    }
+    // 从文件尾向前找最后一个 `\n`（块回退，O(1) 内存）
+    let mut start = len.saturating_sub(WINDOW as u64);
+    loop {
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = Vec::with_capacity(WINDOW);
+        file.read_to_end(&mut buf)?;
+        if let Some(nl_pos) = buf.iter().rposition(|&b| b == b'\n') {
+            file.set_len(start + (nl_pos as u64) + 1)?;
+            return Ok(());
+        }
+        if start == 0 {
+            // 全文件无 `\n`：整文件是半行，清空
+            file.set_len(0)?;
+            return Ok(());
         }
         start = start.saturating_sub(WINDOW as u64);
     }
@@ -186,6 +270,11 @@ impl EventStore for JsonlEventStore {
             // 尾 seq"，冲突 fail-closed 报错。
             // ST-9（2026-08-28 R5 收尾）：尾部读取改 seek 8 KiB 窗口（O(1) 内存），
             // 替代全文 read_to_string——长会话事件文件 append 每次全读为平方级 IO。
+            // R9 STR-0 自愈：append 前检测尾部半行（崩溃残留，不以 \n 结尾），
+            // 截断到最后一个完整行——否则新行接在半行后形成更长坏行，事件流
+            // 永久冻结且 `--resume` 硬失败。截断后从完整行续写。
+            truncate_partial_tail(path.as_std_path())
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
             {
                 let tail = read_tail_line(path.as_std_path())
                     .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
@@ -477,5 +566,53 @@ mod tests {
         st.append(&id, make_record(2, &id, "short")).await.unwrap();
 
         assert_eq!(st.next_seq_sync(&id).unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn crash_half_line_does_not_freeze_event_stream() {
+        // R9 STR-0（P0）：崩溃（kill -9/断电/磁盘满）留下无换行结尾的半行——
+        // 此前 next_seq_sync 解析失败硬报 Corrupted（不可 resume），append
+        // 恒失败（事件流永久冻结），且新行拼到半行后形成更长坏行。修复后：
+        // ① read_tail_line 跳过半行返回上一条完整行；② append 前截断半行自愈。
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01HALFLINE".to_string();
+        let path = st.session_path(&id);
+
+        st.append(&id, make_record(1, &id, "ok1")).await.unwrap();
+        st.append(&id, make_record(2, &id, "ok2")).await.unwrap();
+        // 模拟崩溃：在文件尾追加无换行的半行
+        let existing = std::fs::read_to_string(path.as_std_path()).unwrap();
+        let crashed = format!("{existing}{{crash:true,\"trunc");
+        std::fs::write(path.as_std_path(), crashed).unwrap();
+
+        // next_seq_sync 应跳过半行，返回最后完整行 seq=2 + 1 = 3（不再硬失败）
+        assert_eq!(st.next_seq_sync(&id).unwrap(), 3, "半行不应使 resume 失败");
+
+        // append 应截断半行并正常续写（自愈），事件流不冻结
+        st.append(&id, make_record(3, &id, "ok3")).await.unwrap();
+        let records = st.load(&id).await.unwrap();
+        assert_eq!(records.len(), 3, "半行被截断后三条完整事件均应保留");
+        assert_eq!(records[2].seq, 3);
+        // 文件尾部应为完整行 + 换行
+        let content = std::fs::read_to_string(path.as_std_path()).unwrap();
+        assert!(content.ends_with('\n'), "append 后文件应以换行结尾");
+        assert!(!content.contains("crash"), "半行应被截断清除");
+    }
+
+    #[tokio::test]
+    async fn crash_half_line_only_file_is_self_healed() {
+        // 整文件仅一条半行（崩溃发生在首条事件写入途中）——清空后从 seq=1 续写
+        let dir = tempdir().unwrap();
+        let st = storage(&dir);
+        let id = "01HALFONLY".to_string();
+        let path = st.session_path(&id);
+        std::fs::write(path.as_std_path(), "{\"trunc").unwrap();
+
+        assert_eq!(st.next_seq_sync(&id).unwrap(), 1, "仅半行应视为无事件");
+        st.append(&id, make_record(1, &id, "first")).await.unwrap();
+        let records = st.load(&id).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 1);
     }
 }
