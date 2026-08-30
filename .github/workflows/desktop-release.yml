@@ -56,18 +56,19 @@ jobs:
         with:
           persist-credentials: false
 
-      # 工具链与 ci.yml 对齐：钉住 nightly-2026-08-18。项目 MSRV 1.99 而当前
-      # stable 频道为 1.98（runner 镜像亦然），stable 无法编译项目代码；v0.2.33
-      # 能过纯属裸 cargo 恰好解析到 nightly（dtolnay action 上游行为变更后失效，
-      # v0.3.0 连续发布失败的根因）。分工如下：
-      #   - 项目代码（server sidecar / desktop app）：nightly-2026-08-18，
+      # 工具链与 ci.yml 对齐：滚动 nightly（2026-08-30 解除钉版，ICE 已由
+      # 2026-08-27 nightly 修复；曾钉住 nightly-2026-08-18）。项目 MSRV 1.99
+      # 而当前 stable 频道为 1.98（runner 镜像亦然），stable 无法编译项目代码；
+      # v0.2.33 能过纯属裸 cargo 恰好解析到 nightly（dtolnay action 上游行为
+      # 变更后失效，v0.3.0 连续发布失败的根因）。分工如下：
+      #   - 项目代码（server sidecar / desktop app）：nightly（滚动），
       #     所有编译步骤显式 `rustup run`，不依赖隐式解析；
       #   - tauri-cli 外部工具：runner 预装 stable 即可（不涉及项目 MSRV）。
       # 交叉目标 std 由 targets 参数直接装入 nightly 工具链。
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
-          toolchain: nightly-2026-08-18
+          toolchain: nightly
           targets: ${{ matrix.target }}
 
       - name: Rust cache
@@ -116,7 +117,7 @@ jobs:
           pnpm run build
 
       - name: Build minicoding-server binary
-        run: rustup run nightly-2026-08-18 cargo build --release -p minicoding-server --target ${{ matrix.target }}
+        run: rustup run nightly cargo build --release -p minicoding-server --target ${{ matrix.target }}
 
       - name: Place sidecar binary (Unix)
         if: runner.os != 'Windows'
@@ -136,7 +137,7 @@ jobs:
 
       - name: Tauri build
         working-directory: crates/minicoding-desktop
-        run: rustup run nightly-2026-08-18 cargo tauri build --target ${{ matrix.target }} --features desktop
+        run: rustup run nightly cargo tauri build --target ${{ matrix.target }} --features desktop
 
       - name: List bundle output
         # 调试：显示 Tauri 产出的 bundle 文件（cargo tauri build 使用 workspace target/）
