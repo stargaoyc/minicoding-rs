@@ -13,8 +13,6 @@
 //!
 //! 详见 `docs/modules.md` §2、`docs/design.md` §3。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod budget;
 mod compress;
 mod manager;

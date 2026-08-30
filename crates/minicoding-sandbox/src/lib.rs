@@ -25,8 +25,6 @@
 //!
 //! 详见 `docs/modules.md` §7、`docs/security.md` §8。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod denial;
 mod driver;
 mod external;

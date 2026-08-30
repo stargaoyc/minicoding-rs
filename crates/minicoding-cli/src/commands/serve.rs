@@ -291,6 +291,19 @@ pub async fn run_serve_command(cmd: &ServeCommand) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind address `{bind_str}`: {e}"))?;
 
+    // R9 SRV-1：无鉴权 + 非本机绑定 = 无鉴权的远程 Agent 控制面（可发消息触发
+    // 工具链、代答权限弹窗、create_session workdir 由客户端任意指定）。
+    // Docker 部署必须 bind 0.0.0.0（容器内 127.0.0.1 不可外部访问），文档又未提
+    // auth——组合一旦发生即失控。**拒绝启动**（默认 127.0.0.1 不触发；要远程
+    // 必须先启用鉴权 `--auth-token`/`MINICODING_AUTH_TOKEN` 再绑定非本机地址）。
+    if cmd.no_auth && !bind.ip().is_loopback() {
+        anyhow::bail!(
+            "拒绝启动：`--no-auth`（关闭鉴权）与 `--bind {bind_str}`（非本机地址）组合 = \
+             无鉴权远程控制面。请提供 `--auth-token`/`MINICODING_AUTH_TOKEN` 启用鉴权后 \
+             再绑定非本机地址。"
+        );
+    }
+
     // 解析 provider 配置（CLI > env > config.toml > 默认）
     let resolved = resolve_provider_config(cmd);
 

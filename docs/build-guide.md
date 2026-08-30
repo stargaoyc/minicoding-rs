@@ -465,8 +465,10 @@ pnpm run build
 
 ```bash
 # 单二进制部署：后端 + 前端静态资源
+# 注意（R9 SRV-1）：--bind 0.0.0.0 绑定非本机地址时**必须启用鉴权**
+# （--auth-token 或 MINICODING_AUTH_TOKEN env），否则拒绝启动。
 cargo build --release -p minicoding-cli --features serve
-./target/release/minicoding serve \
+MINICODING_AUTH_TOKEN="$(openssl rand -hex 32)" ./target/release/minicoding serve \
     --bind 0.0.0.0:8080 \
     --web ./crates/minicoding-web/dist \
     --cors-origin "https://your-domain.com"
@@ -1217,7 +1219,11 @@ COPY --from=builder /app/target/release/minicoding-server /usr/local/bin/
 
 EXPOSE 8080
 ENTRYPOINT ["minicoding"]
+# R9 SRV-1：--bind 0.0.0.0 必须配合鉴权，否则拒绝启动。Docker 部署示例
+# 演示通过 MINICODING_AUTH_TOKEN env 传入 token（生产环境用 secret 管理）。
 CMD ["serve", "--bind", "0.0.0.0:8080", "--preset", "external-sandbox"]
+# 运行容器时需设置环境变量：
+# docker run -e MINICODING_AUTH_TOKEN=$(openssl rand -hex 32) ...
 ```
 
 ### 14.3 构建与运行

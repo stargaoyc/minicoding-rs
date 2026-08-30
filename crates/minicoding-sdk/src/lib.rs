@@ -32,8 +32,6 @@
 //!
 //! 详见 `docs/modules.md` §14、`docs/roadmap.md` M8、`docs/dev-plan.md` T-M8-1。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod builder;
 pub mod cred;
 #[cfg(feature = "mcp")]

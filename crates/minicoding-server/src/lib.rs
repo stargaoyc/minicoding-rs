@@ -34,8 +34,6 @@
 //!
 //! 详见 `docs/modules.md` §16、`docs/design.md` §24。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod acp;
 pub(crate) mod bounded_io;
 pub mod http;

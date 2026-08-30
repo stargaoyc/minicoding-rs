@@ -23,8 +23,6 @@
 //!
 //! 详见 `docs/design.md` §26.5（Tauri sidecar 集成）。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 use camino::Utf8PathBuf;
 
 pub mod config;

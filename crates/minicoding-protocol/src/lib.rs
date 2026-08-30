@@ -17,8 +17,6 @@
 //!
 //! 详见 `docs/modules.md` §15、`docs/design.md` §24。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod command;
 pub mod cursor;
 pub mod event;

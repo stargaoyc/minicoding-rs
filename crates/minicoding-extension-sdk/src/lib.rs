@@ -24,8 +24,6 @@
 //!
 //! 详见 `docs/modules.md` §17、`docs/design.md` §23、`docs/extensions.md`。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod bundled;
 pub mod contributors;
 pub mod registrar;

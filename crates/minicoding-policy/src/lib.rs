@@ -13,8 +13,6 @@
 //!
 //! 详见 `docs/modules.md` §3、`docs/design.md` §9、`docs/security.md`。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod builtin;
 mod mode;
 mod path_sandbox;

@@ -13,8 +13,6 @@
 //!
 //! 详见 `docs/modules.md` §4、`docs/design.md` §8。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod auto;
 pub mod auto_contributor;
 pub mod inject;

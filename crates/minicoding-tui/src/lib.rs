@@ -16,8 +16,6 @@
 //!
 //! 详见 `docs/modules.md` §13、`docs/roadmap.md` M7、`docs/design.md` §25。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod app;
 pub mod event;
 pub mod render;

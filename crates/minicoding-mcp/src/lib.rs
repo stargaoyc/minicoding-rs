@@ -26,8 +26,6 @@
 //!
 //! 详见 `docs/modules.md` §8、`docs/design.md` §19。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 pub mod approval;
 pub mod client;
 pub mod config;

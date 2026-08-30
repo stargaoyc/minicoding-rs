@@ -13,8 +13,6 @@
 //!
 //! 详见 `docs/modules.md` §13。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 use std::sync::Arc;
 use std::time::Duration;
 

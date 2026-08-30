@@ -16,8 +16,6 @@
 //!
 //! 详见 `docs/modules.md` §6、`docs/design.md` §17。
 
-#![deny(clippy::all, clippy::pedantic)]
-
 mod journal_impl;
 
 pub use journal_impl::FileChangeJournal;

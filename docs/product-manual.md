@@ -727,7 +727,9 @@ minicoding auth login --provider openai  # 输入 sk-...
 cd crates/minicoding-web && npm run build && cd ../..
 
 # 4. 启动 server
-minicoding-server \
+# 注意（R9 SRV-1）：--bind 0.0.0.0 绑定非本机地址时**必须启用鉴权**，
+# 否则拒绝启动。通过 MINICODING_AUTH_TOKEN env 传入 token。
+MINICODING_AUTH_TOKEN="$(openssl rand -hex 32)" minicoding-server \
   --bind 0.0.0.0:8080 \
   --web ./crates/minicoding-web/dist \
   --cors-origin https://coding.example.com
