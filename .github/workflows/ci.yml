@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -145,7 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -162,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install typos
         uses: taiki-e/install-action@v2
         with:
@@ -184,7 +184,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -216,7 +216,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
@@ -248,7 +248,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
         with:
           # 与 desktop-release.yml 一致：钉精确版（pnpm-lock.yaml 由 11.13.0 生成，
@@ -289,7 +289,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # nightly 滚动：曾钉住 nightly-2026-08-18 因 tokio opaque type ICE，
       # 2026-08-27（e457a7b0d）已修复。
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（ENG-11：@master 浮动引用改为 SHA 钉版）
