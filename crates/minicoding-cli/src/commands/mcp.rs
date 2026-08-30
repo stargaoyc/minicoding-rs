@@ -75,9 +75,21 @@ pub fn run_mcp_command(cmd: &McpCommand, workdir: &str) -> Result<()> {
     let choices_path = paths::mcp_choices_path().context("无法确定 mcp_choices.toml 路径")?;
     let store = minicoding_mcp::FileChoicesStore::new(choices_path);
 
+    // R9 MCP-7：approve/reject 前校验 server 名存在——`minicoding mcp approve xxx`
+    // 拼写错误此前直接写入孤儿批准记录（无配置对应该名），真 server 仍弹窗，
+    // 用户困惑"我批准过了为什么还要问"。加载全部配置核对名字。
+    let known_servers: Vec<String> = minicoding_mcp::load_all_configs(&project_root)
+        .map(|configs| configs.into_iter().map(|c| c.name).collect())?;
+
     match &cmd.action {
         McpAction::List => list_servers(&project_root, &store),
         McpAction::Approve { server } => {
+            if !known_servers.iter().any(|s| s == server) {
+                anyhow::bail!(
+                    "server `{server}` 不在任何 MCP 配置中（~/.minicoding/mcp.json 或 \
+                     .minicoding/mcp.json）。请检查名字或先用 `minicoding mcp list` 确认"
+                );
+            }
             minicoding_mcp::set_project_approval(
                 &project_root,
                 server,
@@ -89,6 +101,12 @@ pub fn run_mcp_command(cmd: &McpCommand, workdir: &str) -> Result<()> {
             Ok(())
         }
         McpAction::Reject { server } => {
+            if !known_servers.iter().any(|s| s == server) {
+                anyhow::bail!(
+                    "server `{server}` 不在任何 MCP 配置中（~/.minicoding/mcp.json 或 \
+                     .minicoding/mcp.json）。请检查名字或先用 `minicoding mcp list` 确认"
+                );
+            }
             minicoding_mcp::set_project_approval(
                 &project_root,
                 server,

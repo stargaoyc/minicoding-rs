@@ -161,7 +161,11 @@ impl RmcpClient {
         cmd.args(args);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::inherit());
+        // R9 MCP-8：stderr 改为 `Stdio::null()`（丢弃）——`Stdio::inherit()` 让
+        // 远端 server 可写 ANSI 转义序列污染宿主终端（对比 stdin/stdout 是 piped，
+        // stderr 继承漏了）。MCP server stderr 输出仅 server 作者调试用，minicoding
+        // 不消费。若需记录可改为 `Stdio::piped()` + 日志，但当前无消费者。
+        cmd.stderr(Stdio::null());
         // env_clear + 白名单 + 配置 env（C-04：凭证不下传子进程）
         cmd.env_clear();
         for key in ENV_WHITELIST {
