@@ -100,6 +100,10 @@ impl Tool for McpToolWrapper {
         // （或任何 MCP 工具）的调用结果是安全取证的关键路径，补齐审计。
         let audit = ctx.audit.clone();
         let session_id = ctx.session_id.clone();
+        // R9 MCP-6：远端工具结果无输出上限（恶意 server 可返回无上限 payload
+        // 灌爆上下文窗口）。套用 `max_output_bytes` 截断（默认 1 MiB），
+        // 与内置工具 `shell.run`/`web.fetch` 同口径。
+        let max_output_bytes = ctx.max_output_bytes;
         Box::pin(async move {
             // JSON Schema 全量校验（2026-08-23 审查遗留#5 升级：jsonschema crate）
             // 此前仅 required 键预检，type/enum/pattern 等约束不生效。
@@ -185,9 +189,66 @@ impl Tool for McpToolWrapper {
                     tracing::warn!(error = %e, "mcp tool audit record failed (best-effort)");
                 }
             }
-            result
+            // R9 MCP-6：远端工具结果输出上限——`client.call` 返回的 `ToolResult`
+            // 可能远超 `max_output_bytes`（恶意 server 可灌爆上下文窗口）。
+            // 与内置工具（shell/web）同口径：超限截断并置 `metadata.truncated`。
+            result.map(|r| cap_result_output(r, max_output_bytes))
         })
     }
+}
+
+/// R9 MCP-6：按字节上限截断 `ToolResult` 文本内容，超限置 `truncated`。
+fn cap_result_output(mut result: ToolResult, cap: usize) -> ToolResult {
+    fn truncate_text(text: &mut String, cap: usize) -> bool {
+        if text.len() <= cap {
+            return false;
+        }
+        // 按字符边界截断（防切断 UTF-8），保留上限内前缀
+        let mut budget = cap.saturating_sub("…[output truncated]".len());
+        let mut prefix = String::new();
+        for c in text.chars() {
+            if budget < c.len_utf8() {
+                break;
+            }
+            prefix.push(c);
+            budget -= c.len_utf8();
+        }
+        prefix.push_str("…[output truncated]");
+        *text = prefix;
+        true
+    }
+
+    let mut truncated = false;
+    match &mut result.content {
+        minicoding_core::model::ToolContent::Text(s) => truncated = truncate_text(s, cap),
+        minicoding_core::model::ToolContent::Json(v) => {
+            let mut s = v.to_string();
+            truncated = truncate_text(&mut s, cap);
+            if truncated {
+                // 序列化超限：把 JSON 内容替换为截断文本（`_truncated` 标记），
+                // 避免原 Value 在回灌 LLM 时仍全量序列化
+                result.content = minicoding_core::model::ToolContent::Text(s);
+            }
+        }
+        minicoding_core::model::ToolContent::Mixed(parts) => {
+            for part in parts {
+                if let minicoding_core::model::ToolContent::Text(s) = part {
+                    truncated |= truncate_text(s, cap);
+                }
+            }
+        }
+        minicoding_core::model::ToolContent::Image { data, .. } => {
+            if data.len() > cap {
+                data.truncate(cap);
+                truncated = true;
+            }
+        }
+    }
+    if truncated {
+        result.metadata.truncated = true;
+        result.metadata.bytes = cap;
+    }
+    result
 }
 
 #[cfg(test)]
