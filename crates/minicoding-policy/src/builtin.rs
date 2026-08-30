@@ -105,12 +105,24 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
         {
             Verdict::Allow
         }
-        SideEffect::Command => Verdict::Ask(make_prompt(
-            tool,
-            command_summary(input),
-            Risk::High,
-            full_options(),
-        )),
+        SideEffect::Command => {
+            // R9 UX-1：只读/无害命令自动放行（Default 模式下免弹窗）。
+            // 当前实现对所有 shell 命令返回 Ask，安全但交互成本极高——
+            // 一次常规重构触发几十次确认，长期驱使用户切到 full-access
+            // （反而更不安全）。保守只读白名单：仅含纯读操作，无复合操作
+            // 符/重定向/管道/子 shell。写操作（如 git commit/cargo build）
+            // 明确不在白名单中，仍 Ask。
+            if is_harmless_command(tool, input) {
+                Verdict::Allow
+            } else {
+                Verdict::Ask(make_prompt(
+                    tool,
+                    command_summary(input),
+                    Risk::High,
+                    full_options(),
+                ))
+            }
+        }
         SideEffect::Network => Verdict::Ask(make_prompt(
             tool,
             network_summary(input),
@@ -118,6 +130,58 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
             full_options(),
         )),
     }
+}
+
+/// R9 UX-1：只读/无害命令判定（Default 模式下自动放行，免弹窗）。
+///
+/// **保守设计**：只放行**纯读操作**——动词在只读白名单内、无复合操作符/
+/// 重定向/管道/子 shell/后台符。写操作（`git commit`/`cargo build`/`echo > f`）
+/// 与解释器（`python -c '...'`）明确不在白名单，仍走 Ask。此判定是交互
+/// 降噪层，**不替代** L0 黑名单（`is_blacklisted` 已在更上层强制，危险命令
+/// 仍 Deny）。
+fn is_harmless_command(tool: &str, input: &Value) -> bool {
+    // 只读动词白名单（保守：这些命令无参数形态也不会产生副作用）
+    const READONLY_VERBS: &[&str] = &[
+        "ls", "cat", "head", "tail", "grep", "find", "pwd", "echo", "date", "which", "wc", "uname",
+        "whoami", "printf", "true", "false", "env", "dir", "type", "help",
+    ];
+    // 仅 shell.run/shell.background（shell.kill/output 无 command 文本）
+    if tool != "shell.run" && tool != "shell.background" {
+        return false;
+    }
+    let Some(command_text) = extract_command_text(input) else {
+        return false;
+    };
+    // 复合操作符/重定向/管道/子 shell/后台 → 不自动放行（有副作用可能）
+    if [";", "&&", "||", "|", ">", "<", "`", "$(", "&", "\n", "\r"]
+        .iter()
+        .any(|op| command_text.contains(op))
+    {
+        return false;
+    }
+    let tokens = tokenize_command(&command_text);
+    let verb = tokens.first().map(String::as_str).unwrap_or_default();
+    if READONLY_VERBS.contains(&verb) {
+        return true;
+    }
+    // git 只读子命令（status/diff/log/show/branch/remote/config --get）
+    if verb == "git"
+        && let Some(sub) = tokens.get(1).map(String::as_str)
+        && matches!(
+            sub,
+            "status" | "diff" | "log" | "show" | "branch" | "remote" | "config"
+        )
+    {
+        return true;
+    }
+    // cargo check（只读编译检查，无产物落盘）
+    if verb == "cargo"
+        && let Some(sub) = tokens.get(1).map(String::as_str)
+        && matches!(sub, "check" | "fmt" | "clippy")
+    {
+        return true;
+    }
+    false
 }
 
 /// 检测工具调用是否命中 `plan.exit` 缓存的预批准清单（S6 词法比对版）。
@@ -1247,7 +1311,7 @@ mod tests {
     #[tokio::test]
     async fn side_effect_command_returns_ask_high_risk_with_full_options() {
         let policy = BuiltinPolicy::new();
-        let input = serde_json::json!({"command": "ls -la"});
+        let input = serde_json::json!({"command": "sleep 1"});
         let verdict = policy
             .check(
                 "shell.run",
@@ -1259,7 +1323,7 @@ mod tests {
         match verdict {
             Verdict::Ask(prompt) => {
                 assert_eq!(prompt.risk, Risk::High);
-                assert!(prompt.summary.contains("ls -la"));
+                assert!(prompt.summary.contains("sleep 1"));
                 assert!(prompt.options.contains(&PromptOption::AllowAlways));
                 assert!(prompt.options.contains(&PromptOption::DenyAlways));
             }
@@ -2377,8 +2441,66 @@ mod tests {
     #[test]
     fn compute_verdict_command_returns_ask() {
         let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
-        let verdict = compute_verdict("shell.run", &serde_json::json!({"command": "ls"}), &ctx);
+        let verdict = compute_verdict(
+            "shell.run",
+            &serde_json::json!({"command": "sleep 1"}),
+            &ctx,
+        );
         assert!(matches!(verdict, Verdict::Ask(_)));
+    }
+
+    /// R9 UX-1：只读/无害命令在 Default 模式下自动放行（免弹窗）。
+    #[test]
+    fn readonly_commands_auto_allowed_in_default_mode() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        for cmd in [
+            "ls",
+            "cat README.md",
+            "git status",
+            "git diff",
+            "cargo check",
+            "grep foo src",
+        ] {
+            let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
+            assert!(
+                matches!(verdict, Verdict::Allow),
+                "只读命令 {cmd} 应自动放行，实际 {verdict:?}"
+            );
+        }
+        // background 同白名单
+        let verdict = compute_verdict(
+            "shell.background",
+            &serde_json::json!({"command": "ls"}),
+            &ctx,
+        );
+        assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    /// R9 UX-1：非只读命令仍 Ask（写/复合/解释器不在白名单）。
+    #[test]
+    fn non_readonly_commands_still_ask() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        for cmd in [
+            "git commit -m x",   // 写操作
+            "cargo build",       // 写产物
+            "echo x > file.txt", // 重定向写
+            "python3 -c 'x'",    // 解释器执行任意代码
+            "ls; rm file",       // 复合
+            "sleep 1",           // 非白名单动词
+        ] {
+            let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
+            assert!(
+                matches!(verdict, Verdict::Ask(_)),
+                "非只读命令 {cmd} 应 Ask，实际 {verdict:?}"
+            );
+        }
+        // 黑名单优先（白名单不能覆盖 Deny）
+        let verdict = compute_verdict(
+            "shell.run",
+            &serde_json::json!({"command": "rm -rf /"}),
+            &ctx,
+        );
+        assert!(matches!(verdict, Verdict::Deny(_)));
     }
 
     #[test]
