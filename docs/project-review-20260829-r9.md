@@ -859,3 +859,33 @@ P0-2（合并双轨 builder，server 委托 sdk）、SANDBOX-2（Windows FIFO→
 SANDBOX-1（Linux 旧内核网络限制提示）、CI-1（cli/server/tui 覆盖率独立门槛 +
 去 `|| true`）、ENG-2（target 清理）、UX-1（只读命令自动放行）、UX-3（/undo
 默认开启落盘）。
+
+---
+
+## 15. 第二轮修复进度追踪（2026-08-29 当日第二轮，除 CI-1/ENG-1 外全量）
+
+> 第一轮（§14）之后继续修复剩余项，每批过 pre-commit 门禁。
+
+| 批次 | 提交 | 覆盖问题 |
+|------|------|---------|
+| 架构 | `3a2f371` | R8 ARCH-4/SANDBOX-2（Windows FIFO 策略错配根治——SpawnHandle 关联句柄，apply/post_spawn 严格配对；顺带修 hooks Windows 挂起） |
+| Provider | `e46fee6`/`836fb54` | PROV-1（ApproxTokenizer \uXXXX+emoji 低估收口）、PROV-3（context_window 可覆盖 + warn）、PROV-2（Ollama num_ctx 感知） |
+| 存储 | `c79a25b`/`2319201` | STR-6（acquire_blocking 超时）、STR-3（JSONL 单行上限） |
+| Context | `4bdeb30`/`49640cd` | CTX-1（calibrate 口径扣固定开销）、CTX-3（启发式摘要截断标记） |
+| UX | `ed5cbcb` | FE-8 前端 seq 必填、UX-3（/undo 默认开启）、UX-4（沙箱降级启动警告） |
+| 工程 | `e625bd8`/`898b2ce`/`3d49178` | STR-1（SeqGap warn+继续）、TOOL-6（PathEscaped 类型）、MCP-7（approve 校验存在）、MCP-8（stderr null 防注入） |
+| 记忆 | `4eb59a4`/`f14eada` | CTX-4（AutoMemory 90 天陈旧标注）、CTX-5（AGENTS.md 注入带 mtime） |
+| 收尾 | `fe4d442` | Cargo.lock 同步（CLI 默认 feature + file-undo） |
+
+**验证**：`cargo test --workspace` **1784 例全绿**（新增：SpawnHandle 相关、ApproxTokenizer 3 例、
+STR-1 SeqGap 继续、CTX-3/4/5 各 1 例、P2-4 ~ 路径 1 例等）；clippy `-D warnings` 零告警；
+前端 tsc + vitest 13 例通过。
+
+**已确认非 bug/已披露**：MCP-4（tool_search 有 mod 声明，R9b 基于旧状态）、架构守卫
+（8 个 crate 实际均已有，R9b 基于旧状态）、CompressedContext 幻影注释（代码已不存在）。
+
+**遗留（用户指定不修）**：CI-1/P1-8（覆盖率门禁，需改 CI 配置）、ENG-1/P0-1（回迁 stable，
+等上游 1.99 发布）。
+
+**遗留架构级（需独立排期，非本批范围）**：P0-2（合并双轨 builder）、SANDBOX-1（Linux
+旧内核网络限制提示）、P2-3（fs.read 审计）、P2-10（CLI 测试补齐）、E2E/一致性测试。
