@@ -353,7 +353,19 @@ fn inner_build_runtime(
                 workdir: workdir_path.clone(),
                 writable: Vec::new(),
             });
-            Some((Arc::from(minicoding_sandbox::detect_driver()), policy))
+            let driver: Arc<dyn SandboxDriver> = Arc::from(minicoding_sandbox::detect_driver());
+            // R9 UX-4：会话启动时若 OS 沙箱未硬化（Windows / 无 landlock /
+            // 降级 NoopDriver），打印显著警告——用户有权知道自己是否在"裸奔"，
+            // 而非等主动执行 `doctor --security` 才看到。
+            if !driver.is_hardened() {
+                tracing::warn!(
+                    driver = driver.id(),
+                    "OS 沙箱未硬化（is_hardened=false）：仅应用层权限生效，\
+                     无内核级文件/网络隔离。建议在 Linux（landlock）或受信容器中运行；\
+                     详情见 `minicoding doctor --security`（security.md §8）"
+                );
+            }
+            Some((driver, policy))
         }
         #[cfg(not(feature = "sandbox"))]
         {

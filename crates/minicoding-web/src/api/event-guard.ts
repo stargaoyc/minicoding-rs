@@ -32,7 +32,10 @@ const KNOWN_EVENT_KINDS = z.enum([
 export const eventDtoSchema = z
   .object({
     type: KNOWN_EVENT_KINDS,
-    seq: z.number().optional(),
+    // R8 FE-8：SSE data 载荷已含 seq（服务端 format_sse_event 注入），
+    // 与生成类型 EventDto.seq 必填对齐。RehydrateRequired（无 type）在
+    // isRehydratePayload 分支先行识别，不经本 schema。
+    seq: z.number(),
   })
   .passthrough();
 
@@ -41,6 +44,6 @@ export type ParsedEventDto = z.infer<typeof eventDtoSchema> & Record<string, unk
 /** 校验并返回类型化事件；失败返回 `null`（调用方 warn 后丢弃）。 */
 export function isEventDto(
   value: unknown,
-): value is { type: string; seq?: number } & Record<string, unknown> {
+): value is { type: string; seq: number } & Record<string, unknown> {
   return eventDtoSchema.safeParse(value).success;
 }

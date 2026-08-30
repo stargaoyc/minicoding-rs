@@ -67,9 +67,10 @@ flate2 = { workspace = true }
 
 [features]
 # serve/mcp 默认开：CLI 是主入口，serve 子命令和 MCP stdio 是高频场景；
-# hooks/file-undo 非默认：需显式 --features file-undo 启用 /undo，
-# hooks 需用户主动配置 hooks.toml 才有意义。与 AGENTS.md §3.5 的差异为有意设计。
-default = ["memory", "sandbox", "serve", "mcp"]
+# R9 UX-3 修复：file-undo 加入默认——/undo 是误操作后的关键回退能力，
+# 默认关闭让用户在需要时拿不到（安全功能应开箱即用）；hooks 仍需用户
+# 主动配置 hooks.toml 才有意义，保持非默认。
+default = ["memory", "sandbox", "serve", "mcp", "file-undo"]
 memory = ["dep:minicoding-memory"]
 hooks = ["dep:minicoding-hooks", "minicoding-sdk/hooks"]
 file-undo = ["dep:minicoding-journal", "minicoding-sdk/file-undo"]
