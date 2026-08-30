@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Undo2 } from "lucide-react";
+import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Square, Undo2 } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
@@ -221,6 +221,22 @@ function AppInner() {
             <Undo2 className="h-4 w-4" />
             回滚
           </Button>
+          {/* R9 P3-3：结束对话——运行中显式停止当前 turn。此前只能靠输入框
+              停止按钮（isStreaming 时），用户对"前一个对话未结束就发送下一个
+              是否卡死"有疑虑：后端 send_message 已预占取消卡死 turn，此处
+              提供显式入口，确认状态后再发送下一条。 */}
+          {turnBusy && (
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={handleCancel}
+              disabled={!activeSessionId}
+              title="结束当前对话（停止正在运行的 turn）"
+            >
+              <Square className="h-4 w-4" />
+              结束对话
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

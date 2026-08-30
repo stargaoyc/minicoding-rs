@@ -95,7 +95,7 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
         return check_memory_write(tool, input);
     }
     match ctx.side_effect {
-        SideEffect::None => Verdict::Allow,
+        SideEffect::None => check_file_read(input, ctx),
         SideEffect::FileWrite => check_file_write(tool, input, ctx),
         // BypassPermissions（design.md §16.2）：全放行（仅隔离容器内使用，对齐 CC
         // `bypassPermissions`）。文件写入仍走 `check_file_write` 保留 C-03 越界 Deny
@@ -855,6 +855,27 @@ fn in_vcs_metadata(path: &str) -> bool {
     })
 }
 
+/// 文件只读类工具的路径越界校验（R9 P2-3：此前策略层对 `SideEffect::None`
+/// 直接 `Allow` 不做路径校验，越界由 tool 层兜底且审计不留痕——C-03 在
+/// 策略层强制，只读桶权威允许也落 audit.log）。
+///
+/// 仅当输入含 `path` 字段（`fs.read`/`fs.grep`/`fs.glob` 等文件工具）时校验；
+/// 无 path 的只读工具（`ui.ask`/`plan.exit` 等）维持原 Allow 语义。
+fn check_file_read(input: &Value, ctx: &PermissionContext) -> Verdict {
+    let Some(path) = extract_path(input) else {
+        return Verdict::Allow;
+    };
+    // C-03：只读路径也必须落在 workdir 内，越界直接 Deny（与 check_file_write
+    // 同口径）。NotFound（workdir/祖先不存在）不在此 Deny——文件不存在由 tool
+    // 层返回 NotFound，策略层不误伤合法相对路径。
+    match resolve_under(&ctx.workdir, path) {
+        Err(crate::path_sandbox::PathSandboxError::Escaped { .. }) => {
+            Verdict::Deny(format!("path not allowed (read): {path}"))
+        }
+        Ok(_) | Err(crate::path_sandbox::PathSandboxError::NotFound { .. }) => Verdict::Allow,
+    }
+}
+
 /// 文件写入类工具的权限判定。
 fn check_file_write(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdict {
     let Some(path) = extract_path(input) else {
@@ -1510,6 +1531,106 @@ mod tests {
         assert!(
             matches!(verdict, Verdict::Ask(_)),
             "AGENTS.md 应保持 Ask，实际 {verdict:?}"
+        );
+    }
+
+    // === check_file_read 测试（R9 P2-3：只读路径越界策略层强制）===
+
+    #[tokio::test]
+    async fn file_read_in_workdir_allows() {
+        // 相对路径在 workdir 内（父目录存在）→ Allow
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        std::fs::create_dir_all(workdir.join("src")).expect("create src");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "workdir 内只读应 Allow，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_escapes_workdir_denies() {
+        // 绝对路径越界（真实存在的目录，规避 NotFound）→ Deny（C-03 策略层强制）
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "/etc/passwd"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        match verdict {
+            Verdict::Deny(msg) => assert!(msg.contains("not allowed"), "期望越界 Deny，实际 {msg}"),
+            other => panic!("期望 Deny，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_read_dotdot_escape_denies() {
+        // `../` 词法逃逸：resolve_under 规范化后越界 → Deny
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        std::fs::create_dir_all(workdir.join("sub")).expect("create sub");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"path": "../outside.txt"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("fs.read", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Deny(_)),
+            "../ 逃逸应 Deny，实际 {verdict:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_no_path_field_allows() {
+        // 无 path 字段的只读工具（ui.ask 等）维持原 Allow 语义
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workdir =
+            Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("tempdir path is utf8");
+        let policy = BuiltinPolicy::new();
+        let input = serde_json::json!({"question": "hi"});
+        let ctx = PermissionContext {
+            session: "test".to_string(),
+            workdir,
+            side_effect: SideEffect::None,
+            turn: 0,
+            history: Vec::new(),
+            permission_mode: PermissionMode::Default,
+            allowed_prompts: Vec::new(),
+        };
+        let verdict = policy.check("ui.ask", &input, &ctx).await.unwrap();
+        assert!(
+            matches!(verdict, Verdict::Allow),
+            "无 path 只读工具应 Allow，实际 {verdict:?}"
         );
     }
 
