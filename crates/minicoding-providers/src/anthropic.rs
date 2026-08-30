@@ -626,10 +626,51 @@ pub struct ApproxTokenizer;
 
 impl ApproxTokenizer {
     /// 单文本估算：CJK 字符逐字计 1 token，其余字符 4 字符 ≈ 1 token。
+    ///
+    /// R9 PROV-1 修复（系统性低估两处）：
+    /// - `\uXXXX` 转义序列（工具参数/结果常以 JSON 序列化进入上下文）：按
+    ///   解码后的字符计数——此前按 6 个 ASCII 字符（`6/4≈2` token）计，
+    ///   JSON 转义中文实测低估 −52.6%；
+    /// - 非 BMP 字符（emoji/补充平面）：保守计 4 token/个——此前按 1 个
+    ///   普通字符（`1/4→0` token）计，5 个 emoji 实测真实 13 token 被估成 2
+    ///   （−84.6%）。4 token/个为保守上界，低估方向收口。
     fn count_str(text: &str) -> usize {
-        let cjk = text.chars().filter(|c| is_cjk_char(*c)).count();
-        let other = text.chars().count() - cjk;
-        cjk + other.div_ceil(4)
+        let mut cjk = 0usize;
+        let mut emoji = 0usize;
+        let mut other = 0usize;
+        let mut rest = text;
+        while !rest.is_empty() {
+            // `\uXXXX` 转义序列：解码后按实际字符类别计数
+            if let Some(after) = rest.strip_prefix("\\u") {
+                let hex: String = after.chars().take(4).collect();
+                if hex.len() == 4
+                    && hex.chars().all(|c| c.is_ascii_hexdigit())
+                    && let Ok(code) = u32::from_str_radix(&hex, 16)
+                {
+                    let decoded = char::from_u32(code).unwrap_or('\u{FFFD}');
+                    if is_cjk_char(decoded) {
+                        cjk += 1;
+                    } else if code >= 0x10000 {
+                        emoji += 1;
+                    } else {
+                        other += 1;
+                    }
+                    rest = &after[4..];
+                    continue;
+                }
+            }
+            let c = rest.chars().next().unwrap_or_default();
+            if is_cjk_char(c) {
+                cjk += 1;
+            } else if u32::from(c) >= 0x10000 {
+                // 非 BMP（emoji/补充平面）：保守 4 token/个
+                emoji += 1;
+            } else {
+                other += 1;
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+        cjk + emoji * 4 + other.div_ceil(4)
     }
 }
 
@@ -1700,6 +1741,30 @@ mod tests {
         // count_messages 同口径
         let n = tok.count_messages(&[Message::user_text("你好世界")]);
         assert_eq!(n, 4 + 4);
+    }
+
+    #[test]
+    fn approx_tokenizer_json_escaped_unicode_weighted_by_decoded_char() {
+        // R9 PROV-1：`\u4f60\u597d`（"你好"）此前按 6 ASCII 字符计
+        // ceil(12/4)=3 token，JSON 转义中文实测低估 −52.6%。解码后按 CJK
+        // 逐字 1 token = 2 token（低估方向收口，仍偏保守）。
+        let tok = ApproxTokenizer;
+        assert_eq!(tok.count(r"\u4f60\u597d"), 2, "转义 CJK 应按解码后逐字计");
+        // 混合：转义中文 + ASCII
+        assert_eq!(tok.count(r"\u4f60\u597d abcdef"), 2 + 2);
+        // 转义 ASCII（\u0041 = 'A'）按普通字符计
+        assert_eq!(tok.count(r"\u0041"), 1);
+    }
+
+    #[test]
+    fn approx_tokenizer_non_bmp_emoji_conservative_weighting() {
+        // R9 PROV-1：emoji 此前按 1 普通字符计（1/4→0 token），5 个 emoji
+        // 真实 13 token 被估成 2（−84.6%）。修复后非 BMP 保守 4 token/个。
+        let tok = ApproxTokenizer;
+        // 5 个 emoji（U+1F600）→ 5 * 4 = 20 token（低估方向收口）
+        assert_eq!(tok.count("😀😀😀😀😀"), 20);
+        // 混合：4 emoji + 空格 + 8 ASCII → 4*4 + ceil(9/4)=3 → 19
+        assert_eq!(tok.count("😀😀😀😀 abcdefgh"), 19);
     }
 
     // --- provider 基本方法 ---

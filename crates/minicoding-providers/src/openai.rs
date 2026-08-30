@@ -539,7 +539,18 @@ fn uses_max_completion_tokens(model: &str) -> bool {
 /// 目的：避免**高估**小窗口模型的 `context_window`——高估使压缩触发过晚，真实
 /// 请求 400 超窗（`LlmError::ContextLength` 紧急压缩兜底，rt.rs PT4-3）。
 /// 已知小窗口模型收敛；其余保持 128K 保守默认（低估方向安全：压缩提前不越界）。
+///
+/// R9 PROV-3 修复：`MINICODING_CONTEXT_WINDOW` 环境变量可覆盖估算值（整数，
+/// 如 `32768`），用于新模型/自定义部署等前缀表未覆盖的场景。未设置时走
+/// 前缀启发式并打 warn（默认值 128K 计入——若模型实际窗口更小，须用户配
+/// 置覆盖以防压缩触发过晚致真实 400）。
 fn model_context_window(model: &str) -> usize {
+    // 环境变量优先（用户可覆盖新模型/自定义部署的窗口估值）
+    if let Ok(env_val) = std::env::var("MINICODING_CONTEXT_WINDOW")
+        && let Ok(n) = env_val.trim().parse::<usize>()
+    {
+        return n;
+    }
     let lower = model.to_ascii_lowercase();
     if lower.starts_with("deepseek") {
         // DeepSeek V3/R1 系列 64K
@@ -549,6 +560,13 @@ fn model_context_window(model: &str) -> usize {
         32_768
     } else {
         // gpt-4o / gpt-4.1 / o1/o3/o4 / gpt-5 等实际 ≥128K，保守取 128K
+        // R9 PROV-3：使用默认值时 warn（用户可设 MINICODING_CONTEXT_WINDOW 覆盖）
+        tracing::warn!(
+            model = %model,
+            window = 128_000,
+            "无已知模型上下文窗口信息，使用 128K 保守默认；若模型实际窗口更小，请设 \
+             MINICODING_CONTEXT_WINDOW 环境变量覆盖（如 `32768`）以防压缩触发过晚致真实 400"
+        );
         128_000
     }
 }
