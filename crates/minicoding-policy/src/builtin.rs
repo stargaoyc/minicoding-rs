@@ -303,6 +303,11 @@ fn shell_hits_blacklist(input: &Value) -> bool {
         "do", "done", "then", "else", "elif", "fi", "if", "for", "while", "until", "case", "esac",
         "in", "!", "{", "}", "(", ")", ";;",
     ];
+    // R9 SANDBOX-3：动词提取剥离的包装前缀（与 hits_dangerous_patterns 同口径）
+    const WRAPPERS: &[&str] = &[
+        "sudo", "doas", "env", "xargs", "nice", "nohup", "command", "busybox", "timeout", "nproc",
+        "ionice",
+    ];
     // R4（SE4-4）：`>&`/`&>` 变体归一为 `>`——POSIX/bash 中 `cmd >& f`、
     // `cmd &> f` 均等价 `> f 2>&1`（真实创建/截断文件）。不能只往 REDIRECTS
     // 加条目：切段字符集含 `&`，`>&` 在切段阶段即被拆散（tokenizer 的连写
@@ -376,18 +381,29 @@ fn shell_hits_blacklist(input: &Value) -> bool {
             if hits_dangerous_patterns(segment, &tokens) {
                 return true;
             }
-            // 段首词即动词（SEC-7：先剥控制关键字）；`sed -i` 特判写模式
-            let verb = tokens
+            // 段首词即动词（SEC-7：先剥控制关键字）；`sed -i` 特判写模式。
+            // R9 SANDBOX-3 修复：与 `hits_dangerous_patterns` 同口径——剥离包装
+            // 前缀（env/xargs/nice/nohup/command/busybox/timeout/sudo/doas）后取
+            // basename。此前仅 `hits_dangerous_patterns` 做了剥离，`.git`/AGENTS.md
+            // 写保护（`WRITE_VERBS`）仍取原始首 token——`env tee .git/config` 等
+            // 变形绕过（R9 P1-1 修复只堵了危险命令，没堵写保护）。
+            let verb_start = tokens
                 .iter()
+                .position(|t| !WRAPPERS.contains(&t.as_str()))
+                .unwrap_or(0);
+            let raw_verb = tokens
+                .iter()
+                .skip(verb_start)
                 .find(|t| !CONTROL_WORDS.contains(&t.as_str()))
-                .map(String::as_str);
+                .map(String::as_str)
+                .unwrap_or_default();
+            let verb = raw_verb.rsplit('/').next().unwrap_or(raw_verb);
             let verb_writes = match verb {
                 // SEC-10：`-i.bak`/`--in-place` 与 `-i` 同为原地写
-                Some("sed") => tokens
+                "sed" => tokens
                     .iter()
                     .any(|t| *t == "-i" || t.starts_with("-i") || t == "--in-place"),
-                Some(v) => WRITE_VERBS.contains(&v),
-                None => false,
+                v => WRITE_VERBS.contains(&v),
             };
             tokens.iter().enumerate().any(|(i, tok)| {
                 // SEC-10（2026-08-26 R3 审查）：参数式写目标——`dd of=AGENTS.md`
@@ -1953,9 +1969,32 @@ mod tests {
             "echo hook > .git/hooks/pre-commit",
             "tee .git/config < payload",
             "rm -rf .git",
+            // R9 SANDBOX-3：变形形态——landlock 并集语义下 .git 继承 workdir 可写，
+            // 实际写保护由应用层黑名单承担；R9 P1-1 黑名单加固（wrapper 剥离 +
+            // basename）后这些形态仍须被拦（重定向目标判定基于 token 位置，
+            // 与动词前缀无关，此处锁定防回归）。
+            "env echo x > .git/hooks/pre-commit",
+            "xargs -I{} echo x > .git/hooks/pre-commit",
+            "/bin/echo x > .git/hooks/pre-commit",
+            "env tee .git/config < payload",
+            "nice rm -rf .git",
+            "env rm -rf .git",
+            "command rm -rf .git",
+            // AGENTS.md 写保护同形态
+            "env echo x > AGENTS.md",
+            "/usr/bin/echo x > AGENTS.md",
+            "xargs echo x > AGENTS.md",
         ] {
             let input = serde_json::json!({ "command": cmd });
             assert!(is_blacklisted("shell.run", &input), "{cmd} 应命中黑名单");
+        }
+        // 后台路径同黑名单（SEC-R6-4：background 与 run 共用词法判定）
+        for cmd in ["env echo x > .git/hooks/pre-commit", "rm -rf .git"] {
+            let input = serde_json::json!({ "command": cmd });
+            assert!(
+                is_blacklisted("shell.background", &input),
+                "{cmd} 在 background 下应命中黑名单"
+            );
         }
     }
 

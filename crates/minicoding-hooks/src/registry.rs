@@ -122,7 +122,13 @@ async fn dispatch_hooks(
                     result.modify_input = Some(new_input);
                 }
                 if let Some(ctx) = output.inject_context {
-                    result.inject_contexts.push(ctx);
+                    // R9 P2-9：注入上下文包裹 hook 来源边界——Hook 可能处理不可信
+                    // 内容（如 PreToolUse on `web.fetch` 结果），无来源标注时模型
+                    // 无法区分"用户/项目指令"与"Hook 派生数据"。包裹后模型可识别
+                    // 来源并降低对派生内容的信任（`<hook name="...">` 声明非指令）。
+                    result
+                        .inject_contexts
+                        .push(format!("<hook name=\"{hook_name}\">\n{ctx}\n</hook>"));
                 }
                 if let Some(msg) = output.exit_message {
                     result.exit_messages.push(msg);
@@ -555,8 +561,11 @@ mod dispatch_tests {
         let input = HookInput::new(HookEvent::SessionStart, "s", 1, Utf8PathBuf::from("/tmp"));
         let result = reg.dispatch(input, DispatchConfig::default()).await;
         assert_eq!(result.inject_contexts.len(), 2);
-        assert_eq!(result.inject_contexts[0], "git status output");
-        assert_eq!(result.inject_contexts[1], "todo list");
+        // R9 P2-9：注入上下文带 hook 来源边界
+        assert!(result.inject_contexts[0].contains("git status output"));
+        assert!(result.inject_contexts[0].contains("hook name=\"git-status\""));
+        assert!(result.inject_contexts[1].contains("todo list"));
+        assert!(result.inject_contexts[1].contains("hook name=\"todo\""));
     }
 
     #[tokio::test]
