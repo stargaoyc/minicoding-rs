@@ -549,12 +549,21 @@ impl ContextManager for ContextManagerImpl {
             tracing::debug!("calibrate skipped: zero actual (provider usage missing)");
             return;
         }
+        // R9 CTX-1 修复：`actual`（provider 返回的完整请求用量）含 system +
+        // tools schema 固定开销，而 `token_cache` 仅计 messages——直接混合
+        // 会让校准值系统性高于消息量（工具多的会话固定开销数千 token），
+        // 导致过早压缩（浪费预算）。校准前扣减本次请求的固定开销基线
+        // （`fixed_overhead` 由 `build_chat_request` 触发判定时计算缓存）。
+        let fixed = self.fixed_overhead.load(Ordering::SeqCst);
+        let messages_actual = actual_input_tokens.saturating_sub(fixed);
         let current = self.token_cache.load(Ordering::SeqCst);
-        let blended = usize::midpoint(current, actual_input_tokens);
+        let blended = usize::midpoint(current, messages_actual);
         self.token_cache.store(blended, Ordering::SeqCst);
         tracing::debug!(
             current,
             actual = actual_input_tokens,
+            fixed_overhead = fixed,
+            messages_actual,
             blended,
             "token cache calibrated"
         );
