@@ -4,6 +4,82 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.10] - 2026-08-30
+
+> 自 v0.3.9 以来的 R8/R9 修复批次（61 个 commit）。主题：**R9 审查全量收口**
+> （sandbox 驱动、provider 校准、存储/上下文熔断、shell 黑名单加固、MCP 批准指纹、
+> 无模型窗口降级、clippy pedantic 全量 deny）、**用户反馈三问题**（工具结果折叠、
+> 卡死 turn 预占取消、输入历史持久化）、**Web 结束对话按钮**、**P2-3 fs.read 审计**
+> （策略层 C-03 越界校验 + 只读桶审计）、**CTX-4 完整版**（AutoMemory 来源指纹自动
+> stale）、**E2E 端到端测试框架**（真实 server 二进制 + wiremock mock LLM，4 场景）。
+
+### Security / Reliability
+
+- **P2-3 fs.read 审计（#13）**：策略层对含 `path` 的只读工具（`fs.read` 等）做
+  C-03 越界校验（Escaped 直接 Deny，NotFound 不误伤，与 tool 层共用
+  `resolve_under`）；只读桶成功调用补落 audit.log（`AuditKind::ToolCall`/allow）
+  ——此前只读权威 Allow 无痕（最应留痕的取证事件）
+- **shell 黑名单加固（P1-1）**：36 绕过 payload 中 19 个收口（`env` 包装缺失、
+  `timeout`/`sudo`/`doas`/`busybox` 包装剥离、`sleep 0`/`true` 等白名单误放）
+- **只读/无害命令自动放行（UX-1）**：Default 模式下 `ls`/`cat`/`git status`/`cargo check`
+  等白名单命令自动 Allow（无复合操作符/重定向/管道），黑名单优先级不变
+- **MCP 批准命令指纹（MCP-1）**：批准按命令计算指纹而非仅工具名，相同命令
+  指纹命中时快捷 Allow，不同命令即使同工具名仍需 Ask
+- **风险预设 C-22 二次确认贯通 Web**：`full-access`/`external-sandbox` 预设 +
+  `bypass_permissions` 模式在 Web 前端创建会话时强制红色警告确认
+- **卡死 turn 预占取消（#14）**：`POST /messages` 排队前检测 `turn_running`，
+  若旧 turn 卡死先 graceful 取消（C-13，幂等），新消息总能执行而非永排
+- **MCP 远端工具结果上限**：`shell.output` 等远端工具结果输出受 `max_output_bytes` 约束
+
+### Fixed
+
+- **用户反馈三问题**：
+  - 工具调用结果太长占屏 → `CollapsibleText` 组件（300 字符阈值默认折叠可展开）
+  - 卡死后再输入对话立刻结束/不执行 → 预占取消 + `Runtime::turn_running()` 暴露
+    + 前端 `useTurnRunning` 轮询恢复 `isStreaming` + `sendDisabled` 时 Enter 给提示
+    + TUI `UiCommand::CancelTurn` 实时 cancel（解决陈旧 token 二次 Ctrl-C 失效）
+  - 重开对话按上下键无法读取历史 → Web localStorage 持久化 + TUI `tui-history.txt`
+- **AutoMemory 陈旧治理（CTX-4/CTX-5）**：90 天超时标注"可能陈旧"；来源文件
+  mtime 晚于条目更新自动标"来源已变更，可能陈旧"（完整版）；AGENTS.md 注入
+  附带修改时间，陈旧度可辨
+- **E2E 端到端测试框架（CI-2）**：`crates/minicoding-server/tests/e2e.rs`，起真实
+  server 二进制 + wiremock mock LLM（默认 CI 安全）+ 真实 LLM env 门控，4 场景
+- **R9 审查修复批次**：SANDBOX-1（Linux 旧内核网络限制启动警告）、SANDBOX-3
+  （.git/AGENTS.md 写保护变形回归收口）、P2-9（Hook 来源包裹）、P2-10（CLI
+  沙箱映射测试）、CTX-2（低估检测联动压缩阈值）、CTX-3（截断标记）、
+  PROV-1（ApproxTokenizer 低估收口）、PROV-2（Ollama capabilities 感知）、
+  PROV-3（`MINICODING_CONTEXT_WINDOW` 覆盖）、STR-1（SeqGap 降级）、
+  STR-6（acquire_blocking 超时）、MCP-7/8（server 校验/stderr 防注入）、
+  TOOL-6（`assert_within_workdir` 错误类型 PathEscaped）、FE-8（seq 必填）、
+  UX-3（/undo 默认开启）、UX-4（沙箱未硬化启动警告）
+- **R8 审查修复批次**：seccomp io_uring 修复、MCP 工具审计、shell 挂起/脱敏、
+  journal symlink 逃逸、CORS 静默丢弃改 warn、SSE data 补 seq、fork bomb 空白
+  变体、Web 弹窗自动关闭、记忆检索截断、C-22 贯通 NDJSON/ACP 等
+- **clippy pedantic 全量 deny**：18 个 workspace crate `lib.rs` 顶部统一 deny
+- **nightly 滚动**：解除 nightly-2026-08-18 日期钉住，改回滚动 nightly
+
+### Performance
+
+- **低估检测联动压缩阈值（CTX-2）**：`calibrate` 累计 `underestimate_streak`，
+  `effective_compact_threshold` 每 3 次低估收 10% 最多 40%，防真实 400 熔断
+- **`calibrate` 口径修正（CTX-1）**：扣减 `fixed_overhead`（system+tools token）
+  后混合占比，避免系统性过早压缩
+
+### New Features
+
+- **Web 结束对话按钮**：顶部栏红色"结束对话"（turnBusy 时显示），与输入框 Square
+  停止按钮互为冗余入口
+- **CTX-4 完整版——AutoMemory 来源指纹**：`AutoEntry.source` 记录来源文件路径，
+  `memory.write` schema 暴露 `source` 字段，渲染时源文件 mtime 变更自动标 stale
+- **E2E 端到端测试框架**：4 场景——完整会话闭环、工具调用闭环（fs.read）、
+  并发消息不卡死、完整项目脚手架（多步 fs.write 断言磁盘落盘）
+- **TUI 斜杠命令（R8 FE-16）**：`/tokens` `/status` `/model` `/plan` `/undo` 接线
+- **H5 双轨 builder 能力矩阵一致性测试**：server 与 SDK 工具集漂移即 CI 失败
+- **shell 黑名单 proptest**：3 组属性测试（任意命令输入不 panic、tokenize 不 panic、
+  无害命令判定不 panic；256 例/组）
+- **sandbox 拒绝结构化（P-19b）**：`SandboxDenyKind` 结构化判定替代纯文本匹配，
+  只读并行桶与副作用路径统一接入检测；`ToolResultMeta.sandbox_denied` 透传协议层
+
 ## [0.3.9] - 2026-08-28
 
 > 自 v0.3.8 以来的 R8 修复批次（12 个 commit）。主题：**工具调度并行化改进**、
