@@ -41,6 +41,12 @@ pub struct ApprovalRecord {
     pub(crate) state: ApprovalState,
     /// 决策时间（RFC 3339）。
     pub(crate) decided_at: String,
+    /// 批准时 server 的命令指纹（R9 MCP-1：stdio → command+args 的 SHA-256；
+    /// http → url）。`None` = 手工 `mcp approve` 写入（显式信任，不校验）。
+    /// 自动批准路径写入；后续 `mcp.json` 变更（如 `git pull` 带入上游更新把
+    /// 同名 server 换成恶意程序）时指纹不匹配 → 重新弹窗，不复用旧信任。
+    #[serde(default)]
+    pub(crate) command_fingerprint: Option<String>,
 }
 
 /// `mcp_choices.toml` 的根结构（按项目指纹分桶）。
@@ -217,6 +223,7 @@ fn project_fingerprint(project_root: &Path) -> String {
 ///
 /// # Errors
 /// - `McpError::Config`：choices 文件读写/解析失败。
+#[allow(clippy::too_many_lines)] // 逐 server 线性审批流（R9 MCP-1 指纹比对使分支增多）
 pub async fn check_project_scope_approval(
     configs: Vec<McpServerConfig>,
     project_root: &Utf8PathBuf,
@@ -237,7 +244,16 @@ pub async fn check_project_scope_approval(
             continue;
         }
         match project_choices.get(&cfg.name) {
-            Some(rec) if rec.state == ApprovalState::Approved => {
+            // R9 MCP-1 修复：批准记录含命令指纹——记录指纹为 `None`（手工
+            // `mcp approve` 写入，显式信任）或与当前配置一致才算已批准；
+            // 指纹不匹配（`mcp.json` 配置变更，如 `git pull` 把同名 server
+            // 换成恶意程序）落到 `_` 分支重新弹窗，不复用旧信任。
+            Some(rec)
+                if rec.state == ApprovalState::Approved
+                    && (rec.command_fingerprint.is_none()
+                        || rec.command_fingerprint.as_deref()
+                            == Some(&transport_fingerprint(&cfg))) =>
+            {
                 tracing::info!(
                     server = %cfg.name,
                     project = %fingerprint,
@@ -310,6 +326,8 @@ pub async fn check_project_scope_approval(
                         server: cfg.name.clone(),
                         state,
                         decided_at: now,
+                        // R9 MCP-1：自动批准写入命令指纹——配置变更后需重新批准
+                        command_fingerprint: Some(transport_fingerprint(&cfg)),
                     },
                 );
                 changed = true;
@@ -369,6 +387,9 @@ pub fn set_project_approval(
             server: server.to_string(),
             state,
             decided_at: now,
+            // R9 MCP-1：手工 `mcp approve` 是显式信任（用户点名批准），
+            // 不校验命令指纹——`None` 在 check 侧视为"始终有效"。
+            command_fingerprint: None,
         },
     );
     store.save(&choices)
@@ -402,6 +423,31 @@ fn transport_summary(cfg: &McpServerConfig) -> String {
             format!("http: {url}")
         }
     }
+}
+
+/// R9 MCP-1：server 命令指纹（批准记录校验用）。
+///
+/// stdio → `command + args` 的 SHA-256（`mcp.json` 变更命令/参数即失配）；
+/// http → `url` 的 SHA-256。`mcp approve` 手工批准写 `None`（显式信任不校验），
+/// 自动批准路径写此指纹。
+fn transport_fingerprint(cfg: &McpServerConfig) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    match &cfg.transport {
+        minicoding_core::mcp::McpTransport::Stdio { command, args, .. } => {
+            hasher.update(b"stdio:");
+            hasher.update(command.as_bytes());
+            for a in args {
+                hasher.update(b"\x00");
+                hasher.update(a.as_bytes());
+            }
+        }
+        minicoding_core::mcp::McpTransport::Http { url, .. } => {
+            hasher.update(b"http:");
+            hasher.update(url.as_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
