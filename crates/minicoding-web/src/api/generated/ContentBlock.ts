@@ -6,12 +6,24 @@ import type { ToolResultMeta } from "./ToolResultMeta";
 /**
  * 消息内容块。一条消息可含多个块（如文本 + 工具调用）。
  */
-export type ContentBlock = { "type": "text", text: string, } | { "type": "image", mime: string, 
-/**
- * base64 编码（传输态），运行态可解为 `Vec<u8>`。
- */
-data: string, } | { "type": "tool_use" } & ToolCall | { "type": "tool_result", call_id: string, content: ToolContent, is_error: boolean, 
-/**
- * 工具执行元数据（M-09：含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
- */
-metadata: ToolResultMeta, };
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      mime: string;
+      /**
+       * base64 编码（传输态），运行态可解为 `Vec<u8>`。
+       */
+      data: string;
+    }
+  | ({ type: "tool_use" } & ToolCall)
+  | {
+      type: "tool_result";
+      call_id: string;
+      content: ToolContent;
+      is_error: boolean;
+      /**
+       * 工具执行元数据（M-09：含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
+       */
+      metadata: ToolResultMeta;
+    };
