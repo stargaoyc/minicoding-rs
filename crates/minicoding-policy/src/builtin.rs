@@ -2537,3 +2537,35 @@ mod tests {
         assert!(matches!(verdict, Verdict::Allow));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// C-02：任意 shell 命令输入不应使黑名单判定 panic（Ok 或 Err 均合法）。
+        #[test]
+        fn blacklist_never_panics_on_arbitrary_input(
+            cmd in "[^\u{0}]{0,128}",
+        ) {
+            let input = serde_json::json!({ "command": cmd });
+            let _ = shell_hits_blacklist(&input);
+            let _ = is_blacklisted("shell.run", &input);
+            // 无害命令判定同样不 panic
+            let _ = is_harmless_command("shell.run", &input);
+        }
+
+        /// C-02：tokenize 不 panic 且重构后的危险子串仍在（模糊不变量）。
+        #[test]
+        fn tokenize_never_panics_and_roundtrips(cmd in "[^\"']{0,64}") {
+            let tokens = tokenize_command(&cmd);
+            // 危险原语若在原文中，token 化后仍应能找到对应 token 片段
+            if cmd.contains("rm -rf /") {
+                prop_assert!(tokens.iter().any(|t| t.contains("rm") || t.contains("-rf")));
+            }
+        }
+    }
+}
