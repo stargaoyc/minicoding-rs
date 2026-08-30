@@ -249,7 +249,7 @@ jobs:
     timeout-minutes: 45 # ENG-2：防 job 挂起烧满 runner 上限
     steps:
       - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           # 与 desktop-release.yml 一致：钉精确版（pnpm-lock.yaml 由 11.13.0 生成，
           # 浮动大版本可能因 lockfile/行为差异导致 --frozen-lockfile 失败）
