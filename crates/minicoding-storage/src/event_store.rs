@@ -364,8 +364,20 @@ impl EventStore for JsonlEventStore {
     }
 
     fn delete(&self, session: &SessionId) -> BoxFuture<'_, Result<(), StorageError>> {
+        // R9 STR-5 修复：事件删除此前全程无锁（对照 jsonl 会话删除 ST-7/
+        // ST-R6-3 补过两轮锁、事件删除一次都没补）——并发 append 在删除窗口
+        // 内重建事件文件会漏删（孤儿事件文件残留）。与 append 同用
+        // `{session}.lock` 排他锁，锁内删文件。
+        let lock_path = self.base_dir.join(format!("{session}.lock"));
         let session = session.clone();
-        Box::pin(async move { self.delete_events_sync(&session) })
+        Box::pin(async move {
+            let _guard = tokio::task::spawn_blocking(move || {
+                crate::lock::SessionLock::acquire_blocking(lock_path)
+            })
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))??;
+            self.delete_events_sync(&session)
+        })
     }
 }
 
