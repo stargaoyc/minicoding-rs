@@ -6,4 +6,9 @@
  * 由 denial 签名检测（`DenialMatch.kind`）与路径沙箱（C-03）共同产出，
  * 经 `ToolResultMeta.sandbox_denied` 透传到各协议层，前端渲染"沙箱拒绝"卡片。
  */
-export type SandboxDenyKind = { "kind": "path_escape", attempted: string, allowed_root: string, } | { "kind": "syscall_blocked", syscall: string, } | { "kind": "write_forbidden", path: string, } | { "kind": "resource_limit", limit: string, } | { "kind": "external" };
+export type SandboxDenyKind =
+  | { kind: "path_escape"; attempted: string; allowed_root: string }
+  | { kind: "syscall_blocked"; syscall: string }
+  | { kind: "write_forbidden"; path: string }
+  | { kind: "resource_limit"; limit: string }
+  | { kind: "external" };

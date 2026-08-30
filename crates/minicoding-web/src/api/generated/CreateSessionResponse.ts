@@ -3,4 +3,4 @@
 /**
  * `CreateSession` 响应。
  */
-export type CreateSessionResponse = { session_id: string, };
+export type CreateSessionResponse = { session_id: string };

@@ -3,4 +3,4 @@
 /**
  * `SendUserMessage` 请求 body。
  */
-export type SendMessageBody = { text: string, };
+export type SendMessageBody = { text: string };
