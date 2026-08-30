@@ -253,7 +253,7 @@ async fn restore_file(
     // 指向外部（如 ~/.ssh）的 symlink 且内容恰与 after 一致时，恢复写会穿透
     // symlink 出界。`symlink_metadata` 不跟随末段链接，词法校验
     // （validate_restore_path）无法发现这类替换。
-    ensure_not_symlink(&path).await?;
+    ensure_not_symlink(&path, workdir).await?;
 
     match change {
         FileChange::Written { before, after, .. } => {
@@ -356,10 +356,29 @@ async fn verify_current_matches(
 /// 恢复写会穿透中段链接出界（C-03/C-28 逃逸）。逐组件检查每个前缀，任一组件是
 /// 符号链接即拒绝。某前缀不存在时后续更深组件必不存在（无 symlink 风险），提前
 /// 返回通过（对应 `Deleted` 变体的"文件不存在"幂等恢复路径）。
-async fn ensure_not_symlink(path: &camino::Utf8PathBuf) -> Result<(), JournalError> {
+async fn ensure_not_symlink(
+    path: &camino::Utf8PathBuf,
+    workdir: Option<&camino::Utf8PathBuf>,
+) -> Result<(), JournalError> {
+    // 校验范围限定在用户可控路径（R9 CI 修复：macOS 上 `/tmp`、`/var` 是系统级
+    // symlink——`/tmp`→`/private/tmp`、`/var`→`/private/var`——journal 记录的是
+    // workdir 内文件，遍历组件时把系统路径当 symlink 误判为 PathEscaped 导致
+    // undo 全挂）。有 workdir 时只检查 workdir 之后的组件；无 workdir（测试/
+    // 兜底）时跳过根与根下第一级（系统挂载点所在层）。
+    let skip = if path.is_absolute() {
+        match workdir {
+            Some(wd) if wd.is_absolute() && path.starts_with(wd) => wd.components().count(),
+            _ => 2, // RootDir + 根下第一级（系统挂载点 /tmp、/var 等）
+        }
+    } else {
+        0 // 相对路径全组件检查
+    };
     let mut prefix = camino::Utf8PathBuf::new();
-    for comp in path.components() {
+    for (i, comp) in path.components().enumerate() {
         prefix.push(comp.as_str());
+        if i < skip {
+            continue;
+        }
         match fs::symlink_metadata(prefix.as_std_path()).await {
             Ok(md) if md.file_type().is_symlink() => {
                 return Err(JournalError::PathEscaped(format!(
@@ -960,15 +979,17 @@ mod tests {
         std::os::windows::fs::symlink_dir(outside.as_std_path(), link.as_std_path()).unwrap();
 
         // 末段是 symlink：拒绝
-        let res = ensure_not_symlink(&link).await;
+        let res = ensure_not_symlink(&link, None).await;
         assert!(matches!(res, Err(JournalError::PathEscaped(_))));
         // 中段是 symlink（link/x.txt 不存在）：拒绝
-        let res = ensure_not_symlink(&link.join("x.txt")).await;
+        let res = ensure_not_symlink(&link.join("x.txt"), None).await;
         assert!(matches!(res, Err(JournalError::PathEscaped(_))));
         // 普通路径（文件不存在）：通过（幂等路径）
-        let ok =
-            ensure_not_symlink(&Utf8PathBuf::from_path_buf(tmp.path().join("plain.txt")).unwrap())
-                .await;
+        let ok = ensure_not_symlink(
+            &Utf8PathBuf::from_path_buf(tmp.path().join("plain.txt")).unwrap(),
+            None,
+        )
+        .await;
         assert!(ok.is_ok());
     }
 

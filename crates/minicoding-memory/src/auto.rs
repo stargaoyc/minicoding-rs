@@ -810,16 +810,14 @@ mod tests {
         // 来源文件：先创建，再改 mtime 为将来（确保晚于条目 updated）
         let src = tmp.path().join("src_main_rs");
         std::fs::write(&src, "fn main() {}").expect("write source");
-        let future_time = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        let f = std::fs::File::open(&src).expect("open source");
-        f.set_times(std::fs::FileTimes::new().set_modified(future_time))
-            .expect("set source mtime");
+        // 条目 updated 设为 1 小时前，源文件 mtime 保持当前（> updated）以触发 stale
+        let past = OffsetDateTime::now_utc() - time::Duration::hours(1);
 
         let changed_entry = AutoEntry {
             topic: "src-entry".to_string(),
             content: "about src/main.rs".to_string(),
             confidence: 0.8,
-            updated: OffsetDateTime::now_utc(),
+            updated: past,
             category: AutoCategory::Decision,
             source: Some(src.to_string_lossy().into_owned()),
         };
