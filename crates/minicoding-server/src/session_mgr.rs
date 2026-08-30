@@ -358,7 +358,7 @@ impl SessionManager {
         if evicted > 0 {
             tracing::info!(
                 evicted,
-                max_idle_secs = 6 * 60 * 60,
+                max_idle_secs = MAX_IDLE.as_secs(),
                 "idle sessions evicted"
             );
         }
