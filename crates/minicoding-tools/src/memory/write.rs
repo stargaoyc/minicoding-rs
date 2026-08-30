@@ -39,6 +39,9 @@ pub enum MemoryCategory {
 pub trait AutoMemoryWriter: Send + Sync {
     /// 添加/更新条目（按 `topic` 去重），返回写入后条目数。
     ///
+    /// `source` 为条目知识的来源文件路径（`memory.write` 的 `source` 参数，
+    /// CTX-4：渲染时源文件 mtime 变更自动标陈旧）；未知来源传 `None`。
+    ///
     /// # Errors
     /// IO 或序列化失败时返回 `ToolError`。
     fn add_entry(
@@ -47,13 +50,17 @@ pub trait AutoMemoryWriter: Send + Sync {
         content: String,
         category: MemoryCategory,
         confidence: f64,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ToolError>>;
 }
+
+/// 内存 Auto memory 条目（topic, content, category, confidence, source）。
+type InMemoryEntry = (String, String, MemoryCategory, f64, Option<String>);
 
 /// 内存 Auto memory 存储（默认，非持久化）。
 #[derive(Default)]
 pub struct InMemoryAutoMemory {
-    entries: tokio::sync::Mutex<Vec<(String, String, MemoryCategory, f64)>>,
+    entries: tokio::sync::Mutex<Vec<InMemoryEntry>>,
 }
 
 impl InMemoryAutoMemory {
@@ -71,15 +78,18 @@ impl AutoMemoryWriter for InMemoryAutoMemory {
         content: String,
         category: MemoryCategory,
         confidence: f64,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ToolError>> {
         Box::pin(async move {
             let mut entries = self.entries.lock().await;
             let confidence = confidence.clamp(0.0, 1.0);
-            if let Some(slot) = entries.iter_mut().find(|(t, _, _, _)| *t == topic) {
+            if let Some(slot) = entries.iter_mut().find(|(t, _, _, _, _)| *t == topic) {
                 slot.1 = content;
                 slot.3 = (slot.3 + 0.1).min(1.0);
+                // CTX-4：来源文件随新证据更新
+                slot.4 = source;
             } else {
-                entries.push((topic, content, category, confidence));
+                entries.push((topic, content, category, confidence, source));
             }
             Ok(entries.len())
         })
@@ -132,6 +142,10 @@ impl MemoryWrite {
                         "minimum": 0.0,
                         "maximum": 1.0,
                         "description": "（仅 auto）置信度 [0.0, 1.0]，默认 0.5。"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "（仅 auto）条目知识的来源文件路径（如刚读取的 src/main.rs）。"
                     }
                 },
                 "required": ["target", "content"]
@@ -157,6 +171,10 @@ struct MemoryWriteInput {
     category: Option<MemoryCategory>,
     #[serde(default = "default_confidence")]
     confidence: f64,
+    /// CTX-4：条目知识的来源文件路径（如被阅读的 `src/main.rs`）；渲染时
+    /// 源文件 mtime 变更自动标陈旧。未知来源省略。
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// `confidence` 默认值。
@@ -207,7 +225,13 @@ impl Tool for MemoryWrite {
                     let category = args.category.unwrap_or(MemoryCategory::Pref);
                     let count = self
                         .auto
-                        .add_entry(topic, args.content.clone(), category, args.confidence)
+                        .add_entry(
+                            topic,
+                            args.content.clone(),
+                            category,
+                            args.confidence,
+                            args.source.clone(),
+                        )
                         .await?;
                     Ok(ToolResult::ok_text(format!(
                         "auto memory entry added (total {count} entries)"

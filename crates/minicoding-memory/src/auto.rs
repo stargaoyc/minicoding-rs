@@ -75,6 +75,10 @@ pub struct AutoEntry {
     pub updated: OffsetDateTime,
     /// 条目类别。
     pub category: AutoCategory,
+    /// R9 CTX-4：来源文件路径（相对 workdir 或绝对路径）。`None` 表示未知
+    /// 来源（如从对话历史自动抽取）。用于渲染时源文件 mtime 变更自动标 stale。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Auto memory 存储（`auto.md` + `auto.index.json` + 内存缓存）。
@@ -190,6 +194,27 @@ impl AutoMemory {
         category: AutoCategory,
         confidence: f64,
     ) -> Result<usize, MemoryError> {
+        self.add_entry_with_source(topic, content, category, confidence, None)
+            .await
+    }
+
+    /// 带来源文件的添加/更新条目（CTX-4 完整版）。
+    ///
+    /// `source` 为条目知识的来源文件路径（如被阅读的 `src/main.rs`）；渲染时
+    /// 若该文件 mtime 晚于条目更新时间，自动标记"来源已变更，可能陈旧"——
+    /// 代码重构后旧记忆不再误导模型（与仅按时间兜底的 [`STALE_AFTER`] 互补）。
+    ///
+    /// # Errors
+    /// IO 或序列化失败时返回 `MemoryError`。
+    #[tracing::instrument(skip(self), fields(otel.name = span_name::MEMORY_SAVE, memory.type = "auto"))]
+    pub async fn add_entry_with_source(
+        &self,
+        topic: String,
+        content: String,
+        category: AutoCategory,
+        confidence: f64,
+        source: Option<String>,
+    ) -> Result<usize, MemoryError> {
         // CTX-1（2026-08-25 R2 审查）：读-改-写全程持 save_lock——此前仅 save
         // 半程持锁，并发 add_entry（Arc<AutoMemory> 跨会话共享）同基线各自
         // 追加后串行落盘，后者整表覆盖前者丢更新。load_entries 不取锁，无死锁。
@@ -208,6 +233,8 @@ impl AutoMemory {
             // 基于新证据给出的更高置信度可表达。
             existing.confidence = (existing.confidence + 0.1).max(confidence).min(1.0);
             existing.updated = now;
+            // 来源文件随新证据更新（新的记忆来自其它文件时切换）
+            existing.source = source;
         } else {
             entries.push(AutoEntry {
                 topic,
@@ -215,6 +242,7 @@ impl AutoMemory {
                 confidence,
                 updated: now,
                 category,
+                source,
             });
         }
 
@@ -326,28 +354,50 @@ fn render_entries(entries: &[AutoEntry]) -> String {
             .updated
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "unknown".to_string());
-        // R9 CTX-4 务实实现：陈旧治理（基础版）——长期未更新的条目可能是过时
-        // 知识（代码重构后旧偏好持续误导）。超过 [`STALE_AFTER`] 未更新的条目
-        // 渲染时标注 `[可能陈旧]`，注入侧 LLM 据此降低权重；同时容量淘汰按
-        // `updated asc` 优先淘汰旧条目（`evict_until_fit`）。完整方案（来源
-        // 文件 mtime + 指纹自动标记 stale）留 roadmap。
+        // R9 CTX-4 陈旧治理（基础版：超时标注；完整版：来源文件 mtime 变更）。
+        // - 超过 [`STALE_AFTER`] 未更新 → `[可能陈旧]`（代码重构后旧偏好持续误导）；
+        // - 来源文件 mtime 晚于条目更新时间 → `[来源已变更]`（记忆基于的文件
+        //   内容已变化，知识可能失效）。
+        // 注入侧 LLM 据此降权；容量淘汰按 `updated asc` 优先淘汰旧条目。
         let stale = now - e.updated > STALE_AFTER;
+        let source_changed = e
+            .source
+            .as_ref()
+            .is_some_and(|src| source_mtime_changed(src, e.updated));
+        let stale_note = if source_changed {
+            "（来源文件已变更，可能陈旧）"
+        } else if stale {
+            "（可能陈旧，仅供参考）"
+        } else {
+            ""
+        };
         let _ = writeln!(
             out,
             "## [{}] {}{}\n\n{}\n\n- confidence: {:.2}\n- updated: {}\n",
             e.category.as_str(),
             e.topic,
-            if stale {
-                "（可能陈旧，仅供参考）"
-            } else {
-                ""
-            },
+            stale_note,
             e.content.trim(),
             e.confidence,
             updated,
         );
     }
     out
+}
+
+/// 来源文件 mtime 是否晚于条目更新时间（CTX-4 完整版）。
+///
+/// 文件不存在/stat 失败时视为未变更（best-effort，不误标陈旧——记忆本身
+/// 有效，仅来源无法验证时不降权）。`std::fs::metadata` 同步 stat 开销极小，
+/// 渲染频率低（保存/注入时各一次），不值得引入异步改造。
+fn source_mtime_changed(source: &str, entry_updated: OffsetDateTime) -> bool {
+    let Ok(meta) = std::fs::metadata(source) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    OffsetDateTime::from(mtime) > entry_updated
 }
 
 /// R9 CTX-4：条目被视为"可能陈旧"的未更新时间阈值（90 天）。
@@ -586,6 +636,7 @@ mod tests {
                 topic: format!("topic-{i}"),
                 content: "line".to_string(),
                 category: AutoCategory::Decision,
+                source: None,
                 confidence: 0.9,
                 updated: now,
             })
@@ -599,6 +650,7 @@ mod tests {
             topic: "extra".to_string(),
             content: "line".to_string(),
             category: AutoCategory::Pitfall,
+            source: None,
             confidence: 0.1, // 最低置信度，应被优先淘汰
             updated: now,
         });
@@ -625,6 +677,7 @@ mod tests {
             topic: "huge".to_string(),
             content: "x".repeat(MAX_BYTES + 100),
             category: AutoCategory::Decision,
+            source: None,
             confidence: 0.5,
             updated: now,
         }];
@@ -708,6 +761,7 @@ mod tests {
             confidence: 0.9,
             updated: OffsetDateTime::now_utc(),
             category: AutoCategory::Pref,
+            source: None,
         };
         let rendered = mem.render(std::slice::from_ref(&entry));
         assert!(rendered.contains("[pref] indent"));
@@ -727,6 +781,7 @@ mod tests {
             // 91 天前
             updated: OffsetDateTime::now_utc() - time::Duration::days(91),
             category: AutoCategory::Pref,
+            source: None,
         };
         let fresh_entry = AutoEntry {
             topic: "new-pref".to_string(),
@@ -734,6 +789,7 @@ mod tests {
             confidence: 0.8,
             updated: OffsetDateTime::now_utc(),
             category: AutoCategory::Pref,
+            source: None,
         };
         let rendered = mem.render(&[stale_entry, fresh_entry]);
         assert!(
@@ -743,6 +799,46 @@ mod tests {
         assert!(
             !rendered.contains("new-pref（可能陈旧"),
             "新条目不应标注: {rendered}"
+        );
+    }
+
+    /// R9 CTX-4 完整版：来源文件 mtime 晚于条目更新 → 自动标注"来源已变更"。
+    #[test]
+    fn render_marks_source_changed_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = make(tmp.path());
+        // 来源文件：先创建，再改 mtime 为将来（确保晚于条目 updated）
+        let src = tmp.path().join("src_main_rs");
+        std::fs::write(&src, "fn main() {}").expect("write source");
+        let future_time = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let f = std::fs::File::open(&src).expect("open source");
+        f.set_times(std::fs::FileTimes::new().set_modified(future_time))
+            .expect("set source mtime");
+
+        let changed_entry = AutoEntry {
+            topic: "src-entry".to_string(),
+            content: "about src/main.rs".to_string(),
+            confidence: 0.8,
+            updated: OffsetDateTime::now_utc(),
+            category: AutoCategory::Decision,
+            source: Some(src.to_string_lossy().into_owned()),
+        };
+        let unchanged_entry = AutoEntry {
+            topic: "no-src".to_string(),
+            content: "no source".to_string(),
+            confidence: 0.8,
+            updated: OffsetDateTime::now_utc(),
+            category: AutoCategory::Pref,
+            source: None,
+        };
+        let rendered = mem.render(&[changed_entry, unchanged_entry]);
+        assert!(
+            rendered.contains("src-entry（来源文件已变更，可能陈旧）"),
+            "来源变更条目标注: {rendered}"
+        );
+        assert!(
+            !rendered.contains("no-src（来源文件已变更"),
+            "无来源条目不应标注: {rendered}"
         );
     }
 
@@ -1101,6 +1197,7 @@ mod tests {
                 confidence: 0.5,
                 updated: now,
                 category: AutoCategory::Pref,
+                source: None,
             },
             AutoEntry {
                 topic: "second".to_string(),
@@ -1108,6 +1205,7 @@ mod tests {
                 confidence: 0.9,
                 updated: now,
                 category: AutoCategory::Decision,
+                source: None,
             },
         ];
         let rendered = mem.render(&entries);

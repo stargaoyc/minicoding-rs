@@ -72,6 +72,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
         content: String,
         category: MemoryCategory,
         confidence: f64,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ToolError>> {
         Box::pin(async move {
             let cat = match category {
@@ -81,7 +82,7 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
                 MemoryCategory::Decision => AutoCategory::Decision,
             };
             self.inner
-                .add_entry(topic, content, cat, confidence)
+                .add_entry_with_source(topic, content, cat, confidence, source)
                 .await
                 .map_err(|e: MemoryError| ToolError::Exec(format!("auto memory: {e}")))
         })
