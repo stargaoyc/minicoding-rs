@@ -79,6 +79,10 @@ minicoding-core = { workspace = true, features = ["test-util"] }
 # F1（测试时钟改造）：`start_paused = true` 虚拟时钟需要 test-util
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
+# E2E 框架（tests/e2e.rs）：spawn 真实 server 进程 + reqwest 驱动 HTTP/SSE +
+# wiremock mock LLM 端点（默认路径，CI 安全）；真实 LLM 经 env 门控跳过。
+reqwest = { workspace = true }
+wiremock = { workspace = true }
 
 # 继承 workspace lints（ENG-8：clippy::all + pedantic deny）
 [lints]
