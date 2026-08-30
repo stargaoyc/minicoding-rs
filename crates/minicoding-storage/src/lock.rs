@@ -8,6 +8,10 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use fs2::FileExt;
+
+/// R9 STR-6：`acquire_blocking` 等待排他锁的默认超时（持锁进程卡住时防
+/// 永久挂起）。10s 对正常 append 热路径（亚毫秒级持锁）足够宽裕。
+const BLOCKING_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use minicoding_core::storage::StorageError;
 use std::fs::File;
 
@@ -55,17 +59,42 @@ impl SessionLock {
     /// fs2 的 `lock_exclusive` 是同步阻塞 API，调用方应在
     /// `tokio::task::spawn_blocking` 中执行，避免阻塞 async reactor。
     ///
+    /// **R9 STR-6 修复**：改用 `try_lock_exclusive` + 轮询（10ms 间隔）替代
+    /// 裸 `lock_exclusive`——后者在持锁进程**卡住（非崩溃）**时另一进程永久
+    /// 挂起（flock 是 advisory，NFS 上更不可靠）。超时（默认 10s）返回
+    /// `StorageError::Locked`，避免跨进程死锁不可恢复。
+    ///
     /// # Errors
-    /// - `StorageError::Io`：文件创建或加锁时 IO 错误。
+    /// - `StorageError::Io`：文件创建或加锁时 IO 错误；
+    /// - `StorageError::Locked`：超时仍未获得锁。
     pub fn acquire_blocking(path: impl Into<Utf8PathBuf>) -> Result<Self, StorageError> {
+        Self::acquire_blocking_timeout(path, BLOCKING_LOCK_TIMEOUT)
+    }
+
+    /// `acquire_blocking` 带显式超时（测试注入用）。
+    fn acquire_blocking_timeout(
+        path: impl Into<Utf8PathBuf>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, StorageError> {
         let path = path.into();
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(path.as_std_path())?;
-        file.lock_exclusive()?;
-        Ok(Self { file, path })
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(()) = file.try_lock_exclusive() {
+                return Ok(Self { file, path });
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(StorageError::Locked(format!(
+                    "{}: 等待排他锁超时（持锁进程可能卡住）",
+                    path.as_str()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// 显式释放锁（等价于 drop，便于语义明确处调用）。
