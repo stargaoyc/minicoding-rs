@@ -683,7 +683,13 @@ impl ContextManager for ContextManagerImpl {
             max_tokens_per_file: config.context.post_compact_max_tokens_per_file,
         };
         Box::pin(async move {
-            let threshold = self.budget.compact_threshold();
+            // R10 P1-附加：触发阈值统一用 `effective_compact_threshold()`——
+            // 成功判据（`handle_oversize` 分支，见 compress 内）同样基于该函数
+            // （低估 streak ≥ 3 时收紧至 −40%）。此前触发用基础
+            // `budget.compact_threshold()`，低估检测生效后压缩在基础阈值触发、
+            // 却按收紧阈值判成功——落入两阈值之间的区间即 record_oversize，
+            // 连续 2 次即 thrash 熔断（健康会话被误熔断）。
+            let threshold = self.effective_compact_threshold();
             let current_tokens = self.token_count();
 
             // Metrics：请求阶段 token 分布
