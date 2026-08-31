@@ -47,7 +47,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::StreamExt;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 /// Server 配置（`serve` 子命令传入）。
@@ -336,26 +336,19 @@ fn is_local_origin(origin: &axum::http::HeaderValue, _parts: &axum::http::reques
         .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]"))
 }
 
-/// 构造 axum Router。
-///
-/// `web_dir` 设为 `Some(dir)` 时在 API/SSE 路由之外挂载 `ServeDir`（M9 `--web`，
-/// 见 `design.md` §26.7），未匹配静态文件的路径 fallback 到 `index.html`（SPA
-/// history 路由）。
-///
-/// `cors_origins` 空列表 = 默认仅允许**本机来源**（`localhost`/`127.0.0.1`/`[::1]`，任意
-/// 端口——开发默认，S2 防浏览器 drive-by）；非空 = 仅允许列出的精确来源
-/// （生产部署，M9 `--cors-origin`，见 `design.md` §26.6）。`*` 通配不再支持。
-fn build_router(
-    state: AppState,
-    web_dir: Option<&Utf8PathBuf>,
-    cors_origins: &[String],
-    auth_token: Option<&str>,
-) -> Router {
-    let cors = if cors_origins.is_empty() {
+/// 构造 CORS 层（R10 P2 收紧：方法仅 GET/POST/DELETE，请求头仅
+/// Authorization/Content-Type，补 Vary: Origin）。
+fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
+    use axum::http::Method;
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN};
+    let methods = [Method::GET, Method::POST, Method::DELETE];
+    let headers = [AUTHORIZATION, CONTENT_TYPE];
+    if cors_origins.is_empty() {
         CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(is_local_origin))
-            .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_methods(methods)
+            .allow_headers(headers)
+            .vary([ORIGIN])
     } else {
         let origins: Vec<_> = cors_origins
             .iter()
@@ -376,9 +369,28 @@ fn build_router(
         }
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
-            .allow_methods(Any)
-            .allow_headers(Any)
-    };
+            .allow_methods(methods)
+            .allow_headers(headers)
+            .vary([ORIGIN])
+    }
+}
+
+/// 构造 axum Router。
+///
+/// `web_dir` 设为 `Some(dir)` 时在 API/SSE 路由之外挂载 `ServeDir`（M9 `--web`，
+/// 见 `design.md` §26.7），未匹配静态文件的路径 fallback 到 `index.html`（SPA
+/// history 路由）。
+///
+/// `cors_origins` 空列表 = 默认仅允许**本机来源**（`localhost`/`127.0.0.1`/`[::1]`，任意
+/// 端口——开发默认，S2 防浏览器 drive-by）；非空 = 仅允许列出的精确来源
+/// （生产部署，M9 `--cors-origin`，见 `design.md` §26.6）。`*` 通配不再支持。
+fn build_router(
+    state: AppState,
+    web_dir: Option<&Utf8PathBuf>,
+    cors_origins: &[String],
+    auth_token: Option<&str>,
+) -> Router {
+    let cors = build_cors_layer(cors_origins);
 
     let api_routes = Router::new()
         .route("/sessions", post(create_session).get(list_sessions))
