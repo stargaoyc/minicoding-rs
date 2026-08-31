@@ -81,40 +81,38 @@ minicoding serve --as-mcp-server
 minicoding-rs/
 ├── Cargo.toml / Cargo.lock      # workspace 配置与锁文件
 ├── dist-workspace.toml          # 跨平台二进制构建配置（cargo-dist）
-├── rust-toolchain.toml          # Rust 工具链锁定（2024 edition / MSRV 1.99+）
+├── rust-toolchain.toml          # Rust 工具链
 ├── deny.toml                    # cargo-deny 依赖许可/来源门禁
 ├── cliff.toml / _typos.toml     # changelog 生成 / typos 检查配置
-├── .pre-commit-config.yaml      # pre-commit 门禁（fmt/clippy/deny/secrets）
-├── .github/workflows/           # CI（ci.yml）+ release（cargo-dist + desktop）
+├── .pre-commit-config.yaml      # pre-commit 门禁
+├── .github/workflows/           # CI + release
 ├── README.md
 ├── AGENTS.md                    # AI 助手开发约束
-├── CONTRIBUTING.md              # 人类贡献指南
-├── SECURITY.md                  # 漏洞披露流程与安全边界
-├── CHANGELOG.md                 # 变更日志
-├── LICENSE                      # AGPL-3.0 全文
+├── CHANGELOG.md
+├── LICENSE
 ├── docs/                        # 设计文档
-│   ├── design.md                # 详细设计（核心）
+│   ├── design.md                # 详细设计
 │   ├── architecture.md          # 分层架构
-│   ├── modules.md               # 模块详细设计（18 crate + web）
+│   ├── modules.md               # 模块详细设计
 │   ├── api.md                   # 接口设计
 │   ├── data-model.md            # 数据模型与存储
 │   ├── security.md              # 安全与权限
-│   ├── hooks.md                 # Hooks 系统设计
-│   ├── tech-stack.md            # 技术选型
-│   ├── innovation.md            # 差异化与创新点
+│   ├── hooks.md
+│   ├── tech-stack.md
+│   ├── innovation.md
 │   ├── roadmap.md               # 开发路线图
 │   ├── dev-plan.md              # 详细开发计划
 │   ├── features.md              # 功能清单
-│   ├── rules.md                 # 运行时大模型约束
-│   ├── m9-design.md             # M9 Web/桌面设计
-│   ├── getting-started.md       # 上手指南
-│   ├── product-manual.md        # 产品手册
-│   ├── build-guide.md           # 构建指南
-│   ├── troubleshooting.md       # 问题排查
-│   ├── learning-guide.md        # 学习路径
-│   ├── observability.md         # 可观测性（OTel/metrics）
+│   ├── rules.md
+│   ├── m9-design.md             # Web/桌面设计
+│   ├── getting-started.md
+│   ├── product-manual.md
+│   ├── build-guide.md
+│   ├── troubleshooting.md
+│   ├── learning-guide.md
+│   ├── observability.md         # 可观测性
 │   ├── development-process.md   # 开发流程
-│   └── history/                 # 设计决策历史
+│   └── history/
 ├── crates/
 │   ├── minicoding-core/         # 抽象层：数据模型 + trait 定义 + Runtime 编排（零实现）
 │   ├── minicoding-context/      # ContextManager 实现 + 压缩管道 + 熔断
