@@ -124,13 +124,21 @@ impl ContextManagerImpl {
         context_window: usize,
         provider: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
+        // R10-10：预留输出由 provider 声明的 `max_output` 驱动（取 min(声明值,
+        // 窗口 25%)，`with_reserved_output` 内部 clamp）——此前硬编码 4096，
+        // 与 Anthropic 64K max_output 脱钩：可用预算被低估/高估都可能触发真实
+        // 400（输入超阈值但输出预留不足）。
+        let mut budget = TokenBudget::new(context_window);
+        if let Some(p) = &provider {
+            budget = budget.with_reserved_output(p.capabilities().max_output);
+        }
         Self {
             messages: tokio::sync::RwLock::new(Vec::new()),
             system_prompt,
             pipeline: None,
             prompt_ctx_template: None,
             tokenizer,
-            budget: TokenBudget::new(context_window),
+            budget,
             provider,
             count: AtomicUsize::new(0),
             token_cache: AtomicUsize::new(0),

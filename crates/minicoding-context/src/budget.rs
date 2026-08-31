@@ -34,6 +34,17 @@ impl TokenBudget {
         }
     }
 
+    /// 设置预留输出 token（R10-10：由 provider `max_output` 驱动，取 min(声明值,
+    /// 窗口的 25%)，使可用预算更准确，防止"预留不足 → 输入超阈值 → 压缩未触发
+    /// → 真实 400"）。
+    #[must_use]
+    pub fn with_reserved_output(mut self, output: usize) -> Self {
+        // 预留输出至少 512（安全偏低限），至多窗口的 25%（留足输入预算）。
+        let max_reserved = self.context_window / 4;
+        self.reserved_output = output.clamp(512, max_reserved);
+        self
+    }
+
     /// 设置压缩触发比例（builder，CTX-R6-7：由 `config.budget_ratio` 驱动）。
     #[must_use]
     pub fn with_ratio(mut self, ratio: f64) -> Self {
