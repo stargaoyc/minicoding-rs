@@ -11,8 +11,8 @@ import {
   isTauri,
   restartApp,
 } from "../../api/tauri";
-import { useServerConfig } from "../../hooks/useTurnControl";
-import { loadWebSettings } from "../../stores/webSettings";
+import { useServerConfig, useSetApiToken } from "../../hooks/useTurnControl";
+import { loadServerToken, loadWebSettings, saveServerToken } from "../../stores/webSettings";
 import { cn } from "../../lib/utils";
 // Q5 拆分：常量与子组件外置
 import { DEFAULTS, INPUT_CLASS, PARAM_DEFAULTS, PROVIDER_OPTIONS } from "./constants";
@@ -44,6 +44,7 @@ import { SectionTitle } from "./SectionTitle";
 
 export function SetupDialog() {
   const fetchServerConfig = useServerConfig();
+  const setApiTokenClient = useSetApiToken();
   const phase = useDesktopStore((s) => s.phase);
   const saveConfig = useDesktopStore((s) => s.saveConfig);
   const restartRequired = useDesktopStore((s) => s.restartRequired);
@@ -60,6 +61,8 @@ export function SetupDialog() {
   const [apiBase, setApiBase] = useState(DEFAULTS.api_base);
   const [model, setModel] = useState(DEFAULTS.model);
   const [apiKey, setApiKey] = useState("");
+  // R10-04：Web 直连模式鉴权 token（`SERVER_TOKEN`，服务端启动时打印）
+  const [serverToken, setServerToken] = useState(loadServerToken());
   // 模型参数 / 上下文参数（W-19，见 features.md）
   const [timeoutSec, setTimeoutSec] = useState(PARAM_DEFAULTS.timeout_sec);
   const [maxRetries, setMaxRetries] = useState(PARAM_DEFAULTS.max_retries);
@@ -181,6 +184,11 @@ export function SetupDialog() {
       compress: compress,
     };
     try {
+      // R10-04：Web 模式保存鉴权 token（localStorage）并应用到 HTTP/SSE 客户端
+      if (webMode) {
+        saveServerToken(serverToken.trim());
+        setApiTokenClient(serverToken.trim());
+      }
       await saveConfig(input);
       // saveConfig 成功后：
       // - Web 模式：已存 localStorage，直接关闭弹窗
@@ -307,6 +315,24 @@ export function SetupDialog() {
                       className={INPUT_CLASS}
                     />
                   </Field>
+
+                  {/* R10-04：Web 模式鉴权 token（`SERVER_TOKEN`，服务端启动时打印；
+                      Tauri 模式由 sidecar 经 env 注入，无需手动填写） */}
+                  {webMode && (
+                    <Field
+                      label="Server Token"
+                      hint="服务端启动时打印的 SERVER_TOKEN=...（未配置则所有 API 返回 401）"
+                    >
+                      <input
+                        type="password"
+                        value={serverToken}
+                        onChange={(e) => setServerToken(e.target.value)}
+                        disabled={saving}
+                        placeholder="粘贴 SERVER_TOKEN"
+                        className={INPUT_CLASS}
+                      />
+                    </Field>
+                  )}
 
                   {/* Model */}
                   <Field label="模型">

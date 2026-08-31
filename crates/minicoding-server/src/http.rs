@@ -443,7 +443,16 @@ fn build_router(
                         || req.method() == axum::http::Method::OPTIONS
                         || request_authorized(&req, &expected);
                     if !authorized {
-                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                        // R10-04：401 返回可操作 body——此前裸状态码前端显示
+                        // "HTTP 401: "（冒号后空白），用户无从知道要配置 token。
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "error": "unauthorized",
+                                "hint": "请配置访问令牌：Web 模式在设置中填入 SERVER_TOKEN（服务端启动时打印），或使用 --no-auth 仅限本机",
+                            })),
+                        )
+                            .into_response();
                     }
                     next.run(req).await
                 }

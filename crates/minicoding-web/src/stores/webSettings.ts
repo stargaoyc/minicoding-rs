@@ -6,11 +6,37 @@
  * 由 server 端持有，不经前端传）。
  *
  * 仅存储非敏感配置：`provider` / `api_base` / `model` / 模型参数 / 上下文参数。
+ * 鉴权 token（R10-04）另存 `minicoding.serverToken` 键，`setApiToken` 在 App 启动时读取。
  * 各字段可选——缺失时新建会话不传对应 body 字段，由 server 端默认值兜底
  * （与 `GET /config` 返回的 server 默认一致）。
  */
 
 const STORAGE_KEY = "minicoding-web-settings";
+
+/** R10-04：鉴权 token 的 localStorage 键（Web 直连模式，服务端 `SERVER_TOKEN`）。 */
+const TOKEN_KEY = "minicoding.serverToken";
+
+/** 读取持久化的鉴权 token（Web 直连模式；缺失返回空串）。 */
+export function loadServerToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** 持久化鉴权 token（`setApiToken` 由 App 启动时调用）。 */
+export function saveServerToken(token: string): void {
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    // localStorage 不可用时仅内存 token 可用，不阻塞
+  }
+}
 
 /** Web 模式 provider + 模型/上下文参数（子集，不含 api_key，C-04）。 */
 export interface WebProviderSettings {

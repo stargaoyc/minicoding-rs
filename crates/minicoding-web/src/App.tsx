@@ -21,9 +21,11 @@ import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
 import { useSessions } from "./hooks/useSessions";
+import { loadServerToken } from "./stores/webSettings";
 import {
   useCancelTurn,
   useSetApiBase,
+  useSetApiToken,
   useUndoSession,
 } from "./hooks/useTurnControl";
 import type { Task } from "./api/generated";
@@ -58,6 +60,7 @@ export default function App() {
 function DesktopGate() {
   // ARCH-5：连接级副作用经 hook 封装
   const setApiBaseClient = useSetApiBase();
+  const setApiTokenClient = useSetApiToken();
 
   const phase = useDesktopStore((s) => s.phase);
   const apiBase = useDesktopStore((s) => s.apiBase);
@@ -73,6 +76,13 @@ function DesktopGate() {
   useEffect(() => {
     setApiBaseClient(apiBase);
   }, [apiBase]);
+
+  // R10-04：Web 直连模式从 localStorage 恢复鉴权 token（Tauri 模式由 sidecar
+  // 经 env 注入 `setApiToken`，此处为空串不影响）——此前 Web 形态开箱 401 且
+  // 无任何 token 输入口，用户只能重建前端或 `--no-auth`。
+  useEffect(() => {
+    setApiTokenClient(loadServerToken());
+  }, [setApiTokenClient]);
 
   if (phase === "loading") {
     return <LoadingScreen />;

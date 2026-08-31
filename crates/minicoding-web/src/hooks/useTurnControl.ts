@@ -4,6 +4,7 @@ import {
   cancelTurn,
   getServerConfig,
   setApiBase,
+  setApiToken,
   setPermissionMode,
   undoSession,
 } from "../api/client";
@@ -21,6 +22,11 @@ import {
  * 连接级副作用（非服务端状态），不进 TanStack Query 缓存。 */
 export function useSetApiBase() {
   return useCallback((base: string) => setApiBase(base), []);
+}
+
+/** R10-04：设置鉴权 token（Web 直连模式从 localStorage 恢复，Tauri 由 sidecar 注入）。 */
+export function useSetApiToken() {
+  return useCallback((token: string) => setApiToken(token), []);
 }
 
 /** 取消当前 turn。失败静默降级为 console.warn（取消失败仅影响 UX 不影响正确性）。 */
