@@ -20,9 +20,10 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                      Frontend Layer                          │
-│   minicoding-cli   │   minicoding-tui   │   minicoding-sdk   │
+│   minicoding-cli │ minicoding-tui │ minicoding-sdk │          │
+│   minicoding-web（HTTP/SSE）│ minicoding-desktop（Tauri）      │
 └───────────────┬──────────────────────────────────────────────┘
-                │  (调用 Runtime API)
+                │  (调用 Runtime API / HTTP JSON-RPC)
 ┌───────────────▼──────────────────────────────────────────────┐
 │                   Orchestration Layer                        │
 │   Agent Loop  │  Subagent  │  Context Manager  │  Event Bus  │
@@ -91,6 +92,11 @@ Frontend 只持有对 `Runtime` 的引用，所有业务逻辑下沉到 Orchestr
 | `Journal` | `minicoding-journal` | FileChangeJournal、/undo 回滚 |
 | `McpClient` | `minicoding-mcp` | rmcp 2.2 官方 SDK |
 | `ProjectDocLoader` / `MemoryStore` | `minicoding-memory` | AGENTS.md 分层加载、长期/Auto 记忆 |
+| `Extension` / `ExtensionHost` / `Registrar` | `minicoding-extension-sdk` | 扩展系统：注册、生命周期、清单（M5） |
+| — | `minicoding-protocol` | JSON-RPC 2.0 wire types + Event/Command DTO（前后端协议契约，非 trait 实现 crate） |
+| — | `minicoding-server` | HTTP/SSE server + ACP/LSP 适配器 + M9 --web 静态托管（多前端接入层） |
+| — | `minicoding-desktop` | Tauri 2.x 桌面壳（M9，sidecar 启动 minicoding-server） |
+| — | `minicoding-web` | Web 前端（React 19 + TS + Vite，独立 npm 项目，不入 Cargo workspace） |
 
 > **架构变更（v2）**：原 `minicoding-core` 承载多职责（含 Storage/PermissionPolicy/ContextCompressor 默认实现），违反单一职责。重构后 core 精简为"抽象层 + Runtime 编排"（零实现），所有实现下沉到独立领域 crate。详见 `modules.md` §0。
 
