@@ -724,10 +724,11 @@ pub fn build_preset_policy(
         "full-access" => Ok((
             PermissionMode::BypassPermissions,
             SandboxPolicy::DangerFullAccess,
-            Some(
-                "WARNING: 会话以 full-access 预设运行（沙箱外 + 权限全自动）——                 仅限受信隔离容器内使用（C-22）"
-                    .to_string(),
-            ),
+            // R10-06：复用 `Preset::warning_text()`（C-22 red 警告唯一事实源），
+            // 消除 `requires_confirmation`/`warning_text` 死代码（此前零调用点）
+            minicoding_policy::Preset::FullAccess
+                .warning_text()
+                .map(ToOwned::to_owned),
         )),
         other => Err(HttpError {
             status: axum::http::StatusCode::BAD_REQUEST,
