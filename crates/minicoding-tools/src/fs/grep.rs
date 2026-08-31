@@ -161,6 +161,18 @@ impl Tool for FsGrep {
                     let Ok(content) = std::fs::read_to_string(entry.path()) else {
                         continue;
                     };
+                    // R10-12：敏感文件（.env/credentials/*.pem 等）的匹配输出同样
+                    // 脱敏——此前仅 `fs.read` 脱敏，`fs.grep pattern=".*" .env` 可
+                    // 完整输出所有密钥绕过 C-04 防线。
+                    let path_utf8 = camino::Utf8PathBuf::from_path_buf(entry.path().to_path_buf())
+                        .unwrap_or_else(|p| {
+                            camino::Utf8PathBuf::from(p.to_string_lossy().as_ref())
+                        });
+                    let content = if crate::fs::is_sensitive_path(&path_utf8) {
+                        minicoding_policy::redact(&content)
+                    } else {
+                        content
+                    };
 
                     if ctx_lines == 0 {
                         for (i, line) in content.lines().enumerate() {

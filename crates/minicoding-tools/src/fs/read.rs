@@ -156,43 +156,9 @@ impl Tool for FsRead {
     }
 }
 
-/// 判断路径是否为敏感文件（应脱敏）。
-///
-/// 匹配规则：
-/// - 文件名为 `.env` 或以 `.env.` 开头（`.env.local`/`.env.production`）；
-/// - 文件名等于 `credentials` / `creds`；
-/// - 扩展名为 `.pem` / `.key` / `.pfx` / `.p12`；
-/// - 文件名含 `secret` / `password` / `token`（不区分大小写）。
+/// 判断路径是否为敏感文件（应脱敏）——委托 `fs::is_sensitive_path`（R10-12 共享）。
 fn is_sensitive_path(path: &camino::Utf8Path) -> bool {
-    // 常量前置，避免 `items_after_statements` 警告。
-    const EXACT: &[&str] = &["credentials", "creds"];
-    const SENSITIVE_EXT: &[&str] = &["pem", "key", "pfx", "p12"];
-    const KEYWORDS: &[&str] = &["secret", "password", "token"];
-
-    let Some(file_name) = path.file_name() else {
-        return false;
-    };
-    let lower = file_name.to_lowercase();
-
-    // .env 系列精确/前缀匹配
-    if lower == ".env" || lower.starts_with(".env.") {
-        return true;
-    }
-
-    // 精确匹配
-    if EXACT.contains(&lower.as_str()) {
-        return true;
-    }
-
-    // 扩展名匹配
-    if let Some(ext) = path.extension()
-        && SENSITIVE_EXT.contains(&ext)
-    {
-        return true;
-    }
-
-    // 关键词包含匹配
-    KEYWORDS.iter().any(|kw| lower.contains(kw))
+    crate::fs::is_sensitive_path(path)
 }
 
 #[cfg(test)]
