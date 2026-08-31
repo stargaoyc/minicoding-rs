@@ -20,6 +20,10 @@ use std::time::Duration;
 
 /// 全局计数器注册表：`record_*` 系列在发 tracing 事件的同时累加此表，
 /// 供 `snapshot_prometheus()` 渲染 `/metrics` 端点。BTreeMap 保证输出稳定排序。
+///
+/// 全局状态违反 `architecture.md:12`「组件无全局可变状态」，但 Prometheus 指标
+/// 注册表是行业最佳实践（opentelemetry 亦全局），`#[cfg(test)]` 用 `reset_metrics`
+/// 清空保证测试隔离（R10 P2 §17）。
 static REGISTRY: LazyLock<Mutex<BTreeMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -65,6 +69,19 @@ pub fn snapshot_prometheus() -> String {
         }
     }
     out
+}
+
+/// 重置所有指标计数器（`#[cfg(test)]` 使用，保证测试隔离）。
+///
+/// 测试快照前调用防止跨测试指标泄漏（R10 P2 §17）。
+#[cfg(test)]
+pub fn reset_metrics() {
+    if let Ok(mut reg) = REGISTRY.lock() {
+        reg.clear();
+    }
+    if let Ok(mut reg) = GAUGES.lock() {
+        reg.clear();
+    }
 }
 
 // === Counter（计数器）===
