@@ -2,7 +2,7 @@
 //!
 //! `MINICODING_HOME` 环境变量覆盖根目录，默认 `~/.minicoding/`。
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use std::env;
 
 /// 获取 `MINICODING_HOME` 根目录（默认 `~/.minicoding/`）。
@@ -82,6 +82,39 @@ pub fn memory_dir() -> Result<Utf8PathBuf, std::io::Error> {
 /// 当 home 目录无法确定时返回错误。
 pub fn mcp_choices_path() -> Result<Utf8PathBuf, std::io::Error> {
     Ok(minicoding_home()?.join("mcp_choices.toml"))
+}
+
+/// 确保目录存在且权限为 0700（私密目录，防同机用户读取会话/记忆/审计）。
+///
+/// 目录已存在时不改变既有权限（不覆盖用户手动放宽的设置），仅当新建时
+/// 应用 0700。用于 `~/.minicoding/` 下所有敏感子目录（R10-23）。
+///
+/// # Errors
+/// 创建目录或设置权限失败时返回 io 错误。
+pub fn ensure_private_dir(path: &Utf8Path) -> std::io::Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            // 新建成功，收紧为 0700。umask 可能放宽默认 0777&~umask，
+            // 显式设置保证同机其他用户不可读。
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if path.is_dir() {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{path} exists and is not a directory"),
+                ))
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -231,5 +264,25 @@ mod tests {
         let s2 = sessions_dir().expect("sessions_dir 2");
         assert_eq!(s2, Utf8PathBuf::from(home2).join("sessions"));
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn ensure_private_dir_creates_0700() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let private = dir.path().join("sub");
+        ensure_private_dir(Utf8Path::from_path(&private).expect("utf8")).expect("创建 0700 目录");
+        assert!(private.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&private)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "新目录应为 0700");
+        }
+        // 已存在时幂等
+        ensure_private_dir(Utf8Path::from_path(&private).expect("utf8")).expect("已存在不报错");
     }
 }
