@@ -3,4 +3,4 @@
 /**
  * 工具副作用分类（决定调度策略与权限决策）。
  */
-export type SideEffect = "none" | "file_write" | "command" | "network";
+export type SideEffect = "none" | "file_write" | "command" | "network" | "spawn";
