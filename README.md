@@ -79,24 +79,42 @@ minicoding serve --as-mcp-server
 
 ```
 minicoding-rs/
-├── Cargo.toml
+├── Cargo.toml / Cargo.lock      # workspace 配置与锁文件
 ├── dist-workspace.toml          # 跨平台二进制构建配置（cargo-dist）
+├── rust-toolchain.toml          # Rust 工具链锁定（2024 edition / MSRV 1.99+）
+├── deny.toml                    # cargo-deny 依赖许可/来源门禁
+├── cliff.toml / _typos.toml     # changelog 生成 / typos 检查配置
+├── .pre-commit-config.yaml      # pre-commit 门禁（fmt/clippy/deny/secrets）
+├── .github/workflows/           # CI（ci.yml）+ release（cargo-dist + desktop）
 ├── README.md
 ├── AGENTS.md                    # AI 助手开发约束
+├── CONTRIBUTING.md              # 人类贡献指南
+├── SECURITY.md                  # 漏洞披露流程与安全边界
+├── CHANGELOG.md                 # 变更日志
+├── LICENSE                      # AGPL-3.0 全文
 ├── docs/                        # 设计文档
 │   ├── design.md                # 详细设计（核心）
+│   ├── architecture.md          # 分层架构
 │   ├── modules.md               # 模块详细设计（18 crate + web）
 │   ├── api.md                   # 接口设计
 │   ├── data-model.md            # 数据模型与存储
 │   ├── security.md              # 安全与权限
 │   ├── hooks.md                 # Hooks 系统设计
 │   ├── tech-stack.md            # 技术选型
+│   ├── innovation.md            # 差异化与创新点
 │   ├── roadmap.md               # 开发路线图
 │   ├── dev-plan.md              # 详细开发计划
 │   ├── features.md              # 功能清单
 │   ├── rules.md                 # 运行时大模型约束
 │   ├── m9-design.md             # M9 Web/桌面设计
-│   └── getting-started.md       # 上手指南
+│   ├── getting-started.md       # 上手指南
+│   ├── product-manual.md        # 产品手册
+│   ├── build-guide.md           # 构建指南
+│   ├── troubleshooting.md       # 问题排查
+│   ├── learning-guide.md        # 学习路径
+│   ├── observability.md         # 可观测性（OTel/metrics）
+│   ├── development-process.md   # 开发流程
+│   └── history/                 # 设计决策历史
 ├── crates/
 │   ├── minicoding-core/         # 抽象层：数据模型 + trait 定义 + Runtime 编排（零实现）
 │   ├── minicoding-context/      # ContextManager 实现 + 压缩管道 + 熔断
@@ -104,8 +122,8 @@ minicoding-rs/
 │   ├── minicoding-memory/       # 长期/Auto/会话记忆 + AGENTS.md loader
 │   ├── minicoding-hooks/        # HookRegistry + ScriptHook + asyncRewake
 │   ├── minicoding-journal/      # FileChangeJournal + /undo
-│   ├── minicoding-sandbox/      # OS 沙箱驱动（Linux landlock / macOS Seatbelt / Windows Job Object）
-│   ├── minicoding-mcp/          # MCP client/server（rmcp 2.2 官方 SDK）
+│   ├── minicoding-sandbox/      # OS 沙箱驱动（landlock/Seatbelt/Job Object）
+│   ├── minicoding-mcp/          # MCP client/server（rmcp 2.2）
 │   ├── minicoding-storage/      # JSONL 存储 + audit.log + Event Store
 │   ├── minicoding-providers/    # LLM Provider 实现（OpenAI/Anthropic/Ollama）
 │   ├── minicoding-tools/        # 内置 Tool 实现（组合层，fs/shell/web/git/task/plan/mcp）
@@ -116,8 +134,9 @@ minicoding-rs/
 │   ├── minicoding-tui/          # TUI frontend
 │   ├── minicoding-sdk/          # 对外嵌入 SDK
 │   ├── minicoding-desktop/      # Tauri 2.x 桌面壳（feature gate `desktop`）
-│   └── minicoding-web/          # Web 前端（React 19 + Vite + Tailwind v4，独立 npm 项目）
-└── tests/                       # 集成测试
+│   └── minicoding-web/          # Web 前端（React 19 + Vite + Tailwind v4）
+├── scripts/                     # 构建/发布辅助脚本 + git hooks
+└── deploy/                      # 部署配置（observability）
 ```
 
 ## 5. 文档导航
@@ -130,9 +149,9 @@ minicoding-rs/
 | [模块设计](docs/modules.md) | 18 个 crate + web 前端的职责边界、内部结构、依赖方向 |
 | [接口设计](docs/api.md) | 核心 trait、公共 API、配置 schema |
 | [数据模型](docs/data-model.md) | Message / Session / ToolCall / Event 等数据结构与持久化 |
-| [安全与权限](docs/security.md) | 权限策略、审计、OS 沙箱（landlock/Seatbelt/Job Object）、审批模式与预设 |
+| [安全与权限](docs/security.md) | 权限策略、审计、OS 沙箱、审批模式与预设 |
 | [Hooks 设计](docs/hooks.md) | 10 类生命周期 Hook、协议、asyncRewake、安全约束 |
-| [技术选型](docs/tech-stack.md) | 依赖库选择与理由（沙箱 sandbox-run/MCP rmcp 2.2/Tauri 2.x） |
+| [技术选型](docs/tech-stack.md) | 依赖库选择与理由 |
 | [架构文档](docs/architecture.md) | 分层架构、组件协作、数据流 |
 
 ### 开发与规划文档
@@ -154,14 +173,6 @@ minicoding-rs/
 | [上手指南](docs/getting-started.md) | 从零到运行 + 从 Claude Code / Codex 迁移指南 |
 | [构建指南](docs/build-guide.md) | 详细的构建说明（环境/依赖/跨平台/发布/CI/排查） |
 | [问题排查](docs/troubleshooting.md) | 常见问题与解决方案（构建/CI/运行时/测试/权限/前端） |
-
-### 贡献与安全
-
-| 文档 | 内容 |
-|------|------|
-| [贡献指南](CONTRIBUTING.md) | 人类贡献者指南：构建/分支/提交/编码/架构/测试/PR checklist |
-| [AI 编码约束](AGENTS.md) | 项目级 AI 辅助编码约束（架构/规范/安全，开发时助手必读） |
-| [安全政策](SECURITY.md) | 漏洞报告流程 + 安全边界声明（漏洞请勿公开披露） |
 
 ## 6. 四形态前端
 
