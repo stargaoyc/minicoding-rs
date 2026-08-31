@@ -221,7 +221,7 @@ fn inner_build_runtime(
     }
     if !is_ollama && config.provider.api_key.is_empty() {
         anyhow::bail!(
-            "API key 未配置：请设置 OPENAI_API_KEY 环境变量、使用 --api-key 参数，或通过 `minicoding cred store` 写入 keyring"
+            "API key 未配置：请设置 OPENAI_API_KEY 环境变量，或在 config.toml 中配置 api_key"
         );
     }
 
