@@ -70,6 +70,10 @@ enum Command {
     /// 备份管理（create/list，S-05）。
     #[command(name = "backup")]
     Backup(BackupCommand),
+    /// 记忆管理（list/read/clear，R10-08；`memory` feature）。
+    #[cfg(feature = "memory")]
+    #[command(name = "memory")]
+    Memory(minicoding_cli::commands::MemoryCommand),
 }
 
 /// minicoding — 终端 AI Coding 助手
@@ -287,6 +291,11 @@ fn main() -> Result<()> {
         }
         Some(Command::Backup(backup_cmd)) => {
             commands::run_backup_command(backup_cmd).context("backup 子命令失败")?;
+            return Ok(());
+        }
+        #[cfg(feature = "memory")]
+        Some(Command::Memory(mem_cmd)) => {
+            commands::run_memory_command(mem_cmd).context("memory 子命令失败")?;
             return Ok(());
         }
         #[cfg(feature = "serve")]

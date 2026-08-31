@@ -16,8 +16,11 @@ pub mod backup;
 pub mod cred;
 pub mod doctor;
 pub mod exec;
+// R10-08：记忆读取/列出/清空子命令（`memory` feature 启用时编译）
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "memory")]
+pub mod memory_cmd;
 #[cfg(feature = "serve")]
 pub mod serve;
 pub mod session_cmd;
@@ -28,6 +31,8 @@ pub use doctor::DoctorCommand;
 pub use exec::ExecCommand;
 #[cfg(feature = "mcp")]
 pub use mcp::McpCommand;
+#[cfg(feature = "memory")]
+pub use memory_cmd::{MemoryCommand, run_memory_command};
 #[cfg(feature = "serve")]
 pub use serve::{ServeCommand, run_serve_command};
 pub use session_cmd::{SessionCommand, run_session_command};
