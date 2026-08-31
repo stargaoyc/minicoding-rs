@@ -37,9 +37,12 @@ pub(crate) async fn send_and_check(
 ///
 /// 单行 JSON 解析失败产出 `LlmError::Parse`，不中断整个流（与原实现一致：
 /// provider 各自的 `flat_map` 语义）。
+///
+/// `parse` 为 `FnMut` 闭包（R10 P2：Ollama 的 `index` 需跨 NDJSON 行累计，
+/// 纯 `fn` 无法携带状态；OpenAI/Anthropic 传 `fn` 指针同样满足 `FnMut`）。
 pub(crate) fn lines_to_deltas(
     lines: BoxStream<'static, Result<String, LlmError>>,
-    parse: fn(&serde_json::Value) -> Vec<Delta>,
+    mut parse: impl FnMut(&serde_json::Value) -> Vec<Delta> + Send + 'static,
 ) -> BoxStream<'static, Result<Delta, LlmError>> {
     Box::pin(lines.flat_map(move |ev| {
         let items: Vec<Result<Delta, LlmError>> = match ev {

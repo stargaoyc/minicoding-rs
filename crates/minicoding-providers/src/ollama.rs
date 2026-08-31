@@ -257,8 +257,12 @@ impl LlmProvider for OllamaProvider {
 
             // NDJSON 解析：每行一个 JSON 对象，`done` 字段判断结束
             let ndjson = crate::common::ndjson::from_response(resp);
+            // R10 P2：index 跨行累计（闭包捕获计数器），防撞 index=0
+            let mut next_index = 0u32;
             let delta_stream =
-                crate::common::stream_runner::lines_to_deltas(Box::pin(ndjson), parse_chunk);
+                crate::common::stream_runner::lines_to_deltas(Box::pin(ndjson), move |v| {
+                    parse_chunk(v, &mut next_index)
+                });
 
             Ok(Box::pin(delta_stream) as BoxStream<'static, _>)
         })
@@ -387,8 +391,11 @@ fn map_status_error(status: u16, body: String) -> LlmError {
 /// - 流中：`{"message": {"role": "assistant", "content": "...", "tool_calls": [...]}, "done": false}`
 /// - 结束：`{"done": true, "prompt_eval_count": N, "eval_count": M, ...}`
 ///
-/// 工具调用一次性出现（非分片），统一映射为 `Delta::ToolCall`（`index=0`，`args_chunk` 为完整 JSON）。
-fn parse_chunk(chunk: &Value) -> Vec<Delta> {
+/// 工具调用一次性出现（非分片），统一映射为 `Delta::ToolCall`（`args_chunk` 为完整 JSON）。
+/// `next_index` 为跨行累计的 `tool_call` 序号（R10 P2：此前每行 `enumerate` 从 0 起，
+/// 跨 NDJSON 行的两个单元素 `tool_calls` 会撞 `index=0`，accumulator 按 index 合并
+/// 会把第二个调用的字段并入第一个）。
+fn parse_chunk(chunk: &Value, next_index: &mut u32) -> Vec<Delta> {
     let mut deltas = Vec::new();
 
     // 文本增量
@@ -410,7 +417,7 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
 
         // 工具调用（一次性，非分片）
         if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-            for (i, tc) in tool_calls.iter().enumerate() {
+            for tc in tool_calls {
                 let function = tc.get("function");
                 let name = function
                     .and_then(|f| f.get("name"))
@@ -427,9 +434,11 @@ fn parse_chunk(chunk: &Value) -> Vec<Delta> {
                     .and_then(|f| f.get("id"))
                     .and_then(Value::as_str)
                     .map(String::from)
-                    .or_else(|| Some(format!("ollama-call-{i}-{}", ulid::Ulid::new())));
+                    .or_else(|| Some(format!("ollama-call-{}-{}", *next_index, ulid::Ulid::new())));
+                let index = *next_index;
+                *next_index += 1;
                 deltas.push(Delta::ToolCall(ToolCallDelta {
-                    index: u32::try_from(i).unwrap_or(0),
+                    index,
                     id,
                     name,
                     args_chunk,
@@ -539,7 +548,8 @@ mod tests {
             "message": {"role": "assistant", "content": "hello"},
             "done": false
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 1);
         assert!(matches!(&deltas[0], Delta::Text(t) if t == "hello"));
     }
@@ -550,7 +560,8 @@ mod tests {
             "message": {"role": "assistant", "content": ""},
             "done": false
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert!(deltas.is_empty(), "expected empty: deltas");
     }
 
@@ -569,7 +580,8 @@ mod tests {
             },
             "done": false
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
             Delta::ToolCall(tc) => {
@@ -590,7 +602,8 @@ mod tests {
             "prompt_eval_count": 42,
             "eval_count": 10
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], Delta::Stop(StopReason::EndTurn)));
         match &deltas[1] {
@@ -606,7 +619,8 @@ mod tests {
     fn parse_done_without_usage() {
         // 部分模型不返回 token 统计
         let chunk = json!({"done": true});
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 1);
         assert!(matches!(&deltas[0], Delta::Stop(_)));
     }
@@ -1043,7 +1057,8 @@ mod tests {
             },
             "done": false
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 2);
         match &deltas[0] {
             Delta::ToolCall(tc) => {
@@ -1064,7 +1079,8 @@ mod tests {
     #[test]
     fn parse_chunk_done_reason_length_maps_max_tokens() {
         let chunk = json!({"done": true, "done_reason": "length"});
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 1);
         assert!(matches!(&deltas[0], Delta::Stop(StopReason::MaxTokens)));
     }
@@ -1077,7 +1093,8 @@ mod tests {
             "done": true,
             "done_reason": "stop"
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         // 1 text + 1 stop
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], Delta::Text(t) if t == "final"));
@@ -1090,7 +1107,8 @@ mod tests {
         let chunk = json!({
             "message": {"role": "assistant", "reasoning": "先规划步骤", "content": "回答"}
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "先规划步骤"));
         assert!(matches!(&deltas[1], Delta::Text(t) if t == "回答"));
@@ -1102,7 +1120,8 @@ mod tests {
         let chunk = json!({
             "message": {"role": "assistant", "reasoning_content": "思路"}
         });
-        let deltas = parse_chunk(&chunk);
+        let mut idx = 0u32;
+        let deltas = parse_chunk(&chunk, &mut idx);
         assert!(matches!(&deltas[0], Delta::Reasoning(t) if t == "思路"));
     }
 
