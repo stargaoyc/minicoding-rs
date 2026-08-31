@@ -1568,3 +1568,72 @@ struct ToolRisk {
 
 
 
+
+---
+
+## 19. 修复追踪（2026-08-31，v0.3.11）
+
+本节记录 R10 报告发布后至 v0.3.11 的修复进展。状态图例：✅ 已修复 / 🟡 部分修复 / ⬜ 未处理（登记）。
+
+### 19.1 P0（4/4 ✅）
+
+| 编号 | 问题 | 状态 | 提交 |
+|------|------|:---:|------|
+| R10-01 | 只读命令白名单可绕过 | ✅ | `77383b0`（移除 env/find、git 子命令收紧、cargo check 移出 + 13 回归用例） |
+| R10-02 | Plan 模式可被 task.spawn 绕过 | ✅ | `77383b0`（SideEffect::Spawn + permission_mode 传播） |
+| R10-03 | 沙箱 fail-open + exec 自动批准 | ✅ | `03c5b98`（sandbox_fail_closed + build_runtime_fail_closed） |
+| R10-04 | Web 形态开箱 401 | ✅ | `784db24`（401 可操作 body + 前端 token 输入） |
+
+### 19.2 P1（13/17 ✅，4 项部分或文档化）
+
+| 编号 | 问题 | 状态 | 说明 |
+|------|------|:---:|------|
+| R10-05 | 能力漂移守卫恒真 | ✅ | `1f8e9c0`（assemble_*_tool_registry 真实装配函数比对） |
+| R10-06 | full-access 确认死代码 | ✅ | `a54e247`（build_preset_policy 复用 warning_text + serve 二次确认） |
+| R10-07 | 记忆/AGENTS.md 注入无边界转义 | ✅ | `4f6c495`（escape_boundary_tag 零宽空格转义 + 3 测试） |
+| R10-08 | 记忆无读取/删除入口 | ✅ | `c31bffc`（memory list/read/clear 子命令） |
+| R10-09 | 权限持久化无作用域/无过期 | ✅ | `839b17d`（with_workdir + TTL 30 天） |
+| R10-10 | 输出预留 4096 与 64K 脱钩 | ✅ | `50c0551`（reserved_output 由 provider 驱动） |
+| R10-11 | context_window 无单一事实来源 | ✅ | `4f2c9d2`（effective_context_window 统一） |
+| R10-12 | fs.grep/git.diff 不脱敏 | ✅ | `9a7b452`（is_sensitive_path 共享 + grep 脱敏） |
+| R10-13 | 沙箱覆盖 git/MCP/Hook 子进程 | 🟡 | SDK build_hook_registry 已通过 SEC-5 with_sandbox 注入沙箱（CLI 路径覆盖）；git/MCP 子进程未纳入，登记 Roadmap |
+| R10-14 | 无 LICENSE 文件 | ✅ | `313c437`（AGPL-3.0 全文 661 行） |
+| R10-15 | CLI feature 门控失效 | ✅ | `f81f113`（path 依赖 + default-features=false + doctor 能力集） |
+| R10-16 | Windows 沙箱非安全边界 | ✅ | `c06e3f4` + `7651fbf`（README/innovation/security.md 措辞修正 + §12 重写） |
+| R10-17 | seccomp 从未交付 | 🟡 | 文档标注实验性（默认关、需 opt-in 编译）；release 未启用，登记 Roadmap |
+| — | TUI panic 破坏终端 | ✅ | `3b6cc62`（panic hook 强制 restore） |
+| — | L2 摘要首消息 assistant → 400 | ✅ | `e4e3ded`（首消息角色归一化） |
+| — | 压缩触发/判据口径不一致 | ✅ | `caedfc6`（effective_compact_threshold 统一） |
+| — | 无 LICENSE/CONTRIBUTING/SECURITY | ✅ | `313c437` + `242b344` |
+
+### 19.3 P2（已修复项）
+
+| 编号 | 问题 | 状态 | 说明 |
+|------|------|:---:|------|
+| R10-18 | 双轨 Runtime 装配 | ⬜ | server 侧仍缺 Hooks/MCP/Extensions/AutoMemory/子 Agent，登记 Roadmap（架构级改动） |
+| R10-19 | 文档漂移 | ✅ | `0aab408`/`a6aa970`/`7651fbf`（architecture.md 补 5 crate、modules.md 命名、features.md M-11、api.md/security.md） |
+| R10-20 | innovation.md fail-open 列为创新点 | ✅ | `c06e3f4`（§3.4 重写为"可配置降级策略，默认 fail-closed"） |
+| R10-21 | MINICODING_CONTEXT_WINDOW 仅 OpenAI | ✅ | `4f2c9d2`（三端统一） |
+| R10-22 | 前端版本漂移 | ✅ | `125f436`（package.json/tauri.conf.json 0.3.9→0.3.10） |
+| R10-23 | 目录权限 0755 | ✅ | `efcb89e`（ensure_private_dir 0700） |
+| R10-24 | AutoApprovePrompter 恒 Allow | ✅ | `03c5b98`（exec 走 fail-closed，沙箱降级弹窗不再自动批准） |
+| — | auto.index.json 损坏不自愈 | ✅ | `3b11b0c`（warn + 清空重建） |
+| — | metrics 全局状态测试隔离 | ✅ | `d409c0d`（reset_metrics） |
+| — | Retry-After 无上限 | ✅ | `0e570ae`（截断到 max_backoff_ms） |
+| — | is_local_origin 只校验 host | ✅ | `638b591`（CORS 收紧 + Vary: Origin） |
+| — | 配置解析失败静默降级 | ✅ | `21c868b`（sdk/server eprintln 警告） |
+| — | config.toml 明文 key 声明矛盾 | ✅ | `d4f20ff`（文档修正 + warn 提示） |
+| — | Ollama tool_call index 撞 0 | ✅ | `12fd63c`（跨行累计） |
+| — | Web 无 ErrorBoundary | ✅ | `ea1d24b` |
+| — | TUI 错误指引指向不存在参数 | ✅ | `e99af83` |
+
+### 19.4 仍登记 Roadmap（未处理）
+
+- **R10-18 双轨 builder**：server 装配补 Hooks/MCP/Extensions/AutoMemory/子 Agent（架构级，v0.4 前）。
+- **R10-13 git/MCP 子进程沙箱**：git/MCP 子进程纳入沙箱覆盖。
+- **R10-17 seccomp 交付**：release 启用 seccomp feature 或从卖点移除（已从文档卖点移除）。
+- **AGPL 与可嵌入 SDK 的许可张力**（§17.4）：v0.4 前明确决策。
+
+---
+
+*报告结束（2026-08-31 追加修复追踪）。*
