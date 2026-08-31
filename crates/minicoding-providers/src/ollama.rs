@@ -224,7 +224,9 @@ impl LlmProvider for OllamaProvider {
             // （防"capability 声明 8192 而实际 32K/2K 导致过早/过晚压缩"；且请求
             // options 已随 num_ctx 下发，capabilities 与请求行为一致）。未设置时
             // 保守 8K（可通过 Modelfile 调整，低估方向安全）。
-            context_window: self.num_ctx.unwrap_or(8_192),
+            // R10-11：经 `effective_context_window` 支持 `MINICODING_CONTEXT_WINDOW`
+            // env 覆盖（与 OpenAI/Anthropic 单一事实来源）。
+            context_window: crate::common::effective_context_window(self.num_ctx.unwrap_or(8_192)),
             max_output: 4_096,
         }
     }

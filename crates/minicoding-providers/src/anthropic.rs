@@ -248,8 +248,10 @@ impl LlmProvider for AnthropicProvider {
             supports_vision: true,
             supports_streaming: true,
             supports_json_mode: false,
-            // Claude 3.5 Sonnet 200K 上下文窗口
-            context_window: 200_000,
+            // Claude 3.5 Sonnet 200K 上下文窗口（R10-11：经
+            // `effective_context_window` 支持 `MINICODING_CONTEXT_WINDOW` env
+            // 覆盖——经网关接入 32K 小窗口模型时不再恒 200K 致压缩永不触发）
+            context_window: crate::common::effective_context_window(200_000),
             // PTM-14：与 MAX_OUTPUT_LIMIT 同步（8192 过时）。
             // PT-R7-1（2026-08-28 R7 审查）：与 `THINKING_MAX_OUTPUT_LIMIT`（64K）
             // 对齐——`compute_max_tokens` 的 thinking 路径实际产出可达 64K，此前

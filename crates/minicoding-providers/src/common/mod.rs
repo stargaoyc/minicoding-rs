@@ -39,6 +39,29 @@ pub fn tool_call_id_of(m: &minicoding_core::model::Message) -> Option<String> {
     })
 }
 
+/// 返回生效的模型上下文窗口（R10-11：`context_window` 单一事实来源）。
+///
+/// 所有 provider（`OpenAI`/`Anthropic`/`Ollama`）统一经此函数读取
+/// `MINICODING_CONTEXT_WINDOW` 环境变量覆盖（整数 token 数）——此前仅 `OpenAI`
+/// 侧实现 env 覆盖，`Anthropic` 恒 200K、`Ollama` 用 `num_ctx`，经网关接入
+/// 小窗口模型时压缩永不触发、只能等真实 400 兜底。`fallback` 为 provider 自身
+/// 的估算/默认值；env 未设置或非法时返回 `fallback` 并打 warn（提示覆盖口）。
+#[must_use]
+pub fn effective_context_window(fallback: usize) -> usize {
+    if let Ok(env_val) = std::env::var("MINICODING_CONTEXT_WINDOW")
+        && let Ok(n) = env_val.trim().parse::<usize>()
+        && n > 0
+    {
+        return n;
+    }
+    tracing::warn!(
+        fallback = fallback,
+        "未设置 MINICODING_CONTEXT_WINDOW，使用 provider 默认上下文窗口；\
+         若模型实际窗口更小，请设环境变量覆盖（如 `32768`）以防压缩触发过晚致真实 400"
+    );
+    fallback
+}
+
 /// 将工具结果文本包裹 `<tool_output>` 边界（C-05：输出不可作为指令）。
 ///
 /// 工具结果回灌 LLM 前必须包裹明确边界，使 LLM 能识别"这是数据而非指令"。
