@@ -89,6 +89,38 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
     }
 }
 
+/// SDK 侧真实工具装配（R10-05：守卫测试与生产共用——此前 `inner_build_runtime`
+/// 内联注册序列，能力矩阵测试把两侧列表硬编码在测试体内、恒真，任何一侧
+/// 增删注册测试仍绿。提取为 `pub` 纯函数，测试直接调用比对）。
+///
+/// 注册集：readonly + ui + write + shell + git + web(optional) + task + memory.write。
+#[must_use]
+pub fn assemble_sdk_tool_registry(
+    event_bus: &minicoding_core::runtime::EventBus,
+    long_term_store: Arc<dyn MemoryStore>,
+    auto_memory: Arc<AutoMemory>,
+) -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    register_readonly_tools(&mut tools);
+    minicoding_tools::register_ui_tools(&mut tools);
+    register_write_tools(&mut tools);
+    register_shell_tools(&mut tools);
+    // T-M8-5：git 工具组（git.diff 只读 / git.apply 写入）
+    minicoding_tools::register_git_tools(&mut tools);
+    // T-M8-5：web 工具组（web.fetch/search，需 `web` feature）
+    #[cfg(feature = "web")]
+    minicoding_tools::register_web_tools(&mut tools);
+    // T-M3-8：任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
+    // T-M7-4：注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
+    register_task_tools(&mut tools, Some(event_bus.clone()));
+    // 6b. 注册 memory.write 工具（T-M3-9：long_term + auto memory）
+    //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
+    //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
+    let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter { inner: auto_memory });
+    tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
+    tools
+}
+
 /// 从 CLI 参数构建 `Runtime`。
 ///
 /// `provider_override` 覆盖 `config.provider.default`（`--provider`，T-M6-5），
@@ -488,28 +520,8 @@ fn inner_build_runtime(
     //    T-M7-4：EventBus 提前创建，clone 给 task store 用于广播 `TaskUpdated`，
     //    原件传入 RuntimeBuilder（EventBus 内部是 broadcast::Sender，clone 共享通道）。
     let event_bus = minicoding_core::runtime::EventBus::new();
-    let mut tools = ToolRegistry::new();
-    register_readonly_tools(&mut tools);
-    minicoding_tools::register_ui_tools(&mut tools);
-    register_write_tools(&mut tools);
-    register_shell_tools(&mut tools);
-    // T-M8-5：git 工具组（git.diff 只读 / git.apply 写入）
-    minicoding_tools::register_git_tools(&mut tools);
-    // T-M8-5：web 工具组（web.fetch/search，需 `web` feature）
-    #[cfg(feature = "web")]
-    minicoding_tools::register_web_tools(&mut tools);
-    // T-M3-8：任务管理工具（SideEffect::None，单 in_progress 约束 + 依赖图成环检测）
-    // T-M7-4：注入 EventBus clone，task.create/update 成功后广播 TaskUpdated
-    register_task_tools(&mut tools, Some(event_bus.clone()));
-
-    // 6b. 注册 memory.write 工具（T-M3-9：long_term + auto memory）
-    //     long_term 走 MemoryStore trait（C-23：经 Ask 权限）；
-    //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
-    //     LongTermMemory::default / AutoMemory::default 在 home 不可解析时退化为相对路径。
-    let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter {
-        inner: auto_memory.clone(),
-    });
-    tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
+    let tools =
+        assemble_sdk_tool_registry(&event_bus, long_term_store.clone(), auto_memory.clone());
 
     // 7. 构造权限策略 + 交互器（C-01：副作用必须经权限）
     //    TTY → InteractivePrompter（stdin 读 y/n）；非 TTY → NonInteractivePrompter

@@ -81,6 +81,30 @@ pub struct ServerRuntimeParams {
     pub compress: bool,
 }
 
+/// Server 侧真实工具装配（R10-05：守卫测试与生产共用——此前 `build_runtime`
+/// 内联注册序列，能力矩阵测试把两侧列表硬编码在测试体内、恒真。提取为
+/// `pub` 纯函数，测试直接调用比对）。
+///
+/// 注册集：readonly + write + shell + task + git + web + ui + memory.write
+/// （server 始终启用 tools 的 `web` feature，故 web 工具无条件注册）。
+#[must_use]
+pub fn assemble_server_tool_registry(
+    event_bus: &minicoding_core::runtime::EventBus,
+) -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    register_readonly_tools(&mut tools);
+    register_write_tools(&mut tools);
+    register_shell_tools(&mut tools);
+    register_task_tools(&mut tools, Some(event_bus.clone()));
+    register_git_tools(&mut tools);
+    register_web_tools(&mut tools);
+    register_ui_tools(&mut tools);
+    // memory.write：long_term 走 MemoryStore（C-23 经 Ask 权限），auto 默认内存实现
+    let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
+    register_memory_tools(&mut tools, long_term_store);
+    tools
+}
+
 /// 构造 server 端 `Runtime`。
 ///
 /// `prompter` 由 `SessionManager` 提供（`ServerPrompter`，共享 pending map）。
@@ -272,17 +296,7 @@ pub fn build_runtime(
     // 7. 构造 tool registry（R8：#12 能力矩阵收拢——补齐 git/web/memory/ui.ask，
     //    与 CLI 对齐；此前 Web/Desktop 用户无这些工具）
     let event_bus = minicoding_core::runtime::EventBus::new();
-    let mut tools = ToolRegistry::new();
-    register_readonly_tools(&mut tools);
-    register_write_tools(&mut tools);
-    register_shell_tools(&mut tools);
-    register_task_tools(&mut tools, Some(event_bus.clone()));
-    register_git_tools(&mut tools);
-    register_web_tools(&mut tools);
-    register_ui_tools(&mut tools);
-    // memory.write：long_term 走 MemoryStore（C-23 经 Ask 权限），auto 默认内存实现
-    let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
-    register_memory_tools(&mut tools, long_term_store);
+    let tools = assemble_server_tool_registry(&event_bus);
 
     // 8. 构造权限策略 + 交互器
     let policy: Arc<dyn PermissionPolicy> = Arc::new(BuiltinPolicy::new());
