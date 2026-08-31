@@ -332,6 +332,7 @@ mod tests {
             prompter: None,
             events: None,
             audit: None,
+            sandbox_fail_closed: false,
         }
     }
 

@@ -125,7 +125,11 @@ pub fn run_exec_command(cmd: &ExecCommand) -> Result<i32> {
     }
 
     #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
-    let mut rt = crate::builder::build_runtime(
+    // R10-03：exec 为无人值守批量场景——`build_runtime_fail_closed(true)` 使沙箱
+    // 不可用/初始化失败时**拒绝执行**而非经 `AutoApprovePrompter` 自动批准为
+    // `DangerFullAccess` 重跑（此前 CI/容器内 landlock 不可用时静默裸奔，击穿
+    // README 承诺的"external-sandbox 默认沙箱拒绝熔断"）。
+    let mut rt = crate::builder::build_runtime_fail_closed(
         cmd.provider.as_deref(),
         cmd.provider_name.as_deref(),
         cmd.api_base.as_deref(),

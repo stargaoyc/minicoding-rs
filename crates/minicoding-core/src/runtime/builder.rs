@@ -53,6 +53,12 @@ pub struct RuntimeBuilder {
     sandbox_driver: Option<Arc<dyn SandboxDriver>>,
     /// OS 沙箱策略（默认 `WorkspaceWrite { workdir, [] }`，由 `--sandbox`/`--preset` 设定）。
     sandbox_policy: Option<SandboxPolicy>,
+    /// R10-03：沙箱不可用/初始化失败时 fail-closed（默认 `false`）。
+    ///
+    /// `true` 时 `maybe_sandbox_fallback` 不再询问"是否沙箱外运行"，直接拒绝
+    /// （`NoopDriver`/`apply` 失败 = 无 OS 隔离 = 不执行），避免 CI/exec 场景
+    /// 自动批准为 `DangerFullAccess` 静默裸奔。由 `exec --sandbox`/CI 配置注入。
+    sandbox_fail_closed: bool,
     /// 文件改动 journal（默认 `None`，仅 `file-undo` feature 启用时注入）。
     journal: Option<Arc<dyn Journal>>,
     /// 沙箱拒绝检测器（默认 `NoopDenialDetector`，M-05 由 sandbox 注入）。
@@ -127,6 +133,7 @@ impl RuntimeBuilder {
             session_summarizer: None,
             sandbox_driver: None,
             sandbox_policy: None,
+            sandbox_fail_closed: false,
             journal: None,
             denial_detector: None,
             sandbox_breaker: None,
@@ -266,6 +273,16 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn sandbox_policy(mut self, p: SandboxPolicy) -> Self {
         self.sandbox_policy = Some(p);
+        self
+    }
+
+    /// R10-03：设置沙箱 fail-closed（`true` 时沙箱不可用/初始化失败直接拒绝执行）。
+    ///
+    /// 供 `minicoding exec --sandbox`、CI 配置注入——默认 `false` 保持向后兼容
+    /// （本地交互式场景仍可经弹窗确认沙箱外运行）。
+    #[must_use]
+    pub fn sandbox_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.sandbox_fail_closed = fail_closed;
         self
     }
 
@@ -500,6 +517,7 @@ impl RuntimeBuilder {
             session_summarizer: self.session_summarizer,
             sandbox_driver: self.sandbox_driver.unwrap_or_else(|| Arc::new(NoopDriver)),
             sandbox_policy,
+            sandbox_fail_closed: self.sandbox_fail_closed,
             journal: self.journal,
             current_turn: std::sync::atomic::AtomicU32::new(0),
             denial_detector: self

@@ -125,6 +125,9 @@ fn inner_build_runtime(
     >,
     start_in_plan_mode: bool,
     prompter_override: Option<Arc<dyn PermissionPrompter>>,
+    // R10-03：沙箱 fail-closed（`true` → 沙箱不可用/初始化失败拒绝执行）。
+    // exec/CI 场景注入，交互式场景默认 `false` 保持向后兼容。
+    #[cfg_attr(not(feature = "sandbox"), allow(unused_variables))] sandbox_fail_closed: bool,
 ) -> Result<(Runtime, Option<MemoryQuerySlot>)> {
     // 1. 加载配置（config.toml > last-known-good > 内置默认），env/CLI flag 在其上
     //    叠加。与 serve/server 对齐的优先级：CLI 参数 > 环境变量 > config.toml >
@@ -675,6 +678,8 @@ fn inner_build_runtime(
         builder = builder
             .sandbox_driver(driver)
             .sandbox_policy(sandbox_policy)
+            // R10-03：沙箱 fail-closed（exec/CI 场景沙箱不可用即拒绝）
+            .sandbox_fail_closed(sandbox_fail_closed)
             // M-05：注入领域级 denial 检测与熔断（sandbox 签名库 + C-30 熔断）
             .sandbox_denial_detector(Arc::new(minicoding_sandbox::DenialDetector::new()))
             .sandbox_denial_breaker(Arc::new(
@@ -773,6 +778,7 @@ pub fn build_runtime_with_memory_slot(
         sandbox_override,
         start_in_plan_mode,
         prompter_override,
+        false,
     )
     .map(|(rt, slot)| {
         (
@@ -812,6 +818,46 @@ pub fn build_runtime(
         sandbox_override,
         start_in_plan_mode,
         prompter_override,
+        false,
+    )
+    .map(|(rt, _)| rt)
+}
+
+/// R10-03：带沙箱 fail-closed 的构建入口（`minicoding exec` 使用）。
+///
+/// `sandbox_fail_closed = true` 时沙箱不可用/初始化失败**拒绝执行**而非询问
+/// 沙箱外运行——`exec` 是无人值守批量场景，`AutoApprovePrompter` 会对
+/// `maybe_sandbox_fallback` 弹窗恒 `Allow`，此前可静默降级为完全无隔离执行。
+///
+/// # Errors
+/// 同 [`inner_build_runtime`]。
+#[allow(clippy::too_many_arguments)] // 透传 inner_build_runtime 参数
+pub fn build_runtime_fail_closed(
+    provider_override: Option<&str>,
+    provider_name_override: Option<&str>,
+    api_base: Option<&str>,
+    api_key: Option<&str>,
+    model: Option<&str>,
+    workdir: &str,
+    system: Option<&str>,
+    mode: &SessionLoadMode,
+    sandbox_override: Option<SandboxPolicy>,
+    start_in_plan_mode: bool,
+    prompter_override: Option<Arc<dyn PermissionPrompter>>,
+) -> Result<Runtime> {
+    inner_build_runtime(
+        provider_override,
+        provider_name_override,
+        api_base,
+        api_key,
+        model,
+        workdir,
+        system,
+        mode,
+        sandbox_override,
+        start_in_plan_mode,
+        prompter_override,
+        true,
     )
     .map(|(rt, _)| rt)
 }

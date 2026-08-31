@@ -118,6 +118,9 @@ pub struct Runtime {
     pub(crate) sandbox_driver: Arc<dyn SandboxDriver>,
     /// OS 沙箱策略（M4，与 `sandbox_driver` 配套）。
     pub(crate) sandbox_policy: SandboxPolicy,
+    /// R10-03：沙箱不可用/初始化失败时 fail-closed（`true` → 拒绝执行而非询问
+    /// 沙箱外运行）。CI/exec 场景注入，默认 `false` 向后兼容。
+    pub(crate) sandbox_fail_closed: bool,
     /// 文件改动 journal（M4，可选，`fs.write/edit/delete` 成功后 `record`，C-28）。
     pub(crate) journal: Option<Arc<dyn Journal>>,
     /// 沙箱拒绝检测器（M-05 抽象注入，默认 `NoopDenialDetector` 兜底）。
@@ -1246,7 +1249,9 @@ impl Runtime {
             .with_journal_opt(self.journal.clone())
             .with_prompter_opt(Some(self.prompter.clone()))
             .with_events_opt(Some(self.events.clone()))
-            .with_audit_opt(Some(self.audit.clone()));
+            .with_audit_opt(Some(self.audit.clone()))
+            // R10-03：沙箱 fail-closed 标志下传（exec/CI 场景沙箱不可用即拒绝）
+            .with_sandbox_fail_closed(self.sandbox_fail_closed);
 
         // 分桶：无副作用 → 并行；有副作用 → 串行（含权限检查）
         // S14：查不到的工具归入副作用桶（fail-closed）——走权限链后再由 dispatch

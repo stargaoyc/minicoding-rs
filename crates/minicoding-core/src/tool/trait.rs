@@ -75,6 +75,10 @@ pub struct ToolContext {
     /// 审计 sink（可选，PTM-12：`ui.ask` 的 Allow/Deny 决策落 `audit.log`
     /// 用——AGENTS.md §5.5 要求任何权限决策必落审计；未注入时跳过）。
     pub audit: Option<Arc<dyn crate::storage::AuditSink>>,
+    /// R10-03：沙箱初始化失败时 fail-closed（`true` → 拒绝执行，不询问
+    /// 沙箱外运行）。由 Runtime 从 `sandbox_fail_closed` 配置注入，供
+    /// `maybe_sandbox_fallback` 判定；CI/exec 场景为 `true`。
+    pub sandbox_fail_closed: bool,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -110,6 +114,7 @@ impl ToolContext {
             prompter: None,
             events: None,
             audit: None,
+            sandbox_fail_closed: false,
         }
     }
 
@@ -170,6 +175,13 @@ impl ToolContext {
     pub fn with_sandbox(mut self, driver: Arc<dyn SandboxDriver>, policy: SandboxPolicy) -> Self {
         self.sandbox_driver = Some(driver);
         self.sandbox_policy = Some(policy);
+        self
+    }
+
+    /// R10-03：设置沙箱 fail-closed 标志（`true` → 沙箱初始化失败拒绝执行）。
+    #[must_use]
+    pub fn with_sandbox_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.sandbox_fail_closed = fail_closed;
         self
     }
 

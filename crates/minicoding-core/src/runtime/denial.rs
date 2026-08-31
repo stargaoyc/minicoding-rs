@@ -87,6 +87,19 @@ impl Runtime {
         if !Self::is_sandbox_setup_failure(error) {
             return None;
         }
+        // R10-03：沙箱 fail-closed——CI/exec 场景配置 `sandbox_fail_closed = true`
+        // 时，沙箱不可用直接拒绝（返回 None → 调用方按原错误处理），**不**询问
+        // "是否沙箱外运行"。此前 `AutoApprovePrompter`（`exec` 使用）对该弹窗
+        // 恒 `Allow` → 策略切为 `DangerFullAccess` 重跑 = 完全无隔离执行，静默
+        // 击穿 README 承诺的"默认沙箱拒绝熔断"。
+        if self.sandbox_fail_closed {
+            tracing::warn!(
+                tool = %call.name,
+                error = %error,
+                "sandbox fail_closed=true：沙箱初始化失败，拒绝执行（不询问沙箱外运行）"
+            );
+            return None;
+        }
         tracing::warn!(
             tool = %call.name,
             call_id = %call.id,

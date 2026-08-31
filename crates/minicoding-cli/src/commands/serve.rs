@@ -435,6 +435,7 @@ async fn run_as_mcp_server(cmd: &ServeCommand) -> Result<()> {
         prompter: None,
         events: None,
         audit: None,
+        sandbox_fail_closed: false,
     };
 
     // 4. 启动 MCP server（阻塞至 client 断开 stdin）
