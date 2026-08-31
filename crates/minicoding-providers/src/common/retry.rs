@@ -170,10 +170,14 @@ impl LlmProvider for RetryProvider {
                         if !retryable || attempt == self.config.max_retries {
                             return Err(e);
                         }
-                        // 计算退避：优先 Retry-After，缺省指数退避
-                        let delay = e
-                            .retry_after_ms()
-                            .map_or_else(|| self.backoff(attempt), Duration::from_millis);
+                        // 计算退避：优先 Retry-After，缺省指数退避。
+                        // R10 P2：Retry-After 是服务端建议值，可能异常/恶意巨大
+                        // （如 86400s=1 天），截断到 `max_backoff_ms` 防请求挂起
+                        // 过久（C-07 资源不耗尽）。
+                        let delay = e.retry_after_ms().map_or_else(
+                            || self.backoff(attempt),
+                            |ms| Duration::from_millis(ms.min(self.config.max_backoff_ms)),
+                        );
                         debug!(
                             target: "minicoding::provider::retry",
                             attempt, ?delay, "退避后重试"
@@ -394,6 +398,20 @@ mod tests {
         let provider = RetryProvider::new(mock as Arc<dyn LlmProvider>, fast_config());
         let result = provider.chat_stream(req()).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn retry_after_capped_at_max_backoff() {
+        // Retry-After=1h >> max_backoff_ms=10，验证被截断而非等待 1h。
+        let mock = Arc::new(MockProvider::new(vec![
+            Err(LlmError::RateLimited {
+                retry_after_ms: Some(3_600_000),
+            }),
+            Ok(()),
+        ]));
+        let provider = RetryProvider::new(mock as Arc<dyn LlmProvider>, fast_config());
+        let result = provider.chat_stream(req()).await;
+        assert!(result.is_ok(), "Retry-After 截断后仍应重试成功");
     }
 
     #[tokio::test]
