@@ -4,6 +4,82 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.3.11] - 2026-08-31
+
+> 自 v0.3.10 以来的 R10 审查修复批次。主题：**R10 审查全量收口**
+> （P0×4：只读白名单绕过 / Plan 模式 task.spawn 绕过 / 沙箱 fail-open /
+> Web 开箱 401；P1 与 P2 安全与可靠性修复、前端与 CI 加固、文档修正）。
+
+### Security
+
+- **P0 只读命令白名单收紧（R10-01）**：`env`/`find` 从只读自动放行移除；
+  git 白名单改为按子命令精确校验（`config --get` 等）；`cargo check` 移出
+  自动放行（存在副作用）。新增 13 个绕过 payload 回归用例
+- **P0 Plan 模式不可被 `task.spawn` 绕过（R10-02）**：新增 `SideEffect::Spawn`
+  变体，`task.spawn` 与子 Agent 均走完整权限链（Plan 下 Ask/Bypass 拒绝）；
+  子 Agent 传播 `permission_mode` 并取更严者
+- **P0 沙箱 fail-closed（R10-03）**：`RuntimeBuilder.sandbox_fail_closed`
+  默认关闭、`minicoding exec` 开启——沙箱不可用/初始化失败时**拒绝执行**
+  而非经 AutoApprovePrompter 自动批准降级到无隔离（此前静默裸奔）
+- **P0 Web 开箱可用（R10-04）**：`/health` 未鉴权 + 401 返回可操作 JSON
+  body；前端 SetupDialog 新增 Server Token 输入并持久化
+- **P1 能力漂移守卫修复（R10-05）**：能力矩阵守卫测试改为调用两真实装配
+  函数（sdk/server）比对，消除恒真
+- **P1 记忆/AGENTS.md 注入边界转义（R10-07）**：`escape_boundary_tag` 零宽
+  空格转义，project_doc/long_term/auto 三处注入统一
+- **P1 权限持久化 workdir 作用域 + TTL（R10-09）**：持久化批准键加
+  `<workdir>:` 前缀、30 天惰性过期（旧无前缀键向后兼容）
+- **P1 输出预留由 provider 驱动（R10-10）**：`reserved_output` 按
+  `max_output` clamp [512, 窗口 25%]，小窗口不再 panic
+- **P1 context_window 单一事实来源（R10-11）**：`MINICODING_CONTEXT_WINDOW`
+  统一到 `providers/common::effective_context_window`，Anthropic/Ollama/OpenAI
+  三端生效
+- **P1 脱敏覆盖一致化（R10-12）**：`fs.grep` 命中敏感文件输出同样脱敏
+- **P2 目录权限 0700（R10-23）**：新增 `ensure_private_dir`，新建敏感目录
+  显式设 0700（会话 ID 不可枚举）
+- **P2 CORS 收紧（server）**：方法仅 GET/POST/DELETE、请求头仅
+  Authorization/Content-Type、补 `Vary: Origin`
+- **P2 config.toml 明文 key 警告**：明文 api_key 加载时 warn 提示改用
+  `env:VAR` 引用（C-04 声明修正）
+- **P2 配置解析失败不再静默**：sdk/server 两处 `unwrap_or_default` 改为
+  显式 eprintln 警告（LKG 回退被绕过问题）
+- **P2 Retry-After 上限截断**：服务端 `Retry-After` 截断到
+  `max_backoff_ms`（防恶意/异常大值挂起）
+
+### Reliability
+
+- **P1 L2 首消息角色归一化**：Anthropic 首条消息须 user，发送前自动归一化
+- **P1 压缩触发口径统一**：`effective_compact_threshold()` 单一判据，防健康
+  会话误熔断
+- **P2 Ollama tool_call index 跨行累计**：`parse_chunk` 增跨行计数器，
+  防并行工具调用撞 index=0 被合并丢失
+- **P2 auto.index.json 损坏自愈**：解析失败 warn + 清空重建（与 jsonl STR-2
+  同韧性）
+- **P2 metrics 测试隔离**：`reset_metrics()` 供测试快照前清空
+
+### Fixed
+
+- **P1 full-access 二次确认（R10-06）**：CLI `serve --preset full-access`
+  需 `--i-understand-full-access`；`build_preset_policy` 复用警告文本
+- **P1 记忆读取/删除入口（R10-08）**：`minicoding memory list/read/clear`
+  子命令（非 TTY 需 `--force`）
+- **P1 CLI feature 门控生效（R10-15）**：path 依赖 + `default-features=false`，
+  `doctor` 打印能力集
+- **P1 TUI panic hook**：强制 `ratatui::restore()` 防终端破坏
+- **P2 前端 ErrorBoundary**：任意渲染异常不再整屏白屏
+- **P2 TUI 错误指引修正**：API key 错误提示移除不存在的 `--api-key`
+  指引（TUI 无 clap 参数）
+- **P2 前端/桌面版本漂移同步**：`package.json`/`tauri.conf.json` 0.3.9→0.3.10
+
+### Docs / Meta
+
+- **补 AGPL-3.0 官方全文 LICENSE（R10-14）**
+- **新增 CONTRIBUTING.md 与 SECURITY.md**（贡献指南 + 漏洞披露流程）
+- **README/innovation.md Windows/seccomp 宣称修正（R10-16/17/20）**：
+  Windows 为进程遏制（非安全边界）、seccomp 实验性（默认关）、fail-open
+  从创新点移除（改为默认 fail-closed）
+- **architecture.md 补 5 个缺失 crate；modules.md extension-sdk 命名同步**
+
 ## [0.3.10] - 2026-08-30
 
 > 自 v0.3.9 以来的 R8/R9 修复批次（61 个 commit）。主题：**R9 审查全量收口**
