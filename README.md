@@ -23,7 +23,7 @@
 - **上下文管理**：基于 token 预算的 4 级压缩管道（裁剪→摘要→滚动→硬截断）；长期记忆双文件（md + index.json）+ mtime 缓存。
 - **项目记忆（AGENTS.md）**：分层加载的静态指令层，随仓库版本化，Agent 不可自主编辑；兼容 `CLAUDE.md`/`.cursorrules` fallback。
 - **权限模型**：`PermissionPolicy`/`PermissionPrompter` 双抽象（决策与交互分离）；per-tool allow/ask/deny + 审批模式（Untrusted/OnFailure/OnRequest/Never）与预设（read-only/auto/external-sandbox/full-access）。
-- **OS 级沙箱（一等公民）**：基于 Linux `landlock`（内核 LSM，fork 后 exec 前 `pre_exec` 应用）+ macOS Seatbelt（`sandbox_init` FFI）+ Windows Job Object 的自研轻量驱动；macOS/Linux/Windows 内核级隔离作为应用层权限之外的第二道防线；支持 `external-sandbox`（CI/容器）与 `danger-full-access`（显式确认）。
+- **OS 级沙箱（一等公民）**：基于 Linux `landlock`（内核 LSM，fork 后 exec 前 `pre_exec` 应用）+ macOS Seatbelt（`sandbox_init` FFI）+ Windows Job Object（进程遏制，非安全边界）的自研轻量驱动； macOS/Linux 内核级隔离作为应用层权限之外的第二道防线；支持 `external-sandbox`（CI/容器）与 `danger-full-access`（显式确认）。
 - **Hooks 系统**：10 类生命周期事件（PreToolUse/PostToolUse/PostToolUseFailure/PreCompact/PostCompact/PermissionRequest/...），外部脚本 + JSON over stdio 协议，可拦截/改写/注入；含 asyncRewake 异步唤醒；L0 硬约束不可被 Hook 覆盖。
 - **MCP 集成**：作为 MCP client 连接外部 server（GitHub/Slack/数据库），`mcp__<server>__<tool>` 命名，project 作用域首次批准防恶意仓库植入；亦可作为 MCP server 被其他 Agent 调用。
 - **Plan 模式**：双重只读强制（硬门 + 软引导），`plan.exit` 提交计划并预批准。

@@ -218,19 +218,25 @@ AI Coding 助手的领域间天然存在协作需求（如工具执行需调权�
 - **改一处不影响无关 crate**：改 `minicoding-sandbox` 不重编 `minicoding-memory`；
 - **强制解耦**：领域 crate 间协作必须经 core trait，避免「便捷直调」导致的耦合债。
 
-### 3.4 NoopDriver 兜底模式（fail-open 降级）
+### 3.4 NoopDriver 兜底模式（可配置降级策略，默认 fail-closed）
 
-#### 3.4.1 创新点
+#### 3.4.1 设计说明
 
-`SandboxDriver` trait 的兜底实现 `NoopDriver` 定义在 `minicoding-core`，当 OS 沙箱不可用（如 Windows 早期版本、不支持 Landlock 的旧内核）时，`detect_driver()` 返回 `NoopDriver` 并打 `warn` 日志，依赖容器自身隔离或应用层权限兜底（见 `tech-stack.md` §11、`security.md` §8.6）。
+`SandboxDriver` trait 的兜底实现 `NoopDriver` 定义在 `minicoding-core`，当 OS 沙箱不可用（如 Windows 早期版本、不支持 Landlock 的旧内核）时，`detect_driver()` 返回 `NoopDriver` 并打 `warn` 日志（见 `tech-stack.md` §11、`security.md` §8.6）。
 
-#### 3.4.2 为什么创新
+**R10-03/R10-20 修正（2026-08-30）**：fail-open 是安全组件的反模式而非创新——沙箱不可用时静默降级会让用户误以为仍在隔离内。本项目现在默认 **fail-closed**：
+- `RuntimeBuilder.sandbox_fail_closed = true` 时（`minicoding exec` 等无人值守场景），沙箱不可用/初始化失败**拒绝执行**，不再询问"是否沙箱外运行"（此前 `AutoApprovePrompter` 对该弹窗恒 `Allow` 导致静默裸奔）；
+- 交互式场景仍可经弹窗显式确认沙箱外运行（C-22）；
+- `--preset full-access` / `danger-full-access` 均需显式二次确认（`--i-understand-*` 或 `confirm_danger`）。
 
-OS 沙箱是平台强相关的（Linux Landlock、macOS Seatbelt、Windows Job Object 成熟度不一），简单实现容易在平台不支持时直接 panic 或拒绝启动。`NoopDriver` 模式让 Runtime 在任何平台都能启动，沙箱能力作为「尽力而为」的增强而非硬前提：
+#### 3.4.2 设计权衡
+
+OS 沙箱是平台强相关的（Linux Landlock、macOS Seatbelt、Windows Job Object 成熟度不一），简单实现容易在平台不支持时直接 panic 或拒绝启动。`NoopDriver` + fail-closed 开关让 Runtime 在任何平台都能启动，同时不静默弱化安全：
 
 - `SandboxDriver::is_hardened()` 如实报告当前是否内核级隔离；
 - `doctor --security` 命令输出降级状态，建议用户在 WSL2/容器内运行；
-- C-22 显式确认由配置/请求层强制（预设确认 + `confirm_danger`），`is_hardened()` 状态记日志（见 `rules.md` §8 对照表）。
+- C-22 显式确认由配置/请求层强制（预设确认 + `confirm_danger`），`is_hardened()` 状态记日志（见 `rules.md` §8 对照表）；
+- **安全边界声明**：沙箱不可用时默认拒绝执行；如需在无沙箱环境运行，请显式使用 `--allow-unsandboxed`（规划中）或 `full-access` 二次确认并了解风险（见 `security.md` §2.6）。
 
 #### 3.4.3 带来的价值
 
@@ -238,6 +244,7 @@ OS 沙箱是平台强相关的（Linux Landlock、macOS Seatbelt、Windows Job O
 |------|------|
 | 跨平台可用 | Linux/macOS/Windows 均可启动，沙箱按平台能力分级 |
 | 降级透明 | `is_hardened()` 让上层代码感知降级状态，不静默弱化安全 |
+| 默认安全 | fail-closed 开关：沙箱不可用即拒绝（exec/CI 场景），杜绝静默裸奔 |
 | 渐进交付 | Linux 先行（M0–M4），macOS 补齐（M5+），Windows 补齐（M6+），不阻塞 MVP |
 
 ---
@@ -1286,7 +1293,7 @@ AI 助手在写代码时容易「自信地编造 API」或「为通过测试而�
 |------|-----------|---------------|--------|
 | 语言 | Rust | Rust 2024 | 同语言，edition 2024 + MSRV 1.99 |
 | 架构 | 单一 CLI 偏向 | 多 crate workspace + 可嵌入 SDK | 可嵌入、多形态 |
-| 沙箱 | Landlock/Seatbelt/Windows 受限令牌 | 同（参考 Codex）+ 自研 pre_exec 胶水 | landlock 直连原生隔离、无 EUPL 依赖 |
+| 沙箱 | Landlock/Seatbelt/Windows Job Object（进程遏制，非安全边界） | 同（参考 Codex）+ 自研 pre_exec 胶水 | landlock 直连原生隔离、无 EUPL 依赖；seccomp 实验性（默认关，需 opt-in 编译） |
 | 审批模式 | Untrusted/OnFailure/OnRequest/Never | 同（参考 Codex）+ 预设 | 预设一键选定 |
 | `/undo` | `/rewind` 未实现冲突检测 | FileChangeJournal + 冲突检测（C-28） | 安全回滚，不覆盖外部编辑 |
 | AGENTS.md | 不可被 Agent 编辑 | 同（C-23 L0 硬约束） | 强化为 L0，启动自检 |
