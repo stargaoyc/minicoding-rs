@@ -367,6 +367,17 @@ pub fn load_config() -> Result<RuntimeConfig, RuntimeError> {
             .map_err(|e| RuntimeError::Config(e.to_string()))?;
         match toml::from_str::<RuntimeConfig>(&raw) {
             Ok(mut cfg) => {
+                // R10 P2：明文 key 兼容但告警——C-04 要求凭证不落盘可被读取的
+                // 位置；config.toml 用户自持可接受，但提示改用 `env:VAR` 引用
+                // （与 `cli/cred.rs` keyring 优先级一致）。不拒绝以保持兼容。
+                if !cfg.provider.api_key.is_empty()
+                    && !cfg.provider.api_key.starts_with("env:")
+                    && !cfg.provider.api_key.starts_with("${")
+                {
+                    tracing::warn!(
+                        "config.toml 中 api_key 为明文，建议改用 env:VAR 引用（凭证更安全，C-04）"
+                    );
+                }
                 // S7：解析前快照写 LKG（保留 env: 引用、剥离明文 key、0600）
                 let lkg_snapshot = scrubbed_for_lkg(&cfg);
                 resolve_env_vars(&mut cfg);
