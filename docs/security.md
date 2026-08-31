@@ -775,44 +775,44 @@ mode = "allowlist"                    # allowlist | denylist
 
 ---
 
-## 12. Windows 沙箱细化设计（参考 Codex Windows Sandbox）
+## 12. Windows 沙箱细化设计（当前实现：Job Object 进程遏制）
 
-### 12.1 设计挑战
+### 12.1 设计挑战与现状
 
-Windows 缺乏 macOS Seatbelt / Linux Landlock 这样成熟的内核级 MAC 框架。参考 Codex 的 Windows 沙箱实现（OpenAI 专门撰文阐述），采用"受限令牌 + DACL + 防火墙"组合方案。
+Windows 缺乏 macOS Seatbelt / Linux Landlock 这样成熟的内核级 MAC 框架。参考 Codex 的 Windows 沙箱实现（OpenAI 专门撰文阐述，受限令牌 + DACL + 防火墙组合方案），**但本项目当前 Windows 驱动仅实现 Job Object（`CreateJobObjectW` + `JobObjectExtendedLimitInformation`）**：
 
-### 12.2 核心机制
+- **进程遏制**：作业对象限制进程树（JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 等），父进程退出时子进程被终止、进程计数/内存上限可设；
+- **非安全边界**：无受限令牌（`CreateRestrictedToken`）、无 DACL 写保护、无 AppContainer。**Windows 沙箱不能作为隔离边界**，仅能遏制失控子进程。
+
+> **诚实声明（R10-16，2026-08-31）**：README/innovation.md/security.md 曾宣称
+> "受限令牌 + DACL + 防火墙"，与实现不符。代码中无 `CreateRestrictedToken`。
+> Windows 上请依赖 WSL2/容器/虚拟机隔离；`doctor --security` 如实报告
+> `SandboxDriver::is_hardened()` 状态（Windows 返回 `false`）。
+
+### 12.2 已实现机制
 
 | 机制 | 实现 | 说明 |
 |------|------|------|
-| SID 身份隔离 | 为沙箱创建专用 SID，给沙箱进程一个独立身份 | 隔离基础 |
-| Write-restricted token | 创建受限令牌，限制可修改文件的地点 | 核心写保护 |
-| DACL 配置 | 为系统目录（`C:\Users\<real>\`、`C:\Windows\`、`C:\Program Files\`）添加沙箱 SID 的读 ACL；为工作目录添加沙箱 SID 的写 ACL | 细粒度访问控制 |
-| VCS 保护 | `<cwd>\.git`、`<cwd>\.hg`、`<cwd>\.svn`、`<cwd>\.minicoding` 显式拒绝沙箱 SID 写入 | 防篡改版本库与自身配置 |
-| 网络隔离 | `CodexSandboxOffline`（防火墙阻断出站）/ `CodexSandboxOnline`（允许网络） | 二元网络控制 |
-| 命令执行器 | 独立 `command-runner` 二进制实际运行用户命令 | 隔离执行 |
-| 密码隔离 | 沙箱用户密码随机生成 → DPAPI 加密 → 存入 `.sandbox-secrets/` | 防横向移动 |
+| 作业对象 | `CreateJobObjectW` + 作业限制 | 进程树遏制、KILL_ON_JOB_CLOSE、子进程归属作业 |
+| 进程快照 | `CreateToolhelp32Snapshot`（toolhelp） | 枚举/清理作业内进程（R10-03 修复快照竞态） |
+| 应用层路径沙箱 | `minicoding-policy` C-03 | 越界 Deny 在应用层强制（跨平台一致） |
 
-### 12.3 网络抑制（fail-closed）
+### 12.3 未实现（Roadmap 项，非当前能力）
 
-Windows 沙箱的网络抑制采用 **fail-closed** 设计（参考 Codex）：
+- 受限令牌（`CreateRestrictedToken`）+ DACL 写保护（参考 Codex §12.2 设计）——**未实现**；
+- AppContainer / Windows Sandbox API 集成——**未实现**；
+- 网络抑制（fail-closed 防火墙阻断）——**未实现**。
 
-- 将 proxy-aware 流量导向死端点，使 Git HTTP(S) transport 失败；
-- Git over SSH 立即失败；
-- prepend 小脚本拦截常见网络工具（curl/wget/Invoke-WebRequest）；
-- 使沙箱内 Git、package installer 等失败，迫使用户审批任何 internet-facing 操作。
+### 12.4 成熟度声明与建议
 
-### 12.4 成熟度声明
-
-Windows 沙箱实现成熟度低于 macOS/Linux（与 Codex 一致）。初期降级策略：
+Windows 沙箱实现成熟度低于 macOS/Linux（与 Codex 一致）。**Windows 上的安全依赖应用层权限 + 显式运行环境选择**：
 
 | 阶段 | Windows 策略 |
 |------|-------------|
-| M4 初期 | 应用层路径沙箱 + 用户提示"Windows 沙箱降级，建议在 WSL2/容器内运行" |
-| M4+ | 受限令牌 + DACL（如上表） |
-| 长期 | 评估 AppContainer / Windows Sandbox API 集成 |
+| 当前 | Job Object 进程遏制 + 应用层路径沙箱；`doctor --security` 报告 `is_hardened()=false`，建议 WSL2/容器 |
+| 长期 | 评估受限令牌 + DACL（参考 Codex）或 AppContainer / Windows Sandbox API |
 
-**诚实边界（SEC-9/SEC-10，2026-08-28 R5 收尾）**：
+**诚实边界（SEC-9/SEC-10，2026-08-28 R5 收尾；R10-16 修正 2026-08-31）**：
 
 - **仅进程级遏制**：Job Object 只约束进程生命周期 + UI 限制，**无文件系统/网络/内存
   限制**——沙箱化 `shell.run` 子进程可写任意路径（builtin 黑名单注释自认

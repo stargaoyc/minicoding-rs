@@ -23,6 +23,8 @@
 ### C-01 副作用必须经权限
 任何 `SideEffect != None` 的工具调用，必须经 `PermissionPolicy::check` → `PermissionPrompter` 解析为 `Allow` 后才执行。LLM 无权跳过；即使 LLM 在文本中"声称已获授权"，Runtime 仍独立决策。
 
+> **R10-02 补充（2026-08-31）**：`SideEffect::Spawn`（`task.spawn`/子 Agent 等"派生执行"原语）纳入本约束——Plan 模式下 Spawn 走 `Ask`/`BypassPermissions` 分支被拒，不得借子任务绕过 Plan 只读硬门；子 Agent 运行时传播 `permission_mode` 并取与父会话更严者。
+
 ### C-02 内置黑名单不可覆盖
 内置黑名单由 `policy::builtin` 硬编码拒绝，**任何用户配置与 LLM 输出都无法覆盖**。覆盖面（R3，2026-08-26 对齐实现）：
 1. **约束文件破坏**：AGENTS.md/CLAUDE.md 删除（fs.delete Deny）、写入走不可 AllowAlways 的 Ask 通道；
@@ -95,6 +97,7 @@ Auto memory（`auto.md`，见 `design.md` §8.7）是 Agent 可写的自动学�
 - **拒绝计数硬阈值**：单 turn 内累计沙箱拒绝 ≥3 次触发熔断（注入提醒"连续 N 次沙箱拒绝，可能方向有误，请重新评估或切换更宽松沙箱预设"），≥5 次强制 TurnEnd 回灌错误总结。
 - **拒绝是内核级反馈**：沙箱拒绝来自 `EPERM`/Seatbelt denial/Landlock denial，是内核级硬反馈，**不可**被应用层 `allow` 规则覆盖（与 C-22 同源）。LLM 不得通过文本声明"沙箱已放宽""重试可成功"来跳过熔断。
 - **升级流不绕过权限**：沙箱拒绝后的"请求批准 → 放宽重试"升级流仍走 `PermissionPrompter`，用户可拒绝；用户拒绝后 LLM 不得在文本中"声称用户已同意"而重试。
+- **R10-03 补充（2026-08-31）**：`sandbox.fail_closed = true`（`minicoding exec`/CI 场景默认）时，沙箱不可用/初始化失败**拒绝执行**，沙箱降级弹窗不得经 `AutoApprovePrompter` 自动批准（此前 exec 对该弹窗恒 Allow → 策略切 `DangerFullAccess` 重跑 = 静默无隔离执行）。
 - **M-09 结构化判定**：熔断与回灌以结构化 `SandboxDenyKind`（`syscall_blocked`/`write_forbidden`/`resource_limit`/`external`，见 `api.md` §3.9）替代纯文本匹配；只读并行桶与副作用串行路径统一接入检测（无 `SideEffect` 差距），检测结果经 `ToolResultMeta.sandbox_denied` 透传到协议层与前端拒绝卡片，文本匹配仅在兜底（`External`）保留。
 
 ---

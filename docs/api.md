@@ -498,7 +498,7 @@ pub trait Tool {
     ) -> Result<ToolResult, ToolError>;
 }
 
-pub enum SideEffect { None, FileWrite, Command, Network }
+pub enum SideEffect { None, FileWrite, Command, Network, Spawn }
 
 /// 工具输出声明（R-05，M-11）：JSON 输出工具的 schema。
 pub struct ToolOutputSchema { pub schema: serde_json::Value }
@@ -1277,9 +1277,18 @@ impl RuntimeBuilder {
     /// 非白名单变更仅 warn 提示重启。CLI 注入 `paths::config_path()`；
     /// 不设置时（server）不启用。
     pub fn with_config_path(mut self, p: Utf8PathBuf) -> Self;
+    /// 沙箱 fail-closed（R10-03，2026-08-31）：为 `true` 时沙箱不可用/初始化
+    /// 失败**拒绝执行**（`maybe_sandbox_fallback` 直接返回 `None`，不询问
+    /// "是否沙箱外运行"）。`minicoding exec`/CI 场景应开启（`build_runtime_fail_closed`），
+    /// 防 `AutoApprovePrompter` 对降级弹窗恒 `Allow` 导致静默无隔离执行。
+    pub fn sandbox_fail_closed(mut self, fail_closed: bool) -> Self;
     pub fn build(self) -> Result<Runtime>;
 }
 ```
+
+> `RuntimeBuilder` 的 setter 均为消费式（`mut self -> Self`），可链式调用。
+> R10-03 起沙箱默认 **fail-open**（交互式场景保留降级询问路径，C-22 用户显式
+> 确认）；无人值守场景（exec/server CI）必须显式开启 `sandbox_fail_closed`。
 
 ### 4.2 输入与事件
 
@@ -1376,6 +1385,27 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ---
+
+### 5.1 R10 新增 SDK 入口（2026-08-31）
+
+```rust
+/// 构建 fail-closed Runtime（R10-03）：`sandbox_fail_closed = true`，沙箱
+/// 不可用/初始化失败直接拒绝执行，不询问"是否沙箱外运行"。
+/// 用于 `minicoding exec`/CI 等无人值守批量场景。
+pub fn build_runtime_fail_closed(...) -> Result<Runtime>;
+
+/// 装配 SDK 工具集（R10-05 能力矩阵守卫）：一次性注册所有内置工具
+/// （fs/shell/web/git/task/plan）并返回 `ToolRegistry`，供测试断言
+/// 能力矩阵完整性。server 侧有对应的 `assemble_server_tool_registry`。
+pub fn assemble_sdk_tool_registry() -> ToolRegistry;
+
+/// 记忆 CLi 子命令（R10-08）：`minicoding memory list` 列出记忆条目、
+/// `memory read <id>` 读取内容、`memory clear` 清空全部。非 TTY 下
+/// `clear` 需 `--force` 二次确认。见 `modules.md` §5。
+pub fn memory_list() -> Vec<MemorySummary>;
+pub fn memory_read(id: &str) -> Result<String>;
+pub fn memory_clear(force: bool) -> Result<()>;
+```
 
 ## 6. 配置 Schema
 
@@ -1884,8 +1914,8 @@ LLM 主动向用户提问（对标 Claude Code AskUserQuestion），走
 | 项 | 值 |
 |----|----|
 | 工具组 | `Task` |
-| 副作用 | `None`（父 Agent 只接收 `summary`；子 Agent 的副作用在其自身权限链处理，C-05） |
-| 只读（Plan 模式） | 是（父会话视角；子 Agent 内部仍受自身 `PermissionMode` 约束） |
+| 副作用 | `Spawn`（R10-02：`task.spawn` 从 `None` 升为 `Spawn` 变体，派生执行也须经完整权限链——Plan 模式下 Spawn 走 `Ask`/`BypassPermissions` 分支被拒，不得借子任务绕过 Plan 只读硬门；见 `rules.md` C-01 补充） |
+| 只读（Plan 模式） | 否（R10-02 起，Spawn 在 Plan 下不可免检；子 Agent 运行时传播 `permission_mode` 并取与父会话更严者） |
 | 持有能力 | `Arc<dyn SubagentRunner>`（由 `Runtime::subagent_runner()` 注入）+ `Arc<dyn PlanModeController>`（Plan 模式守卫） |
 | 输出 | `{ summary, artifacts, token_used, completed }`（C-05：仅 `summary`，不回灌中间消息） |
 
