@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use minicoding_context::{ContextManagerImpl, SimpleContextManager};
-use minicoding_core::config::{ProviderConfig, SmallProviderConfig, config_hash};
+use minicoding_core::config::{ProviderConfig, RuntimeConfig, SmallProviderConfig, config_hash};
 use minicoding_core::hooks::HookRegistry;
 use minicoding_core::memory::{MemoryStore, SessionSummarizer};
 use minicoding_core::model::{MemoryError, Message, Session, SessionId, ToolError};
@@ -166,7 +166,16 @@ fn inner_build_runtime(
     //    内置默认（README §6、getting-started.md）。此前交互主链路从 default 起步，
     //    文件配置（含 hooks 段）静默失效（2026-08-23 审查 §3-P1）；解析失败且无
     //    LKG 时降级默认值，与 `serve.rs` 的容错口径一致。
-    let mut config = minicoding_core::config::load_config().unwrap_or_default();
+    let mut config = match minicoding_core::config::load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            // R10 P2：配置解析失败静默降级零提示——`unwrap_or_default` 直接
+            // 吞掉错误，用户 TOML 写错后程序回退 openai/gpt-4o-mini 且无从察觉。
+            // 此处显式 eprintln 警告（stderr 直出，tracing 未初始化时也可见）。
+            eprintln!("警告: 配置文件解析失败，已回退默认值（provider 与模型将被重置）: {e}");
+            RuntimeConfig::default()
+        }
+    };
     // 环境变量快捷覆盖
     if let Ok(base) = std::env::var("OPENAI_API_BASE") {
         config.provider.api_base = base;

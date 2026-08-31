@@ -108,7 +108,14 @@ async fn main() -> Result<()> {
     }
 
     // 解析 provider 配置（CLI > env > config.toml > 默认，与 `minicoding serve` 一致）
-    let file_config = minicoding_core::config::load_config().unwrap_or_default();
+    let file_config = match minicoding_core::config::load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            // R10 P2：配置解析失败静默降级零提示——见 sdk/builder.rs 同款修复
+            eprintln!("警告: 配置文件解析失败，已回退默认值（provider 与模型将被重置）: {e}");
+            minicoding_core::config::RuntimeConfig::default()
+        }
+    };
     let file_provider = &file_config.provider;
 
     let provider_kind = cli
