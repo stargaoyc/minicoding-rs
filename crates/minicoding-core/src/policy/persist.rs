@@ -41,9 +41,16 @@ pub enum PolicyPersistError {
 }
 
 /// 持久化策略存储（tool / `tool@path-prefix` → 决策）。
+///
+/// R10-09：支持 workdir 作用域——构造时传入 `workdir` 后，写入键带
+/// `<workdir>:` 前缀（如 `"/proj/a:fs.write@src"`），查询仅匹配当前 workdir
+/// 的键（跨项目同名路径不再误放行）。旧的无前缀键（历史数据）仍按全局规则
+/// 匹配，保证向后兼容。
 #[derive(Debug, Clone)]
 pub struct PolicyPersist {
     path: Utf8PathBuf,
+    /// 权限作用域 workdir（规范化绝对路径）。`None` 时不带作用域前缀（旧行为）。
+    workdir: Option<Utf8PathBuf>,
 }
 
 /// policy.toml 磁盘结构。
@@ -53,13 +60,73 @@ struct PolicyFile {
     allow: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     deny: BTreeMap<String, String>,
+    /// R10-09：规则创建时间（键 → RFC3339）。超过 [`POLICY_TTL`] 的规则查询时
+    /// 视为过期（惰性：不主动清理，命中时忽略）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    created_at: BTreeMap<String, String>,
 }
+
+/// 权限规则 TTL（R10-09：30 天）。超过后自动失效，需重新确认。
+const POLICY_TTL: time::Duration = time::Duration::days(30);
 
 impl PolicyPersist {
     /// 创建指向 `path` 的存储（调用方经 [`crate::paths::policy_path`] 构造）。
     #[must_use]
     pub fn new(path: Utf8PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            workdir: None,
+        }
+    }
+
+    /// 创建带 workdir 作用域的存储（R10-09：跨项目同名路径不再误放行）。
+    ///
+    /// `workdir` 会 canonicalize 后作为键前缀；无法规范化时降级为原样路径。
+    #[must_use]
+    pub fn with_workdir(path: Utf8PathBuf, workdir: Utf8PathBuf) -> Self {
+        let workdir = std::fs::canonicalize(workdir.as_std_path())
+            .ok()
+            .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .unwrap_or(workdir);
+        Self {
+            path,
+            workdir: Some(workdir),
+        }
+    }
+
+    /// 当前 workdir 作用域前缀（`"<workdir>:"`）；无 workdir 时为空串。
+    fn scope_prefix(&self) -> String {
+        self.workdir
+            .as_ref()
+            .map_or_else(String::new, |wd| format!("{wd}:"))
+    }
+
+    /// 构造查询/写入键：`{scope}{tool}` 或 `{scope}{tool}@{prefix}`。
+    fn key(&self, tool: &str, prefix: Option<&str>) -> String {
+        match prefix {
+            Some(p) => format!("{}{tool}@{p}", self.scope_prefix()),
+            None => format!("{}{tool}", self.scope_prefix()),
+        }
+    }
+
+    /// 判断键是否属于当前作用域（无前缀的旧键视为全局，仍匹配）。
+    fn in_scope(&self, key: &str) -> bool {
+        let scope = self.scope_prefix();
+        key.starts_with(&scope) || !key.contains(':')
+    }
+
+    /// 规则是否过期（`created_at` 缺失视为不过期——历史数据兼容）。
+    /// 规则是否过期（`created_at` 缺失视为不过期——历史数据兼容）。
+    fn expired(file: &PolicyFile, key: &str) -> bool {
+        let Some(created) = file.created_at.get(key) else {
+            return false;
+        };
+        let Ok(ts) =
+            time::OffsetDateTime::parse(created, &time::format_description::well_known::Rfc3339)
+        else {
+            return false;
+        };
+        time::OffsetDateTime::now_utc() - ts > POLICY_TTL
     }
 
     /// 工具级查询：`Some(true)`=allow，`Some(false)`=deny，`None`=无记录。
@@ -80,30 +147,42 @@ impl PolicyPersist {
     ///    （fail-closed）；均无则 `None`。
     #[must_use]
     pub fn decision_for_path(&self, tool: &str, path: Option<&str>) -> Option<bool> {
+        // 路径级：分别取 deny/allow 最长命中前缀长度。
+        // 键形如 `tool@prefix`（旧式全局）或 `<workdir>:tool@prefix`（R10-09 作用域）；
+        // 仅匹配属于当前 workdir 的键 + 旧式无 `:` 全局键；TTL 过期键跳过。
+        // `longest` 定义为关联函数外提（items_after_statements 约束），
+        // 闭包参数在调用处绑定。
+        fn longest<'a>(
+            keys: impl Iterator<Item = &'a String> + Clone,
+            tool: &str,
+            p: &'a str,
+            in_scope: &impl Fn(&str) -> bool,
+            not_expired: &impl Fn(&str) -> bool,
+        ) -> Option<usize> {
+            keys.filter(|k| in_scope(k) && not_expired(k))
+                .filter_map(|k| {
+                    // 剥离可选 workdir 前缀后，剩余形如 `tool@prefix`
+                    let body = k.split_once(':').map_or(k.as_str(), |(_, rest)| rest);
+                    body.strip_prefix(&format!("{tool}@"))
+                })
+                .filter(|prefix| {
+                    p.starts_with(*prefix)
+                        && (prefix.is_empty()
+                            || p.len() == prefix.len()
+                            || p[prefix.len()..].starts_with('/'))
+                })
+                .map(str::len)
+                .max()
+        }
+
         let text = std::fs::read_to_string(&self.path).ok()?;
         let file: PolicyFile = toml::from_str(&text).ok()?;
+
         if let Some(p) = path {
-            // 路径级：分别取 deny/allow 最长命中前缀长度（键以 `tool@` 引导）。
-            // 前缀命中须落在 `/` 组件边界——裸 starts_with 会使 `src/generated`
-            // 误命中兄弟目录 `src/generated-evil/x`（S18 同类 bug 的 persist 层
-            // 补修，2026-08-25 审查 §6.2-S12）
-            fn longest<'a, V>(
-                keys: std::collections::btree_map::Keys<'a, String, V>,
-                tool: &str,
-                p: &'a str,
-            ) -> Option<usize> {
-                keys.filter_map(|k| k.strip_prefix(&format!("{tool}@")))
-                    .filter(|prefix| {
-                        p.starts_with(*prefix)
-                            && (prefix.is_empty()
-                                || p.len() == prefix.len()
-                                || p[prefix.len()..].starts_with('/'))
-                    })
-                    .map(str::len)
-                    .max()
-            }
-            let deny_hit = longest(file.deny.keys(), tool, p);
-            let allow_hit = longest(file.allow.keys(), tool, p);
+            let in_scope = |k: &str| self.in_scope(k);
+            let not_expired = |k: &str| !Self::expired(&file, k);
+            let deny_hit = longest(file.deny.keys(), tool, p, &in_scope, &not_expired);
+            let allow_hit = longest(file.allow.keys(), tool, p, &in_scope, &not_expired);
             match (deny_hit, allow_hit) {
                 (Some(d), Some(a)) => return Some(d < a),
                 (Some(_), None) => return Some(false),
@@ -111,11 +190,23 @@ impl PolicyPersist {
                 (None, None) => {}
             }
         }
-        // 工具级：deny 优先（fail-closed）
-        if file.deny.contains_key(tool) {
-            return Some(false);
+
+        // 工具级：deny 优先（fail-closed）；先查作用域键，再回退旧式全局键。
+        let deny_key = self.key(tool, None);
+        for k in [&deny_key, tool] {
+            if file.deny.contains_key(k) && !Self::expired(&file, k) {
+                return Some(false);
+            }
         }
-        file.allow.get(tool).copied()
+        let allow_key = self.key(tool, None);
+        for k in [&allow_key, tool] {
+            if !Self::expired(&file, k)
+                && let Some(v) = file.allow.get(k)
+            {
+                return Some(*v);
+            }
+        }
+        None
     }
 
     /// 记录工具级 allow 规则并原子落盘（unix 0600）。
@@ -123,9 +214,11 @@ impl PolicyPersist {
     /// # Errors
     /// 读/序列化/写入失败时返回 [`PolicyPersistError`]。
     pub fn set_allow(&self, tool: &str) -> Result<(), PolicyPersistError> {
-        self.mutate(|f| {
-            f.allow.insert(tool.to_string(), true);
-            f.deny.remove(tool);
+        let key = self.key(tool, None);
+        self.mutate(move |f| {
+            f.allow.insert(key.clone(), true);
+            f.deny.remove(&key);
+            f.created_at.insert(key, now_rfc3339());
         })
     }
 
@@ -135,9 +228,11 @@ impl PolicyPersist {
     /// 同 [`Self::set_allow`]。
     pub fn set_deny(&self, tool: &str, reason: &str) -> Result<(), PolicyPersistError> {
         let reason = reason.to_string();
+        let key = self.key(tool, None);
         self.mutate(move |f| {
-            f.deny.insert(tool.to_string(), reason);
-            f.allow.remove(tool);
+            f.deny.insert(key.clone(), reason);
+            f.allow.remove(&key);
+            f.created_at.insert(key, now_rfc3339());
         })
     }
 
@@ -146,13 +241,14 @@ impl PolicyPersist {
     /// # Errors
     /// 同 [`Self::set_allow`]。
     pub fn set_allow_path(&self, tool: &str, prefix: &str) -> Result<(), PolicyPersistError> {
-        let key = format!("{tool}@{prefix}");
+        let key = self.key(tool, Some(prefix));
         self.mutate(move |f| {
             // R4（RT4-4）：与工具级 setter 的互斥清理对齐——路径级此前只 insert
             // 不清理对方表，查询时同长度冲突 deny 恒胜（`d < a` 等长 false），
             // 用户先 DenyAlways 后改主意 AllowAlways 被静默忽略。
             f.allow.insert(key.clone(), true);
             f.deny.remove(&key);
+            f.created_at.insert(key, now_rfc3339());
         })
     }
 
@@ -167,11 +263,12 @@ impl PolicyPersist {
         reason: &str,
     ) -> Result<(), PolicyPersistError> {
         let reason = reason.to_string();
-        let key = format!("{tool}@{prefix}");
+        let key = self.key(tool, Some(prefix));
         self.mutate(move |f| {
             // R4（RT4-4）：同上，写入 deny 同时清理 allow 同键。
             f.deny.insert(key.clone(), reason);
             f.allow.remove(&key);
+            f.created_at.insert(key, now_rfc3339());
         })
     }
 
@@ -213,6 +310,13 @@ impl PolicyPersist {
 
 /// mutate 的 tmp 文件序号（SEC-10：tmp 名含 pid+序号，防并发覆盖）。
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 当前时间 RFC3339（R10-09 `created_at` 用；格式化失败回退 epoch，理论不可达）。
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -307,5 +411,74 @@ mod tests {
             Some(true),
             "与前缀完全相等的路径命中"
         );
+    }
+
+    /// R10-09：workdir 作用域——项目 A 的 allow 规则不适用于项目 B 同名路径。
+    #[test]
+    fn workdir_scoped_rules_do_not_leak_across_projects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(tmp.path().join("policy.toml")).expect("utf8");
+        // 项目 A：`/tmp/proj-a/src` 放行
+        let store_a = PolicyPersist::with_workdir(path.clone(), Utf8PathBuf::from("/tmp/proj-a"));
+        store_a
+            .set_allow_path("fs.write", "src")
+            .expect("allow in proj-a");
+        assert_eq!(
+            store_a.decision_for_path("fs.write", Some("src/main.rs")),
+            Some(true),
+            "项目 A 内命中"
+        );
+
+        // 项目 B：`/tmp/proj-b/src` 同名路径不得命中项目 A 的规则
+        let store_b = PolicyPersist::with_workdir(path, Utf8PathBuf::from("/tmp/proj-b"));
+        assert_eq!(
+            store_b.decision_for_path("fs.write", Some("src/main.rs")),
+            None,
+            "跨项目同名路径不得误放行（R10-09）"
+        );
+    }
+
+    /// R10-09：旧式无前缀键（历史 policy.toml）仍作为全局规则匹配（向后兼容）。
+    #[test]
+    fn legacy_unscoped_keys_still_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(tmp.path().join("policy.toml")).expect("utf8");
+        let store = PolicyPersist::with_workdir(path.clone(), Utf8PathBuf::from("/tmp/proj"));
+        // 手工写入旧式无前缀键（模拟历史文件）
+        store.set_allow("fs.read").expect("allow");
+        // set_allow 现在写作用域键；验证旧式 `fs.read` 裸键仍被识别：
+        // 直接改磁盘文件模拟历史数据
+        let legacy = "fs.read";
+        let mut file: PolicyFile =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read policy")).expect("parse");
+        file.allow.remove(&store.key(legacy, None));
+        file.allow.insert(legacy.to_string(), true);
+        std::fs::write(&path, toml::to_string_pretty(&file).expect("serialize"))
+            .expect("write legacy");
+        assert_eq!(
+            store.decision_for("fs.read"),
+            Some(true),
+            "旧式无前缀键仍作为全局规则匹配"
+        );
+    }
+
+    /// R10-09：TTL 过期规则惰性失效（`created_at` 超过 30 天后不再命中）。
+    #[test]
+    fn ttl_expired_rules_ignored() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(tmp.path().join("policy.toml")).expect("utf8");
+        let store = PolicyPersist::with_workdir(path.clone(), Utf8PathBuf::from("/tmp/proj"));
+        store.set_allow("fs.read").expect("allow");
+        // 篡改 created_at 为 31 天前 → 过期
+        let key = store.key("fs.read", None);
+        let mut file: PolicyFile =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read policy")).expect("parse");
+        let expired = (time::OffsetDateTime::now_utc() - time::Duration::days(31))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("fmt");
+        file.created_at.insert(key.clone(), expired);
+        std::fs::write(&path, toml::to_string_pretty(&file).expect("serialize"))
+            .expect("write expired");
+        assert_eq!(store.decision_for("fs.read"), None, "过期规则应惰性失效");
     }
 }

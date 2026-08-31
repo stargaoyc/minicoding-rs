@@ -675,11 +675,12 @@ fn inner_build_runtime(
                     as std::sync::Arc<dyn minicoding_core::hooks::AsyncRewakeScheduler>
             }
         })
-        .with_policy_persist(
-            minicoding_core::paths::policy_path()
-                .ok()
-                .map(|p| std::sync::Arc::new(minicoding_core::policy::PolicyPersist::new(p))),
-        )
+        .with_policy_persist(minicoding_core::paths::policy_path().ok().map(|p| {
+            std::sync::Arc::new(minicoding_core::policy::PolicyPersist::with_workdir(
+                p,
+                workdir_path.clone(),
+            ))
+        }))
         .event_store(Arc::new(event_store))
         .snapshot_store(Arc::new(snapshot_store));
 

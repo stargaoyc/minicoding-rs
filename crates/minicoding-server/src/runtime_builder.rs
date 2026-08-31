@@ -334,11 +334,12 @@ pub fn build_runtime(
         // R8 ARCH-1 修复：server 侧接线 PolicyPersist（~/.minicoding/policy.toml），
         // 与 CLI/SDK 对齐——AllowAlways/DenyAlways 跨会话持久化（此前仅进程内有效，
         // Web/Desktop 用户点"始终允许"重启后丢失）。
-        .with_policy_persist(
-            minicoding_core::paths::policy_path()
-                .ok()
-                .map(|p| std::sync::Arc::new(minicoding_core::policy::PolicyPersist::new(p))),
-        );
+        .with_policy_persist(minicoding_core::paths::policy_path().ok().map(|p| {
+            std::sync::Arc::new(minicoding_core::policy::PolicyPersist::with_workdir(
+                p,
+                workdir.clone(),
+            ))
+        }));
 
     // 11b. 注入文件改动 journal（W-11 diff 视图，C-28：/undo 语义复用 FileChangeJournal）
     //      与 CLI `file-undo` feature 对齐：`workspace/diff` 端点展示会话内文件改动历史。

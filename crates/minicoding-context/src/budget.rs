@@ -40,8 +40,14 @@ impl TokenBudget {
     #[must_use]
     pub fn with_reserved_output(mut self, output: usize) -> Self {
         // 预留输出至少 512（安全偏低限），至多窗口的 25%（留足输入预算）。
+        // 小窗口（<2048）下 25% 可能低于 512 下限——此时放弃下限直接取窗口
+        // 的 25%，避免 `clamp(512, max_reserved)` 在 min>max 时 panic。
         let max_reserved = self.context_window / 4;
-        self.reserved_output = output.clamp(512, max_reserved);
+        self.reserved_output = if max_reserved < 512 {
+            max_reserved.max(1)
+        } else {
+            output.clamp(512, max_reserved)
+        };
         self
     }
 
