@@ -4,6 +4,26 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.4.0] - 2026-08-31
+
+> 自 v0.3.11 以来的收尾批次（含 0.3.11 全部修复 + 文档/CI 同步）。
+> 主题：**0.4.0 里程碑——R10 审查收口 + README/文档全量同步 + CI 门禁加固**。
+> 包含 v0.3.11 未随发布物同步的 DTO 生成与 typos 排除修复。
+
+### 同步与修复
+
+- **DTO 生成漂移修复**：`SideEffect` 补 `spawn` 变体后重新运行 `pnpm gen-types`，
+  前端 `SideEffect.ts` 类型同步（CI web job 的 DTO 漂移门禁通过）
+- **CI typos 门禁修复**：审查报告归档至 `docs/history/` 后，`_typos.toml`
+  排除规则扩展 `docs/history/*.md`（commit hash 子串不再误报）
+- **README 目录结构树同步**：补齐 LICENSE/CHANGELOG/CONTRIBUTING/SECURITY/
+  deny.toml/rust-toolchain/.pre-commit-config.yaml/.github 等根文件、docs/
+  缺失的 8 个文档、scripts/ 与 deploy/，移除不存在的 tests/ 目录
+
+### 自 v0.3.10 以来的累计变更（含 v0.3.11 全部条目）
+
+v0.3.11 全部安全/可靠性/文档修复均计入 0.4.0（见下方 v0.3.11 段落）。
+
 ## [0.3.11] - 2026-08-31
 
 > 自 v0.3.10 以来的 R10 审查修复批次。主题：**R10 审查全量收口**
