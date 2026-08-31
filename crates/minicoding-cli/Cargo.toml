@@ -19,7 +19,14 @@ path = "src/main.rs"
 
 [dependencies]
 minicoding-core = { workspace = true }
-minicoding-sdk = { workspace = true }
+# R10-15：SDK 用 path 依赖 + default-features=false——此前 workspace 继承导致
+# SDK 全部 default features（sandbox/hooks/file-undo/web/extensions/cred-keyring/mcp）
+# 恒开，CLI 的六个 feature 无法关闭（cargo 禁止成员覆写继承依赖的 default-features，
+# 见 tui Cargo.toml 注释）。SDK 的 cred-keyring 常开（CLI cred 命令需要），其余经
+# 下方 feature 显式传播。
+minicoding-sdk = { path = "../minicoding-sdk", default-features = false, features = [
+    "cred-keyring",
+] }
 minicoding-context = { workspace = true }
 minicoding-policy = { workspace = true }
 minicoding-storage = { workspace = true }
@@ -54,7 +61,10 @@ minicoding-hooks = { workspace = true, optional = true }
 minicoding-journal = { workspace = true, optional = true }
 minicoding-sandbox = { workspace = true, optional = true }
 minicoding-mcp = { workspace = true, optional = true }
-minicoding-server = { workspace = true, optional = true }
+# R10-15：server 同样用 path + default-features=false——此前继承使
+# `server/default = ["otel"]` 的 OTLP 栈恒编入 CLI（而 CLI 自己的 otel feature
+# 不在 default，编译了却不初始化）。CLI 的 otel feature 显式传播。
+minicoding-server = { path = "../minicoding-server", default-features = false, optional = true }
 # 扩展 SDK（Extension trait + BundledExtensionHost + 9 内置 PromptContributor）
 minicoding-extension-sdk = { workspace = true, optional = true }
 
@@ -84,7 +94,9 @@ web = ["minicoding-sdk/web"]
 # LSP stdio 适配器（T-M8-8，启用 `minicoding-server` 的 `lsp` feature）
 lsp = ["serve", "minicoding-server/lsp"]
 # OTLP 导出（需 reqwest，按需启用；未启用时降级为纯 fmt 日志，见 core::otel）
-otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+# R10-15：server 已 default-features=false，此处显式传播 server/otel——
+# 否则 CLI 的 serve 子命令不会初始化 server 侧 OTLP。
+otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "minicoding-server/otel"]
 full = ["memory", "hooks", "file-undo", "sandbox", "mcp", "serve", "web", "lsp", "otel", "extensions"]
 
 [dev-dependencies]

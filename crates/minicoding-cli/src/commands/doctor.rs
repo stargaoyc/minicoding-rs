@@ -35,6 +35,53 @@ pub fn run_doctor_command(cmd: &DoctorCommand) {
         println!("─────────────────────");
         print_security_report();
     }
+    print_capabilities();
+}
+
+/// R10-15：打印已编译能力集（类似 `docker version` 打印 plugins）。
+///
+/// CLI 的 feature 门控此前整体失效（SDK/server 依赖未关 default-features），
+/// 发布二进制可能静默缺少 web/hooks/extensions/lsp 而用户无从得知。此处按
+/// 编译期 feature 如实列出——`cfg!` 是编译期常量，release 构建后展示实际
+/// 能力，与 feature 矩阵一一对应。
+fn print_capabilities() {
+    let mut caps: Vec<&str> = Vec::new();
+    if cfg!(feature = "memory") {
+        caps.push("memory");
+    }
+    if cfg!(feature = "hooks") {
+        caps.push("hooks");
+    }
+    if cfg!(feature = "file-undo") {
+        caps.push("file-undo");
+    }
+    if cfg!(feature = "sandbox") {
+        caps.push("sandbox");
+    }
+    if cfg!(feature = "mcp") {
+        caps.push("mcp");
+    }
+    if cfg!(feature = "serve") {
+        caps.push("serve");
+    }
+    if cfg!(feature = "web") {
+        caps.push("web");
+    }
+    if cfg!(feature = "lsp") {
+        caps.push("lsp");
+    }
+    if cfg!(feature = "extensions") {
+        caps.push("extensions");
+    }
+    if cfg!(feature = "otel") {
+        caps.push("otel");
+    }
+    let joined = if caps.is_empty() {
+        "(none)".to_string()
+    } else {
+        caps.join(" ")
+    };
+    println!("capabilities:    {joined}");
 }
 
 /// 打印安全自检报告。
