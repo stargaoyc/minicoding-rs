@@ -108,6 +108,7 @@
 | M-08 | 向量检索（`@memory`） | BM25 语义检索（零外部依赖，CJK 逐字分词） | M8 | 已实现（@memory 接线完成：显式查询槽契约，前缀触发 top-5 注入；无槽退化全量渲染+截断，见 `api.md` §12.2） |
 | M-09 | Auto memory 注入（B2/B3） | `AutoMemoryContributor` 渲染注入 system 稳定区（cacheable），与 `memory.write` 共享实例形成写读闭环；检索语料 auto+long_term 统一入 BM25 索引 | M3 | 已实现（2026-08-25 R2 批次接线，此前生产链路零调用） |
 | M-10 | Auto memory 来源指纹（CTX-4 完整版） | `AutoEntry.source` 记录来源文件；渲染时源文件 mtime 晚于条目更新时间自动标注"来源文件已变更，可能陈旧"（与 90 天超时标注互补，代码重构后旧记忆不再误导模型）；`AutoMemoryWriter::add_entry` 增加 `source` 参数，`memory.write` schema 暴露 `source` 字段 | M3 | 已实现（2026-08-30 R9 批次） |
+| M-11 | 记忆读取/删除入口（R10-08） | `minicoding memory list/read/clear` CLI 子命令：列出/查看/清空长期与 Auto 记忆；非 TTY 下 `clear` 需 `--force` 二次确认；修复"记忆只写不读、只增不减"缺口（见 `api.md` §12.3） | M3 | 已实现（2026-08-31 R10 批次） |
 
 ## 6. 权限与安全
 
@@ -313,7 +314,7 @@
 | LLM Provider | 9 |
 | 工具系统 | 25 |
 | 上下文管理 | 10 |
-| 记忆 | 10 |
+| 记忆 | 11 |
 | 权限与安全 | 29 |
 | Hooks 系统 | 13 |
 | MCP 集成 | 14 |
@@ -325,7 +326,7 @@
 | Extension 扩展 | 3 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 21 |
-| **合计** | **209** |
+| **合计** | **210** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 48 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（DOC-5，2026-08-25 R2 审查：按主表逐行里程碑列重新统计；R8 审查更正：原注"四段相加 = 205"算术错误——48+84+46+20=198，合计 **205** 以功能项 ID 实数为准，四段为约数口径且跨里程碑条目归属重复计数，两者不直接对等；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 
