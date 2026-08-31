@@ -46,6 +46,16 @@ fn main() -> Result<()> {
 
     // ratatui 初始化（alternate screen + raw mode），整个会话切换过程保持开启
     let mut terminal = ratatui::init();
+
+    // R10 P1-附加：panic hook——任意线程 panic 时强制恢复终端（alternate screen
+    // 退出 + raw mode 关闭）。此前无防护，渲染/事件循环 panic 后终端残留 raw
+    // 模式（输入不回显、无换行），用户只能盲打 reset 或重开终端。
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        default_hook(info);
+    }));
+
     let result = run_loop(&mut terminal, &workdir, &SessionLoadMode::None);
     ratatui::restore();
     result
