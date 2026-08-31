@@ -100,11 +100,19 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
         // BypassPermissions（design.md §16.2）：全放行（仅隔离容器内使用，对齐 CC
         // `bypassPermissions`）。文件写入仍走 `check_file_write` 保留 C-03 越界 Deny
         // 与 C-23 项目约束文件 Ask——L0 硬约束不受用户模式影响。
-        SideEffect::Command | SideEffect::Network
+        // R10-02：Spawn 派生子 Agent（可写可跑 shell）同属高危，BypassPermissions
+        // 下放行，否则 Ask（Plan 硬门在上方已 Deny，此处覆盖 Default/其它模式）。
+        SideEffect::Command | SideEffect::Network | SideEffect::Spawn
             if ctx.permission_mode == PermissionMode::BypassPermissions =>
         {
             Verdict::Allow
         }
+        SideEffect::Spawn => Verdict::Ask(make_prompt(
+            tool,
+            "派生子 Agent（可写文件、执行命令，子 Agent 独立权限链）".to_string(),
+            Risk::High,
+            full_options(),
+        )),
         SideEffect::Command => {
             // R9 UX-1：只读/无害命令自动放行（Default 模式下免弹窗）。
             // 当前实现对所有 shell 命令返回 Ask，安全但交互成本极高——
@@ -140,10 +148,13 @@ fn compute_verdict(tool: &str, input: &Value, ctx: &PermissionContext) -> Verdic
 /// 降噪层，**不替代** L0 黑名单（`is_blacklisted` 已在更上层强制，危险命令
 /// 仍 Deny）。
 fn is_harmless_command(tool: &str, input: &Value) -> bool {
-    // 只读动词白名单（保守：这些命令无参数形态也不会产生副作用）
+    // 只读动词白名单（R10-01：保守纯读操作）。
+    // 注意：`env`/`find` 被**刻意排除**——`env python3 payload.py` 以首 token
+    // 匹配绕过；`find -exec sh -c 'x' +` / `find -delete` / `find -fprintf` 均无
+    // 复合操作符。`echo`/`printf` 仅在无重定向/管道时安全（下方已拦截）。
     const READONLY_VERBS: &[&str] = &[
-        "ls", "cat", "head", "tail", "grep", "find", "pwd", "echo", "date", "which", "wc", "uname",
-        "whoami", "printf", "true", "false", "env", "dir", "type", "help",
+        "ls", "cat", "head", "tail", "grep", "pwd", "echo", "date", "which", "wc", "uname",
+        "whoami", "printf", "true", "false", "dir", "type", "help",
     ];
     // 仅 shell.run/shell.background（shell.kill/output 无 command 文本）
     if tool != "shell.run" && tool != "shell.background" {
@@ -164,23 +175,39 @@ fn is_harmless_command(tool: &str, input: &Value) -> bool {
     if READONLY_VERBS.contains(&verb) {
         return true;
     }
-    // git 只读子命令（status/diff/log/show/branch/remote/config --get）
+    // git 只读子命令（R10-01：仅放行纯读形式；`config` 未限制 `--get` 时
+    // 可写 `.git/config` 注入 `core.pager`/`core.sshCommand` 实现持久化执行，
+    // `remote set-url`/`branch -D` 等写形式必须 Ask）
     if verb == "git"
         && let Some(sub) = tokens.get(1).map(String::as_str)
-        && matches!(
-            sub,
-            "status" | "diff" | "log" | "show" | "branch" | "remote" | "config"
-        )
     {
-        return true;
+        let read_only = match sub {
+            // 纯读子命令
+            "status" | "diff" | "log" | "show" => true,
+            // 仅放行"分支列表"类（无写动词）：`git branch` / `git branch -a`
+            // `-D`/`-m`/`-c`/`-f` 等写形式不放行
+            "branch" => tokens
+                .get(2)
+                .is_none_or(|a| matches!(a.as_str(), "-a" | "-v" | "--list" | "-r")),
+            // 仅放行列表类：`git remote` / `git remote -v` / `git remote show <name>`
+            // `set-url`/`add`/`remove`/`prune` 写形式不放行
+            "remote" => tokens
+                .get(2)
+                .is_none_or(|a| matches!(a.as_str(), "-v" | "--verbose" | "show")),
+            // 仅放行读取类：`git config --get <k>` / `--list` / `-l`
+            // 裸 `git config core.pager '...'` / `--global` 写形式不放行
+            "config" => tokens.get(2).is_some_and(|a| {
+                matches!(
+                    a.as_str(),
+                    "--get" | "--list" | "-l" | "--get-all" | "--get-regexp"
+                )
+            }),
+            _ => false,
+        };
+        return read_only;
     }
-    // cargo check（只读编译检查，无产物落盘）
-    if verb == "cargo"
-        && let Some(sub) = tokens.get(1).map(String::as_str)
-        && matches!(sub, "check" | "fmt" | "clippy")
-    {
-        return true;
-    }
+    // R10-01：`cargo check/fmt/clippy` 移出自动放行——编译期执行 `build.rs` 与
+    // proc-macro 任意代码，且 `cargo` 可写 `target/`，归入"需确认"而非"只读"。
     false
 }
 
@@ -2579,7 +2606,9 @@ mod tests {
             "cat README.md",
             "git status",
             "git diff",
-            "cargo check",
+            "git config --get user.name",
+            "git remote -v",
+            "git branch",
             "grep foo src",
         ] {
             let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
@@ -2595,6 +2624,34 @@ mod tests {
             &ctx,
         );
         assert!(matches!(verdict, Verdict::Allow));
+    }
+
+    /// R10-01（P0）：白名单绕过用例——`env`/`find` 解释器前缀、git 写子命令、
+    /// cargo 编译期执行均不得自动放行。
+    #[test]
+    fn harmless_command_bypasses_rejected() {
+        let ctx = ctx_with_mode(SideEffect::Command, PermissionMode::Default);
+        for cmd in [
+            "env python3 /tmp/payload.py", // env 前缀 → 任意命令执行
+            "env sh -c 'echo x'",
+            "find . -exec sh -c 'x' +",        // find -exec 免分隔符执行
+            "find . -delete",                  // 静默删除
+            "find . -fprintf /tmp/o '%s'",     // find 写文件
+            "git config core.pager 'sh -c x'", // git config 写注入
+            "git config --global core.sshCommand x",
+            "git remote set-url origin http://evil", // remote 写形式
+            "git branch -D main",                    // branch 写形式
+            "cargo check",                           // 编译期执行 build.rs / proc-macro
+            "cargo build",
+            "echo x > f.txt", // 重定向写
+            "cat a; rm b",    // 复合
+        ] {
+            let verdict = compute_verdict("shell.run", &serde_json::json!({"command": cmd}), &ctx);
+            assert!(
+                !matches!(verdict, Verdict::Allow),
+                "白名单绕过 {cmd} 不得自动放行，实际 {verdict:?}"
+            );
+        }
     }
 
     /// R9 UX-1：非只读命令仍 Ask（写/复合/解释器不在白名单）。

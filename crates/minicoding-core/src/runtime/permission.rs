@@ -289,6 +289,7 @@ impl Runtime {
             SideEffect::FileWrite => "file_write",
             SideEffect::Command => "command",
             SideEffect::Network => "network",
+            SideEffect::Spawn => "spawn",
         };
         let tool_timer = metrics::start_timer();
         // AllowAlways/DenyAlways 已在 resolve_decision 持久化并折叠为

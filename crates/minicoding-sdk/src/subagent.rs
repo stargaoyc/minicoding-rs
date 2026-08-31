@@ -22,7 +22,7 @@ use minicoding_core::agent::SubagentRunner;
 use minicoding_core::config::RuntimeConfig;
 use minicoding_core::context::ContextManager;
 use minicoding_core::model::{RuntimeError, SubagentResult, SubagentSpec};
-use minicoding_core::policy::{PermissionPolicy, PermissionPrompter};
+use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompter};
 use minicoding_core::provider::{BoxFuture, LlmProvider, Tokenizer};
 use minicoding_core::runtime::RuntimeBuilder;
 use minicoding_core::sandbox::SandboxDriver;
@@ -74,6 +74,10 @@ pub struct InProcessSubagentRunner {
     base_config: RuntimeConfig,
     /// 父工作目录（`spec.workdir` 缺省时使用）。
     workdir: camino::Utf8PathBuf,
+    /// 父权限模式（R10-02：子 Runtime 继承父 `permission_mode`——此前子 Agent
+    /// 以 `Default` 启动，Plan 模式硬门可被 `task.spawn` 绕过；取父模式保证
+    /// "子级不比父级更宽松"）。
+    permission_mode: PermissionMode,
     /// 并发闸门（F2）。信号量许可跨整个 `spawn` future 持有。
     semaphore: Arc<Semaphore>,
 }
@@ -107,6 +111,7 @@ impl InProcessSubagentRunner {
         )>,
         base_config: RuntimeConfig,
         workdir: camino::Utf8PathBuf,
+        permission_mode: PermissionMode,
     ) -> Self {
         Self {
             provider,
@@ -119,6 +124,7 @@ impl InProcessSubagentRunner {
             sandbox,
             base_config,
             workdir,
+            permission_mode,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBAGENTS)),
         }
     }
@@ -223,7 +229,12 @@ impl SubagentRunner for InProcessSubagentRunner {
                 .workdir(workdir)
                 .policy(policy)
                 .prompter(prompter)
-                .audit(audit);
+                .audit(audit)
+                // R10-02：子 Runtime 继承父 `permission_mode`——此前默认 Default，
+                // Plan 模式硬门（builtin.rs `ctx.permission_mode == Plan`）对子
+                // Agent 永不触发，`task.spawn` 即可绕过 Plan 只读保证。继承后
+                // 子 Agent 权限模式与父一致（"子级不比父级更宽松"）。
+                .permission_mode(self.permission_mode);
             if let Some((driver, sandbox_policy)) = sandbox {
                 builder = builder
                     .sandbox_driver(driver)

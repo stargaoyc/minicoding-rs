@@ -26,6 +26,12 @@ pub enum SideEffect {
     Command,
     /// 网络访问：`web.fetch`/`web.search`。
     Network,
+    /// 派生具备副作用能力的子执行体（`task.spawn`，R10-02）。
+    ///
+    /// 自身不产生直接副作用，但会派生子 Agent——子 Agent 可写文件、执行 shell。
+    /// **必须走完整权限链 + Hook + 审计**（与 `None` 的只读免检语义严格区分）；
+    /// 只读桶仅接受 `None`，`Spawn` 落入副作用串行桶。
+    Spawn,
 }
 
 /// 工具调用请求（LLM 产出）。

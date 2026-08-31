@@ -5,8 +5,10 @@
 //!
 //! ## 设计要点
 //!
-//! - `SideEffect::None`：父 Agent 只接收 `summary`，子 Agent 的副作用在其自身
-//!   权限检查中处理（不重复过父会话权限链）；
+//! - `SideEffect::Spawn`（R10-02）：派生子 Agent 是"派生具备副作用能力的执行体"，
+//!   必须走父会话完整权限链 + Hook + 审计——此前误标 `None` 落入只读桶免检，
+//!   Plan 模式硬门可被绕过（子 Agent 以 Default 模式启动自由写文件/跑 shell）。
+//!   子 Agent 自身的副作用仍由其自身权限链处理（继承父 policy/prompter）；
 //! - 持有 `Arc<dyn SubagentRunner>` 反向调用 Runtime 派发（与 `plan.exit` 持有
 //!   `Arc<dyn PlanModeController>` 同构，避免 core 依赖 tools）；
 //! - 持有 `Arc<dyn PlanModeController>` 实现 Plan 模式守卫：`SubagentType::Plan`
@@ -28,9 +30,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
-/// 派发子 Agent 的工具（`SideEffect::None`）。
+/// 派发子 Agent 的工具（`SideEffect::Spawn`，R10-02）。
 ///
-/// 父 Agent 只接收 `summary`，子 Agent 内部的副作用由其自身权限链处理。
+/// 父 Agent 只接收 `summary`，子 Agent 内部的副作用由其自身权限链处理；
+/// 但**派发动作本身**派生具备副作用能力的执行体，须走父会话完整权限链。
 pub struct TaskSpawn {
     schema: ToolSchema,
     output_schema: ToolOutputSchema,
@@ -206,7 +209,7 @@ impl Tool for TaskSpawn {
     }
 
     fn side_effect(&self) -> SideEffect {
-        SideEffect::None
+        SideEffect::Spawn
     }
 
     fn execute(
@@ -575,12 +578,14 @@ mod tests {
     }
 
     #[test]
-    fn task_spawn_is_read_only_and_no_side_effect() {
+    fn task_spawn_declares_spawn_side_effect() {
         let runner = MockRunner::with_ok("ok");
         let controller = MockController::new(PermissionMode::Default);
         let tool = TaskSpawn::new(runner, controller);
-        assert_eq!(tool.side_effect(), SideEffect::None);
-        assert!(tool.is_read_only());
+        // R10-02：task.spawn 派生具备副作用能力的子执行体，必须声明 Spawn
+        //（走完整权限链 + Hook + 审计），而非误标 None 落入只读桶免检。
+        assert_eq!(tool.side_effect(), SideEffect::Spawn);
+        assert!(!tool.is_read_only());
     }
 
     #[test]

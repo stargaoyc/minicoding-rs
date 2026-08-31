@@ -613,6 +613,8 @@ fn inner_build_runtime(
         sandbox_pair.clone(),
         child_config,
         workdir_path.clone(),
+        // R10-02：子 Agent 继承父权限模式（Plan 模式下子级保持只读硬门）。
+        initial_mode,
     );
     let subagent_runner: Arc<dyn minicoding_core::agent::SubagentRunner> =
         Arc::new(minicoding_tools::WorktreeSubagentRunner::new(

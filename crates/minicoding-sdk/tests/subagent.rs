@@ -6,6 +6,7 @@
 use futures::stream;
 use minicoding_core::agent::SubagentRunner;
 use minicoding_core::model::{LlmError, Message, StopReason, SubagentSpec, SubagentType};
+use minicoding_core::policy::PermissionMode;
 use minicoding_core::provider::{
     BoxFuture, BoxStream, Capabilities, ChatRequest, Delta, LlmProvider, Tokenizer,
 };
@@ -143,6 +144,8 @@ fn make_runner(provider: Arc<dyn LlmProvider>, dir: &std::path::Path) -> InProce
         None,
         minicoding_core::config::RuntimeConfig::default(),
         sessions,
+        // R10-02：测试默认 Default 模式；Plan 传播由 builder 集成测试覆盖
+        PermissionMode::Default,
     )
 }
 
