@@ -286,7 +286,18 @@ pub fn repair_request_messages(msgs: Vec<Message>) -> Vec<Message> {
             Some(m)
         })
         .collect();
-    repair_dangling_tool_calls(cleaned)
+    let repaired = repair_dangling_tool_calls(cleaned);
+    // R10 P1-附加：首消息角色归一化——L2 摘要把首条消息变成 assistant 时，
+    // Anthropic API 要求首条必须为 user，否则 400（压缩路径此前绕开此检查）。
+    // 插入占位 user 消息（空文本）作为首条，保证发送侧对 Anthropic 合法。
+    if repaired.first().is_some_and(|m| m.role == Role::Assistant) {
+        let mut with_user = Vec::with_capacity(repaired.len() + 1);
+        with_user.push(Message::user_text("（上下文压缩摘要后继续）"));
+        with_user.extend(repaired);
+        with_user
+    } else {
+        repaired
+    }
 }
 
 #[cfg(test)]
@@ -357,8 +368,10 @@ mod request_tests {
             tool_result_msg("c1", "ok"),
         ];
         let first = repair_request_messages(msgs);
-        // ghost 消息整条移除；assistant + 真实结果保留
-        assert_eq!(first.len(), 2);
+        // ghost 消息整条移除；assistant + 真实结果保留；首条为 assistant 时
+        // R10 归一化插入占位 user 消息 → 3 条
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[0].role, Role::User, "首条应归一化为 user");
         let second = repair_request_messages(first.clone());
         assert_eq!(first.len(), second.len(), "幂等：长度不变");
         for (a, b) in first.iter().zip(second.iter()) {
@@ -366,6 +379,20 @@ mod request_tests {
             assert_eq!(a.role, b.role);
             assert_eq!(a.tool_calls.len(), b.tool_calls.len());
         }
+    }
+
+    /// R10 P1-附加：首消息为 assistant 时插入占位 user 消息（Anthropic 首条必须 user）。
+    #[test]
+    fn first_message_assistant_normalized_to_user() {
+        let msgs = vec![assistant_with_call("c1"), tool_result_msg("c1", "ok")];
+        let out = repair_request_messages(msgs);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].role, Role::User, "首条 assistant 应归一化为 user");
+        assert_eq!(out[1].role, Role::Assistant);
+        assert_eq!(out[2].role, Role::Tool);
+        // 幂等：再次调用不再插入（首条已是 user）
+        let again = repair_request_messages(out.clone());
+        assert_eq!(again.len(), out.len());
     }
 
     #[test]
