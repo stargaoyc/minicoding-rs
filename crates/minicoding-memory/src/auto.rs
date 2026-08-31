@@ -163,8 +163,21 @@ impl AutoMemory {
         // tmp+rename 原子替换，读者要么见旧要么见新、永不见半成品）；正文
         // auto.md 由同一 entries 派生，不存在 long_term 双文件 hash 错配场景。
         let bytes = fs::read(&self.index_path).await?;
-        let entries: Vec<AutoEntry> = serde_json::from_slice(&bytes)
-            .map_err(|e| MemoryError::Serialize(format!("auto index parse: {e}")))?;
+        // R10 P2：损坏索引不自愈——`serde_json::from_slice` 失败直接上抛
+        // `MemoryError::Serialize` 会阻塞所有记忆读取（每次注入都失败）。
+        // 与 `jsonl.rs` 的 STR-2（warn + 扫描重建）同韧性：解析失败时告警并
+        // 清空重建（auto 记忆可重新学习，损坏索引不应让会话不可用）。
+        let entries: Vec<AutoEntry> = match serde_json::from_slice(&bytes) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %self.index_path,
+                    "auto.index.json 损坏，已清空重建（auto 记忆可重新学习）"
+                );
+                Vec::new()
+            }
+        };
 
         *lock(&self.cached_entries) = Some(entries.clone());
         *lock(&self.cached_mtime) = Some(current_mtime);
