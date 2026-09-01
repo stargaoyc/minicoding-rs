@@ -13,7 +13,7 @@ export type GetSessionResponse = {
    */
   tasks: Array<Task>;
   /**
-   * 当前是否有 turn 在运行（R9 P3-3：SSE 断线/页面刷新后前端据此恢复
+   * 当前是否有 turn 在运行（SSE 断线/页面刷新后前端据此恢复
    * `isStreaming`；同时是新消息打断卡死 turn 的判定依据）。
    */
   turn_running: boolean;

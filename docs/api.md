@@ -571,7 +571,7 @@ pub trait Storage {
     async fn load(&self, session: &SessionId) -> Result<Vec<Message>, StorageError>;
     async fn list_sessions(&self) -> Result<Vec<SessionListItem>, StorageError>;
     async fn delete(&self, session: &SessionId) -> Result<(), StorageError>;
-    /// 会话摘要落盘（T-M3-6；D4 补录：此前 api.md 漏列第 5 方法）。
+    /// 会话摘要落盘（T-M3-6）。
     /// `SessionListItem.summary` 同步更新，`list_sessions` 可见。
     async fn update_summary(&self, session: &SessionId, summary: &str)
         -> Result<(), StorageError>;

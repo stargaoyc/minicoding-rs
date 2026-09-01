@@ -204,7 +204,6 @@ impl AnthropicProvider {
         }
         // thinking 启用时 top_p 同样不可携带（Anthropic 与 temperature 同一约束：
         // thinking 模式下采样参数被拒绝），镜像 temperature 的 gate 逻辑
-        //
         if req.params.thinking_budget_tokens.is_none()
             && let Some(t) = req.params.top_p
         {

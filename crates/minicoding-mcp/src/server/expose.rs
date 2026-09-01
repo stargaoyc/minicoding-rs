@@ -307,8 +307,8 @@ fn convert_content_to_blocks(content: ToolContent) -> Vec<rmcp::model::ContentBl
     }
 }
 
-/// base64 编码（MCP wire format：RFC 4648 标准 alphabet + padding；2026-08-25
-/// 审查以 `base64` crate 替换手写实现，与 client 侧解码对称）。
+/// base64 编码（MCP wire format：RFC 4648 标准 alphabet + padding，
+/// 经 `base64` crate 实现，与 client 侧解码对称）。
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(data)

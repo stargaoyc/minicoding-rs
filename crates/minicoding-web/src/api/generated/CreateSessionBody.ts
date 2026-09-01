@@ -12,7 +12,7 @@ export type CreateSessionBody = {
   provider_name: string | null;
   api_base: string | null;
   /**
-   * S20/C-04：接受但**忽略**（wire 兼容旧客户端）——凭证由 server 持有，
+   * C-04：接受但**忽略**（wire 兼容旧客户端）——凭证由 server 持有，
    * 不经前端传入。传入时打 warn。
    */
   api_key: string | null;
@@ -26,7 +26,7 @@ export type CreateSessionBody = {
    */
   preset: string | null;
   /**
-   * 高危预设（`full-access`/`external-sandbox`）的二次确认字段（S3/C-22）：
+   * 高危预设（`full-access`/`external-sandbox`）的二次确认字段（C-22）：
    * UI 弹出红色警告确认后置 true 回传；缺失或 false 时请求被拒。
    */
   confirm_danger: boolean | null;

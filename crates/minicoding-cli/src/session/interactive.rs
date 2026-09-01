@@ -326,9 +326,7 @@ fn print_help() {
     anstream::eprintln!("{DIM}  /quit              退出会话（同 /exit、Ctrl-D）{DIM:#}");
     anstream::eprintln!("{DIM}  /exit              退出会话{DIM:#}");
     anstream::eprintln!("{DIM}  /plan [on|off|status]  切换 Plan 模式（只读强制）{DIM:#}");
-    anstream::eprintln!(
-        "{DIM}  /undo              回滚最近一次文件改动 operation{DIM:#}"
-    );
+    anstream::eprintln!("{DIM}  /undo              回滚最近一次文件改动 operation{DIM:#}");
     anstream::eprintln!("{DIM}  /model [name]      查看/切换模型（会话级生效）{DIM:#}");
     anstream::eprintln!("{DIM}  /status            会话状态摘要{DIM:#}");
     anstream::eprintln!("{DIM}  /tokens            本会话 token 计量{DIM:#}");

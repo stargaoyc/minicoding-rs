@@ -65,7 +65,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      # taiki-e/install-action 内置版本钉住与 checksum 校验（E2），
+      # taiki-e/install-action 内置版本钉住与 checksum 校验，
       # 替代原 curl | sh 无校验安装（版本与 dist-workspace.toml 的 cargo-dist-version 一致）
       - uses: taiki-e/install-action@v2
         name: Install dist

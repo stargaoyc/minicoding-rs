@@ -23,7 +23,7 @@ export type ContentBlock =
       content: ToolContent;
       is_error: boolean;
       /**
-       * 工具执行元数据（M-09：含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
+       * 工具执行元数据（含 `sandbox_denied` 结构化拒绝信息；wire 兼容旧数据）。
        */
       metadata: ToolResultMeta;
     };

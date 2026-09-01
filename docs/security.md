@@ -426,7 +426,7 @@ pub enum SandboxPolicy {
 | 平台 | 技术 | 实现 | crate |
 |------|------|------|-------|
 | macOS 12+ | `sandbox_init`(3) FFI（Seatbelt，自研胶水） | 父进程生成 Seatbelt profile 写临时文件（0600），`Command::pre_exec` 在子进程 fork 后 exec 前调 `sandbox_init` 加载（原 ~~`sandbox-run`~~ 方案因 EUPL-1.2 弃用）；VCS 目录默认只读；不依赖外部 crate | `minicoding-sandbox`（FFI 直连） |
-| Linux 5.13+ | `landlock` 直连（自研 pre_exec 胶水）；`libseccomp` 可选 feature（默认关，A1） | 自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前调 landlock `restrict_self()` 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`），不手写 BPF；启用 `--features seccomp` 后同一 pre_exec 内追加危险 syscall deny-list 过滤（见 §8.11） | `landlock` + `libc`（+ 可选 `libseccomp`） |
+| Linux 5.13+ | `landlock` 直连（自研 pre_exec 胶水）；`libseccomp` 可选 feature（默认关） | 自研胶水经 `Command::pre_exec` 在子进程 fork 后 exec 前调 landlock `restrict_self()` 限制文件系统可写范围（`LANDLOCK_ACCESS_FS_WRITE/REMOVE_FILE/...`），不手写 BPF；启用 `--features seccomp` 后同一 pre_exec 内追加危险 syscall deny-list 过滤（见 §8.11） | `landlock` + `libc`（+ 可选 `libseccomp`） |
 | Windows | AppContainer / Job Object（评估） | 受限 token + Job 限制写路径；初期降级为应用层 + 用户提示 | `windows` crate |
 | 全平台兜底 | 容器 / VM | CI/不可信任务推荐在容器内运行 `minicoding` | 外部 |
 

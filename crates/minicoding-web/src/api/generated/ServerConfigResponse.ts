@@ -16,7 +16,7 @@ export type ServerConfigResponse = {
   permission_timeout_sec: number;
   preset: string;
   /**
-   * 配置修订号（M-10 防陈旧写：前端保存前锁定基准，config.toml 实时值）。
+   * 配置修订号（防陈旧写：前端保存前锁定基准，config.toml 实时值）。
    */
   config_revision: number;
 };

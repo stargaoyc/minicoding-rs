@@ -99,7 +99,7 @@ impl Tool for PlanList {
         Some(&self.output_schema)
     }
 
-    /// 渲染意图：allowed_prompts 非空 → 表格（tool/prompt）；
+    /// 渲染意图：`allowed_prompts` 非空 → 表格（tool/prompt）；
     /// 为空 → JSON 直出。
     fn render_output(&self, result: &ToolResult) -> RenderIntent {
         let minicoding_core::model::ToolContent::Json(value) = &result.content else {

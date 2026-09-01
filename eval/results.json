@@ -1,0 +1,66 @@
+[
+  {
+    "id": "L1-001",
+    "layer": "L1",
+    "name": "Rust fib 函数生成",
+    "passed": true,
+    "elapsed_s": 19.3,
+    "check_output": "",
+    "prompt": "创建 src/lib.rs，实现 Rust 函数 fib(n: u32) -> u64 返回第 n 个斐波那契数（n 从 0 开始），并附单测断言 fib(10)==55。任务 L1-001",
+    "metrics": {
+      "steps": 5,
+      "tool_calls": 6,
+      "output_tokens": 953,
+      "cost_usd": 0.00029,
+      "session": "01M1GYB6C098ERYH4X2TRQB6M0.jsonl"
+    }
+  },
+  {
+    "id": "L2-001",
+    "layer": "L2",
+    "name": "修复 add bug（Aider polyglot 式）",
+    "passed": true,
+    "elapsed_s": 20.1,
+    "check_output": "",
+    "prompt": "项目 src/main.rs 中函数 add 实现有 bug（返回 a-b 而非 a+b），单测 add_works 因此失败。请修复该函数使 cargo test 通过。任务 L2-001",
+    "metrics": {
+      "steps": 7,
+      "tool_calls": 8,
+      "output_tokens": 813,
+      "cost_usd": 0.00024,
+      "session": "01M1GYBS61RYMVMF4GKTSZZ1AY.jsonl"
+    }
+  },
+  {
+    "id": "L3-001",
+    "layer": "L3",
+    "name": "目录结构创建（Terminal-Bench 式）",
+    "passed": true,
+    "elapsed_s": 25.2,
+    "check_output": "",
+    "prompt": "在当前目录创建 src/backend/（含 main.rs）和 src/frontend/（含 App.tsx）两层目录结构，然后在每个文件中写入一行注释。任务 L3-001",
+    "metrics": {
+      "steps": 7,
+      "tool_calls": 9,
+      "output_tokens": 896,
+      "cost_usd": 0.00027,
+      "session": "01M1GYCCSKR7Y739EDM3K8T5R8.jsonl"
+    }
+  },
+  {
+    "id": "L4-001",
+    "layer": "L4",
+    "name": "小仓库 issue 修复（SWE-bench 式）",
+    "passed": true,
+    "elapsed_s": 25.6,
+    "check_output": "",
+    "prompt": "仓库存在一个 issue：src/lib.rs 的 sum 函数是占位实现（返回 0），单测 sum_works 失败。请实现 sum 使所有测试通过。任务 L4-001",
+    "metrics": {
+      "steps": 7,
+      "tool_calls": 10,
+      "output_tokens": 1082,
+      "cost_usd": 0.00032,
+      "session": "01M1GYD5DEAAWFVQ6T74N8Z4EJ.jsonl"
+    }
+  }
+]

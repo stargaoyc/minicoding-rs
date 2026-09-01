@@ -12,7 +12,7 @@ export type ToolResultMeta = {
   bytes: number;
   truncated: boolean;
   /**
-   * 沙箱拒绝结构化信息（M-09；非拒绝结果为 `None`，wire 省略）。
+   * 沙箱拒绝结构化信息（非拒绝结果为 `None`，wire 省略）。
    */
   sandbox_denied: SandboxDenyInfo | null;
 };

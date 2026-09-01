@@ -16,8 +16,8 @@ use std::time::Duration;
 // 时需要它，但不应直接依赖 `tokio-util`（重依赖按 crate 隔离，AGENTS.md §3.5）。
 pub use tokio_util::sync::CancellationToken;
 
-/// 子进程环境变量白名单（C-04 凭证不下传子进程；单一事实来源，2026-08-23
-/// 审查 §6-P1：此前 `shell.run` 私有一份、`ctx.env` 恒空，git/background 等
+/// 子进程环境变量白名单（C-04 凭证不下传子进程；单一事实来源）。
+/// 此前 `shell.run` 私有一份、`ctx.env` 恒空，git/background 等
 /// 子进程拿到完全空环境——缺 HOME 使 git 无法解析身份/全局配置）。
 ///
 /// 仅传递基础环境变量；`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`*_KEY`/`*_TOKEN`/

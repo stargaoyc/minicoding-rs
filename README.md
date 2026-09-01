@@ -111,8 +111,7 @@ minicoding-rs/
 │   ├── troubleshooting.md
 │   ├── learning-guide.md
 │   ├── observability.md         # 可观测性
-│   ├── development-process.md   # 开发流程
-│   └── history/
+│   └── development-process.md   # 开发流程
 ├── crates/
 │   ├── minicoding-core/         # 抽象层：数据模型 + trait 定义 + Runtime 编排（零实现）
 │   ├── minicoding-context/      # ContextManager 实现 + 压缩管道 + 熔断
@@ -161,7 +160,7 @@ minicoding-rs/
 | [功能清单](docs/features.md) | 全功能总账（按领域分组） |
 | [大模型约束](docs/rules.md) | 运行时对 LLM 施加的 L0/L1/L2 约束 |
 | [开发过程文档](docs/development-process.md) | 项目开发全过程记录、关键设计决策、里程碑演进 |
-| [AI 编码约束](AGENTS.md) | AI 助手开发本项目时的编码/架构/文档/安全/前端规范 |
+| [编码约束](AGENTS.md) | 本项目的编码/架构/文档/安全/前端规范 |
 
 ### 用户与学习文档
 

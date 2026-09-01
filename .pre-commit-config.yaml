@@ -112,7 +112,14 @@ repos:
       - id: no-secrets-in-staged
         name: check no secrets staged
         description: 检查暂存区无敏感文件（AGENTS.md §6.4）
-        entry: bash -c 'if git diff --cached --name-only | grep -Eq "\.env(\\..+)?$|credentials\\.json$|\\.pem$|\\.key$"; then echo "ERROR: 敏感文件被暂存（见 AGENTS.md §6.4）"; git diff --cached --name-only | grep -E "\.env(\\..+)?$|credentials\\.json$|\\.pem$|\\.key$"; exit 1; fi'
+        entry: |
+          bash -c '
+            if git diff --cached --name-only | grep -Eq "\.env(\..+)?$|credentials\.json$|\.pem$|\.key$"; then
+              echo "ERROR: 敏感文件被暂存（见 AGENTS.md §6.4）"
+              git diff --cached --name-only | grep -E "\.env(\..+)?$|credentials\.json$|\.pem$|\.key$"
+              exit 1
+            fi
+          '
         language: system
         pass_filenames: false
         stages: [pre-commit]

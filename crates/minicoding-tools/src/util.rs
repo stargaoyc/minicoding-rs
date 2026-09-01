@@ -16,7 +16,7 @@ pub fn resolve_path(workdir: &Utf8PathBuf, input: &str) -> Result<Utf8PathBuf, T
     use minicoding_policy::PathSandboxError;
 
     // 核心判定委托 `minicoding-policy::path_sandbox`（单一实现，消除双版本
-    // 漂移——审查 §1.10）。此处仅保留调用方契约：错误映射 + "父目录不存在 →
+    // 漂移）。此处仅保留调用方契约：错误映射 + "父目录不存在 →
     // NotFound"（write.rs 的 mkdir -p 重试依赖该信号）。
     match minicoding_policy::resolve_under(workdir, input) {
         Ok(resolved) => {

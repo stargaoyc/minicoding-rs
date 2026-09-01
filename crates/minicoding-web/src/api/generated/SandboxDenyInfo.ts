@@ -2,7 +2,7 @@
 import type { SandboxDenyKind } from "./SandboxDenyKind";
 
 /**
- * 沙箱拒绝详情（M-09 结构化透传，wire 可选字段）。
+ * 沙箱拒绝详情（结构化透传，wire 可选字段）。
  */
 export type SandboxDenyInfo = {
   /**

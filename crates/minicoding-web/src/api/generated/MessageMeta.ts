@@ -23,7 +23,7 @@ export type MessageMeta = {
    */
   source: MessageSource;
   /**
-   * 本消息替代了事件 seq 区间 `[from_seq, to_seq]`（压缩追溯，R-02/M-07）。
+   * 本消息替代了事件 seq 区间 `[from_seq, to_seq]`（压缩追溯）。
    *
    * 压缩摘要/合并消息携带被替换消息的 seq 区间，审计可追溯"这轮压缩掉了
    * 什么"（`AuditKind::Compress`）。`None` = 非压缩产物。wire 兼容：
