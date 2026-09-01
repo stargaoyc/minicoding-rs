@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
@@ -170,16 +170,27 @@ export function MessageList({
  * 用户可点击 `summary` 手动收起。思考过程为瞬态数据，刷新后不保留。
  */
 function ReasoningBlock({ text, defaultOpen = true }: { text: string; defaultOpen?: boolean }) {
+  // R10 性能：收起时只渲染前 200 字符摘要——长思考（如 DeepSeek 上千字）折叠态
+  // 不渲染全文，减少 DOM 体积（此前 `<details>` 收起只是 CSS 隐藏，全文仍在 DOM）。
+  const COLLAPSE_LIMIT = 200;
+  const [open, setOpen] = useState(defaultOpen);
+  const collapsedText = text.length > COLLAPSE_LIMIT ? `${text.slice(0, COLLAPSE_LIMIT)}…` : text;
   return (
     <details
-      open={defaultOpen}
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
       className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
     >
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
         💭 思考过程
+        {text.length > COLLAPSE_LIMIT && (
+          <span className="ml-1 text-[10px] text-[var(--color-text-muted)]/60">
+            {open ? "（点击收起）" : `（${text.length} 字符，点击展开）`}
+          </span>
+        )}
       </summary>
       <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
-        {text}
+        {open ? text : collapsedText}
       </pre>
     </details>
   );

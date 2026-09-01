@@ -5,7 +5,7 @@
  * 权限请求/决策、消息落盘、turn 边界），按事件类型着色，点击条目展开原始载荷。
  */
 import { useMemo, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { Activity, X, Trash2 } from "lucide-react";
 import { useTraceStore } from "../../stores/trace";
 import { Button } from "../ui/button";
@@ -41,12 +41,15 @@ export function TracePanel() {
   );
 
   return (
-    <motion.div
-      initial={{ x: "100%" }}
-      animate={{ x: open ? 0 : "100%" }}
-      transition={{ duration: 0.2 }}
-      className="fixed right-0 top-0 z-40 flex h-screen w-[420px] max-w-[90vw] flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)]"
-    >
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ x: "100%" }}
+          animate={{ x: 0 }}
+          exit={{ x: "100%" }}
+          transition={{ duration: 0.2 }}
+          className="fixed right-0 top-0 z-40 flex h-screen w-[420px] max-w-[90vw] flex-col border-l border-[var(--color-border)] bg-[var(--color-surface)]"
+        >
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
         <Activity className="h-4 w-4 text-[var(--color-accent-hover)]" />
@@ -121,6 +124,8 @@ export function TracePanel() {
           </div>
         )}
       </div>
-    </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

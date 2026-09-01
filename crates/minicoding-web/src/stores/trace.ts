@@ -81,7 +81,10 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     } else if (type === "reasoning_delta") {
       // R10 可读性：reasoning_delta 逐 token 到达，合并为一段完整思考（避免
       // 一个字母一条日志）。累积到 reasoningAccum，替换最近一条 reasoning 条目。
+      // R10 性能：面板关闭时不 set（token 节流同款）——推理时每秒几十个 delta，
+      // 每次 set 都触发 TracePanel 重渲染（即便不可见），是流式卡顿的来源之一。
       reasoningAccum += event.text;
+      if (!get().open) return;
       const summary = `💭 思考: "${reasoningAccum.slice(0, 80)}${reasoningAccum.length > 80 ? "…" : ""}"`;
       const detail = reasoningAccum;
       const next = [...entries];

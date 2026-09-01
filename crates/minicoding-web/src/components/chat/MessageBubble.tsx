@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronDown, ChevronUp, User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -125,7 +125,7 @@ function ToolCallList({ calls }: { calls: ToolCall[] }) {
   );
 }
 
-export function MessageBubble({
+function MessageBubbleInner({
   message,
   isStreaming,
 }: {
@@ -201,24 +201,30 @@ export function MessageBubble({
             </div>
           ) : text ? (
             <>
-              <ReactMarkdown
-                components={{
-                  code: ({ children, className }) => (
-                    <code
-                      className={cn(
-                        "rounded px-1.5 py-0.5 text-xs",
-                        className?.includes("language-")
-                          ? "block bg-[var(--color-bg)] p-3"
-                          : "bg-[var(--color-surface)]",
-                      )}
-                    >
-                      {children}
-                    </code>
-                  ),
-                }}
-              >
-                {text}
-              </ReactMarkdown>
+              {isStreaming ? (
+                <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-[var(--color-text)]">
+                  {text}
+                </pre>
+              ) : (
+                <ReactMarkdown
+                  components={{
+                    code: ({ children, className }) => (
+                      <code
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-xs",
+                          className?.includes("language-")
+                            ? "block bg-[var(--color-bg)] p-3"
+                            : "bg-[var(--color-surface)]",
+                        )}
+                      >
+                        {children}
+                      </code>
+                    ),
+                  }}
+                >
+                  {text}
+                </ReactMarkdown>
+              )}
               {/* R10：assistant 消息既有文本又有工具调用时，工具调用一并展示
                    （此前 `text ? : toolCalls` 二选一，工具调用被吞掉） */}
               {toolCalls.length > 0 && (
@@ -257,3 +263,7 @@ export function MessageBubble({
     </motion.div>
   );
 }
+
+/** R10 性能：memo 包裹——历史消息（`isStreaming` 恒为 undefined）不随
+ * 流式 token 的 `streamingText` 变化重渲染（此前整棵 MessageList 都重渲染）。 */
+export const MessageBubble = memo(MessageBubbleInner);
