@@ -1119,7 +1119,7 @@ pub enum Capability { Tool, Hook, PromptContributor, Keybinding, StatusItem, Com
 
 ### 3.13 Prompt 管道（见 `design.md` §22）
 
-Prompt 管道把 system prompt 的组装拆为 9 个 `PromptContributor`，按固定顺序拼接。稳定段（1-5：身份/系统规则/任务指南/通信规范/环境信息）在前，易变段（6-9：用户规则/项目规则/工具摘要/扩展注入）在后，使稳定段命中 prompt cache，降低重复请求的计费。扩展通过 `Registrar::register_prompt_contributor`（§3.12）注册的 contributor 注入 `Extension` section（顺序 9）。
+Prompt 管道把 system prompt 的组装拆为 10 个 `PromptContributor`，按固定顺序拼接。稳定段（1-5：身份/系统规则/任务指南/通信规范/环境信息）在前，易变段（6-10：用户规则/项目规则/工具摘要/扩展注入/技能清单）在后，使稳定段命中 prompt cache，降低重复请求的计费。扩展通过 `Registrar::register_prompt_contributor`（§3.12）注册的 contributor 注入 `Extension` section（顺序 9）。
 
 ```rust
 /// Prompt contributor：为 system prompt 组装贡献一个 section。
@@ -1154,12 +1154,13 @@ pub enum PromptSectionOrder {
     ProjectRules = 7,   // 7. 项目规则（AGENTS.md）
     ToolSummary = 8,    // 8. 工具 schema 摘要
     Extension = 9,      // 9. 扩展注入
+    Skills = 10,        // 10. 技能清单（声明式 SKILL.md 渐进披露，R10 新增）
 }
 ```
 
-9 个 contributor 按 `PromptSectionOrder` 枚举值顺序拼接，稳定段（1-5）内容相对恒定可命中 prompt cache，易变段（6-9）放后。扩展通过 `Registrar::register_prompt_contributor` 注册的 contributor 注入到 `Extension` 段（顺序 9），与内置 `ExtensionContributor` 共存（同 order 内按 name 排序）。
+10 个 contributor 按 `PromptSectionOrder` 枚举值顺序拼接，稳定段（1-5）内容相对恒定可命中 prompt cache，易变段（6-10）放后。扩展通过 `Registrar::register_prompt_contributor` 注册的 contributor 注入到 `Extension` 段（顺序 9），与内置 `ExtensionContributor` 共存（同 order 内按 name 排序）。
 
-**实现**：9 个内置 contributor 由 `minicoding_extension_sdk::builtin_contributors(identity_content)` 构造，位于 `minicoding-extension-sdk/src/contributors/`：
+**实现**：10 个内置 contributor 由 `minicoding_extension_sdk::builtin_contributors(identity_content)` 构造，位于 `minicoding-extension-sdk/src/contributors/`：
 
 | 顺序 | Contributor | cacheable | 内容来源 |
 |:---:|------|:---:|------|
@@ -2084,3 +2085,32 @@ audit.log（`AuditKind::ToolCall`，`decision=allow`），此前只读权威 All
 字段——SSE 断线/页面刷新后前端据此恢复 `isStreaming`（`useTurnRunning` 5s 轮询）；
 同时 `POST /sessions/{id}/messages` 在排队前预占取消在运行的 turn（C-13 graceful，
 幂等），保证卡死 turn 后新消息总能执行。
+
+### 12.3 技能系统（声明式 SKILL.md，R10 新增，2026-08-31）
+
+技能是声明式指令文件（`.minicoding/skills/<name>/SKILL.md`），通过 prompt 注入
+渐进披露 + 工具按需读取。**原理**：技能目录可能很多，全量注入浪费 token——只注入
+清单（name + description），LLM 需要时经 `skill.read` 读取完整指令。技能指令视为
+不可信内容（C-05：工具结果包裹 `<skill_output>` 边界，参考 C-27 auto.md 降级）。
+
+```rust
+// core::skill（trait 定义在 core，实现在 memory/tools）
+pub trait SkillStore: Send + Sync {
+    fn list_skills(&self) -> Vec<SkillInfo>;            // 摘要清单（prompt 渐进披露）
+    fn get_skill(&self, name: &str) -> Result<Option<Skill>, SkillError>;
+    fn has_skill(&self, name: &str) -> bool;
+}
+pub struct SkillInfo { pub name: String, pub description: String,
+                       pub when_to_use: Option<String>, pub source: Utf8PathBuf }
+pub struct Skill { pub name: String, pub description: String,
+                   pub when_to_use: Option<String>, pub instructions: String,
+                   pub source: Utf8PathBuf, pub mtime: Option<OffsetDateTime> }
+pub struct NoopSkillStore;                               // 兜底：空技能集
+```
+
+`SkillStore` 实现在 `minicoding-memory::skills::DiskSkillStore`（frontmatter 解析 +
+全局/项目两级 + mtime 缓存），工具 `skill.list`/`skill.read` 在
+`minicoding-tools::skills`（`SideEffect::None` 只读桶，Plan 模式可用）。prompt 侧
+`SkillContributor`（`minicoding-extension-sdk`）注入 `Skills` 段（顺序 10，volatile）
+渲染清单；`PromptContext.skills` 由 `RuntimeBuilder::skill_store` 注入后动态填充。
+`Runtime::skill_store()` 暴露引用供 frontend/测试使用。

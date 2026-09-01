@@ -19,6 +19,7 @@ camino = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 # A8 架构守卫：复用 core 的 manifest 断言
 minicoding-core = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

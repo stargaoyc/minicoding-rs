@@ -296,6 +296,7 @@
 | X-20 | Extension SDK | 第三方扩展作者稳定 API（`Extension` trait + `Registrar` + `ExtensionManifest`），见 `design.md` §23、`modules.md` §17 | M5 | 已实现 |
 | X-21 | Prompt contributor 注入 | 扩展通过 `Registrar` 注册 contributor 注入 prompt section，见 `design.md` §22 | M5 | 已实现 |
 | X-22 | 扩展工具统一 dispatch | 扩展注册的工具仍走 `ToolRegistry` dispatch，确保权限审计一致（C-01/C-02 不被绕过） | M5 | 已实现 |
+| X-23 | 技能系统（声明式 SKILL.md） | `.minicoding/skills/<name>/SKILL.md`（frontmatter + 指令正文）；全局 + 项目两级加载（项目级覆盖）；`skill.list`/`skill.read` 工具（只读桶，C-05 包裹 `<skill_output>` 边界）；`SkillContributor` 注入 prompt 第 10 段渐进披露清单；mtime 缓存（与 long_term 同构） | M10 | 已实现（2026-08-31 技能功能批次） |
 
 ## 15. Prompt 管道
 
@@ -323,10 +324,10 @@
 | 前端 | 8 |
 | 嵌入与跨进程 | 14 |
 | 工程与质量 | 10 |
-| Extension 扩展 | 3 |
+| Extension 扩展 | 4 |
 | Prompt 管道 | 2 |
 | Web 与桌面（M9） | 21 |
-| **合计** | **210** |
+| **合计** | **211** |
 
 > **统计口径**：含带字母后缀的子工具（T-06b `fs.multiedit`、T-08b/c/d `shell.background`/`output`/`kill`），它们有独立 ID、独立 schema 与独立实现，按独立功能项计。MVP（M0–M2）交付约 48 项；M3–M5 扩展与安全约 84 项；M6–M8 高级形态约 46 项（含 asyncRewake、Auto memory、压缩熔断、LSP 适配器等增强）；M9 Web/桌面（W-01..W-20）20 项低优先级可选（DOC-5，2026-08-25 R2 审查：按主表逐行里程碑列重新统计；R8 审查更正：原注"四段相加 = 205"算术错误——48+84+46+20=198，合计 **205** 以功能项 ID 实数为准，四段为约数口径且跨里程碑条目归属重复计数，两者不直接对等；旧值 38/55/55 为早期口径残留）（已全部实现，W-11 项目工作区含 diff 视图/工作区切换/桌面编辑器集成/新建会话选目录，W-12 会话持久化与懒恢复，W-13 Plan 模式入口，W-14 输入框改进，W-15 平台感知命令，W-16 取消后可继续，W-17 发送滚动到底，W-18 退出终止 sidecar，W-19 设置面板扩展，W-20 前端单测基建）。新增 Hooks（13）+ MCP client（11）+ 沙箱/审批强化（P-15..P-23）+ Plan/Undo/Todo/AGENTS.md/Auto memory + LSP 适配器（E-15..E-18）+ Web/桌面（W-01..W-20）是参考 CC/Codex 后的核心增强。
 

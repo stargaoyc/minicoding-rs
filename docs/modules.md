@@ -347,7 +347,7 @@ minicoding-policy/src/
 
 ### 4.1 职责
 
-实现 `ProjectDocLoader`/`MemoryStore` trait（定义在 core）：长期记忆双文件、Auto memory 自动学习、会话摘要、AGENTS.md 分层加载。
+实现 `ProjectDocLoader`/`MemoryStore`/`SkillStore` trait（定义在 core）：长期记忆双文件、Auto memory 自动学习、会话摘要、AGENTS.md 分层加载、声明式 SKILL.md 技能加载（R10 新增）。
 
 ### 4.2 模块树
 
@@ -369,6 +369,8 @@ minicoding-memory/src/
 ├── vector.rs              # `@memory` BM25 语义检索（CJK 逐字分词，零外部依赖）
 ├── retrieval.rs           # MemoryRetrieval（auto+long_term 语料组装与检索，M-08）
 ├── auto_contributor.rs    # AutoMemoryContributor（prompt pipeline contributor，B2/B3）
+├── skills/
+│   └── mod.rs             # 声明式 SKILL.md 技能加载器（DiskSkillStore，frontmatter 解析 + 分层 + mtime 缓存，R10 新增）
 └── inject.rs              # 记忆注入 system 段（包裹 <long_term_memory>/<auto_memory> 边界）
 ```
 
@@ -648,6 +650,8 @@ minicoding-tools/src/
 ├── memory/
 │   ├── mod.rs             # 记忆工具装配
 │   └── write.rs           # memory.write（写入 long_term/auto，经权限+审计）
+├── skills/
+│   └── mod.rs             # skill.list / skill.read（声明式 SKILL.md 渐进披露，R10 新增）
 ├── worktree.rs            # WorktreeSubagentRunner（git worktree 隔离装饰器，M-05 从 core 下沉）
 ├── plan/
 │   ├── exit.rs            # ExitPlanMode（见 design.md §16.4）

@@ -125,6 +125,8 @@ pub struct PromptContext {
     pub git_info: Option<GitInfo>,
     /// 已启用的工具 schema 列表（`ToolSummary` contributor 用）。
     pub enabled_tools: Vec<ToolSchema>,
+    /// 已启用的技能清单（声明式 SKILL.md 渐进披露，`SkillContributor` 用）。
+    pub skills: Vec<crate::skill::SkillInfo>,
     /// 用户规则（来自 `long_term.md`，`UserRules` contributor 用）。
     pub user_rules: MemoryBlock,
     /// 项目规则（来自 AGENTS.md 分层加载，`ProjectRules` contributor 用）。
@@ -141,6 +143,7 @@ impl PromptContext {
             platform: Platform::from_env(),
             git_info: None,
             enabled_tools: Vec::new(),
+            skills: Vec::new(),
             user_rules: MemoryBlock::default(),
             project_rules: ProjectDoc::default(),
         }
@@ -164,6 +167,13 @@ impl PromptContext {
     #[must_use]
     pub fn with_tools(mut self, tools: Vec<ToolSchema>) -> Self {
         self.enabled_tools = tools;
+        self
+    }
+
+    /// 链式注入技能清单。
+    #[must_use]
+    pub fn with_skills(mut self, skills: Vec<crate::skill::SkillInfo>) -> Self {
+        self.skills = skills;
         self
     }
 

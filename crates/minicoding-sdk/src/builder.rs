@@ -93,12 +93,13 @@ impl AutoMemoryWriter for AutoMemoryAdapter {
 /// 内联注册序列，能力矩阵测试把两侧列表硬编码在测试体内、恒真，任何一侧
 /// 增删注册测试仍绿。提取为 `pub` 纯函数，测试直接调用比对）。
 ///
-/// 注册集：readonly + ui + write + shell + git + web(optional) + task + memory.write。
+/// 注册集：readonly + ui + write + shell + git + web(optional) + task + memory.write + skill.*。
 #[must_use]
 pub fn assemble_sdk_tool_registry(
     event_bus: &minicoding_core::runtime::EventBus,
     long_term_store: Arc<dyn MemoryStore>,
     auto_memory: Arc<AutoMemory>,
+    skill_store: Arc<dyn minicoding_core::skill::SkillStore>,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
@@ -118,6 +119,8 @@ pub fn assemble_sdk_tool_registry(
     //     auto 走 AutoMemoryWriter trait（C-27：默认 Allow，指令性内容降级 Ask）。
     let auto_store: Arc<dyn AutoMemoryWriter> = Arc::new(AutoMemoryAdapter { inner: auto_memory });
     tools.register(Arc::new(MemoryWrite::new(long_term_store, auto_store)));
+    // 6c. 注册技能工具（skill.list / skill.read，SideEffect::None 只读）
+    minicoding_tools::register_skill_tools(&mut tools, skill_store);
     tools
 }
 
@@ -334,6 +337,15 @@ fn inner_build_runtime(
     // CTX-5：检索语料扩展为 auto + long_term 分节（与 6b 的 memory.write 共享实例）
     let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
 
+    // 4b2. 构造技能存储（声明式 SKILL.md，`SkillStore` trait 实现在 memory）。
+    //      全局 `~/.minicoding/skills` + 项目 `<workdir>/.minicoding/skills` 两级；
+    //      `MINICODING_HOME` 无法确定时退化为空技能存储（零开销）。
+    let skill_store: Arc<dyn minicoding_core::skill::SkillStore> =
+        match minicoding_memory::skills::DiskSkillStore::new(&workdir_path) {
+            Ok(s) => Arc::new(s),
+            Err(_) => Arc::new(minicoding_core::skill::NoopSkillStore),
+        };
+
     // 4c. (`extensions` feature) 构造 PromptPipeline + PromptContext 模板。
     //     9 个内置 contributor 由 `minicoding-extension-sdk::builtin_contributors` 提供，
     //     CLI 注入 user_rules（long_term.md）+ project_rules（AGENTS.md）+ git_info。
@@ -363,7 +375,9 @@ fn inner_build_runtime(
                 .with_project_rules(minicoding_core::prompt::ProjectDoc {
                     content: project_rules.content,
                     layers: project_rules.layers,
-                });
+                })
+                // 技能清单渐进披露（SkillContributor 用，`Skills` 段顺序 10）
+                .with_skills(skill_store.list_skills());
         let mut contributors = minicoding_extension_sdk::builtin_contributors(&identity);
         // B2/B3：auto memory 注入 stable 区（order=Environment，cacheable=true，
         // 排在 environment 段之前——同 order 内按 contributor_name 稳定排序）。
@@ -529,8 +543,12 @@ fn inner_build_runtime(
     //    T-M7-4：EventBus 提前创建，clone 给 task store 用于广播 `TaskUpdated`，
     //    原件传入 RuntimeBuilder（EventBus 内部是 broadcast::Sender，clone 共享通道）。
     let event_bus = minicoding_core::runtime::EventBus::new();
-    let tools =
-        assemble_sdk_tool_registry(&event_bus, long_term_store.clone(), auto_memory.clone());
+    let tools = assemble_sdk_tool_registry(
+        &event_bus,
+        long_term_store.clone(),
+        auto_memory.clone(),
+        skill_store.clone(),
+    );
 
     // 7. 构造权限策略 + 交互器（C-01：副作用必须经权限）
     //    TTY → InteractivePrompter（stdin 读 y/n）；非 TTY → NonInteractivePrompter
@@ -671,6 +689,7 @@ fn inner_build_runtime(
         .subagent_runner(subagent_runner)
         .with_config_watcher(config_watcher)
         .with_config_path(config_path)
+        .skill_store(skill_store.clone())
         // 遗留#3：AllowAlways/DenyAlways 持久化（~/.minicoding/policy.toml）
         .with_async_rewake_scheduler({
             #[cfg(feature = "hooks")]

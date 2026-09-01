@@ -97,6 +97,11 @@ pub struct RuntimeBuilder {
     /// 注入后 Runtime 在 `emit(Event)` 同时持久化 `PersistedEvent` 到事件流，
     /// 支持 `--replay` 事件重放与 SSE cursor durable 恢复（见 `design.md` §25）。
     event_store: Option<Arc<dyn EventStore>>,
+    /// 技能存储（声明式 SKILL.md，默认 `NoopSkillStore`）。
+    ///
+    /// 注入后 Runtime 在构建 prompt 时把技能清单注入 `PromptContext.skills`
+    /// （渐进披露），`skill.list`/`skill.read` 工具从同一实例读取（见 `design.md` §22）。
+    skill_store: Option<Arc<dyn crate::skill::SkillStore>>,
     /// Snapshot 存储（Event Sourcing，默认 `NoopSnapshotStore`）。
     ///
     /// 注入后 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
@@ -146,6 +151,7 @@ impl RuntimeBuilder {
             explicit_overrides: std::collections::HashSet::new(),
             event_store: None,
             snapshot_store: None,
+            skill_store: None,
             policy_persist: None,
             rewake: None,
         }
@@ -444,6 +450,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// 设置技能存储（声明式 SKILL.md，默认 `NoopSkillStore`）。
+    ///
+    /// 注入后 Runtime 在构建 prompt 时把技能清单注入 `PromptContext.skills`
+    /// （渐进披露），`skill.list`/`skill.read` 工具从同一实例读取。
+    /// 未注入时退化为 `NoopSkillStore`（无技能，零开销）。
+    #[must_use]
+    pub fn skill_store(mut self, s: Arc<dyn crate::skill::SkillStore>) -> Self {
+        self.skill_store = Some(s);
+        self
+    }
+
     /// 构造 `Runtime`。
     ///
     /// **Event Sourcing 初始化**：`event_seq` 默认初始化为 1（新会话起始 seq），
@@ -545,6 +562,9 @@ impl RuntimeBuilder {
             snapshot_store: self
                 .snapshot_store
                 .unwrap_or_else(|| Arc::new(NoopSnapshotStore)),
+            skill_store: self
+                .skill_store
+                .unwrap_or_else(|| Arc::new(crate::skill::NoopSkillStore)),
             // 默认值：新会话起始 seq=1；`init_event_stream` 会按 EventStore 实际情况修正。
             event_seq: Arc::new(TokioMutex::new(1)),
             message_since_snapshot: AtomicU64::new(0),

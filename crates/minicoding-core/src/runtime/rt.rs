@@ -177,6 +177,11 @@ pub struct Runtime {
     /// `Some` 时 Runtime 在每 `SNAPSHOT_INTERVAL` 条 `MessageAppended` 事件后
     /// 落盘 snapshot。未注入时（`NoopSnapshotStore`）退化为 no-op。
     pub(crate) snapshot_store: Arc<dyn SnapshotStore>,
+    /// 技能存储（声明式 SKILL.md，可选，见 `design.md` §22）。
+    ///
+    /// 未注入时（`NoopSkillStore`）退化为空技能集。技能清单经 `skill_store()`
+    /// 暴露给 frontend，并在 prompt 构建时注入 `PromptContext.skills`（渐进披露）。
+    pub(crate) skill_store: Arc<dyn crate::skill::SkillStore>,
     /// 当前会话的事件 seq 计数器（单调递增，从 1 开始）。
     ///
     /// 由 `EventStore::next_seq` 初始化（Runtime 构造时调用一次），此后由
@@ -431,6 +436,12 @@ impl Runtime {
     #[must_use]
     pub fn event_store(&self) -> Arc<dyn EventStore> {
         self.event_store.clone()
+    }
+
+    /// 返回技能存储引用（供 frontend 读取技能清单，`skill.list` 工具使用）。
+    #[must_use]
+    pub fn skill_store(&self) -> Arc<dyn crate::skill::SkillStore> {
+        self.skill_store.clone()
     }
 
     /// 生成会话摘要并落盘 `index.json`（T-M3-6）。

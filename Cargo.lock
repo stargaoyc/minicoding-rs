@@ -3324,6 +3324,7 @@ name = "minicoding-extension-sdk"
 version = "0.4.0"
 dependencies = [
  "camino",
+ "futures",
  "minicoding-core",
  "semver",
  "serde",

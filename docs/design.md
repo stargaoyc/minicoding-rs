@@ -2461,6 +2461,27 @@ M5 测 Plan 时**不需要**真实的 Task/Journal 实现：Plan 工具的 `Exit
 | 6 | UserRules | 用户规则（来自 `long_term.md`，§8.2） | 跨会话变化 | ✗ |
 | 7 | ProjectRules | 项目规则（来自 AGENTS.md，§8.6） | 仓库内稳定 | ✗ |
 | 8 | ToolSummary | 工具 schema 摘要（含 MCP 工具） | 工具集变化时变 | ✗ |
+| 9 | Extension | 扩展注入（通过 `Registrar`） | 扩展注册时变 | ✗ |
+| 10 | Skills | 技能清单（声明式 SKILL.md 渐进披露，R10 新增） | 技能目录变化时变 | ✗ |
+
+### 22.1 技能清单注入（第 10 段）
+
+R10 新增 `Skills = 10` 段：`SkillContributor`（`minicoding-extension-sdk`）从 `PromptContext.skills` 读取技能清单（`SkillInfo`），注入形如：
+
+```
+## 可用技能
+
+- `book`: 把仓库写成书（适用：用户要写书）
+- `refactor`: 代码重构建议（适用：函数过长）
+```
+
+只注入 **清单**（name + description），不注入全文。LLM 看到"有哪些技能可用"后，按需经 `skill.read` 工具（`minicoding-tools`）读取完整指令正文。技能指令视为不可信内容（C-05：工具结果包裹 `<skill_output>` 边界）。
+
+技能目录结构：
+```
+.minicoding/skills/<name>/SKILL.md
+```
+SKILL.md 含 YAML frontmatter（`name`/`description`/`when_to_use`）与 Markdown 指令正文。全局 `~/.minicoding/skills/` + 项目 `<workdir>/.minicoding/skills/` 两级，同名技能项目级覆盖全局。加载器 `DiskSkillStore`（`minicoding-memory`）带 mtime 缓存（与 `long_term.rs` 同构）。
 | 9 | Extension | 扩展注入（通过 `Registrar::register_prompt_contributor`，§23） | 动态 | ✗ |
 
 稳定段（1-5）排前，易变段（6-9）排后。LLM provider 的 prompt cache 以前缀匹配——稳定段命中缓存，易变段仅追加增量。把 Environment 排在稳定段是因为它"会话内不变"，cache 在单会话内有效；UserRules/ProjectRules 排后是因为它们跨会话变化，cache 命中率低。
@@ -2472,7 +2493,7 @@ pub trait PromptContributor: Send + Sync {
     /// Contributor 唯一标识（如 "identity"、"project_rules"），用于调试与 OTel span。
     fn name(&self) -> &str;
 
-    /// 拼装顺序（枚举固定 9 段，稳定段在前利于 prompt cache）。
+    /// 拼装顺序（枚举固定 10 段，稳定段在前利于 prompt cache）。
     fn order(&self) -> PromptSectionOrder;
 
     /// 该段是否可缓存（影响 prompt cache 命中率统计）。默认 false。
@@ -2483,7 +2504,7 @@ pub trait PromptContributor: Send + Sync {
     fn build(&self, ctx: &PromptContext) -> BoxFuture<'_, Result<PromptSection, PromptError>>;
 }
 
-/// Section 排序（稳定→易变，与 9 段表格一一对应）。
+/// Section 排序（稳定→易变，与 10 段表格一一对应）。
 pub enum PromptSectionOrder {
     Identity,       // 1
     System,         // 2

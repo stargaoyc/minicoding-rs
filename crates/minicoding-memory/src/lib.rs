@@ -20,6 +20,7 @@ pub mod long_term;
 pub mod project_doc;
 pub mod retrieval;
 pub mod session_sum;
+pub mod skills;
 pub mod vector;
 
 pub use auto::{AutoCategory, AutoMemory};
@@ -33,4 +34,5 @@ pub use project_doc::{
 };
 pub use retrieval::MemoryRetrieval;
 pub use session_sum::SessionSummarizerImpl;
+pub use skills::DiskSkillStore;
 pub use vector::{MemoryIndex, SearchResult};

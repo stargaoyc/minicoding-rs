@@ -33,6 +33,7 @@ mod git;
 mod memory;
 mod plan;
 mod shell;
+mod skills;
 mod task;
 mod ui;
 mod util;
@@ -55,6 +56,7 @@ pub use shell::{
     BackgroundShellStatus, BackgroundShellStore, InMemoryBackgroundShellStore, ShellBackground,
     ShellKill, ShellOutput, ShellRun, register_shell_tools,
 };
+pub use skills::{SkillList, SkillRead, register_skill_tools};
 pub use task::{
     InMemoryTaskStore, TaskCreate, TaskList, TaskPatch, TaskSpawn, TaskStore, TaskUpdate,
     register_spawn_tool, register_task_tools,

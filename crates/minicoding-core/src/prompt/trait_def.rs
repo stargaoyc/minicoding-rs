@@ -61,6 +61,8 @@ pub enum PromptSectionOrder {
     /// 9. 扩展注入（通过 `PromptBuild` Hook，§20；扩展通过 `Registrar` 注册的
     ///    contributor 也注入到此段）。
     Extension = 9,
+    /// 10. 技能清单（声明式 SKILL.md 渐进披露，R10 新增）。
+    Skills = 10,
 }
 
 impl PromptSectionOrder {
@@ -77,6 +79,7 @@ impl PromptSectionOrder {
             Self::ProjectRules => "project_rules",
             Self::ToolSummary => "tool_summary",
             Self::Extension => "extension",
+            Self::Skills => "skills",
         }
     }
 }

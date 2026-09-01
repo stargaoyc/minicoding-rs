@@ -26,10 +26,11 @@ use minicoding_core::policy::{PermissionMode, PermissionPolicy, PermissionPrompt
 use minicoding_core::provider::LlmProvider;
 use minicoding_core::runtime::{Runtime, RuntimeBuilder};
 use minicoding_core::sandbox::{SandboxDriver, SandboxPolicy};
+use minicoding_core::skill::SkillStore;
 use minicoding_core::storage::AuditSink;
 use minicoding_core::tool::ToolRegistry;
 use minicoding_memory::{
-    LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl, find_repo_root,
+    DiskSkillStore, LongTermMemory, ProjectDocLoaderImpl, SessionSummarizerImpl, find_repo_root,
     inject_project_doc_sync,
 };
 use minicoding_policy::BuiltinPolicy;
@@ -41,7 +42,8 @@ use minicoding_providers::{
 use minicoding_storage::{FileAuditSink, JsonlStorage};
 use minicoding_tools::{
     register_git_tools, register_memory_tools, register_readonly_tools, register_shell_tools,
-    register_task_tools, register_ui_tools, register_web_tools, register_write_tools,
+    register_skill_tools, register_task_tools, register_ui_tools, register_web_tools,
+    register_write_tools,
 };
 use std::sync::Arc;
 
@@ -85,11 +87,12 @@ pub struct ServerRuntimeParams {
 /// 内联注册序列，能力矩阵测试把两侧列表硬编码在测试体内、恒真。提取为
 /// `pub` 纯函数，测试直接调用比对）。
 ///
-/// 注册集：readonly + write + shell + task + git + web + ui + memory.write
+/// 注册集：readonly + write + shell + task + git + web + ui + memory.write + skill.*
 /// （server 始终启用 tools 的 `web` feature，故 web 工具无条件注册）。
 #[must_use]
 pub fn assemble_server_tool_registry(
     event_bus: &minicoding_core::runtime::EventBus,
+    skill_store: Arc<dyn SkillStore>,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     register_readonly_tools(&mut tools);
@@ -102,6 +105,8 @@ pub fn assemble_server_tool_registry(
     // memory.write：long_term 走 MemoryStore（C-23 经 Ask 权限），auto 默认内存实现
     let long_term_store: Arc<dyn MemoryStore> = Arc::new(LongTermMemory::default());
     register_memory_tools(&mut tools, long_term_store);
+    // skill.list / skill.read（SideEffect::None 只读，渐进披露）
+    register_skill_tools(&mut tools, skill_store);
     tools
 }
 
@@ -296,7 +301,11 @@ pub fn build_runtime(
     // 7. 构造 tool registry（R8：#12 能力矩阵收拢——补齐 git/web/memory/ui.ask，
     //    与 CLI 对齐；此前 Web/Desktop 用户无这些工具）
     let event_bus = minicoding_core::runtime::EventBus::new();
-    let tools = assemble_server_tool_registry(&event_bus);
+    let skill_store: Arc<dyn SkillStore> = match DiskSkillStore::new(&workdir) {
+        Ok(s) => Arc::new(s),
+        Err(_) => Arc::new(minicoding_core::skill::NoopSkillStore),
+    };
+    let tools = assemble_server_tool_registry(&event_bus, skill_store.clone());
 
     // 8. 构造权限策略 + 交互器
     let policy: Arc<dyn PermissionPolicy> = Arc::new(BuiltinPolicy::new());
@@ -331,6 +340,7 @@ pub fn build_runtime(
         .events(event_bus)
         .event_store(event_store)
         .snapshot_store(snapshot_store)
+        .skill_store(skill_store.clone())
         // R8 ARCH-1 修复：server 侧接线 PolicyPersist（~/.minicoding/policy.toml），
         // 与 CLI/SDK 对齐——AllowAlways/DenyAlways 跨会话持久化（此前仅进程内有效，
         // Web/Desktop 用户点"始终允许"重启后丢失）。
