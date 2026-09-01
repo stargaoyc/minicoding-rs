@@ -149,7 +149,7 @@ function AppInner() {
   const {
     streamingText,
     streamingReasoning,
-    reasoningHistory,
+    reasoningByMessageId,
     isStreaming,
     activeTools,
     elapsedSec,
@@ -290,7 +290,7 @@ function AppInner() {
               messages={messages}
               streamingText={streamingText}
               streamingReasoning={streamingReasoning}
-              reasoningHistory={reasoningHistory}
+              reasoningByMessageId={reasoningByMessageId}
               isStreaming={isStreaming}
               isLoading={isLoading}
               activeTools={activeTools}
