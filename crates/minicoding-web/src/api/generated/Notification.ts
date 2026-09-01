@@ -5,4 +5,4 @@ import type { Version } from "./Version";
 /**
  * JSON-RPC 通知（无 ID，不需响应）。
  */
-export type Notification = { jsonrpc: Version, method: string, params: JsonValue | null, };
+export type Notification = { jsonrpc: Version; method: string; params: JsonValue | null };

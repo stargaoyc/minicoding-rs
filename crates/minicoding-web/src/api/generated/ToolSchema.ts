@@ -4,8 +4,11 @@ import type { JsonValue } from "./bindings/serde_json/JsonValue";
 /**
  * 工具 schema（注册时声明，供 LLM 调用参考）。
  */
-export type ToolSchema = { name: string, description: string, 
-/**
- * JSON Schema 描述输入参数。
- */
-input_schema: JsonValue, };
+export type ToolSchema = {
+  name: string;
+  description: string;
+  /**
+   * JSON Schema 描述输入参数。
+   */
+  input_schema: JsonValue;
+};

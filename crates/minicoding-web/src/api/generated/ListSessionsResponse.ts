@@ -4,4 +4,4 @@ import type { SessionMeta } from "./SessionMeta";
 /**
  * `ListSessions` 响应。
  */
-export type ListSessionsResponse = { sessions: Array<SessionMeta>, };
+export type ListSessionsResponse = { sessions: Array<SessionMeta> };
