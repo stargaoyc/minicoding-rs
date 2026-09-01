@@ -4,6 +4,36 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.5.0] - 2026-09-01
+
+> 主题：**技能系统 + 前端可观测性与可读性批次**。包含声明式 SKILL.md
+> 技能系统（方案 A 完整版）、Web 前端 Agent Loop 运行流程回放、工具调用
+> 可读性增强、思考过程留存、AI 消息空白修复。
+
+### Added
+
+- **技能系统（声明式 SKILL.md）**：`.minicoding/skills/<name>/SKILL.md`
+  （frontmatter + 指令正文）；全局 + 项目两级加载（项目级覆盖）；`skill.list`/
+  `skill.read` 工具（只读桶，C-05 包裹 `<skill_output>` 边界）；`SkillContributor`
+  注入 prompt 第 10 段渐进披露清单；mtime 缓存（与 long_term 同构）。对齐
+  Claude Code / Gemini CLI / Codex 主流技能形态，技能目录可直接互操作
+- **前端运行流程面板（TracePanel）**：顶部栏"运行流程"按钮 → 侧滑时间线，
+  完整展示 Agent Loop 全流程（turn/step 边界、工具调用含命令/路径、思考过程、
+  权限请求/决策、消息落盘），点击条目展开原始 JSON，支持按事件类型过滤
+- **工具调用可读性**：`tool_call_started` 事件携带工具 input（`shell.run` 显示
+  `$ <command>`、`fs.write` 显示路径）；工具结果可读化（`wrote N bytes to PATH`
+  → "已写入 PATH（N 字节）"）
+- **思考过程留存**：reasoning_delta 不再随消息落盘消失——每轮 turn 的思考
+  归档到 `reasoningHistory` 永久显示（历史块默认收起，流式块默认展开）
+
+### Fixed
+
+- **AI 消息空白**：assistant 消息的工具调用可能在 `content` 的 `tool_use` 块而
+  顶层 `tool_calls` 为空——`MessageBubble` 合并两者；有文本时也显示工具调用
+  （此前 `text?:toolCalls` 二选一，工具调用被吞）
+- **工具结果乱码**：`fs.read` 读二进制文件（.crate/.tar.gz/.so）返回明确提示
+  而非整屏乱码；前端对非打印字符 >5% 的结果显示摘要
+
 ## [0.4.0] - 2026-08-31
 
 > 自 v0.3.11 以来的收尾批次（含 0.3.11 全部修复 + 文档/CI 同步）。
