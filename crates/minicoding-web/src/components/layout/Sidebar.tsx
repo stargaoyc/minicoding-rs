@@ -16,10 +16,30 @@ import type { SessionModeKey } from "./NewSessionDialog";
 import { WorkspacePanel } from "../workspace/WorkspacePanel";
 import { NewSessionDialog } from "./NewSessionDialog";
 
+/**
+ * R10：新建会话的 SessionModeKey → 切换器 PermissionMode 映射。
+ * 创建会话时 `default`/`accept_edits`/`plan`/`full_access` 分别走后端
+ * `permission_mode`/`plan_mode`/`preset` 字段，与左侧切换器的四模式
+ * 一一对应（`plan_mode: true` 映射为 `plan`；`preset: full-access` 映射为
+ * `bypass_permissions`）。
+ */
+function modeToPermissionMode(mode: SessionModeKey): PermissionMode {
+  switch (mode) {
+    case "default":
+      return "default";
+    case "accept_edits":
+      return "accept_edits";
+    case "plan":
+      return "plan";
+    case "full_access":
+      return "bypass_permissions";
+  }
+}
+
 export function Sidebar() {
   const { data: sessions, isLoading } = useSessions();
   const createSession = useCreateSession();
-  const { activeSessionId, setActiveSession, sidebarCollapsed, toggleSidebar, theme, toggleTheme } =
+  const { activeSessionId, setActiveSession, sidebarCollapsed, toggleSidebar, theme, toggleTheme, setPermissionMode } =
     useUIStore();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
 
@@ -64,6 +84,10 @@ export function Sidebar() {
       onSuccess: (resp) => {
         setNewSessionOpen(false);
         setActiveSession(resp.session_id);
+        // R10 修复：新建会话选定的权限模式同步到 UI store（此前左下角切换器
+        // 一直显示"默认"——`permission_mode` 只在运行时切换时更新，创建时的
+        // `permission_mode: accept_edits`/`plan_mode`/preset 从未回写 store）。
+        setPermissionMode(modeToPermissionMode(mode));
       },
     });
   };

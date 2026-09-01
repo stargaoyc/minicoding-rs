@@ -39,6 +39,10 @@ interface TraceState {
 
 /** 高频事件节流计数器（token/reasoning_delta 等）。 */
 let tokenCount = 0;
+/** 本 turn 累积的思考文本（reasoning_delta 逐 token 到达，合并为一段）。 */
+let reasoningAccum = "";
+/** 最近一次 reasoning 条目的 seq（用于替换而非追加）。 */
+let reasoningSeq = -1;
 
 export const useTraceStore = create<TraceState>((set, get) => ({
   entries: [],
@@ -75,16 +79,34 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         detail = `${tokenCount} 个 token`;
       }
     } else if (type === "reasoning_delta") {
-      summary = `💭 思考: "${event.text.slice(0, 60)}${event.text.length > 60 ? "…" : ""}"`;
-      detail = event.text;
+      // R10 可读性：reasoning_delta 逐 token 到达，合并为一段完整思考（避免
+      // 一个字母一条日志）。累积到 reasoningAccum，替换最近一条 reasoning 条目。
+      reasoningAccum += event.text;
+      const summary = `💭 思考: "${reasoningAccum.slice(0, 80)}${reasoningAccum.length > 80 ? "…" : ""}"`;
+      const detail = reasoningAccum;
+      const next = [...entries];
+      if (reasoningSeq >= 0 && next.some((e) => e.seq === reasoningSeq)) {
+        const idx = next.findIndex((e) => e.seq === reasoningSeq);
+        next[idx] = { seq: event.seq, type: "reasoning_delta", ts, summary, detail };
+        reasoningSeq = event.seq;
+      } else {
+        next.push({ seq: event.seq, type: "reasoning_delta", ts, summary, detail });
+        reasoningSeq = event.seq;
+      }
+      set({ entries: next });
+      return;
     } else if (type === "message_appended") {
       summary = `📝 消息已落盘: ${event.message.role}[${event.message.id.slice(-8)}]`;
       detail = JSON.stringify(event.message, null, 2);
       tokenCount = 0; // 新 turn 重置 token 计数
+      reasoningAccum = ""; // 新 turn 重置思考累积
+      reasoningSeq = -1;
     } else if (type === "turn_streaming_started") {
       summary = "▶️ turn 开始";
       detail = "";
       tokenCount = 0;
+      reasoningAccum = "";
+      reasoningSeq = -1;
     } else if (type === "turn_end") {
       summary = `⏹️ turn 结束: ${typeof event.stop_reason === "string" ? event.stop_reason : JSON.stringify(event.stop_reason)}`;
       detail = typeof event.stop_reason === "string" ? event.stop_reason : JSON.stringify(event.stop_reason);
@@ -133,6 +155,8 @@ export const useTraceStore = create<TraceState>((set, get) => ({
   toggle: () => set((s) => ({ open: !s.open })),
   clear: () => {
     tokenCount = 0;
+    reasoningAccum = "";
+    reasoningSeq = -1;
     set({ entries: [] });
   },
   setOpen: (v) => set({ open: v }),

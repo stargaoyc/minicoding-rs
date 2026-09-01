@@ -30,9 +30,10 @@ export interface WaitingPermission {
 export interface ChatStreamState {
   streamingText: string;
   streamingReasoning: string;
-  /** R10：已完成的思考过程存档（每轮 turn 的 reasoning 留存，不随 message_appended 清空）。
-   *  元素 = 一轮的完整思考文本。此前 reasoning 是瞬态，消息落盘即消失。 */
-  reasoningHistory: string[];
+  /** R10：已完成的思考过程存档（本轮 turn 的 reasoning 在 message_appended 时按
+   * 消息 id 存入，而非堆到末尾）。此前 reasoningHistory 是平铺数组，全部显示在
+   * 对话末尾，与实际发生位置不符。 */
+  reasoningByMessageId: Record<string, string>;
   isStreaming: boolean;
   activeTools: ActiveTool[];
   waitingPermission: WaitingPermission | null;
@@ -44,7 +45,7 @@ export interface ChatStreamState {
 export const initialChatState: ChatStreamState = {
   streamingText: "",
   streamingReasoning: "",
-  reasoningHistory: [],
+  reasoningByMessageId: {},
   isStreaming: false,
   activeTools: [],
   waitingPermission: null,
@@ -98,15 +99,15 @@ export function applyChatEvent(
       set({ streamingReasoning: next.streamingReasoning + event.text });
       break;
     case "message_appended":
-      // R10：思考过程留存——把本 turn 的 reasoning 归档到 history 再清空瞬态
-      //（此前 streamingReasoning 直接清空，思考过程一闪即消失）。
+      // R10：思考过程留存——把本 turn 的 reasoning 按消息 id 归档，随后清空
+      // 瞬态（此前直接清空，思考一闪即消失；后又平铺到末尾，位置不符）。
       set({
         streamingText: "",
         streamingReasoning: "",
-        reasoningHistory:
-          next.streamingReasoning.trim() && !next.reasoningHistory.includes(next.streamingReasoning)
-            ? [...next.reasoningHistory, next.streamingReasoning]
-            : next.reasoningHistory,
+        reasoningByMessageId: {
+          ...next.reasoningByMessageId,
+          ...(next.streamingReasoning.trim() ? { [event.message.id]: next.streamingReasoning } : {}),
+        },
         isStreaming: false,
       });
       effects.push("invalidate-messages");
@@ -119,11 +120,6 @@ export function applyChatEvent(
         // 列表最底部。无条件清空最安全。
         streamingText: "",
         streamingReasoning: "",
-        // R10：思考过程留存——turn_end 时兜底归档（若 message_appended 已归档则去重）
-        reasoningHistory:
-          next.streamingReasoning.trim() && !next.reasoningHistory.includes(next.streamingReasoning)
-            ? [...next.reasoningHistory, next.streamingReasoning]
-            : next.reasoningHistory,
         activeTools: [],
       });
       // 权限请求未获响应（后端默认 300s 超时自动 Deny，不发 resolved 事件）：

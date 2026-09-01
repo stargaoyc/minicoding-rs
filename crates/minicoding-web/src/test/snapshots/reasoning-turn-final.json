@@ -1,9 +1,9 @@
 {
   "streamingText": "",
   "streamingReasoning": "",
-  "reasoningHistory": [
-    "先分析用户需求，然后决定调用哪个工具。"
-  ],
+  "reasoningByMessageId": {
+    "msg-reasoning-1": "先分析用户需求，然后决定调用哪个工具。"
+  },
   "isStreaming": false,
   "activeTools": [],
   "waitingPermission": null,

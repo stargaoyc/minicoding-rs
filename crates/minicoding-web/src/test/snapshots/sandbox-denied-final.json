@@ -1,7 +1,7 @@
 {
   "streamingText": "",
   "streamingReasoning": "",
-  "reasoningHistory": [],
+  "reasoningByMessageId": {},
   "isStreaming": false,
   "activeTools": [],
   "waitingPermission": null,

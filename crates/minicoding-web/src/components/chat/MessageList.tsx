@@ -13,8 +13,8 @@ interface MessageListProps {
   messages: Message[] | undefined;
   streamingText: string;
   streamingReasoning: string;
-  /** R10：已完成的思考过程存档（每轮 turn 留存，永久显示）。 */
-  reasoningHistory?: string[];
+  /** R10：已完成的思考过程存档（按消息 id 关联，渲染在对应 assistant 消息处）。 */
+  reasoningByMessageId?: Record<string, string>;
   isStreaming: boolean;
   isLoading: boolean;
   activeTools: ActiveTool[];
@@ -25,7 +25,7 @@ export function MessageList({
   messages,
   streamingText,
   streamingReasoning,
-  reasoningHistory,
+  reasoningByMessageId,
   isStreaming,
   isLoading,
   activeTools,
@@ -103,14 +103,16 @@ export function MessageList({
       <div className="mx-auto max-w-3xl space-y-3">
         <AnimatePresence initial={false}>
           {messages?.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <div key={msg.id} className="space-y-3">
+              {/* R10：思考过程内联显示——按消息 id 关联，渲染在对应
+                   assistant 消息的实际位置（而非堆到对话末尾） */}
+              {reasoningByMessageId?.[msg.id] && (
+                <ReasoningBlock text={reasoningByMessageId[msg.id]} defaultOpen={false} />
+              )}
+              <MessageBubble message={msg} />
+            </div>
           ))}
         </AnimatePresence>
-
-        {/* R10：历史思考过程存档（每轮 turn 留存，不随流式结束消失） */}
-        {(reasoningHistory ?? []).map((text, i) => (
-          <ReasoningBlock key={`hist-${i}`} text={text} defaultOpen={false} />
-        ))}
 
         {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
         {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
