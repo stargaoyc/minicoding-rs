@@ -44,10 +44,17 @@ impl Runtime {
     /// 拒绝/权限错误路径不经过 `execute_allowed_call`（其内含正常的事件发射），
     /// 由本辅助补齐同一语义：SSE 消费者可见"卡片出现 → 以错误结果终结"，
     /// 与只读桶、Allow 路径的生命周期事件保持一致。
-    fn emit_denied_lifecycle(&self, call_id: &ToolCallId, tool: &str, result: &ToolResult) {
+    fn emit_denied_lifecycle(
+        &self,
+        call_id: &ToolCallId,
+        tool: &str,
+        input: &serde_json::Value,
+        result: &ToolResult,
+    ) {
         self.events.emit(Event::ToolCallStarted {
             call_id: call_id.clone(),
             tool: tool.to_string(),
+            input: input.clone(),
         });
         self.events.emit(Event::ToolCallFinished {
             call_id: call_id.clone(),
@@ -176,7 +183,7 @@ impl Runtime {
             Ok(v) => v,
             Err(e) => {
                 let result = ToolResult::err_text(format!("permission error: {e}"));
-                self.emit_denied_lifecycle(&call.id, &call.name, &result);
+                self.emit_denied_lifecycle(&call.id, &call.name, &call.input, &result);
                 self.record_permission_audit(
                     &call.name,
                     &Decision::Deny(e.to_string()),
@@ -217,7 +224,7 @@ impl Runtime {
                 Ok(rechecked) => merge_verdicts_stricter(&verdict, rechecked),
                 Err(e) => {
                     let result = ToolResult::err_text(format!("permission error: {e}"));
-                    self.emit_denied_lifecycle(&call.id, &call.name, &result);
+                    self.emit_denied_lifecycle(&call.id, &call.name, &call.input, &result);
                     self.record_permission_audit(
                         &call.name,
                         &Decision::Deny(e.to_string()),
@@ -302,7 +309,7 @@ impl Runtime {
                 // 拒绝路径同样发 ToolCallStarted/Finished（2026-08-23 审查 §4-P2）：
                 // SSE 消费者视角此前"凭空出现一条错误结果"，无卡片/终态事件。
                 let result = ToolResult::err_text(format!("permission denied: {msg}"));
-                self.emit_denied_lifecycle(&call.id, &call.name, &result);
+                self.emit_denied_lifecycle(&call.id, &call.name, &call.input, &result);
                 Ok((call.id.clone(), result))
             }
             Decision::Allow => {
@@ -809,6 +816,7 @@ impl Runtime {
         self.events.emit(Event::ToolCallStarted {
             call_id: original_call.id.clone(),
             tool: original_call.name.clone(),
+            input: original_call.input.clone(),
         });
         let result = match self.tools.dispatch(effective_call, ctx).await {
             Ok(r) => r,

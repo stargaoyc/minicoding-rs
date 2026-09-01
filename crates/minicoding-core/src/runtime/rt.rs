@@ -1405,6 +1405,7 @@ impl Runtime {
                     events.emit(Event::ToolCallStarted {
                         call_id: call_id.clone(),
                         tool: tool_name.clone(),
+                        input: call.input.clone(),
                     });
                     let result = match tools.dispatch(&call, &ctx).await {
                         Ok(r) => r,

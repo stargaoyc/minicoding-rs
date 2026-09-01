@@ -8,8 +8,4 @@ import type { JsonValue } from "./bindings/serde_json/JsonValue";
  * 序列化 newtype 变体（`Text(String)`/`Json(Value)` 内容不是 map/struct），会导致
  * 工具结果落盘序列化失败。
  */
-export type ToolContent =
-  | { type: "text"; content: string }
-  | { type: "json"; content: JsonValue }
-  | { type: "image"; content: { mime: string; data: Array<number> } }
-  | { type: "mixed"; content: Array<ToolContent> };
+export type ToolContent = { "type": "text", "content": string } | { "type": "json", "content": JsonValue } | { "type": "image", "content": { mime: string, data: Array<number>, } } | { "type": "mixed", "content": Array<ToolContent> };

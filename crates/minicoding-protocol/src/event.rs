@@ -53,7 +53,11 @@ pub enum EventKind {
     /// 一轮结束。
     TurnEnd { stop_reason: StopReason },
     /// 工具调用开始。
-    ToolCallStarted { call_id: ToolCallId, tool: String },
+    ToolCallStarted {
+        call_id: ToolCallId,
+        tool: String,
+        input: serde_json::Value,
+    },
     /// 工具调用完成。
     ToolCallFinished {
         call_id: ToolCallId,
@@ -125,9 +129,14 @@ impl From<&Event> for EventKind {
             Event::TurnEnd { stop_reason } => Self::TurnEnd {
                 stop_reason: stop_reason.clone(),
             },
-            Event::ToolCallStarted { call_id, tool } => Self::ToolCallStarted {
+            Event::ToolCallStarted {
+                call_id,
+                tool,
+                input,
+            } => Self::ToolCallStarted {
                 call_id: call_id.clone(),
                 tool: tool.clone(),
+                input: input.clone(),
             },
             Event::ToolCallFinished { call_id, result } => Self::ToolCallFinished {
                 call_id: call_id.clone(),
@@ -325,10 +334,11 @@ mod tests {
             &Event::ToolCallStarted {
                 call_id: "call-1".to_string(),
                 tool: "fs.read".to_string(),
+                input: serde_json::json!({ "path": "/tmp/a" }),
             },
         );
         match dto.kind {
-            EventKind::ToolCallStarted { call_id, tool } => {
+            EventKind::ToolCallStarted { call_id, tool, .. } => {
                 assert_eq!(call_id, "call-1");
                 assert_eq!(tool, "fs.read");
             }

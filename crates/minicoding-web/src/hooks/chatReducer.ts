@@ -1,10 +1,13 @@
 import type { EventDto } from "../api/client";
+import type { JsonValue } from "../api/generated/bindings/serde_json/JsonValue";
 import type { ToolResult } from "../api/generated";
 
 /** 进行中的工具调用（供 UI 渲染工具卡片，见 AGENTS.md §8.5 流式状态）。 */
 export interface ActiveTool {
   callId: string;
   tool: string;
+  /** R10：工具输入参数（`tool_call_started` 事件携带），用于卡片显示命令/路径等。 */
+  input?: JsonValue;
   status: "running" | "ok" | "err";
   result?: ToolResult;
 }
@@ -125,7 +128,12 @@ export function applyChatEvent(
       set({
         activeTools: [
           ...next.activeTools.filter((t) => t.callId !== event.call_id),
-          { callId: event.call_id, tool: event.tool, status: "running" },
+          {
+            callId: event.call_id,
+            tool: event.tool,
+            input: event.input,
+            status: "running",
+          },
         ],
       });
       break;

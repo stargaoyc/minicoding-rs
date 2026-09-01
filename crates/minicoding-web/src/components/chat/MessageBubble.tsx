@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, User, Bot, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Message, ToolCall } from "../../api/generated";
 import { cn, formatTime } from "../../lib/utils";
-import { extractText, extractToolResultSummary, sandboxDenyLabel } from "../../lib/message";
+import { extractText, extractToolResultSummary, formatToolResultSummary, sandboxDenyLabel } from "../../lib/message";
 
 /** 工具结果超过该长度默认折叠（用户反馈"工具调用结果太长占屏"，可展开查看全文）。 */
 const TOOL_RESULT_COLLAPSE_THRESHOLD = 300;
@@ -135,7 +135,17 @@ export function MessageBubble({
   const config = ROLE_CONFIG[message.role] ?? ROLE_CONFIG.assistant;
   const Icon = config.icon;
   const text = extractText(message);
-  const toolCalls = message.tool_calls ?? [];
+  // R10 AI 消息空白修复：合并 `message.tool_calls` 顶层字段 + `content` 中的
+  // `tool_use` 块。后端可能只把工具调用放在 content 的 `tool_use` 块中而顶层
+  // `tool_calls` 为空（曾导致 assistant 纯工具调用消息完全空白）。
+  const toolCalls = [
+    ...(message.tool_calls ?? []),
+    ...message.content
+      .filter((b): b is Extract<typeof b, { type: "tool_use" }> & { id: string; name: string; input: unknown } =>
+        b.type === "tool_use",
+      )
+      .map((b) => ({ id: b.id, name: b.name, input: b.input })),
+  ];
 
   // 工具结果消息（role=tool）：无任何可显示内容（如纯 JSON `{}`）时不渲染
   // 空白气泡（用户反馈"工具调用输出是空的，不如不显示"）
@@ -190,24 +200,33 @@ export function MessageBubble({
               </span>
             </div>
           ) : text ? (
-            <ReactMarkdown
-              components={{
-                code: ({ children, className }) => (
-                  <code
-                    className={cn(
-                      "rounded px-1.5 py-0.5 text-xs",
-                      className?.includes("language-")
-                        ? "block bg-[var(--color-bg)] p-3"
-                        : "bg-[var(--color-surface)]",
-                    )}
-                  >
-                    {children}
-                  </code>
-                ),
-              }}
-            >
-              {text}
-            </ReactMarkdown>
+            <>
+              <ReactMarkdown
+                components={{
+                  code: ({ children, className }) => (
+                    <code
+                      className={cn(
+                        "rounded px-1.5 py-0.5 text-xs",
+                        className?.includes("language-")
+                          ? "block bg-[var(--color-bg)] p-3"
+                          : "bg-[var(--color-surface)]",
+                      )}
+                    >
+                      {children}
+                    </code>
+                  ),
+                }}
+              >
+                {text}
+              </ReactMarkdown>
+              {/* R10：assistant 消息既有文本又有工具调用时，工具调用一并展示
+                   （此前 `text ? : toolCalls` 二选一，工具调用被吞掉） */}
+              {toolCalls.length > 0 && (
+                <div className="mt-2">
+                  <ToolCallList calls={toolCalls} />
+                </div>
+              )}
+            </>
           ) : message.role === "tool" && toolResult ? (
             <div
               className={cn(
@@ -220,8 +239,8 @@ export function MessageBubble({
               <span className="mr-1.5 text-[var(--color-text-muted)]">
                 {toolResult.isError ? "✗" : "✓"}
               </span>
-              {/* R9 P3-1：长工具结果默认折叠（可展开全文），避免大输出占满整个聊天区 */}
-              <CollapsibleText text={toolResult.text} error={toolResult.isError} />
+              {/* R10：工具结果可读化摘要（fs.write→"已写入 path（N 字节）"等） */}
+              <CollapsibleText text={formatToolResultSummary(toolResult.text, toolResult.isError)} error={toolResult.isError} />
             </div>
           ) : toolCalls.length > 0 ? (
             <ToolCallList calls={toolCalls} />

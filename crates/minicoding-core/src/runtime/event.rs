@@ -24,7 +24,15 @@ pub enum Event {
     /// 一轮结束。
     TurnEnd { stop_reason: StopReason },
     /// 工具调用开始。
-    ToolCallStarted { call_id: ToolCallId, tool: String },
+    ///
+    /// 携带 `input`（工具输入参数 JSON）供前端渲染工具卡片（如 `shell.run` 显示
+    /// 实际命令、`fs.write` 显示目标路径）——此前仅工具名，可读性差
+    /// （R10 前端可观测性批次）。
+    ToolCallStarted {
+        call_id: ToolCallId,
+        tool: String,
+        input: serde_json::Value,
+    },
     /// 工具调用完成。
     ToolCallFinished {
         call_id: ToolCallId,
@@ -238,6 +246,7 @@ mod tests {
         bus.emit(Event::ToolCallStarted {
             call_id: "call-1".to_string(),
             tool: "fs.read".to_string(),
+            input: serde_json::json!({ "path": "/tmp/a" }),
         });
         bus.emit(Event::ToolCallFinished {
             call_id: "call-1".to_string(),

@@ -2,12 +2,10 @@ import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
-import type { Message, ToolResult } from "../../api/generated";
+import type { Message, ToolResult, ToolContent, SandboxDenyInfo as SandboxDenyInfoDto } from "../../api/generated";
 import type { ActiveTool } from "../../hooks/useChat";
-import { sandboxDenyLabel } from "../../lib/message";
-import type { SandboxDenyInfo as SandboxDenyInfoDto } from "../../api/generated";
-import { summarizeToolContent } from "../../lib/message";
-import type { ToolContent } from "../../api/generated";
+import { sandboxDenyLabel, summarizeToolContent, formatToolResultSummary } from "../../lib/message";
+import type { JsonValue } from "../../api/generated/bindings/serde_json/JsonValue";
 
 interface MessageListProps {
   /** 当前会话 ID（用于"打开会话默认跳到底部"的一次性标记）。 */
@@ -215,11 +213,18 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
       break;
   }
 
-  // 结果摘要（截断，失败时优先展示错误）
-  const summary = summarizeToolContent(
-    result && typeof result === "object" && "content" in result
-      ? (result as { content?: ToolContent }).content
-      : undefined,
+  // R10：工具输入摘要（`tool_call_started` 事件携带）——shell.run 显示命令、
+  // fs.write 显示路径，而非仅工具名（可读性修复）。
+  const inputSummary = summarizeToolInput(name, tool.input);
+
+  // 结果摘要（截断，失败时优先展示错误）；R10：fs.write 等结果可读化
+  const summary = formatToolResultSummary(
+    summarizeToolContent(
+      result && typeof result === "object" && "content" in result
+        ? (result as { content?: ToolContent }).content
+        : undefined,
+    ),
+    result?.is_error ?? false,
   );
 
   // M-09 沙箱拒绝卡片：结构化 metadata.sandbox_denied 存在时渲染专属样式，
@@ -258,6 +263,12 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
           {denied.detail}
         </p>
       )}
+      {/* R10：工具输入摘要（shell.run→命令、fs.write→路径），提升工具卡片可读性 */}
+      {inputSummary && (
+        <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text)]" title={inputSummary}>
+          {inputSummary}
+        </p>
+      )}
       {/* R-05（M-11）：按工具名本地渲染结构化结果（零协议改动，前端内置 renderer）。
            fs.glob → 文件列表；task.list / plan.list → 表格；其余工具回落文本摘要。 */}
       {status === "ok" && result && renderStructuredToolResult(name, result)}
@@ -266,6 +277,36 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
       )}
     </div>
   );
+}
+
+/**
+ * R10：工具输入摘要——按工具类型提取关键参数，提升工具卡片可读性。
+ * - shell.run → `$ <command>`
+ * - fs.write/fs.edit/fs.delete → `<path>`
+ * - fs.read/fs.list/fs.grep → `<path>`
+ * - git.apply → `<path>`
+ * - 其余 → 关键字段（path/command/query/pattern）或 JSON 截断
+ */
+function summarizeToolInput(name: string, input: JsonValue | undefined): string {
+  if (input === undefined || input === null) return "";
+  if (typeof input !== "object" || Array.isArray(input)) {
+    const json = JSON.stringify(input);
+    return json.length > 80 ? `${json.slice(0, 80)}…` : json;
+  }
+  const record = input as Record<string, unknown>;
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+
+  if (name === "shell.run" || name === "shell.background") {
+    const cmd = str(record.command);
+    if (cmd) return `$ ${cmd.length > 100 ? `${cmd.slice(0, 100)}…` : cmd}`;
+  }
+  for (const key of ["path", "target", "query", "pattern"] as const) {
+    const v = str(record[key]);
+    if (v) return v.length > 100 ? `${v.slice(0, 100)}…` : v;
+  }
+  const json = JSON.stringify(input);
+  return json.length > 80 ? `${json.slice(0, 80)}…` : json;
 }
 
 /**

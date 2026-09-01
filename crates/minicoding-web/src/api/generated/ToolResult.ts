@@ -5,4 +5,4 @@ import type { ToolResultMeta } from "./ToolResultMeta";
 /**
  * 工具执行结果。
  */
-export type ToolResult = { content: ToolContent; is_error: boolean; metadata: ToolResultMeta };
+export type ToolResult = { content: ToolContent, is_error: boolean, metadata: ToolResultMeta, };

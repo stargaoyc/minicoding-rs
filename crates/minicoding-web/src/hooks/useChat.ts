@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useUIStore } from "../stores/ui";
+import { useTraceStore } from "../stores/trace";
 import {
   getSession,
   getPendingPermissions,
@@ -191,6 +192,8 @@ export function useSSEStream(
 
   const handleEvent = useCallback(
     (event: EventDto) => {
+      // R10：可观测性——记录事件到 trace store（Agent Loop 全流程回放）
+      useTraceStore.getState().push(event);
       if (event.type === "turn_streaming_started") {
         turnStartedAt.current = Date.now();
       }
@@ -227,6 +230,8 @@ export function useSSEStream(
 
   useEffect(() => {
     if (!sessionId) return;
+    // R10：切换会话时清空上一条会话的可观测性日志
+    useTraceStore.getState().clear();
     // 拉取未决权限快照，恢复丢失的弹窗（`PermissionRequested` 是瞬态事件，
     // SSE 断线/事件丢失时重放不可用，见 server `sse.rs`）。幂等：同 pid
     // 重复设置 waitingPermission 无副作用；已决请求会从快照消失。

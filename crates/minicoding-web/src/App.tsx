@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Square, Undo2 } from "lucide-react";
+import { ListTodo, Loader2, AlertCircle, Settings, ShieldAlert, ShieldX, Square, Undo2, Activity } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimeBackground } from "./components/AnimeBackground";
 import { Sidebar } from "./components/layout/Sidebar";
@@ -10,6 +10,7 @@ import { PermissionDialog } from "./components/permission/PermissionDialog";
 import { TaskPanel } from "./components/tasks/TaskPanel";
 import { SetupDialog } from "./components/setup/SetupDialog";
 import { FilePreview } from "./components/workspace/FilePreview";
+import { TracePanel } from "./components/trace/TracePanel";
 import { Button } from "./components/ui/button";
 import {
   useMessages,
@@ -20,6 +21,7 @@ import {
 import { usePermissions } from "./hooks/usePermissions";
 import { useUIStore } from "./stores/ui";
 import { useDesktopStore } from "./stores/desktop";
+import { useTraceStore } from "./stores/trace";
 import { useSessions } from "./hooks/useSessions";
 import { loadServerToken } from "./stores/webSettings";
 import {
@@ -131,6 +133,8 @@ function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => voi
 
 function AppInner() {
   const { activeSessionId, taskPanelOpen, toggleTaskPanel, setSettingsOpen } = useUIStore();
+  const traceOpen = useTraceStore((s) => s.open);
+  const traceSetOpen = useTraceStore((s) => s.setOpen);
   const permissions = usePermissions();
   const { data: sessions } = useSessions();
 
@@ -259,6 +263,17 @@ function AppInner() {
               <span className="ml-1 text-xs text-[var(--color-accent-hover)]">{tasks.length}</span>
             )}
           </Button>
+          {/* R10：可观测性——运行流程按钮（打开 TracePanel 时间线） */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => traceSetOpen(!traceOpen)}
+            disabled={!activeSessionId}
+            title="Agent Loop 运行流程（可观测性 / 回放）"
+          >
+            <Activity className="h-4 w-4" />
+            运行流程
+          </Button>
           {/* 设置按钮：Tauri 模式修改 config.toml + keyring；Web 模式修改 localStorage */}
           <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)} title="设置">
             <Settings className="h-4 w-4" />
@@ -341,6 +356,9 @@ function AppInner() {
 
       {/* Permission dialog (overlay) */}
       <PermissionDialog pending={permissions.pending} onResolve={permissions.resolve} />
+
+      {/* 可观测性：Agent Loop 运行流程时间线面板 */}
+      <TracePanel />
     </div>
   );
 }

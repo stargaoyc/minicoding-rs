@@ -36,7 +36,7 @@ export const happyTurn: EventDto[] = [
 /** 场景 2：权限确认流（工具触发 Ask → 用户 allow → 工具完成 → 继续输出）。 */
 export const permissionFlow: EventDto[] = [
   ev({ type: "turn_streaming_started" }),
-  ev({ type: "tool_call_started", call_id: "call-1", tool: "fs.write" }),
+  ev({ type: "tool_call_started", call_id: "call-1", tool: "fs.write", input: { path: "src/main.rs" } }),
   ev({
     type: "permission_requested",
     id: "perm-1",
@@ -86,19 +86,19 @@ const deniedResult = (detail: string) => ({
 /** 场景 3：沙箱拒绝（连续 3 次触发软熔断提醒 → 模型放弃 → 正常结束）。 */
 export const sandboxDenied: EventDto[] = [
   ev({ type: "turn_streaming_started" }),
-  ev({ type: "tool_call_started", call_id: "call-d1", tool: "shell.run" }),
+  ev({ type: "tool_call_started", call_id: "call-d1", tool: "shell.run", input: { command: "ls -la" } }),
   ev({
     type: "tool_call_finished",
     call_id: "call-d1",
     result: deniedResult("sandbox denied (EPERM): Operation not permitted"),
   }),
-  ev({ type: "tool_call_started", call_id: "call-d2", tool: "shell.run" }),
+  ev({ type: "tool_call_started", call_id: "call-d2", tool: "shell.run", input: { command: "cargo test" } }),
   ev({
     type: "tool_call_finished",
     call_id: "call-d2",
     result: deniedResult("sandbox denied (EPERM): Operation not permitted"),
   }),
-  ev({ type: "tool_call_started", call_id: "call-d3", tool: "shell.run" }),
+  ev({ type: "tool_call_started", call_id: "call-d3", tool: "shell.run", input: { command: "git diff" } }),
   ev({
     type: "tool_call_finished",
     call_id: "call-d3",

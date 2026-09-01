@@ -62,3 +62,35 @@ export function sandboxDenyLabel(kind: SandboxDenyKindDto): string {
       return "沙箱拒绝";
   }
 }
+
+/**
+ * R10：工具结果可读化摘要——识别常见工具结果文本模式，转成更易读的形式。
+ * - `fs.write`/`fs.edit`/`fs.delete`：`wrote N bytes to PATH` → `已写入 PATH`
+ * - `shell.run`：多行输出截断 + 摘要
+ * - 二进制/乱码内容检测：替换字符 U+FFFD 或控制字符比例过高时显示摘要
+ * - 其他：原文（保留给 CollapsibleText）
+ */
+export function formatToolResultSummary(text: string, isError: boolean): string {
+  const t = text.trim();
+  if (isError) return t;
+  // R10 乱码防护：检测非打印字符比例（不可见字符 >5% 视为二进制）
+  let nonPrintable = 0;
+  for (const c of t) {
+    if (c === '\uFFFD' || (c.charCodeAt(0) < 32 && c !== '\n' && c !== '\r' && c !== '\t')) {
+      nonPrintable++;
+    }
+  }
+  if (nonPrintable > t.length * 0.05) {
+    return `[二进制内容 ${t.length} 字节]（文件不是文本，无法直接显示）`;
+  }
+  // fs.write/fs.edit/fs.delete
+  const wrote = /^wrote (\d+) bytes to (.+)$/.exec(t);
+  if (wrote) return `已写入 ${wrote[2]}（${wrote[1]} 字节）`;
+  const edited = /^edited (\d+) bytes in (.+)$/.exec(t);
+  if (edited) return `已修改 ${edited[2]}（${edited[1]} 字节）`;
+  const deleted = /^deleted (.+)$/.exec(t);
+  if (deleted) return `已删除 ${deleted[1]}`;
+  const created = /^created (.+)$/.exec(t);
+  if (created) return `已创建 ${created[1]}`;
+  return t;
+}

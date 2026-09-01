@@ -4,4 +4,4 @@ import type { JsonValue } from "./bindings/serde_json/JsonValue";
 /**
  * JSON-RPC 错误对象。
  */
-export type Error = { code: number; message: string; data: JsonValue | null };
+export type Error = { code: number, message: string, data: JsonValue | null, };

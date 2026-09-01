@@ -103,12 +103,24 @@ impl Tool for FsRead {
                 ))));
             }
 
-            let content = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| match e.kind() {
-                    std::io::ErrorKind::NotFound => ToolError::NotFound(args.path.clone()),
-                    _ => ToolError::Io(e),
-                })?;
+            let bytes = tokio::fs::read(&path).await.map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ToolError::NotFound(args.path.clone()),
+                _ => ToolError::Io(e),
+            })?;
+
+            // R10 可读性修复：二进制文件（.crate/.tar.gz/.so 等）直接 read_to_string
+            // 会得到乱码字节流（无效 UTF-8 被替换为 U+FFFD），此前整屏乱码。改为
+            // 检测并返回明确提示（带文件大小），不再回灌乱码内容（C-07 输出边界）。
+            let content = match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    return Ok(ToolResult::err_text(format!(
+                        "文件是二进制（非 UTF-8 文本，{} 字节）：无法直接读取，\
+                         请改用 shell 命令（如 `file`/`xxd`）分析",
+                        bytes.len()
+                    )));
+                }
+            };
 
             let lines: Vec<&str> = content.lines().collect();
             let offset = args.offset.unwrap_or(0);

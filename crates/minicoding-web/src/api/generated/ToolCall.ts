@@ -4,11 +4,8 @@ import type { JsonValue } from "./bindings/serde_json/JsonValue";
 /**
  * 工具调用请求（LLM 产出）。
  */
-export type ToolCall = {
-  id: string;
-  name: string;
-  /**
-   * 工具输入参数（JSON）。
-   */
-  input: JsonValue;
-};
+export type ToolCall = { id: string, name: string, 
+/**
+ * 工具输入参数（JSON）。
+ */
+input: JsonValue, };
