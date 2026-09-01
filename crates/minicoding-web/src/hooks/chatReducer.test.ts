@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { applyChatEvent, initialChatState } from "./chatReducer";
-import { happyTurn, permissionFlow, sandboxDenied } from "../test/sseFixtures";
+import { happyTurn, permissionFlow, sandboxDenied, reasoningTurn } from "../test/sseFixtures";
 import { expectMatchesSnapshot } from "../test/snapshot";
 import type { EventDto } from "../api/client";
 
@@ -87,6 +87,23 @@ describe("chatReducer replay", () => {
     const { state } = replay(sandboxDenied);
     expect(state.activeTools).toHaveLength(0);
     expectMatchesSnapshot("sandbox-denied-final", state);
+  });
+
+  it("reasoning-turn：思考过程留存（message_appended 后不消失）", () => {
+    // 中间态：reasoning_delta 增量拼接
+    let s = initialChatState;
+    for (const e of reasoningTurn.slice(0, 3)) {
+      s = applyChatEvent(s, e).state;
+    }
+    expect(s.streamingReasoning).toBe("先分析用户需求，然后决定调用哪个工具。");
+
+    const { state } = replay(reasoningTurn);
+    // R10：message_appended 归档思考而非清空——终态仍保留完整思考
+    expect(state.reasoningHistory).toHaveLength(1);
+    expect(state.reasoningHistory[0]).toBe("先分析用户需求，然后决定调用哪个工具。");
+    // 瞬态已清空（防重复渲染）
+    expect(state.streamingReasoning).toBe("");
+    expectMatchesSnapshot("reasoning-turn-final", state);
   });
 
   it("turn_end 未决权限 → 超时自动拒绝提示；interrupted 不提示", () => {

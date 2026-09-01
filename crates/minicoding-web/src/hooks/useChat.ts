@@ -129,7 +129,7 @@ export function useSSEStream(
   const qc = useQueryClient();
   // SSE 归约状态集中在单一对象（M-14：归约逻辑在 chatReducer.ts，可 record/replay 测试）
   const [chatState, setChatState] = useState<ChatStreamState>(initialChatState);
-  const { streamingText, streamingReasoning, isStreaming, activeTools, waitingPermission, permissionDeniedMsg, planActive } =
+  const { streamingText, streamingReasoning, reasoningHistory, isStreaming, activeTools, waitingPermission, permissionDeniedMsg, planActive } =
     chatState;
   // 归约用最新状态引用（handleEvent 闭包稳定，不随状态重建订阅）
   const chatStateRef = useRef<ChatStreamState>(initialChatState);
@@ -328,6 +328,7 @@ export function useSSEStream(
   return {
     streamingText,
     streamingReasoning,
+    reasoningHistory,
     isStreaming,
     activeTools,
     elapsedSec,

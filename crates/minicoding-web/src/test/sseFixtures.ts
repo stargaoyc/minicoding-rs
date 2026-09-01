@@ -115,3 +115,20 @@ export const sandboxDenied: EventDto[] = [
   }),
   ev({ type: "turn_end", stop_reason: "end_turn" }),
 ];
+
+/** 场景 4：思考过程留存（reasoning_delta → turn_end → reasoningHistory 非空）。 */
+export const reasoningTurn: EventDto[] = [
+  ev({ type: "turn_streaming_started" }),
+  ev({ type: "reasoning_delta", text: "先分析用户需求，" }),
+  ev({ type: "reasoning_delta", text: "然后决定调用哪个工具。" }),
+  ev({ type: "token", text: "好的，我来处理。" }),
+  ev({
+    type: "message_appended",
+    message: makeMessage({
+      id: "msg-reasoning-1",
+      role: "assistant",
+      content: [{ type: "text", text: "好的，我来处理。" }],
+    }),
+  }),
+  ev({ type: "turn_end", stop_reason: "end_turn" }),
+];

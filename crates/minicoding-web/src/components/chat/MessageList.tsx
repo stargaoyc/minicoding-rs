@@ -13,6 +13,8 @@ interface MessageListProps {
   messages: Message[] | undefined;
   streamingText: string;
   streamingReasoning: string;
+  /** R10：已完成的思考过程存档（每轮 turn 留存，永久显示）。 */
+  reasoningHistory?: string[];
   isStreaming: boolean;
   isLoading: boolean;
   activeTools: ActiveTool[];
@@ -23,6 +25,7 @@ export function MessageList({
   messages,
   streamingText,
   streamingReasoning,
+  reasoningHistory,
   isStreaming,
   isLoading,
   activeTools,
@@ -104,6 +107,11 @@ export function MessageList({
           ))}
         </AnimatePresence>
 
+        {/* R10：历史思考过程存档（每轮 turn 留存，不随流式结束消失） */}
+        {(reasoningHistory ?? []).map((text, i) => (
+          <ReasoningBlock key={`hist-${i}`} text={text} defaultOpen={false} />
+        ))}
+
         {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
         {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
 
@@ -159,10 +167,10 @@ export function MessageList({
  * `max-h-64` + 内部滚动——页面高度不随思考增长，无滚动抖动。
  * 用户可点击 `summary` 手动收起。思考过程为瞬态数据，刷新后不保留。
  */
-function ReasoningBlock({ text }: { text: string }) {
+function ReasoningBlock({ text, defaultOpen = true }: { text: string; defaultOpen?: boolean }) {
   return (
     <details
-      open
+      open={defaultOpen}
       className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
     >
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">

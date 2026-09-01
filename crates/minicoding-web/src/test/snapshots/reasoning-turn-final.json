@@ -1,7 +1,9 @@
 {
   "streamingText": "",
   "streamingReasoning": "",
-  "reasoningHistory": [],
+  "reasoningHistory": [
+    "先分析用户需求，然后决定调用哪个工具。"
+  ],
   "isStreaming": false,
   "activeTools": [],
   "waitingPermission": null,
