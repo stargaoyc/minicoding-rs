@@ -6,8 +6,4 @@
  * 与 `minicoding_core::journal::FileChange` 的四种变体一一对应，用
  * `kind` 标签序列化（前端据此渲染增删对比）。
  */
-export type WorkspaceFileChange =
-  | { kind: "written"; path: string; before: string | null; after: string }
-  | { kind: "edited"; path: string; before: string; after: string }
-  | { kind: "deleted"; path: string; content: string }
-  | { kind: "created"; path: string; content: string };
+export type WorkspaceFileChange = { "kind": "written", path: string, before: string | null, after: string, } | { "kind": "edited", path: string, before: string, after: string, } | { "kind": "deleted", path: string, content: string, } | { "kind": "created", path: string, content: string, };

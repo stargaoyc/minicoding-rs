@@ -86,7 +86,7 @@ impl Tool for WebSearch {
                 .map_or(5, |n| n as usize);
 
             // 1. HTTP POST（DDG HTML 端点用 POST 表单）：连接/读取超时 + 整体
-            //    ctx.timeout 兜底。禁用自动重定向、手动逐跳跟随（
+            //    ctx.timeout 兜底。禁用自动重定向、手动逐跳跟随——
             //    此前 3xx 一律报错——DDG 实际部署偶发 302
             //    使功能脆弱；且开放重定向可把请求带向内网/元数据地址，自动跟随
             //    会绕过 SSRF 校验。逐跳跟随（上限 5）：每跳解析 Location 后

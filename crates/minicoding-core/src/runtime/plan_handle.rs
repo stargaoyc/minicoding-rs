@@ -1,8 +1,8 @@
 //! `PlanControllerHandle`（自 rt.rs 抽出）：`PlanModeController` 的 Runtime 内部适配器。
 //!
-//! **为何留在 core 而非领域 crate**（对审查 A6 的处理说明）：本结构仅依赖 core
+//! **为何留在 core 而非领域 crate**（处理说明）：本结构仅依赖 core
 //! 内部类型——若迁往 `minicoding-policy` 等领域 crate，将制造 policy→storage/runtime
-//! 的**新交叉依赖**，恰违反 AGENTS.md §3.2 与 A8 架构守卫。trait 边界已保证
+//! 的**新交叉依赖**，恰违反 AGENTS.md §3.2 架构守卫。trait 边界已保证
 //! `plan.exit` 工具与 Runtime 解耦；此处只是 Runtime 的私有接线件。
 //!
 //! Event Sourcing：`exit_plan`/`set_mode` 触发 `PermissionModeChanged` 时同步持久化

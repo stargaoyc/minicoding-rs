@@ -1,4 +1,4 @@
-# CI 门禁（+ ，AGENTS.md §6.3）
+# CI 门禁（AGENTS.md §6.3）
 #
 # 10 道门禁：fmt / clippy -D warnings / test / coverage(≥80%) / cargo audit / cargo deny / typos / cross-platform / web / desktop
 # 平台策略（features ）：

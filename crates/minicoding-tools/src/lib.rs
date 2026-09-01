@@ -4,8 +4,8 @@
 //!
 //! 实现内置 `Tool` 集合（`fs`/`shell`/`web`/`git`/`task`/`plan`）；作为"组合层"，
 //! 依赖 core + policy（架构守卫白名单），沙箱/Journal/MCP 等领域能力由 Runtime 经
-//! core trait **注入 `ToolContext`**——本 crate 不直连领域 crate（2026-08-26
-//!  头注修正：原文描述的直连装配方式已被 trait 注入取代）。
+//! core trait **注入 `ToolContext`**——本 crate 不直连领域 crate
+//! （原文描述的直连装配方式已被 trait 注入取代）。
 //!
 //! ## 设计要点
 //!
@@ -20,8 +20,8 @@
 //! - **plan.exit**：退出 Plan 模式 + 缓存预批准，`SideEffect::None` 可穿透 Plan 硬门（C-25）；
 //! - **mcp 工具包装**：见 `minicoding-mcp`（`naming`/wrapper 在该 crate，非此处）。
 //!
-//! 当前阶段：已实现 fs 工具组——只读（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`，见
-//! ）与写入（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`）；以及
+//! 当前阶段：已实现 fs 工具组——只读（`fs.read`/`fs.list`/`fs.glob`/`fs.grep`）
+//! 与写入（`fs.write`/`fs.edit`/`fs.multiedit`/`fs.delete`）；以及
 //! shell 工具组（`shell.run`）；task 工具组（`task.*`）；
 //! plan 工具组（`plan.exit`）；其余工具（web/git/mcp 包装）与领域 crate
 //! 依赖见 M3+/M4+。

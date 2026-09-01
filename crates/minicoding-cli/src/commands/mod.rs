@@ -1,5 +1,4 @@
-//! CLI 子命令（`session`/`exec`/`doctor`/`mcp`/`cred`/`serve`/`backup`，
-//! ）。
+//! CLI 子命令（`session`/`exec`/`doctor`/`mcp`/`cred`/`serve`/`backup`）。
 //!
 //! - `session list`/`delete`：会话管理（不构建 Runtime）；
 //! - `exec`：非交互批量执行（构建 Runtime + 沙箱策略）；

@@ -79,8 +79,7 @@ pub enum NdjsonError {
 const MAX_LINE_BYTES: usize = 256 * 1024;
 type SharedStdout = Arc<Mutex<tokio::io::BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>;
 
-/// 有界行读取：见 [`crate::bounded_io::read_line_bounded`]（2026-08-28
-///  审查：  声称 take 截断但实现未生效，OOM 防护实际不存在）。
+/// 有界行读取：见 [`crate::bounded_io::read_line_bounded`]。
 async fn read_line_bounded(
     reader: &mut tokio::io::BufReader<tokio::io::Stdin>,
     max: usize,

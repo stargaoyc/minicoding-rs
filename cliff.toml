@@ -53,9 +53,7 @@ postprocessors = [
 conventional_commits = true
 filter_unconventional = false
 split_commits = false
-commit_preprocessors = [
-    # 中文 commit subject 直接保留（AGENTS.md §6.2 要求中文）
-]
+commit_preprocessors = []
 commit_parsers = [
     { message = "\\[skip", skip = true },
     { message = "^feat", group = "Features" },

@@ -1533,7 +1533,7 @@ glob = "/etc/hosts"  # 允许读取特定系统文件
 - 不要为「方便」关闭路径沙箱——`full-access` 预设仍受 `sandbox_path` 约束（除非 `external-sandbox`）；
 - `policy.toml` 的 `[[allow]]` 用最小权限原则，避免 `glob = "**"` 全放行；
 - 定期 review `audit.log` 中的 `PathEscaped` 记录，发现 LLM 越界企图模式；
-- 符号链接场景在 `mcp/approval.rs` 的 `project_fingerprint` 也有类似处理（见 `docs/review-report.md` §4.2 C1）。
+- 符号链接场景在 `mcp/approval.rs` 的 `project_fingerprint` 也有类似处理。
 
 ---
 
@@ -1761,7 +1761,7 @@ cd ..
 #### 预防措施
 
 - project 作用域 MCP server 首次必弹窗批准（C-24），未批准不连接；
-- `mcp_choices.toml` 按项目指纹分桶，符号链接场景下 `canonicalize` 失败回退原始路径（见 `docs/review-report.md` §4.2 C1，建议补注释说明指纹稳定性）；
+- `mcp_choices.toml` 按项目指纹分桶，符号链接场景下 `canonicalize` 失败回退原始路径（建议补注释说明指纹稳定性）；
 - 批准记忆原子写（`.tmp` + `rename`），防止并发写损坏；
 - MCP server 的 env 经 `shell_environment_policy` 过滤（C-04），不下传 API key；
 - MCP server 在沙箱内运行（C-22、C-26），路径访问受 `sandbox_path` 约束（C-03）；
@@ -2745,7 +2745,6 @@ grep sess_01H... ~/.minicoding/audit.log
 - `docs/rules.md` §2 与 §8：L0 硬约束与约束检查清单
 - `docs/hooks.md` §11：asyncRewake 协议
 - `docs/data-model.md` §10：跨进程文件锁
-- `docs/review-report.md` §4：代码审查发现与建议
 - `AGENTS.md` §5：安全规范（开发时）
 - `AGENTS.md` §6：提交与协作规范
 - `.github/workflows/ci.yml`：CI 门禁配置

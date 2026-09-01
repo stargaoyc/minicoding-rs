@@ -103,7 +103,7 @@ pub enum PersistedEvent {
     ///
     /// 与 `runtime::Event::TurnEnd` 一一映射。replay 时仅记录审计轨迹。
     TurnEnd { stop_reason: StopReason },
-    /// step 开始（SCHEMA_VERSION 2+）：一次 LLM 请求 + 其触发的工具调用。
+    /// step 开始（`SCHEMA_VERSION` 2+）：一次 LLM 请求 + 其触发的工具调用。
     ///
     /// 仅 log 定位（压缩点/中断点），replay 时不重建任何状态（C-05：不进
     /// transcript，模型不可）。v1 事件流无此变体，replay 跳过。
@@ -111,7 +111,7 @@ pub enum PersistedEvent {
         iter: u32,
         tool_call_ids: Vec<String>,
     },
-    /// step 结束（SCHEMA_VERSION 2+）：该次迭代工具结果已全部回灌。
+    /// step 结束（`SCHEMA_VERSION` 2+）：该次迭代工具结果已全部回灌。
     ///
     /// cancel/timeout 中断时可能只有 `StepStarted` 无 `StepEnded`（中断点定位）。
     StepEnded { iter: u32 },

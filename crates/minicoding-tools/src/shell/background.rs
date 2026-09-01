@@ -92,7 +92,7 @@ struct ShellEntry {
 /// 与 store 无锁竞争。条目数受 [`MAX_TRACKED_SHELLS`] 约束（见模块文档）。
 pub struct InMemoryBackgroundShellStore {
     shells: Mutex<HashMap<String, ShellEntry>>,
-    /// 插入序号发生器（与 `shells` 锁解耦，仅 fetch_add）。
+    /// 插入序号发生器（与 `shells` 锁解耦，仅 `fetch_add`）。
     next_seq: AtomicU64,
 }
 

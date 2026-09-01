@@ -587,7 +587,6 @@ async fn handle_prompt(
     };
 
     // 先订阅已带 seq 的实时通道，避免 spawn turn task 后错过早期事件
-    //
     let mut rx = session.subscribe_sequenced();
 
     // 后台 task 执行 send_message_boxed

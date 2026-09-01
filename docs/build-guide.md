@@ -201,7 +201,7 @@ minicoding-rs/
 ├── rust-toolchain.toml        # 工具链固定
 ├── deny.toml                  # cargo-deny 配置
 ├── cargo-dist.toml            # 发布构建配置
-└── AGENTS.md                  # AI 编码约束
+└── AGENTS.md                  # 编码约束
 ```
 
 ---

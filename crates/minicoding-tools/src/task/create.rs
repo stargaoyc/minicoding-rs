@@ -90,7 +90,7 @@ impl Tool for TaskCreate {
         })
     }
 
-    /// 输出 JSON Schema：task_id + status。
+    /// 输出 JSON Schema：`task_id` + status。
     fn output_schema(&self) -> Option<&ToolOutputSchema> {
         Some(&self.output_schema)
     }
