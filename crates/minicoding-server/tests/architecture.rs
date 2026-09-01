@@ -32,18 +32,21 @@ fn architecture_deps_whitelist() {
 /// （两者与生产 `build_runtime` 共用），任何一侧增删注册立即红灯。
 #[test]
 fn capability_matrix_server_matches_sdk_assembly() {
-    // SDK 装配（真实生产函数）：readonly + ui + write + shell + git + web + task + memory
+    // SDK 装配（真实生产函数）：readonly + ui + write + shell + git + web + task + memory + skill
     let event_bus_sdk = minicoding_core::runtime::EventBus::new();
     let sdk = minicoding_sdk::builder::assemble_sdk_tool_registry(
         &event_bus_sdk,
         std::sync::Arc::new(minicoding_memory::LongTermMemory::default()),
         std::sync::Arc::new(minicoding_memory::AutoMemory::default()),
+        std::sync::Arc::new(minicoding_core::skill::NoopSkillStore),
     );
 
-    // server 装配（真实生产函数）：readonly + write + shell + task + git + web + ui + memory
+    // server 装配（真实生产函数）：readonly + write + shell + task + git + web + ui + memory + skill
     let event_bus_server = minicoding_core::runtime::EventBus::new();
-    let server =
-        minicoding_server::runtime_builder::assemble_server_tool_registry(&event_bus_server);
+    let server = minicoding_server::runtime_builder::assemble_server_tool_registry(
+        &event_bus_server,
+        std::sync::Arc::new(minicoding_core::skill::NoopSkillStore),
+    );
 
     let sdk_names: std::collections::BTreeSet<String> =
         sdk.schemas().into_iter().map(|s| s.name).collect();

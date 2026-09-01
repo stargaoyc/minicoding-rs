@@ -2,12 +2,10 @@ import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MessageBubble } from "./MessageBubble";
 import { ScrollArea } from "../ui/scroll-area";
-import type { Message, ToolResult } from "../../api/generated";
+import type { Message, ToolResult, ToolContent, SandboxDenyInfo as SandboxDenyInfoDto } from "../../api/generated";
 import type { ActiveTool } from "../../hooks/useChat";
-import { sandboxDenyLabel } from "../../lib/message";
-import type { SandboxDenyInfo as SandboxDenyInfoDto } from "../../api/generated";
-import { summarizeToolContent } from "../../lib/message";
-import type { ToolContent } from "../../api/generated";
+import { sandboxDenyLabel, summarizeToolContent, formatToolResultSummary } from "../../lib/message";
+import type { JsonValue } from "../../api/generated/bindings/serde_json/JsonValue";
 
 interface MessageListProps {
   /** 当前会话 ID（用于"打开会话默认跳到底部"的一次性标记）。 */
@@ -15,6 +13,8 @@ interface MessageListProps {
   messages: Message[] | undefined;
   streamingText: string;
   streamingReasoning: string;
+  /** ：已完成的思考过程存档（每轮 turn 留存，永久显示）。 */
+  reasoningHistory?: string[];
   isStreaming: boolean;
   isLoading: boolean;
   activeTools: ActiveTool[];
@@ -25,6 +25,7 @@ export function MessageList({
   messages,
   streamingText,
   streamingReasoning,
+  reasoningHistory,
   isStreaming,
   isLoading,
   activeTools,
@@ -106,6 +107,11 @@ export function MessageList({
           ))}
         </AnimatePresence>
 
+        {/* ：历史思考过程存档（每轮 turn 留存，不随流式结束消失） */}
+        {(reasoningHistory ?? []).map((text, i) => (
+          <ReasoningBlock key={`hist-${i}`} text={text} defaultOpen={false} />
+        ))}
+
         {/* 工具调用卡片（本 turn 的进度，见 useChat.ts `activeTools`） */}
         {activeTools.length > 0 && <ToolCallList tools={activeTools} />}
 
@@ -161,10 +167,10 @@ export function MessageList({
  * `max-h-64` + 内部滚动——页面高度不随思考增长，无滚动抖动。
  * 用户可点击 `summary` 手动收起。思考过程为瞬态数据，刷新后不保留。
  */
-function ReasoningBlock({ text }: { text: string }) {
+function ReasoningBlock({ text, defaultOpen = true }: { text: string; defaultOpen?: boolean }) {
   return (
     <details
-      open
+      open={defaultOpen}
       className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]/40 px-3 py-2"
     >
       <summary className="cursor-pointer select-none text-xs text-[var(--color-text-muted)]">
@@ -215,11 +221,18 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
       break;
   }
 
-  // 结果摘要（截断，失败时优先展示错误）
-  const summary = summarizeToolContent(
-    result && typeof result === "object" && "content" in result
-      ? (result as { content?: ToolContent }).content
-      : undefined,
+  // 工具输入摘要（`tool_call_started` 事件携带）——shell.run 显示命令、
+  // fs.write 显示路径，而非仅工具名（可读性修复）。
+  const inputSummary = summarizeToolInput(name, tool.input);
+
+  // 结果摘要（截断，失败时优先展示错误）；fs.write 等结果可读化
+  const summary = formatToolResultSummary(
+    summarizeToolContent(
+      result && typeof result === "object" && "content" in result
+        ? (result as { content?: ToolContent }).content
+        : undefined,
+    ),
+    result?.is_error ?? false,
   );
 
   //  沙箱拒绝卡片：结构化 metadata.sandbox_denied 存在时渲染专属样式，
@@ -258,6 +271,12 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
           {denied.detail}
         </p>
       )}
+      {/* ：工具输入摘要（shell.run→命令、fs.write→路径），提升工具卡片可读性 */}
+      {inputSummary && (
+        <p className="mt-1 truncate font-mono text-[11px] text-[var(--color-text)]" title={inputSummary}>
+          {inputSummary}
+        </p>
+      )}
       {/* ：按工具名本地渲染结构化结果（零协议改动，前端内置 renderer）。
            fs.glob → 文件列表；task.list / plan.list → 表格；其余工具回落文本摘要。 */}
       {status === "ok" && result && renderStructuredToolResult(name, result)}
@@ -266,6 +285,36 @@ function ToolCallCard({ tool }: { tool: ActiveTool }) {
       )}
     </div>
   );
+}
+
+/**
+ * ：工具输入摘要——按工具类型提取关键参数，提升工具卡片可读性。
+ * - shell.run → `$ <command>`
+ * - fs.write/fs.edit/fs.delete → `<path>`
+ * - fs.read/fs.list/fs.grep → `<path>`
+ * - git.apply → `<path>`
+ * - 其余 → 关键字段（path/command/query/pattern）或 JSON 截断
+ */
+function summarizeToolInput(name: string, input: JsonValue | undefined): string {
+  if (input === undefined || input === null) return "";
+  if (typeof input !== "object" || Array.isArray(input)) {
+    const json = JSON.stringify(input);
+    return json.length > 80 ? `${json.slice(0, 80)}…` : json;
+  }
+  const record = input as Record<string, unknown>;
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+
+  if (name === "shell.run" || name === "shell.background") {
+    const cmd = str(record.command);
+    if (cmd) return `$ ${cmd.length > 100 ? `${cmd.slice(0, 100)}…` : cmd}`;
+  }
+  for (const key of ["path", "target", "query", "pattern"] as const) {
+    const v = str(record[key]);
+    if (v) return v.length > 100 ? `${v.slice(0, 100)}…` : v;
+  }
+  const json = JSON.stringify(input);
+  return json.length > 80 ? `${json.slice(0, 80)}…` : json;
 }
 
 /**

@@ -13,6 +13,7 @@ pub mod environment;
 pub mod extension_contrib;
 pub mod identity;
 pub mod project_rules;
+pub mod skill_summary;
 pub mod system;
 pub mod task_guidelines;
 pub mod tool_summary;
@@ -23,6 +24,7 @@ pub use environment::EnvironmentContributor;
 pub use extension_contrib::ExtensionContributor;
 pub use identity::IdentityContributor;
 pub use project_rules::ProjectRulesContributor;
+pub use skill_summary::SkillContributor;
 pub use system::SystemContributor;
 pub use task_guidelines::TaskGuidelinesContributor;
 pub use tool_summary::ToolSummaryContributor;
@@ -31,7 +33,7 @@ pub use user_rules::UserRulesContributor;
 use minicoding_core::prompt::PromptContributor;
 use std::sync::Arc;
 
-/// 构造默认 9 个内置 contributor 列表（注册到 `PromptPipeline`）。
+/// 构造默认 10 个内置 contributor 列表（注册到 `PromptPipeline`）。
 ///
 /// `identity_content` 为 `IDENTITY.md` 内容（空则用默认身份）。
 #[must_use]
@@ -46,6 +48,7 @@ pub fn builtin_contributors(identity_content: &str) -> Vec<Arc<dyn PromptContrib
         Arc::new(ProjectRulesContributor),
         Arc::new(ToolSummaryContributor),
         Arc::new(ExtensionContributor),
+        Arc::new(SkillContributor),
     ]
 }
 
@@ -57,9 +60,9 @@ mod tests {
     use minicoding_core::prompt::PromptSectionOrder;
 
     #[test]
-    fn builtin_contributors_returns_nine_contributors() {
+    fn builtin_contributors_returns_ten_contributors() {
         let list = builtin_contributors("");
-        assert_eq!(list.len(), 9, "expected exactly 9 builtin contributors");
+        assert_eq!(list.len(), 10, "expected exactly 10 builtin contributors");
     }
 
     #[test]
@@ -78,6 +81,7 @@ mod tests {
                 "project_rules",
                 "tool_summary",
                 "extension_builtin",
+                "skill_summary",
             ]
         );
     }
@@ -86,7 +90,7 @@ mod tests {
     fn builtin_contributors_orders_are_monotonic() {
         let list = builtin_contributors("");
         let orders: Vec<PromptSectionOrder> = list.iter().map(|c| c.order()).collect();
-        // 顺序应为 Identity(1) → System(2) → ... → Extension(9)，单调递增
+        // 顺序应为 Identity(1) → System(2) → ... → Extension(9) → Skills(10)，单调递增
         for i in 1..orders.len() {
             let prev = orders[i - 1] as u8;
             let curr = orders[i] as u8;
@@ -95,7 +99,7 @@ mod tests {
                 "orders not monotonic at index {i}: {prev} -> {curr}"
             );
         }
-        // 验证覆盖全部 9 段
+        // 验证覆盖全部 10 段
         assert_eq!(orders[0], PromptSectionOrder::Identity);
         assert_eq!(orders[1], PromptSectionOrder::System);
         assert_eq!(orders[2], PromptSectionOrder::TaskGuidelines);
@@ -105,19 +109,20 @@ mod tests {
         assert_eq!(orders[6], PromptSectionOrder::ProjectRules);
         assert_eq!(orders[7], PromptSectionOrder::ToolSummary);
         assert_eq!(orders[8], PromptSectionOrder::Extension);
+        assert_eq!(orders[9], PromptSectionOrder::Skills);
     }
 
     #[test]
     fn builtin_contributors_with_empty_identity_works() {
         let list = builtin_contributors("");
         // 验证不 panic + 长度正确即可
-        assert_eq!(list.len(), 9);
+        assert_eq!(list.len(), 10);
     }
 
     #[test]
     fn builtin_contributors_with_custom_identity_works() {
         let list = builtin_contributors("You are a Rust expert.");
-        assert_eq!(list.len(), 9);
+        assert_eq!(list.len(), 10);
         // 第一个应为 IdentityContributor
         assert_eq!(list[0].name(), "identity");
         assert_eq!(list[0].order(), PromptSectionOrder::Identity);

@@ -28,6 +28,7 @@ pub mod prompt;
 pub mod provider;
 pub mod runtime;
 pub mod sandbox;
+pub mod skill;
 pub mod storage;
 #[cfg(feature = "test-util")]
 pub mod testing;
@@ -80,6 +81,7 @@ pub mod prelude {
         NoopDriver, SandboxDenialDetector, SandboxDenialTracker, SandboxDenyKind, SandboxDriver,
         SandboxError, SandboxPolicy, hard_trip_summary, soft_trip_reminder,
     };
+    pub use crate::skill::{NoopSkillStore, Skill, SkillError, SkillInfo, SkillStore};
     pub use crate::storage::{
         AuditKind, AuditRecord, AuditSink, EventRecord, EventStore, NoopAudit, NoopEventStore,
         NoopSnapshotStore, PersistedEvent, SCHEMA_VERSION, SNAPSHOT_INTERVAL, SessionSnapshot,
