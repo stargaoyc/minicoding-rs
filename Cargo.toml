@@ -63,7 +63,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.29"
 opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.28", features = ["trace", "http-proto", "reqwest-rustls"] }
+opentelemetry-otlp = { version = "0.32", features = ["trace", "http-proto", "reqwest-rustls"] }
 
 # 错误处理（库 crate 用 thiserror，边界用 anyhow，见 AGENTS.md §2.3）
 thiserror = "2.0"
