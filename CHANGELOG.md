@@ -4,6 +4,24 @@
 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号语义见
 `docs/tech-stack.md` §14。
 
+## [0.5.2] - 2026-09-01
+
+> 前端流式渲染性能优化批次。
+
+### Performance
+
+- **流式文本纯文本渲染**：token 流式过程中用纯文本 `<pre>`（此前每次 token
+  都触发 `ReactMarkdown` 全量重解析，含代码高亮——长回复/代码块时极卡）；
+  消息落盘后切换回 Markdown 渲染
+- **TracePanel 关闭即卸载**：面板改为 `AnimatePresence` 条件卸载（保留退出
+  动画），关闭时零渲染开销；此前仅滑出屏幕、DOM 与订阅仍在
+- **reasoning_delta 节流**：运行流程面板关闭时不更新 entries（推理时每秒
+  几十个 delta，此前每次触发 store 更新 + 面板重渲染）
+- **历史消息 memo**：`React.memo(MessageBubble)`——历史消息不再随流式
+  `streamingText` 变化整棵重渲染
+- **思考块折叠摘要**：收起时只渲染前 200 字符摘要（长思考如 DeepSeek 上千字
+  折叠态不再把全文留在 DOM）
+
 ## [0.5.1] - 2026-09-01
 
 > 自 v0.5.0 以来的前端修复批次：思考过程展示优化 + 权限模式显示同步。
