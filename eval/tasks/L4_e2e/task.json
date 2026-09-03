@@ -1,0 +1,7 @@
+{
+  "id": "L4-001",
+  "layer": "L4",
+  "name": "小仓库 issue 修复（SWE-bench 式）",
+  "prompt": "仓库存在一个 issue：src/lib.rs 的 sum 函数是占位实现（返回 0），单测 sum_works 失败。请实现 sum 使所有测试通过。任务 L4-001",
+  "attempts": 2
+}

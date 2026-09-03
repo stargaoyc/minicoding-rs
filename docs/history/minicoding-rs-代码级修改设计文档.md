@@ -698,4 +698,3 @@ impl CredentialResolver {
 ---
 
 *本文基于 minicoding-rs v0.2.30 与 deepseek-harness @ 99f6f02 源码级独立重读；所有现状论断附 file:line。已纠正既有 v2 对比 / improvement-design / 此前分析中关于 R-06（并行已实现）、R-03（已有硬停止版）、事件溯源成熟度、[tools] 死配置、MCP local scope、storage unwrap 等过时/错误结论；并新发现 D-05 悬空 tool_calls 缺陷。*
-

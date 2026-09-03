@@ -1,0 +1,7 @@
+{
+  "id": "L3-001",
+  "layer": "L3",
+  "name": "目录结构创建（Terminal-Bench 式）",
+  "prompt": "在当前目录创建 src/backend/（含 main.rs）和 src/frontend/（含 App.tsx）两层目录结构，然后在每个文件中写入一行注释。任务 L3-001",
+  "attempts": 1
+}

@@ -1,0 +1,7 @@
+{
+  "id": "L2-001",
+  "layer": "L2",
+  "name": "修复 add bug（Aider polyglot 式）",
+  "prompt": "项目 src/main.rs 中函数 add 实现有 bug（返回 a-b 而非 a+b），单测 add_works 因此失败。请修复该函数使 cargo test 通过。任务 L2-001",
+  "attempts": 2
+}

@@ -1,0 +1,7 @@
+{
+  "id": "L1-001",
+  "layer": "L1",
+  "name": "Rust fib 函数生成",
+  "prompt": "创建 src/lib.rs，实现 Rust 函数 fib(n: u32) -> u64 返回第 n 个斐波那契数（n 从 0 开始），并附单测断言 fib(10)==55。任务 L1-001",
+  "attempts": 1
+}
