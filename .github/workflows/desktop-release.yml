@@ -90,7 +90,7 @@ jobs:
         # ERR_UNKNOWN_BUILTIN_MODULE，v0.2.17 失败根因）。
         # 不配置 cache: 'pnpm'——setup-node 的 pnpm store path 探测与
         # pnpm/action-setup 安装组合在 runner 上报错。
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
