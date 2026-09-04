@@ -3,6 +3,17 @@
 All notable changes to `minicoding-rs` are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-09-04
+
+First stable release. The full feature set is in place and the API surface is considered stable:
+
+- Agent loop with parallel/serial tool scheduling, plan mode, and typed subagents.
+- Permission model (policy + prompter) with an un-overridable builtin blacklist, and OS-level sandbox (Landlock/seccomp on Linux, Seatbelt on macOS, Job Object on Windows).
+- Context management with four-level compaction, circuit breaking, and long/auto/session memory.
+- Multi-provider LLM support (OpenAI/Anthropic/Ollama), MCP client and server, hooks with asyncRewake, file-change journal with `/undo`.
+- Four frontends sharing one Rust backend: CLI, TUI, HTTP/SSE server, and Web/desktop (Tauri).
+- Declarative `SKILL.md` skills, OpenTelemetry tracing, JSONL storage, and audit logging.
+
 ## [0.5.2] - 2026-09-01
 
 ### Performance
