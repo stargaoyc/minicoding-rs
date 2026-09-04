@@ -80,7 +80,7 @@ jobs:
         # 锁定 pnpm 版本：pnpm-lock.yaml 由 pnpm 11.13.0 生成（lockfileVersion 9.0），
         # runner 预装 pnpm 版本不固定，版本不匹配会导致 install --frozen-lockfile 失败。
         # 不在此处开启 cache（corepack 安装模式下 store path 探测与 setup-node 冲突）。
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.13.0
           run_install: false
