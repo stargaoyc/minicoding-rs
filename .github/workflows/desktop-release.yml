@@ -66,7 +66,7 @@ jobs:
       #   - tauri-cli 外部工具：runner 预装 stable 即可（不涉及项目 MSRV）。
       # 交叉目标 std 由 targets 参数直接装入 nightly 工具链。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master snapshot（@master 浮动引用改为 SHA 钉版）
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master snapshot（@master 浮动引用改为 SHA 钉版）
         with:
           toolchain: nightly
           targets: ${{ matrix.target }}
